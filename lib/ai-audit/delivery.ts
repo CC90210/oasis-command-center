@@ -26,7 +26,8 @@ import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
-import { AUTHORIZATION_VOIDED_REASONS, shortName } from "@/lib/ai-audit/rules";
+import { AUTHORIZATION_VOIDED_REASONS, shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { defaultPaymentDeps, expireOpenCheckouts, type PaymentDeps } from "@/lib/ai-audit/payment";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
   getAuditVersion,
@@ -163,6 +164,78 @@ export async function reopenForEdits(
   if (!current) return { ok: false, error: "not_found" };
   const { settings } = await getSettings(db, t);
   const p = await saveProposalDraft(db, { tenantId: t, engagementId: current.id, content: proposal.content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
+  if (!p.ok) return { ok: false, error: `proposal_${p.error}` };
+  const after = await getEngagement(db, t, engagement.id);
+  return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };
+}
+
+/** Where a delivered audit may be revised from: delivered, and not paid (phase 5). */
+export const REVISABLE_STAGES: readonly AiAuditStage[] = ["delivered", "proposal_review", "payment_pending"];
+
+/** The email for a revised audit: the same private-link placeholder, saying it replaces the last one. */
+export function revisionEmail(input: { contactName: string | null; businessName: string }): { subject: string; body: string } {
+  const greeting = input.contactName ? `Hi ${input.contactName.trim().split(/\s+/)[0]},` : "Hi,";
+  const name = input.businessName || "your business";
+  return {
+    subject: `Your updated AI audit for ${name}`,
+    body: [
+      greeting,
+      "",
+      `I have updated the free AI audit for ${name}. The new version, with its proposal, is here:`,
+      AUDIT_LINK_PLACEHOLDER,
+      "",
+      "The link in my earlier email no longer works; this one replaces it. Reply with any questions.",
+    ].join("\n"),
+  };
+}
+
+/**
+ * Revise an audit after it was delivered, before it is paid (phase 5). The
+ * client's payment pages close first (Stripe is told each open session is
+ * over), so nothing is paid for a version being replaced; a follow-up still
+ * waiting for CC is withdrawn. The engagement goes back to Research & Audit
+ * Generation with drafts copied from what the client has, the email worded
+ * as an update. The client's link keeps opening the delivered version until
+ * the new one is approved and sent: that delivery supersedes it and stops the
+ * old link (recordDelivery).
+ */
+export async function reviseAfterDelivery(
+  db: Client,
+  input: { tenantId: string; engagementId: string; expectedRowVersion: number; actor: Actor; now: Date; payment?: PaymentDeps },
+): Promise<{ ok: true; engagement: Engagement } | { ok: false; error: string }> {
+  const t = requireTenant(input.tenantId);
+  const engagement = await getEngagement(db, t, input.engagementId);
+  if (!engagement) return { ok: false, error: "not_found" };
+  if (engagement.row_version !== input.expectedRowVersion) return { ok: false, error: "conflict" };
+  if (!REVISABLE_STAGES.includes(engagement.stage)) return { ok: false, error: "not_revisable" };
+  if (engagement.payment_status !== "none" && engagement.payment_status !== "pending") return { ok: false, error: "already_paid" };
+  const audit = engagement.current_audit_version_id ? await getAuditVersion(db, t, engagement.current_audit_version_id) : null;
+  const proposal = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
+  if (!audit || audit.status !== "delivered" || !audit.doc || !proposal || proposal.status !== "delivered" || !proposal.content) return { ok: false, error: "nothing_delivered" };
+  // Payment pages first: a session Stripe could not close would let the client pay for a version being replaced.
+  const closed = await expireOpenCheckouts(db, t, engagement.id, input.now, input.payment ?? defaultPaymentDeps());
+  if (closed.failed) return { ok: false, error: "checkout_still_open" };
+  const at = input.now.toISOString();
+  const moved = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null, health: "ok", health_reason: null }, at, "generating", undefined, noDeliveryInFlight(t, engagement.id, input.now)), [
+    eventStatement({ tenantId: t, engagementId: engagement.id, event: "revised_after_delivery", actor: input.actor, at, fromStage: engagement.stage, toStage: "generating", meta: { audit_version_id: audit.id, proposal_version_id: proposal.id, checkouts_expired: closed.expired } }),
+  ]);
+  if (!moved) return { ok: false, error: "conflict" };
+  // A follow-up still waiting points at the link this revision will replace.
+  const waiting = await db.execute({
+    sql: "SELECT id FROM approvals WHERE tenant_id = ? AND action_kind = 'follow_up_ai_audit' AND status = 'pending' AND json_extract(payload_json, '$.engagement_id') = ?",
+    args: [t, engagement.id],
+  });
+  for (const row of waiting.rows) await cancelPendingApproval(db, t, String(row.id), { type: "user", id: input.actor.id }, { reason: "revised_after_delivery" }, input.now);
+  let current = await getEngagement(db, t, engagement.id);
+  if (!current) return { ok: false, error: "not_found" };
+  const a = await saveAuditDraft(db, { tenantId: t, engagementId: current.id, doc: audit.doc, actor: input.actor, now: input.now, expectedRowVersion: current.row_version });
+  if (!a.ok) return { ok: false, error: `audit_${a.error}` };
+  current = await getEngagement(db, t, engagement.id);
+  if (!current) return { ok: false, error: "not_found" };
+  const { settings } = await getSettings(db, t);
+  const email = revisionEmail({ contactName: current.contact_name, businessName: current.business_name || "" });
+  const content = { ...proposal.content, delivery_email: { ...proposal.content.delivery_email, ...email } };
+  const p = await saveProposalDraft(db, { tenantId: t, engagementId: current.id, content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
   if (!p.ok) return { ok: false, error: `proposal_${p.error}` };
   const after = await getEngagement(db, t, engagement.id);
   return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };
@@ -496,6 +569,11 @@ async function recordDelivery(
       [
         { sql: "UPDATE ai_audit_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, approval_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, input.approvalId, at, t, input.auditVersionId] },
         { sql: "UPDATE ai_audit_proposal_versions SET status = 'delivered', approved_at = COALESCE(approved_at, ?), delivered_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, at, at, t, input.proposalVersionId] },
+        // A revision replaces what the client had (phase 5): the earlier versions are superseded, and the earlier link
+        // stops working, in the same write as this delivery. A first delivery has nothing earlier: no rows change.
+        { sql: "UPDATE ai_audit_versions SET status = 'superseded', updated_at = ? WHERE tenant_id = ? AND engagement_id = ? AND status = 'delivered' AND id <> ?", args: [at, t, current.id, input.auditVersionId] },
+        { sql: "UPDATE ai_audit_proposal_versions SET status = 'superseded', updated_at = ? WHERE tenant_id = ? AND engagement_id = ? AND status = 'delivered' AND id <> ?", args: [at, t, current.id, input.proposalVersionId] },
+        { sql: "UPDATE ai_audit_share_links SET revoked_at = ?, revoked_reason = 'superseded' WHERE tenant_id = ? AND engagement_id = ? AND id <> ? AND revoked_at IS NULL", args: [at, t, current.id, input.linkId] },
         eventStatement({
           tenantId: t,
           engagementId: current.id,

@@ -572,6 +572,58 @@ async function main() {
     assert.ok((await store.patchEngagement(db, { tenantId: OASIS, id: engagementId, expectedRowVersion: now2.row_version, patch: { health: "ok", health_reason: null }, event: "health_cleared", actor: cc, now: NOW() })).ok);
   });
 
+
+  console.log("a revision after delivery (phase 5)");
+  await check("a delivered, unpaid audit is revised: drafts open, Pay closes, and the new delivery replaces the client's link", async () => {
+    let e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const oldAudit = e.current_audit_version_id!;
+    const oldProposal = e.current_proposal_version_id!;
+    const oldToken = token;
+    const noStripe = { stripeSecret: async () => null, isDryRun: () => true, alert: async () => undefined, baseUrl: () => "https://oasisai.work" };
+    const revised = await delivery.reviseAfterDelivery(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW(), payment: noStripe as never });
+    assert.ok(revised.ok, !revised.ok ? revised.error : "");
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "generating");
+    assert.notEqual(e.current_audit_version_id, oldAudit, "a new draft, copied");
+    const draftProposal = (await versions.getProposalVersion(db, OASIS, e.current_proposal_version_id!))!;
+    assert.equal(draftProposal.status, "draft");
+    assert.match(draftProposal.content!.delivery_email.subject, /^Your updated AI audit for /);
+    assert.ok(draftProposal.content!.delivery_email.body.includes("{{audit_link}}"));
+    // The client still reads what they have, and cannot pay for it while it is being replaced.
+    const stillOpen = await pub.loadPublicAudit(db, oldToken, NOW());
+    assert.ok(stillOpen, "the delivered version still opens");
+    assert.deepEqual(await payment.createOrReuseCheckout(db, { link: stillOpen!.link, now: NOW(), deps: noStripe as never }), { ok: false, error: "not_payable" });
+    // Submitted, printed and approved again, it goes out with a new link that replaces the old one.
+    const sub = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+    assert.ok(sub.ok, !sub.ok ? `${sub.error} ${(sub.problems ?? []).join("; ")}` : "");
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const audit2 = (await versions.getAuditVersion(db, OASIS, e.current_audit_version_id!))!;
+    const bytes = Buffer.from("%PDF-1.4\n" + "y".repeat(400) + "\n%%EOF");
+    const printed = await pdf.storePdf(db, memStorage, { tenantId: OASIS, jobInput: { audit_version_id: audit2.id, content_sha256: audit2.content_sha256 }, report: { pdfBase64: bytes.toString("base64"), sha256: hash.sha256Hex(bytes), bytes: bytes.length, pages: 6 }, now: NOW() });
+    assert.ok(printed.ok);
+    const card = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW() });
+    assert.ok(card.ok && card.created);
+    const cardId = card.ok ? card.approvalId : "";
+    await db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), cardId] });
+    const before = sent.length;
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "sent");
+    assert.equal(sent.length, before + 1);
+    assert.match(String(sent[sent.length - 1].subject), /^Your updated AI audit for /);
+    const m = /\/your-audit\/([A-Za-z0-9_-]{43})/.exec(String(sent[sent.length - 1].body));
+    assert.ok(m && m[1] !== oldToken, "a new link");
+    token = m![1];
+    assert.equal(await pub.loadPublicAudit(db, oldToken, NOW()), null, "the old link stops");
+    assert.ok(await pub.loadPublicAudit(db, token, NOW()), "the new link opens");
+    assert.equal((await versions.getAuditVersion(db, OASIS, oldAudit))!.status, "superseded");
+    assert.equal((await versions.getProposalVersion(db, OASIS, oldProposal))!.status, "superseded");
+    assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "delivered");
+    // A paid or undelivered audit is not revised.
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    const viaRoute = await delivery.reviseAfterDelivery(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version - 1, actor: cc, now: NOW(), payment: noStripe as never });
+    assert.deepEqual(viaRoute, { ok: false, error: "conflict" });
+  });
+
   console.log("the client's link");
   await check("the link opens the delivered audit; a bad, revoked or expired link opens nothing", async () => {
     const p = await pub.loadPublicAudit(db, token, NOW());
@@ -851,7 +903,7 @@ async function main() {
     assert.deepEqual(r.errors, []);
     // The delivery, and the one follow-up CC approved: the tick itself sends nothing.
     assert.equal(sent.length, before, "the tick sends no email");
-    assert.equal(sent.length, 2, "two emails ever sent: the delivery and the approved follow-up");
+    assert.equal(sent.length, 3, "three emails ever sent: the delivery, the approved follow-up and the revised delivery");
   });
 
   finish("ai-audit-flow");

@@ -222,6 +222,19 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                   Reopen for edits
                 </button>
               ) : null}
+              {isOwner && ["delivered", "proposal_review", "payment_pending"].includes(e.stage) && (e.payment_status === "none" || e.payment_status === "pending") ? (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    if (!window.confirm("Revise this audit? Any payment page the client has open stops working now. The client keeps reading the version they have until you approve and send the new one, which replaces their link.")) return;
+                    void act("revise_after_delivery", {}, "Revising: edit the drafts, then submit again for final approval.");
+                  }}
+                >
+                  Revise and send again
+                </button>
+              ) : null}
               {submitted && view.deliveryApproval?.status === "failed" && view.deliveryApproval.reason === "delivery_unknown" && isOwner ? (
                 <>
                   <button type="button" className="btn-primary" disabled={busy} onClick={() => act("confirm_delivery_sent", {}, "Recorded as delivered.")}>

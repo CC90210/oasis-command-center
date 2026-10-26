@@ -12,6 +12,7 @@
  *   save_proposal      { content, expected_row_version }  the priced proposal draft
  *   submit             { expected_row_version }          check, freeze, print the PDF (nothing is sent)
  *   reopen             { expected_row_version }          take a submission back for edits
+ *   revise_after_delivery { expected_row_version }       revise a delivered, unpaid audit: payment pages close, drafts open; owner only
  *   retry_delivery     { confirm_not_sent? }              file a fresh final approval after a failed one (after an uncertain send, only with confirm_not_sent)
  *   confirm_delivery_sent                                 after an uncertain send: CC saw it in the Sent folder, record the delivery
  *   recheck_payment                                       ask Stripe about every open checkout
@@ -52,7 +53,7 @@ import { validateProfileField } from "@/lib/ai-audit/profile";
 import { getEngagement, getSettings, patchEngagement, recordEvent, type Actor } from "@/lib/ai-audit/store";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { deleteProfileField, saveAuditDraft, saveProfileField, saveProposalDraft } from "@/lib/ai-audit/versions";
-import { confirmUncertainDelivery, reopenForEdits, requestDeliveryApproval, submitForFinalApproval } from "@/lib/ai-audit/delivery";
+import { confirmUncertainDelivery, reopenForEdits, requestDeliveryApproval, reviseAfterDelivery, submitForFinalApproval } from "@/lib/ai-audit/delivery";
 import { expireOpenCheckouts, listCheckouts, verifyCheckout } from "@/lib/ai-audit/payment";
 import { clearPdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
@@ -231,6 +232,15 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!rv) return json(400, { ok: false, error: "expected_row_version_required" });
       const r = await reopenForEdits(s.db, { tenantId: s.tenantId, engagementId, expectedRowVersion: rv, actor, now });
       if (!r.ok) return r.error === "conflict" ? casError("conflict") : json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, row_version: r.engagement.row_version, stage: r.engagement.stage });
+    }
+    case "revise_after_delivery": {
+      // It closes the client's payment pages and, once sent again, replaces their link: the owner's call.
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const rv = rowVersion(body);
+      if (!rv) return json(400, { ok: false, error: "expected_row_version_required" });
+      const r = await reviseAfterDelivery(s.db, { tenantId: s.tenantId, engagementId, expectedRowVersion: rv, actor, now });
+      if (!r.ok) return r.error === "conflict" ? casError("conflict") : json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
       return json(200, { ok: true, row_version: r.engagement.row_version, stage: r.engagement.stage });
     }
     case "retry_delivery": {

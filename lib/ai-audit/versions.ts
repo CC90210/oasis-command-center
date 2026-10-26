@@ -455,6 +455,13 @@ export async function listProposalVersions(db: Client, tenantId: string, engagem
 export type SaveDraftResult<T> = { ok: true; version: T; created: boolean } | { ok: false; error: "conflict" | "not_editable" | "not_found" };
 
 /**
+ * Where a delivered version may get a new draft: while it waits on the client,
+ * and in Research & Audit Generation after a revision moved it back
+ * (lib/ai-audit/delivery.ts reviseAfterDelivery, phase 5).
+ */
+const REVISION_STAGES: readonly string[] = ["delivered", "proposal_review", "payment_pending", "generating"];
+
+/**
  * Save the audit document on the engagement's draft version. When the current
  * version is not a draft (it was submitted, approved or delivered), a new
  * draft version is created that supersedes it; the frozen one stays as it is.
@@ -480,7 +487,7 @@ export async function saveAuditDraft(
     const v = await getAuditVersion(db, t, current.id);
     return v ? { ok: true, version: v, created: false } : { ok: false, error: "not_found" };
   }
-  if (current && current.status === "delivered" && !["delivered", "proposal_review", "payment_pending"].includes(engagement.stage)) {
+  if (current && current.status === "delivered" && !REVISION_STAGES.includes(engagement.stage)) {
     return { ok: false, error: "not_editable" };
   }
   const id = newId();
