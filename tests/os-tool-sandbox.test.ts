@@ -107,6 +107,20 @@ async function main() {
   await createClient({ url: `file:${process.env.TURSO_DB_PATH}` }).executeMultiple(
     readFileSync(join(process.cwd(), "database", "turso", "bravo__192_ai_usage.sql"), "utf8"),
   );
+  // Each turn reads the owner's agent choices for apps (lib/os/agent-access-store.ts)
+  // from tenant_integration_credentials, and a read that fails withholds every app
+  // tool. An empty table is the normal case: nothing saved, every default applies.
+  await createClient({ url: `file:${process.env.TURSO_DB_PATH}` }).executeMultiple(`
+    CREATE TABLE "tenant_integration_credentials" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+      "tenant_id" TEXT NOT NULL, "service" TEXT NOT NULL, "field_key" TEXT NOT NULL,
+      "encrypted_value" TEXT NOT NULL, "last_tested_at" TEXT, "last_test_ok" INTEGER, "last_test_error" TEXT,
+      "created_by" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("id"));
+    CREATE UNIQUE INDEX "tic_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
+  `);
   const { modelCallMeter } = await import("../lib/ai/usage");
   const runner = await import("../lib/cloud-tool-runner");
   const registry = await import("../lib/ai/tools/client-safe-registry");

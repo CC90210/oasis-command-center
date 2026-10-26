@@ -40,6 +40,13 @@ import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integrati
  */
 export const VAULT_CUSTOM_SERVICE = "custom";
 
+/**
+ * A custom vault key's name: UPPER_SNAKE_CASE, a letter first, at most 64
+ * characters (the .env convention). One rule for the vault route, the agent
+ * choices route and the credential tools, as VAULT_CUSTOM_SERVICE is one name.
+ */
+export const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
 type StoreRow = {
   id: string;
   tenant_id: string;
