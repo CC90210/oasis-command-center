@@ -152,7 +152,7 @@ export async function getTranscript(db: Client, tenantId: string, id: string, wi
 
 export type AddTranscriptResult =
   | { ok: true; transcript: Transcript; duplicate: boolean }
-  | { ok: false; error: "not_found" | "stage_closed" | "no_recording_consent" | "conflict" | "too_many_transcripts" };
+  | { ok: false; error: "not_found" | "stage_closed" | "no_recording_consent" | "recording_declined" | "conflict" | "too_many_transcripts" };
 
 /**
  * Store a parsed transcript with its consent. The same text twice on one
@@ -177,6 +177,17 @@ export async function addTranscript(
   if (!engagement) return { ok: false, error: "not_found" };
   if (!TRANSCRIPT_OPEN_STAGES.includes(engagement.stage)) return { ok: false, error: "stage_closed" };
   if (!input.consent.recording) return { ok: false, error: "no_recording_consent" };
+  // The client's own no to the recording, as recorded on the call's opening question, stands over any tick or
+  // join notice: no transcript of that call is stored (review of phase 2c, second pass, F1).
+  if (engagement.current_profile_version_id) {
+    const declined = (
+      await db.execute({
+        sql: "SELECT value_json FROM ai_audit_profile_fields WHERE tenant_id = ? AND profile_version_id = ? AND field_key = 'consent.recording' LIMIT 1",
+        args: [t, engagement.current_profile_version_id],
+      })
+    ).rows[0];
+    if (declined && String(declined.value_json) === "false") return { ok: false, error: "recording_declined" };
+  }
   if (!TRANSCRIPT_FORMATS.includes(input.parsed.format)) throw new Error("ai-audit.transcripts: unknown format");
 
   const hash = linesHash(input.parsed.lines);

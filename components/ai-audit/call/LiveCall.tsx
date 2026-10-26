@@ -6,8 +6,9 @@
  * Left, the questions in the handbook's order and words (lib/ai-audit/
  * framework.ts), each with why it is asked, its follow-ups, a notes box that
  * saves as CC types, and a box for each figure it answers. Right, the call's
- * clock, the client's consent, and what the audit still needs. On a phone it is
- * one column with the clock and "next question" pinned at the bottom.
+ * clock, the call room, and what the audit still needs. On a phone it is one
+ * column, the call room above the questions, with the clock and "next
+ * question" pinned at the bottom.
  *
  * Keyboard: Alt+ArrowDown / Alt+ArrowUp move between questions.
  *
@@ -34,8 +35,44 @@ export type CallBrief = {
   weight: Array<{ question_id: string; why: string }>;
 };
 
+/** The lead's Oasis Meet room for the call (lib/ai-audit/meet-link.ts), if there is one. */
+export type CallRoom = {
+  code: string;
+  title: string;
+  status: string;
+  recordAudio: boolean;
+  guests: Array<{ name: string; consented: boolean; removed: boolean }>;
+  /** Meet's transcript status (queued, transcribing, ready, expired, deleted, lost), or null before it has one. */
+  transcript: string | null;
+  /** Its transcript is on this engagement. */
+  attached: boolean;
+  /** Why the tick leaves its ready transcript for the owner's hand (meet-link.ts AuditRoom.holds). */
+  holds: string[];
+};
+
+const JOINS_BY_ITSELF =
+  "It joins this engagement by itself when Meet has the transcript ready, if every guest agreed to the recording on joining and the workspace owner recorded the client's answer about AI analysis above. Otherwise it waits under Call and transcripts for the owner to attach.";
+
+/** What the call room box says about the room: only what will really happen to its transcript. */
+function roomWords(room: CallRoom, editable: boolean): string {
+  const state = room.status === "live" ? "Live now." : room.status === "ended" ? "Ended." : "Not started yet.";
+  if (room.attached) return `${state} Its transcript is on this engagement.`;
+  if (!editable) return `${state} The profile is authorized, so no transcript can join this engagement now.`;
+  if (!room.recordAudio) return `${state} Not recorded: paste the transcript after the call.`;
+  if (room.status !== "ended") return `${state} Recorded and transcribed. ${JOINS_BY_ITSELF}`;
+  if (room.transcript === "ready") {
+    if (!room.guests.length) return `${state} No guest joined, so its transcript is not the client's call.`;
+    if (room.guests.some((g) => !g.consented)) return `${state} A guest did not agree to the recording, so its transcript cannot be used.`;
+    if (room.holds.length) return `${state} Its transcript waits for the workspace owner to attach it under Call and transcripts: ${room.holds.join("; ")}.`;
+    return `${state} Its transcript is ready. It joins this engagement once the workspace owner has recorded the client's answer about AI analysis above, or the owner attaches it under Call and transcripts.`;
+  }
+  if (room.transcript === "expired" || room.transcript === "deleted" || room.transcript === "lost") return `${state} Meet has no transcript of it: paste one, or work from your notes.`;
+  return `${state} Meet is still making its transcript. ${JOINS_BY_ITSELF}`;
+}
+
 type Props = {
   brief: CallBrief | null;
+  room: CallRoom | null;
   engagementId: string;
   businessType: BusinessType | null;
   callStartedAt: string | null;
@@ -243,7 +280,7 @@ function ConsentChoice({ engagementId, fieldKey, label, initial, disabled, onSav
   );
 }
 
-export function LiveCall({ brief, engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
+export function LiveCall({ brief, room, engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
   const weighted = useMemo(() => new Map((brief?.weight ?? []).map((w) => [w.question_id, w.why])), [brief]);
   const toConfirm = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -295,6 +332,18 @@ export function LiveCall({ brief, engagementId, businessType, callStartedAt, cal
     return () => window.removeEventListener("keydown", onKey);
   }, [active, go]);
 
+  async function makeRoom() {
+    setBusy(true);
+    setMessage(null);
+    const r = await postAction(engagementId, "create_meet_room");
+    setBusy(false);
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    router.refresh();
+  }
+
   async function act(action: "start_call" | "end_call") {
     setBusy(true);
     setMessage(null);
@@ -332,11 +381,53 @@ export function LiveCall({ brief, engagementId, businessType, callStartedAt, cal
     </div>
   );
 
+  // Shown twice, like the clock: above the questions on a phone (where the side column comes after all of them),
+  // in the side column on a wide screen. `visibility` picks which.
+  const callRoomBox = (visibility: string) => (
+    <section className={`${visibility} gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm`}>
+      <h2 className="text-sm font-semibold text-fg">Call room</h2>
+      {room ? (
+        <>
+          <a className="btn-secondary justify-self-start" href={`/meet/${room.code}`} target="_blank" rel="noopener noreferrer">
+            Open {room.title}
+          </a>
+          <div className="text-[12px] text-fg-muted">{roomWords(room, editable)}</div>
+          {room.guests.length ? (
+            <ul className="grid gap-0.5 text-[12px]">
+              {room.guests.map((g, i) => (
+                <li key={`${g.name}-${i}`} className={g.consented && !g.removed ? "text-fg-muted" : "text-status-warm"}>
+                  {g.name}: {g.consented ? "agreed to the recording" : "did not agree to the recording"}
+                  {g.removed ? ", removed from the call" : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {/* The only room has ended: another call needs another room. */}
+          {editable && room.status === "ended" ? (
+            <button type="button" className="btn-secondary justify-self-start" disabled={busy} onClick={() => void makeRoom()}>
+              Make another call room
+            </button>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <div className="text-[12px] text-fg-muted">No Oasis Meet room for this lead yet. One is made when the call is booked, or here.</div>
+          {editable ? (
+            <button type="button" className="btn-secondary justify-self-start" disabled={busy} onClick={() => void makeRoom()}>
+              Make a call room
+            </button>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+
   return (
     <div className="grid gap-5 pb-24 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] lg:pb-0">
       <div className="grid content-start gap-4">
         {message ? <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg">{message}</div> : null}
         {!editable ? <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg-muted">The profile is authorized, so the call&apos;s notes are read-only now.</div> : null}
+        {callRoomBox("grid lg:hidden")}
         {QUESTION_CATEGORIES.map((cat) => {
           const inCat = questions.filter((q) => q.category === cat);
           if (!inCat.length) return null;
@@ -432,6 +523,7 @@ export function LiveCall({ brief, engagementId, businessType, callStartedAt, cal
           <h2 className="text-sm font-semibold text-fg">The call</h2>
           {controls}
         </section>
+        {callRoomBox("hidden lg:grid")}
         {brief && brief.hypotheses.length ? (
           <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
             <h2 className="text-sm font-semibold text-fg">From the pre-call brief</h2>

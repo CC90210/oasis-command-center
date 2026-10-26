@@ -140,6 +140,21 @@ const CODE_ATTEMPTS = 3;
 
 /** Make a room. A code that is already taken (the unique index says so) is drawn again. */
 export async function createMeetRoom(db: Client, input: NewMeetRoom): Promise<MeetRoom> {
+  const room = await insertMeetRoom(db, input, null);
+  if (!room) throw new Error("meet.rooms: the room was not stored");
+  return room;
+}
+
+/**
+ * Make a room for a lead unless the lead already has one still to be held (scheduled or live). The check is part
+ * of the INSERT itself, one statement, so two presses at the same moment make one room, never two. Null when the
+ * lead had one: read it again to use it.
+ */
+export async function createMeetRoomUnlessLeadHasOpen(db: Client, input: NewMeetRoom & { leadId: string }): Promise<MeetRoom | null> {
+  return insertMeetRoom(db, input, input.leadId);
+}
+
+async function insertMeetRoom(db: Client, input: NewMeetRoom, unlessOpenForLead: string | null): Promise<MeetRoom | null> {
   const startsAt = input.startsAt && Number.isFinite(Date.parse(input.startsAt)) ? new Date(input.startsAt).toISOString() : null;
   const nextCode = input.nextCode ?? (() => newMeetCode());
   for (let attempt = 1; ; attempt += 1) {
@@ -159,15 +174,23 @@ export async function createMeetRoom(db: Client, input: NewMeetRoom): Promise<Me
       endedAt: null,
       endedReason: null,
     };
+    const values = [
+      room.id, room.tenantId, room.code, room.title, room.hostUserId, room.status, room.recordAudio ? 1 : 0,
+      room.startsAt, room.calendarEventId, room.leadId, room.createdAt, null, null, null,
+    ];
+    const placeholders = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
     try {
-      await db.execute({
-        sql: `INSERT INTO meet_rooms (${ROOM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [
-          room.id, room.tenantId, room.code, room.title, room.hostUserId, room.status, room.recordAudio ? 1 : 0,
-          room.startsAt, room.calendarEventId, room.leadId, room.createdAt, null, null, null,
-        ],
-      });
-      return room;
+      const rs = await db.execute(
+        unlessOpenForLead === null
+          ? { sql: `INSERT INTO meet_rooms (${ROOM_COLUMNS}) VALUES (${placeholders})`, args: values }
+          : {
+              sql: `INSERT INTO meet_rooms (${ROOM_COLUMNS}) SELECT ${placeholders}
+                     WHERE NOT EXISTS (SELECT 1 FROM meet_rooms WHERE tenant_id = ? AND lead_id = ? AND status IN ('scheduled', 'live'))`,
+              args: [...values, room.tenantId, unlessOpenForLead],
+            },
+      );
+      // A plain INSERT that did not throw stored the row; the guarded one stored it only if the lead had no open room.
+      return unlessOpenForLead === null || rs.rowsAffected === 1 ? room : null;
     } catch (err) {
       const clash = /UNIQUE constraint failed: meet_rooms\.code/i.test(err instanceof Error ? err.message : String(err));
       if (!clash || attempt >= CODE_ATTEMPTS) throw err;

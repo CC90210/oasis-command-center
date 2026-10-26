@@ -113,7 +113,7 @@ async function main() {
     const { CollapsibleSection } = await import("../components/leads/CollapsibleSection");
     const { PageFrame } = await import("../components/os/PageFrame");
     const Page = (await import("../app/founders/marketing/tools/page")).default;
-    const tree = await Page();
+    const tree = await Page({ searchParams: Promise.resolve({}) });
     const sections = nodes(tree).filter((n) => n.type === CollapsibleSection);
     assert.deepEqual(
       sections.map((s) => [s.props.title, s.props.storageKey, s.props.defaultCollapsed, s.props.keepMounted]),

@@ -104,6 +104,7 @@ import {
   type Track,
 } from "@/lib/founders-marketing-core";
 import { EXTRACTED_ROOT } from "@/lib/founders/extracted-videos";
+import { DownloadFailureNotice } from "@/components/founders/DownloadFailureNotice";
 import { HookCompare } from "@/components/founders/HookCompare";
 import { AssetTile, MarketingEmpty } from "@/components/founders/marketing-shared";
 
@@ -132,6 +133,7 @@ export default async function MarketingLibraryPage({
     lifecycle?: string;
     page?: string;
     view?: string;
+    download?: string;
   }>;
 }) {
   const founder = await resolveFounder();
@@ -193,7 +195,14 @@ export default async function MarketingLibraryPage({
           }),
       null,
     ),
-    safe("marketing.library.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    // The brand sub-pills and the By row count what each pill's link opens: this
+    // view with every filter it keeps, the pill's own facet left out (audit and
+    // review of #739, 2026-10-26).
+    safe(
+      "marketing.library.facets",
+      getMarketingFacets(founder.tenantId, { group, lifecycle, status, track, channel, icp, pack, brand, author }),
+      DEGRADED_MARKETING_FACETS,
+    ),
     safe("marketing.library.meta", getMetaFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_META_FACETS),
     safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
       counts: { needs_review: 0, approved: 0, scheduled: 0, live: 0, archived: 0 },
@@ -314,6 +323,8 @@ export default async function MarketingLibraryPage({
         // was a duplicate.
         subtitle="A record of what has already been produced — the daily poster writes here, it never reads from here."
       />
+      {/* A Download pressed on this page that failed comes back here with ?download=<code>. */}
+      <DownloadFailureNotice code={sp.download} />
 
       {/* ── Axis 1: BRAND. Tabs, not pills — this is navigation between separate
           bodies of work, and it should not look like the facets that narrow
