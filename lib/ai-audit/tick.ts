@@ -219,7 +219,7 @@ export async function runAiAuditTick(
       report.paymentsSettled += await settleVerifiedReceipts(db, tenantId, now(), deps.payment, 10);
     });
     await guard("expire_closed", undefined, async () => {
-      for (const id of await closedEngagementsWithOpenCheckouts(db, tenantId, 5, now())) {
+      for (const id of await closedEngagementsWithOpenCheckouts(db, tenantId, 5)) {
         if (over()) break;
         report.checkoutsExpired += (await expireOpenCheckouts(db, tenantId, id, now(), deps.payment)).expired;
       }

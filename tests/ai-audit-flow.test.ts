@@ -677,6 +677,9 @@ async function main() {
     // The tick's sweep finds any such session by itself too.
     await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'open' WHERE engagement_id = ?", args: [engagementId] });
     assert.deepEqual(await payment.closedEngagementsWithOpenCheckouts(db, OASIS), [engagementId]);
+    // One the client finished but has not paid yet is left to the regular payment check (CodeRabbit on #746).
+    await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = 'complete_unpaid' WHERE engagement_id = ?", args: [engagementId] });
+    assert.deepEqual(await payment.closedEngagementsWithOpenCheckouts(db, OASIS), []);
     await db.execute({ sql: "DELETE FROM ai_audit_checkouts WHERE engagement_id = ?", args: [engagementId] });
     await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'delivered' WHERE id = ?", args: [engagementId] });
   });

@@ -569,6 +569,11 @@ export async function expireOpenCheckouts(
       if (v.status === "problem") {
         await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'failed', last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('creating', 'open')", args: [`complete_unverified:${v.code}`.slice(0, 200), at, t, c.id] });
       }
+      // Finished but not paid yet (a bank payment still clearing): Stripe will not expire it, so the sweep leaves it to
+      // the regular payment check instead of asking again on every tick (CodeRabbit on #746).
+      if (v.status === "unpaid") {
+        await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = 'complete_unpaid', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'open'", args: [at, t, c.id] });
+      }
     } else {
       failed += 1;
       await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?", args: [secret ? "expire_failed" : "stripe_not_connected", at, t, c.id] });
@@ -594,15 +599,17 @@ async function stripeSessionState(f: typeof fetch, secret: string, sessionId: st
  * this existed, or a session Stripe opened while a revision landed (review of
  * phase 5, finding 1).
  */
-export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10, now = new Date()): Promise<string[]> {
+export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+  // A session the client finished but has not paid yet is left to the regular payment check (dueOpenCheckouts):
+  // Stripe will not expire it. Every other open one is asked again on each tick until it closes.
   const rs = await db.execute({
     sql: `SELECT DISTINCT c.engagement_id FROM ai_audit_checkouts c
           JOIN ai_audit_engagements e ON e.tenant_id = c.tenant_id AND e.id = c.engagement_id
           WHERE c.tenant_id = ? AND c.status IN ('creating', 'open') AND c.stripe_session_id IS NOT NULL
             AND (e.stage NOT IN (${WAITING_ON_CLIENT_STAGES.map(() => "?").join(", ")}) OR c.proposal_version_id IS NOT e.current_proposal_version_id)
-            AND (c.last_checked_at IS NULL OR c.last_checked_at < ?)
+            AND (c.last_error IS NULL OR c.last_error <> 'complete_unpaid')
           LIMIT ?`,
-    args: [requireTenant(tenantId), ...WAITING_ON_CLIENT_STAGES, new Date(now.getTime() - 30 * 60_000).toISOString(), limit],
+    args: [requireTenant(tenantId), ...WAITING_ON_CLIENT_STAGES, limit],
   });
   return rs.rows.map((r) => String(r.engagement_id));
 }
