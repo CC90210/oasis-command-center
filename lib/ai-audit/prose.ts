@@ -32,6 +32,7 @@ import { numbersIn } from "@/lib/ai-audit/extract";
 import { scrubCredentials } from "@/lib/ai-audit/transcript";
 import { statesFigure, type AuditDoc, type DocParagraph } from "@/lib/ai-audit/doc";
 import { rangeWords } from "@/lib/ai-audit/opportunities";
+import { NOT_A_COUNT } from "@/lib/ai-audit/evidence";
 
 export const PROSE_SCHEMA = "ai_audit_prose/v2" as const;
 export const PROSE_MAX_TOKENS = 3_000;
@@ -121,8 +122,6 @@ const FIGURE = /(\$\s?)?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?:\s?(k|tho
 const RANGE_GAP = /^\s*(?:[a-z%$]+\s+)?(?:to|-|\u2013|\u2014|or|and)\s*\$?\s*$/i;
 /** Where a figure's own clause ends. */
 const CLAUSE_END = /[,;:.!?]|\b(?:and|but|which|while|so|because|whereas)\b/i;
-/** "one" that counts nothing: "each one", "no one", "one of them". */
-const NOT_A_COUNT = /\b(?:each|every|no|any|some|the|this|that|which)\s+one\b|\bone\s+(?:of|another|by one)\b|\bsomeone\b|\banyone\b/gi;
 /** "Within a minute", "an hour": a time frame (inventsFacts checks those against the draft), not a count. */
 const A_TIME = /\b(?:a|an)\s+(?:second|minute|hour|day|week|month|quarter|year)s?\b/gi;
 /** A share said in words: "half of", "two thirds of", "one in four". */
