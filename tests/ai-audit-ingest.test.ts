@@ -126,6 +126,22 @@ test("unknown option values are ignored, not counted", () => {
   assert.ok(s.score >= 0);
 });
 
+test("an answer that names an object's own property scores nothing, never NaN", () => {
+  // The public form checks which fields arrive, not their values: "constructor"
+  // looked up in a plain object is a function, and made the whole score NaN.
+  const fields = ["monthly_revenue", "budget", "timeframe", "automation_goal", "tried_before", "team_size"];
+  for (const value of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf", "isPrototypeOf"]) {
+    for (const field of fields) {
+      const s = scoreAiAuditLead({ ...MIDDLE, [field]: value });
+      assert.ok(Number.isFinite(s.score), `${field}=${value}: score ${s.score}`);
+      assert.ok(Object.values(s.parts).every((p) => Number.isFinite(p)), `${field}=${value}: ${JSON.stringify(s.parts)}`);
+      assert.equal(s.score, scoreAiAuditLead({ ...MIDDLE, [field]: undefined }).score, `${field}=${value}`);
+    }
+    const all = scoreAiAuditLead(Object.fromEntries(fields.map((f) => [f, value])));
+    assert.deepEqual([all.score, all.status], [0, "cold"], value);
+  }
+});
+
 test("reasons are human-readable and non-empty for a strong lead", () => {
   const s = scoreAiAuditLead(DREAM);
   assert.ok(s.reasons.length >= 3, JSON.stringify(s.reasons));

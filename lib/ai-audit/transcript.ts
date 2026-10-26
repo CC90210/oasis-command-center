@@ -1145,6 +1145,11 @@ function norm(s: string): string {
   );
 }
 
+/** A text as the quote check compares it (see quoteInLines): lib/ai-audit/extract.ts lines its figures up with a quote by it. */
+export function quoteWords(s: string): string {
+  return norm(s);
+}
+
 const MARKER_WORDS = ` ${norm(CREDENTIAL_MARKER)} `;
 
 /**

@@ -44,7 +44,12 @@ Every finding in an audit carries exactly one of these. The client's page explai
 ## Before the call
 
 - Open the lead and choose **Start AI audit** if there is no engagement yet.
-- Read what they wrote on the form and look at their website.
+- Read the **pre-call research brief** at the top of **Call and transcripts**. It builds by itself once the engagement reaches Research in Progress or Discovery Call Scheduled; press **Build the brief** to build it sooner or again. It shows:
+  - what their website shows, checked by the Command Center (Verified), such as whether visitors can book online, call in one tap, or chat;
+  - what they said on the form (Client-reported);
+  - likely problems to test on the call (Hypotheses, never facts until the client confirms them);
+  - the questions to spend time on, and what could not be checked.
+- The brief reads only the business's own public website, with plain requests, and never sends their details to an AI service. A social profile instead of a website is listed for you to look at by hand.
 - Have one question ready for each figure the estimates need: lead volume, response time, close rate, average job value, hours on admin, the cost of an hour of staff time.
 - Decide what you will **not** say: no prices, no promised results, no statistics you cannot source.
 

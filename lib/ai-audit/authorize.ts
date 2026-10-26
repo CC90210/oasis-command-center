@@ -55,6 +55,7 @@ import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayloa
 import { effectiveStatus } from "@/lib/os/approvals/rules";
 import { AUTHORIZATION_VOIDED_REASONS, PROFILE_EDIT_STAGES, TERMINAL_STAGES, shortName } from "@/lib/ai-audit/rules";
 import { dbBool } from "@/lib/db-bool";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
 
@@ -462,10 +463,15 @@ async function runAuthorization(ctx: ExecutorContext): Promise<ExecutorOutcome> 
     }
     await tx.batch([
       {
-        sql: `UPDATE ai_audit_profile_versions SET status = 'frozen', profile_sha256 = ?, transcript_sha256 = ?, frozen_at = ?, updated_at = ?
+        // The draft's run report (the model's summary of the call) is a working note, not part of what is
+        // authorized: a frozen profile never holds one, so nothing a later delete must reach stays frozen (review of phase 2b, H1).
+        sql: `UPDATE ai_audit_profile_versions SET status = 'frozen', profile_sha256 = ?, transcript_sha256 = ?, frozen_at = ?, updated_at = ?,
+                summary = json_remove(COALESCE(summary, '{}'), '$.extraction')
                WHERE tenant_id = ? AND id = ? AND status = 'draft'`,
         args: [p.profile_sha256, p.transcripts_sha256, at, at, t, p.profile_version_id],
       },
+      // A draft still running reads a profile that is now frozen: it stops, and keeps nothing (review of phase 2b, F5).
+      ...stopEngagementRunsStatements(t, engagement.id, "stage_closed", at),
       {
         // A warning that an earlier authorization stopped holding is answered by this one; other warnings stay.
         sql: `UPDATE ai_audit_engagements SET health = 'ok', health_reason = NULL
