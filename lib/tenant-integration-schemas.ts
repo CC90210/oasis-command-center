@@ -129,6 +129,24 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
       { key: "webhook_secret", label: "Webhook Secret (HMAC-SHA256)", sensitive: true, hint: "Shared secret Kixie signs inbound webhooks with — set the same value in Kixie's webhook config UI. Required so we can verify webhook authenticity." },
     ],
   },
+  // Quo (formerly OpenPhone): the raw API key in Authorization, with no
+  // "Bearer". Test is GET https://api.quo.com/v1/phone-numbers, which lists the
+  // workspace's numbers and where each may text, and sends nothing. A text is
+  // POST /v1/messages {"content", "from", "to": [number]} (lib/integrations/quo.ts).
+  // https://www.quo.com/docs/mdx/api-reference/authentication,
+  // https://quo.com/docs/mdx/api-reference/phone-numbers/list-phone-numbers.md and
+  // https://www.quo.com/docs/mdx/api-reference/messages/send-a-text-message (read 2026-10-26).
+  {
+    service: "quo",
+    label: "Quo",
+    description:
+      "Your own Quo (formerly OpenPhone) workspace: one API key, and the number texts leave from when the workspace has more than one. Test lists your Quo numbers and where each may text, and sends nothing. Texts go out only while live texting is switched on.",
+    fields: [
+      { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In Quo: Settings > API > Generate API key. Only a workspace owner or admin can create one." },
+      { key: "from_number", label: "From number (optional)", sensitive: false, validation: "phone_e164", placeholder: "+14165551212", hint: "The Quo number your texts leave from, in E.164 form like +14165551212. Leave it blank when your Quo workspace has one number: OASIS uses that one." },
+    ],
+    getKey: { href: "https://www.quo.com/docs/mdx/api-reference/authentication", label: "Quo's guide to API keys" },
+  },
   {
     service: "gws",
     label: "Google Workspace (Gmail)",

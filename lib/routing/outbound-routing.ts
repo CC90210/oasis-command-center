@@ -44,9 +44,14 @@
  */
 
 import { isDripBrand, type BrandKey, type DripBrandKey } from "@/lib/email/brands";
+import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 
-/** Every outbound carrier/mailbox we can address. */
-export type ProviderId = "gws" | "gws_bluerise" | "texttorrent" | "twilio";
+/**
+ * Every outbound carrier/mailbox we can address. Quo (2026-10-26) texts for
+ * OASIS's own workspaces from the dashboard (chooseSmsProvider below); no drip
+ * brand's lane names it, so routeOutbound never picks it.
+ */
+export type ProviderId = "gws" | "gws_bluerise" | "texttorrent" | "twilio" | "quo";
 
 export type OutboundChannel = "email" | "sms";
 
@@ -174,6 +179,41 @@ export function routeOutbound(input: RoutingInput): RoutingDecision {
     };
   }
   return { send: true, provider, brand, channel, reason: `${brand} SMS via ${provider}` };
+}
+
+/** The providers a text sent from the dashboard can name (app/api/conversations/reply). */
+export type DashboardSmsProvider = "texttorrent" | "kixie" | "twilio" | "quo";
+
+/**
+ * Whether chooseSmsProvider can pick Quo for this request: only an OASIS
+ * workspace, or a request that names Quo. A route reads the Quo key only
+ * then, so every other workspace's send is exactly what it was.
+ */
+export function smsMayUseQuo(input: { requested: DashboardSmsProvider; tenantId: string | null | undefined }): boolean {
+  return input.requested === "quo" || isOasisInternalTenant(input.tenantId);
+}
+
+/**
+ * Which provider sends one text from the dashboard.
+ *
+ * OASIS's own workspaces (isOasisInternalTenant, by tenant id) text through
+ * Quo whenever Quo is set up (CC, 2026-10-26: Twilio broke and OASIS moved its
+ * texting to Quo). The same rule as send_gateway.py _resolve_sms_provider in
+ * CEO-Agent, with one difference: the dashboard always names a provider (the
+ * inbox picker starts on TextTorrent, a lead's SMS box always asks for Kixie),
+ * so a named provider is not a deliberate choice here and does not outrank Quo
+ * for OASIS. A request that names Quo gets Quo, set up or not: the send then
+ * says Quo is not set up, rather than going out through another provider.
+ * Every other workspace keeps the provider it asked for.
+ */
+export function chooseSmsProvider(input: {
+  requested: DashboardSmsProvider;
+  tenantId: string | null | undefined;
+  /** The workspace's Quo credentials resolve (lib/integrations/quo.ts getQuoCredentials). */
+  quoReady: boolean;
+}): DashboardSmsProvider {
+  if (!smsMayUseQuo(input)) return input.requested;
+  return input.requested === "quo" || input.quoReady ? "quo" : input.requested;
 }
 
 /**

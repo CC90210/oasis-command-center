@@ -28,14 +28,16 @@ import { ProfileEditor } from "./ProfileEditor";
 import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
 import { DiscoveryPanel } from "./DiscoveryPanel";
+import { ResearchPanel } from "./ResearchPanel";
 import { describeError, postAction } from "./api";
 
-type Tab = "overview" | "call" | "profile" | "audit" | "proposal" | "delivery" | "history";
+type Tab = "overview" | "call" | "profile" | "research" | "audit" | "proposal" | "delivery" | "history";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "call", label: "Call and transcripts" },
   { key: "profile", label: "Discovery profile" },
+  { key: "research", label: "Research" },
   { key: "audit", label: "Audit" },
   { key: "proposal", label: "Proposal" },
   { key: "delivery", label: "Delivery and payment" },
@@ -262,6 +264,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
       <div hidden={tab !== "profile"}>
         {/* Editable until Gate 1; an edit after a frozen version opens a new draft (versions.ts). */}
         <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={!PROFILE_EDIT_STAGES.includes(e.stage)} />
+      </div>
+
+      {/* Kept mounted, hidden, so a half-typed assumption survives a switch of tab. */}
+      <div hidden={tab !== "research"}>
+        <ResearchPanel view={view} isOwner={isOwner} />
       </div>
 
       <div hidden={tab !== "audit"}>

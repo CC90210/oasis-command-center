@@ -29,7 +29,8 @@ async function handle(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   }
   try {
-    const report = await runAiAuditTick(getTursoClient(), { budgetMs: 200_000 });
+    // Under the cron forwarder's 120-second wait, so it never retries a tick still running.
+    const report = await runAiAuditTick(getTursoClient(), { budgetMs: 100_000 });
     const { errors, ...counts } = report;
     const body = { ok: errors.length === 0, ...counts, errors: errors.map((e) => ({ step: e.step, error: e.error.slice(0, 120) })) };
     return NextResponse.json(body, { status: errors.length ? 500 : 200 });

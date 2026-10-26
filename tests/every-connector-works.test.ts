@@ -12,7 +12,7 @@
  *
  *   key form    the schema exists, its Test probe exists, and the Test is run
  *               against a mocked vendor (Plaid, Discord, Microsoft Teams, Meta
- *               Ads): saved encrypted, a pass is green with the account's name,
+ *               Ads, Quo): saved encrypted, a pass is green with the account's name,
  *               every refusal is in plain words, a webhook is pinned to the
  *               vendor's own domain, a secret never goes to a new host.
  *   sign-in     the provider is registered with its secrets named, the
@@ -397,13 +397,27 @@ function keyVendor(url: URL, init: RequestInit | undefined, call: Call): Respons
       missingacct: json(400, { error: { code: 100, type: "GraphMethodException" } }),
     });
   }
+  if (url.hostname === "api.quo.com") {
+    assert.equal(url.pathname, "/v1/phone-numbers", "Quo's Test lists the numbers and sends no text");
+    assert.equal(call.method, "GET");
+    assert.equal(init?.redirect, "manual");
+    assert.doesNotMatch(call.auth, /^Bearer /i, "Quo takes the raw key, never a Bearer token");
+    const number = {
+      id: "PNalpha0001", number: "+13653603976", name: "Primary",
+      restrictions: { messaging: { CA: "unrestricted", US: "restricted", Intl: "restricted" } },
+    };
+    return answer(word(call.auth), () => json(200, { data: [number] }), {
+      revoked: json(401, { error: { message: "Unauthorized", key: "Unauthorized" } }),
+      noscope: json(403, { title: "Forbidden", message: "Not allowed", status: 403 }),
+    });
+  }
   return null;
 }
 
 const VENDOR_HOSTS = new Set([
   "oauth.platform.intuit.com", "quickbooks.api.intuit.com", "developer.api.intuit.com",
   "identity.xero.com", "api.xero.com", "zoom.us", "api.zoom.us", "graph.facebook.com",
-  "sandbox.plaid.com", "production.plaid.com", "discord.com", "api.stripe.com",
+  "sandbox.plaid.com", "production.plaid.com", "discord.com", "api.stripe.com", "api.quo.com",
 ]);
 
 const realFetch = globalThis.fetch;
@@ -661,7 +675,7 @@ async function main() {
     assert.deepEqual(by("accounting"), ["quickbooks", "xero"]);
     assert.deepEqual(by("banking"), ["plaid", "wise"]);
     assert.ok(by("meetings").includes("zoom"));
-    for (const slug of ["slack", "whatsapp", "discord", "microsoft-teams"]) assert.ok(by("messaging").includes(slug), `${slug}: in Messaging & chat`);
+    for (const slug of ["slack", "whatsapp", "discord", "microsoft-teams", "quo"]) assert.ok(by("messaging").includes(slug), `${slug}: in Messaging & chat`);
     assert.ok(by("ads_social").includes("meta"));
     assert.deepEqual(by("website_hosting"), ["cloudflare", "firecrawl", "github", "hostinger"]);
     for (const c of connectors.CONNECTOR_CATEGORIES) assert.ok(connectors.CONNECTOR_CATALOG.some((d) => d.category === c.key), `${c.key}: an empty section`);
@@ -745,7 +759,7 @@ async function main() {
   });
 
   // ===========================================================================================
-  // 3. Key vendors: Plaid, Discord, Microsoft Teams, Meta Ads
+  // 3. Key vendors: Plaid, Discord, Microsoft Teams, Meta Ads, Quo
   // ===========================================================================================
 
   const discordUrl = (word = "") => `https://discord.com/api/webhooks/123456789012345678/${word}AbCdEfGhIjKlMnOpQrSt0123`;
@@ -773,6 +787,11 @@ async function main() {
       good: { access_token: "EAAB-alpha-system-user-token-0001", ad_account_id: "act_1234567890" },
       word: (w) => ({ access_token: `EAAB-alpha-${w}-system-user-0001` }),
     },
+    {
+      slug: "quo", service: "quo", secretField: "api_key", pass: /\+1 365 360 3976: Canada yes, US restricted, international restricted/,
+      good: { api_key: "quo-alpha-workspace-key-0001", from_number: "+13653603976" },
+      word: (w) => ({ api_key: `quo-alpha-${w}-workspace-key-0001` }),
+    },
   ];
 
   await check("each key vendor has a form that saves, a probe that tests, and a link to where the key is made", () => {
@@ -787,7 +806,7 @@ async function main() {
       assert.deepEqual([...(def.live!.source as { requireAll: readonly string[] }).requireAll].sort(), schemas.requiredIntegrationFieldKeys(schema).sort(), `${app.slug}: the card needs exactly what the form requires`);
     }
     const src = read("lib/tenant-integration-schemas.ts");
-    for (const cited of ["plaid.com/docs/api/institutions", "docs.discord.com/developers/resources/webhook", "learn.microsoft.com/en-us/connectors/teams", "developers.facebook.com/docs/marketing-api"]) {
+    for (const cited of ["plaid.com/docs/api/institutions", "docs.discord.com/developers/resources/webhook", "learn.microsoft.com/en-us/connectors/teams", "developers.facebook.com/docs/marketing-api", "quo.com/docs/mdx/api-reference/phone-numbers"]) {
       assert.ok(src.includes(cited), `the schemas cite ${cited}`);
     }
   });
@@ -943,7 +962,9 @@ async function main() {
       const t = await runTest(app.service);
       assert.equal(t.body.ok, false, `${app.slug}: Bravo's Test passed with Alpha's key`);
       assert.match(String(t.body.error), /^missing_fields/);
-      assert.equal((await card(BRAVO_CO, app.slug)).kind, "not_connected", app.slug);
+      // A card not offered to client workspaces (Quo) says so to a client that saved nothing.
+      const expected = connectors.connectorBySlug(app.slug)!.clientsUnavailable ? "coming_soon" : "not_connected";
+      assert.equal((await card(BRAVO_CO, app.slug)).kind, expected, app.slug);
     }
     assert.equal(calls.length, 0, "a call was made for a workspace that saved nothing");
   });

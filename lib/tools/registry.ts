@@ -310,7 +310,7 @@ export function toolByKey(k: unknown): ToolDef | null {
  * in flight (a meeting is never refused because downloads are busy, and the
  * reverse).
  */
-export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local" | "ai_audit_pdf" | "ai_audit_model";
+export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local" | "ai_audit_pdf" | "ai_audit_model" | "ai_audit_search";
 export type RunnerToolKey = ToolKey | SystemRunnerToolKey;
 
 export type RunnerRules = {
@@ -331,6 +331,9 @@ export const SYSTEM_RUNNER_TOOLS: Readonly<Record<SystemRunnerToolKey, RunnerRul
   // One model call on the Mac for a Free AI Audit (lib/ai-audit/extraction.ts):
   // the prompt is built at claim time and never stored on the job.
   ai_audit_model: { stages: ["thinking"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
+  // Web search on the Mac for a Free AI Audit's research (lib/ai-audit/research.ts): public facts
+  // only, the prompt built at claim time; the job keeps only the checked list of pages it found.
+  ai_audit_search: { stages: ["thinking"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
 };
 
 export const SYSTEM_RUNNER_TOOL_KEYS = Object.keys(SYSTEM_RUNNER_TOOLS) as SystemRunnerToolKey[];
