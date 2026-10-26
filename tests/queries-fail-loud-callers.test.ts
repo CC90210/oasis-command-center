@@ -443,6 +443,24 @@ async function main() {
     assert.equal((await (await shellStatus.GET()).json()).bridgeOnline, false);
   });
 
+  // The activity tape lists every publisher in the workspace, not only the house
+  // agents: a send from a lead page or a Kixie call is published by the dashboard
+  // side, and scoping the tape by publisher_agent hid all of it behind "No events
+  // recorded yet" (audit, 2026-10-26).
+  await check("/operations: the activity tape shows an event the dashboard side published for this workspace", async () => {
+    await db.execute({
+      sql: "INSERT INTO agent_events (id, event_type, publisher_agent, correlation_id, severity, payload, published_at) VALUES ('ev-dash', 'dashboard_action', 'dashboard', ?, 'info', '{\"action\":\"email_sent\"}', ?)",
+      args: [OASIS, now],
+    });
+    try {
+      const ops = (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
+      assert.doesNotMatch(ops, /No events recorded yet/, "a dashboard-published event is on the tape");
+      assert.doesNotMatch(ops, /Couldn't check the activity tape/);
+    } finally {
+      await db.execute("DELETE FROM agent_events WHERE id = 'ev-dash'");
+    }
+  });
+
   // One count, two pages (lib/admin/attention.ts needsYouCount). /health's
   // header counts the founder-booking check (a header saying "Nothing needs
   // you" above a failing check is what lib/health/outcome-panel-data.ts exists

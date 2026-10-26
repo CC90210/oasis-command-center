@@ -54,7 +54,7 @@ import { resolveFounder } from "@/lib/founders/gate";
 import { OasisWhiteboard } from "@/components/founders/OasisWhiteboard";
 import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import { ToolsSection } from "@/components/tools/ToolsSection";
-import { TOOL_RECHECK_EVENT, VIDEO_CARD_ID } from "@/components/tools/tool-grid-format";
+import { VIDEO_CARD_ID } from "@/components/tools/tool-grid-format";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Content Tools · Content · OASIS" };
@@ -78,7 +78,7 @@ export default async function ContentToolsPage() {
         </div>
       </CollapsibleSection>
       {/* Only Check connection re-reads this page: nothing here depends on a finished run on the server. */}
-      <RefreshOnToolRun events={[TOOL_RECHECK_EVENT]} />
+      <RefreshOnToolRun finished={false} />
     </PageFrame>
   );
 }

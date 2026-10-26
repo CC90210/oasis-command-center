@@ -188,7 +188,8 @@ export async function getTenantEnabledAgents(
 /**
  * The agents an OPERATOR surface lists for OASIS's own workspaces (by tenant
  * id): a tenant cron's agent key (POST and PATCH /api/cron-jobs), /operations'
- * workers and tapes, /health's integrations. That is the house agents OASIS's
+ * worker cards and decisions tape (its activity tape is tenant-scoped by
+ * correlation_id and lists every publisher), /health's integrations. That is the house agents OASIS's
  * bridge runs (lib/agents.ts OASIS_RUNTIME_AGENT_KEYS), not its business
  * roster, which is its department leads since W4a (decision 21; review R4).
  * Null for every other workspace: the caller keeps its enabled roster.

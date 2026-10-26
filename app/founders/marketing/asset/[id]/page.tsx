@@ -111,7 +111,11 @@ export default async function AssetDetailPage({
 
   // Null covers both "no such asset" and "not yours" — the caller cannot tell
   // them apart, which is the point. 404, never 403.
-  const asset = await getMarketingAsset(founder.tenantId, id);
+  //
+  // The most recent publish request is read beside the asset, not after it: it
+  // depends only on the id, and the page streams nothing, so a third dependent
+  // hop was paid on every open and on every 8-second poll while a post goes out.
+  const [asset, lastIntent] = await Promise.all([getMarketingAsset(founder.tenantId, id), getLatestPublishIntent(founder.tenantId, id)]);
   if (!asset) notFound();
 
   const media = asset.media || [];
@@ -236,9 +240,9 @@ export default async function AssetDetailPage({
     return `/founders/marketing/asset/${asset.id}${s ? `?${s}` : ""}`;
   };
 
-  // Most recent publish request, so the panel can say what already happened
-  // rather than inviting the operator to fire a second one blind.
-  const lastIntent = await getLatestPublishIntent(founder.tenantId, asset.id);
+  // lastIntent (read above with the asset): the most recent publish request, so
+  // the panel can say what already happened rather than inviting the operator
+  // to fire a second one blind.
 
   const facts: Array<[string, string | null]> = [
     ["Brand", asset.brand_name || asset.brand_slug],
@@ -369,7 +373,7 @@ export default async function AssetDetailPage({
                 one component, one behaviour. A second implementation here would
                 drift and the two surfaces would start disagreeing about what
                 "approve" does. */}
-            <AssetActions id={asset.id} status={asset.status} title={asset.title} />
+            <AssetActions id={asset.id} status={asset.status} title={asset.title} afterDeleteHref={libraryBack} />
           </Card>
           )}
 

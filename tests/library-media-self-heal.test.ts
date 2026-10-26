@@ -231,6 +231,8 @@ async function main() {
       "components/founders/TileVideo.tsx",
       "components/founders/HookCompare.tsx",
       "components/founders/SlideReorder.tsx",
+      // Extracted videos' late-mounting player (audit, 2026-10-26): it mounts after the page, so its link is the likeliest to have expired.
+      "components/founders/LazyVideo.tsx",
       "app/founders/marketing/asset/[id]/page.tsx",
       "components/founders/SignedMedia.tsx",
     ];

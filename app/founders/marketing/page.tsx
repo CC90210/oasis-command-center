@@ -482,9 +482,11 @@ async function LibraryCard({ tenantId }: { tenantId: string }) {
 }
 
 /**
- * The Training tab's material, from its own one-query read: it never waits on
+ * The Training page's material, from its own one-query read: it never waits on
  * the Library's asset pages. CC did not know what the "Training corpus" was, so
- * the card says it in the tab's words and links to the tab.
+ * the card says it in the page's words and opens the page (it is no longer a
+ * tab: Content Tools took its slot on 2026-10-06, and the copy said "tab" for
+ * twenty days after that, pointing at nothing in the bar).
  */
 async function TrainingCard({ tenantId }: { tenantId: string }) {
   const corpus = await safe("marketing.corpus.stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true });
@@ -510,7 +512,7 @@ async function TrainingCard({ tenantId }: { tenantId: string }) {
           ) : corpus.indexed === 0 && pending === 0 ? (
             // Ingestion HAS landed — the route enqueues and
             // scripts/ingest_training_link.py drains it every five minutes.
-            <>Nothing yet. Add links on the Training tab.</>
+            <>Nothing yet. Open Training to add links.</>
           ) : (
             <>
               {corpus.indexed} learned

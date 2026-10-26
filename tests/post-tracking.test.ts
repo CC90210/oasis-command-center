@@ -79,8 +79,12 @@ async function main() {
     for (const n of proto.networks) assert.equal(typeof n.name, "string", n.platform);
     const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`net${i}`, { status: "pending" }]));
     assert.equal(postTrackingOf({ zernio: { platforms: many } })!.networks.length, 12);
+    // The vendor's name stays off the screen (tests/content-iphone.test.ts INTERNAL).
     assert.equal(postTrackingOf({ zernio: { outcome: "missing" } })!.summary,
-      "Zernio no longer has this post; it was removed or rebooked.");
+      "The posting service no longer has this post; it was removed or rebooked.");
+    assert.equal(postTrackingOf({ zernio: { outcome: "scheduled" } })!.summary,
+      "Booked with the posting service and waiting for its slot.");
+    assert.equal(postTrackingOf({ zernio: { outcome: "something_new" } })!.summary, "Tracked by the posting service.");
   });
 
   await check("a booked card is Scheduled, not Needs review; posted still wins", () => {

@@ -17,10 +17,11 @@
  *                            (lib/tools/catalog.ts), so the page re-renders and hands
  *                            the card its new state; the card itself has no router.
  *
- * `events` picks which of the two a page answers. Agent training answers both.
- * Content Tools answers only the recheck: nothing it renders on the server depends
- * on a finished run, and a refresh whose catalog read fails would replace the
- * grid with its fallback line, unmounting every card mid-session (review of #736).
+ * `finished` and `recheck` pick which of the two a page answers. Agent training
+ * answers both. Content Tools answers only the recheck: nothing it renders on the
+ * server depends on a finished run, and a refresh whose catalog read fails would
+ * replace the grid with its fallback line, unmounting every card mid-session
+ * (review of #736).
  *
  * The grid dispatches events rather than calling the router so a test can render
  * it outside Next's app router (tests/tools-grid.render.ts). It renders nothing.
@@ -30,19 +31,16 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { TOOL_RECHECK_EVENT, TOOL_RUN_FINISHED_EVENT } from "@/components/tools/tool-grid-format";
 
-const BOTH: readonly string[] = [TOOL_RUN_FINISHED_EVENT, TOOL_RECHECK_EVENT];
-
-export function RefreshOnToolRun({ events = BOTH }: { events?: readonly string[] }) {
+export function RefreshOnToolRun({ finished = true, recheck = true }: { finished?: boolean; recheck?: boolean }) {
   const router = useRouter();
-  // One string, so a caller's fresh array literal on every render does not re-subscribe.
-  const names = events.join("\n");
   useEffect(() => {
-    const list = names.split("\n").filter(Boolean);
     const refresh = () => router.refresh();
-    for (const name of list) window.addEventListener(name, refresh);
+    if (finished) window.addEventListener(TOOL_RUN_FINISHED_EVENT, refresh);
+    if (recheck) window.addEventListener(TOOL_RECHECK_EVENT, refresh);
     return () => {
-      for (const name of list) window.removeEventListener(name, refresh);
+      window.removeEventListener(TOOL_RUN_FINISHED_EVENT, refresh);
+      window.removeEventListener(TOOL_RECHECK_EVENT, refresh);
     };
-  }, [router, names]);
+  }, [router, finished, recheck]);
   return null;
 }

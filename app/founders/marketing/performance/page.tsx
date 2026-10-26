@@ -50,6 +50,7 @@ import {
   engagements,
   retention,
   type PerfRow,
+  isMeasured,
 } from "@/lib/founders-performance-core";
 import { getPerformance } from "@/lib/founders/performance-queries";
 import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
@@ -121,7 +122,9 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
   // Every connected channel, quiet ones included, then any other that posted.
   const channels = channelRows(perf, PUBLISH_CHANNELS.map((c) => c.id));
 
-  const topByViews = [...rows].sort((a, b) => (b.views || 0) - (a.views || 0)).slice(0, 5);
+  // Measured posts first, so a post with no numbers yet never takes a top-5 slot
+  // from one with numbers on a 0-views tie; it is listed, marked "Not in yet".
+  const topByViews = [...rows].sort((a, b) => Number(isMeasured(b)) - Number(isMeasured(a)) || (b.views || 0) - (a.views || 0)).slice(0, 5);
   const withRetention = rows
     .map((r) => ({ r, ret: retention(r) }))
     .filter((x): x is { r: PerfRow; ret: number } => x.ret !== null)
@@ -131,11 +134,16 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
   return (
     <div className="space-y-6">
       <p className="px-1 text-sm text-fg-muted">
+        {/* "Empty" is decided on posts in the window, not on measured posts: the
+            hour after publishing, the month is not empty, its numbers are not in
+            yet (audit, 2026-10-26). */}
         {perf.degraded
           ? "Could not read the metrics — the numbers below are not a zero, they are unknown"
-          : totals.posts === 0
+          : rows.length === 0
             ? "Nothing published in the last 30 days"
-            : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel`}
+            : totals.posts === 0
+              ? `${rows.length}${perf.truncated ? "+" : ""} post${rows.length === 1 ? "" : "s"} · last 30 days · numbers not in yet`
+              : `${totals.posts}${perf.truncated ? "+" : ""} posts · last 30 days · per channel`}
       </p>
 
       {/* Posts that have shipped but have no numbers yet. Reported rather than
@@ -147,7 +155,7 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
           <p className="text-sm text-fg-muted">
             {perf.awaitingMetrics} post{perf.awaitingMetrics === 1 ? "" : "s"} published
             recently{perf.awaitingMetrics === 1 ? " has" : " have"} no numbers yet — they are
-            excluded from the totals above rather than counted as zero. Figures are pulled from
+            left out of the totals rather than counted as zero. Figures are pulled from
             your posting account on a schedule, not pushed, so they land within the hour.
           </p>
         </Card>
@@ -171,10 +179,10 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
         </Card>
       )}
 
-      {!perf.degraded && totals.posts === 0 && (
+      {!perf.degraded && rows.length === 0 && (
         <Card>
           <p className="text-sm text-fg-muted">
-            No posts in the window yet. Numbers appear here within a few minutes of publishing —
+            No posts in the window yet. Numbers appear here within the hour of publishing —
             they are pulled from your posting account on a schedule, not pushed.
           </p>
         </Card>
@@ -314,11 +322,13 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
                           </span>
                           <PostLink r={r}>{r.content_excerpt || "(no caption)"}</PostLink>
                         </td>
+                        {/* A post with no numbers yet is listed, never printed as 0 views:
+                            that is the misread the awaiting card above exists to prevent. */}
                         <td className="py-2 pr-3 text-right tabular-nums text-fg">
-                          {nf.format(r.views)}
+                          {isMeasured(r) ? nf.format(r.views) : <span className="text-fg-dim">Not in yet</span>}
                         </td>
                         <td className="py-2 pr-3 text-right tabular-nums text-fg-muted">
-                          {nf.format(engagements(r))}
+                          {isMeasured(r) ? nf.format(engagements(r)) : "—"}
                         </td>
                         <td className="py-2 text-right tabular-nums text-fg-dim">
                           {ret === null ? "—" : `${(ret * 100).toFixed(0)}%`}
