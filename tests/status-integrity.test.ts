@@ -890,8 +890,9 @@ async function main() {
     assert.deepEqual(noteFor(emailed, null), [emailed, model.FEED_NEEDS_HREF]);
     for (const email of [
       "Not emailed either: sending is switched off (dry run)",
-      "Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app",
+      "Not emailed: the hourly cap of 10 alert emails is reached, so this one is only in the app",
       "The email fallback failed too (auth: 535)",
+      "The email fallback failed too (smtp said\nno twice)",
     ]) {
       assert.deepEqual(
         noteFor(`Not sent: Telegram said: Unauthorized. ${email}`, clientBCard.value),

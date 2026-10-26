@@ -652,7 +652,7 @@ export type ConnectionAttention = {
 const NO_BOT_NOTE = "Not sent: no Telegram bot connected";
 
 /** What an alert's push said about its email, after the Telegram part: "Emailed to <address> instead", or why it was not. */
-const ALERT_EMAIL_PART = /\. ((?:Emailed to \S+ instead|Not emailed\b|The email fallback failed too\b).*)$/;
+const ALERT_EMAIL_PART = /\. ((?:Emailed to \S+ instead|Not emailed\b|The email fallback failed too\b)[\s\S]*)$/;
 
 /**
  * An alert row's Telegram note. What happened to the push is the alert's own

@@ -215,7 +215,7 @@ async function main() {
     for (const r of sales.slice(11)) {
       assert.deepEqual(r, {
         delivered: false,
-        outcome: "Not sent: Telegram said: Unauthorized. Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app",
+        outcome: "Not sent: Telegram said: Unauthorized. Not emailed: the hourly cap of 10 alert emails is reached, so this one is only in the app",
       }, "not delivered, so its caller records it in the app");
     }
     assert.equal(operator.delivered, true, "each lane has its own ten");
@@ -237,7 +237,7 @@ async function main() {
     restore();
     assert.equal(tried, 11);
     assert.ok(results.slice(0, 11).every((r) => !r.delivered && r.outcome.endsWith("The email fallback failed too (auth: 535)")));
-    assert.ok(results.slice(11).every((r) => !r.delivered && / Not emailed: 10 alert emails already went out in the last hour, so this one is only in the app$/.test(r.outcome)));
+    assert.ok(results.slice(11).every((r) => !r.delivered && / Not emailed: the hourly cap of 10 alert emails is reached, so this one is only in the app$/.test(r.outcome)));
   });
 
   await check("never throws: a sender or a cap that throws is a failed email, not an exception", async () => {

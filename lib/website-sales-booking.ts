@@ -49,7 +49,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { deliverWelcomeEmail } from "@/lib/forms/oasis-funnel-email";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
@@ -358,16 +358,19 @@ async function notifyFounders(
     `Booking email: ${e(outcomeLine(outcome))}`;
 
   try {
-    const r = await sendTelegram(text, { lane: "operator" });
-    if (r.ok) return;
-    console.error(`${TAG} founder notify failed:`, r.reason);
+    // The one alert route (lib/notify/alert-route.ts): oasis-webdev is one of
+    // OASIS's own workspaces, so this reaches the operator chat as before, and
+    // CC's inbox when Telegram refuses it.
+    const r = await pushWorkspaceAlert(tenantId, text);
+    if (r.delivered) return;
+    console.error(`${TAG} founder notify failed:`, r.outcome);
     await recordAlertFailure({
       db,
       tenantId,
       leadId: recordId,
       source: ALERT_FAILURE_SOURCE,
       label: "website-sales qualification",
-      reason: r.reason ?? "unknown",
+      reason: r.outcome,
       extra: `Booking email outcome: ${outcomeLine(outcome)}.`,
       tag: "website-sales.booking",
     });

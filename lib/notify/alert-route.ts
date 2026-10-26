@@ -235,7 +235,7 @@ async function emailFounderInstead(
       await notice.release();
       return {
         delivered: false,
-        outcome: `${outcome}. Not emailed: ${ALERT_EMAILS_PER_LANE_PER_HOUR} alert emails already went out in the last hour, so this one is only in the app`,
+        outcome: `${outcome}. Not emailed: the hourly cap of ${ALERT_EMAILS_PER_LANE_PER_HOUR} alert emails is reached, so this one is only in the app`,
       };
     }
     message = founderHeldAlertMessage(text, lane, outcome, now);
