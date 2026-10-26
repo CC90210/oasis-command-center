@@ -713,6 +713,34 @@ async function main() {
     await out;
     assert.equal(saver.wantsSave(), false);
   });
+  await check("a closing flush that finds another tab's edit stops the save queued behind it (Codex review of phase 2, fifth pass)", async () => {
+    const { createNoteSaver } = await import("../components/ai-audit/call/note-saver");
+    const box = { text: "" };
+    const sent: string[] = [];
+    let answerFirst: (() => void) | null = null;
+    const states: string[] = [];
+    const saver = createNoteSaver({
+      text: "",
+      version: 0,
+      read: () => box.text,
+      send: (text, version, opts) => {
+        sent.push(`${opts.keepalive ? "flush" : "save"}:${text}@${version}`);
+        if (!opts.keepalive) return new Promise((resolve) => (answerFirst = () => resolve({ kind: "saved" as const, version: 1, notes: text })));
+        // Another tab saved meanwhile: the server answers with its words and a newer version.
+        return Promise.resolve({ kind: "conflict" as const, version: 2, notes: "the other tab's words" });
+      },
+      onState: (st) => states.push(st),
+    });
+    box.text = "draft";
+    saver.typed();
+    const out = saver.save();
+    box.text = "draft, more";
+    await saver.flush();
+    answerFirst!();
+    await out;
+    assert.deepEqual(sent, ["save:draft@0", "flush:draft, more@0"], "nothing is sent over the other tab's words");
+    assert.equal(saver.state(), "conflict");
+  });
   await check("a consent answer corrected while its first save is out is stored as the last choice, never the first (Codex review of phase 2, second pass)", async () => {
     const { createFigureSaver } = await import("../components/ai-audit/call/note-saver");
     const tick = () => new Promise((r) => setImmediate(r));

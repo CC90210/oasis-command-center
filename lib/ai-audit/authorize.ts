@@ -268,14 +268,27 @@ export async function requestAuthorization(
     );
   let created = await file(supersedesId);
   if (!created.ok && created.error === "already_revised" && "successorId" in created && created.successorId) {
-    // The linked card was already replaced by one that never got linked, for other information: replace that one instead.
-    const successor = await getApprovalInTenant(db, t, String(created.successorId));
-    if (successor && effectiveStatus(successor, input.now.toISOString()) === "pending") created = await file(successor.id);
+    // The linked card was already replaced by one that never got linked (for other information, or
+    // since expired, cancelled or ended): revise the last card of that chain if it can be revised,
+    // else file a fresh card. Refusing here left every later request already_revised (Codex review, fifth pass).
+    const last = await lastRevision(db, t, String(created.successorId));
+    created = await file(last && ["pending", "sent_back", "cancelled"].includes(last.status) ? last.id : undefined);
   }
   if (!created.ok) return { ok: false, error: created.error };
   const linked = await linkAuthorizationCard(db, t, input.engagementId, created.approval.id, input.actor, input.now, payload.engine);
   if (!linked.ok) return linked;
   return { ok: true, approvalId: created.approval.id, created: created.created };
+}
+
+/** The newest card in a chain of revisions, starting at `id` (a few steps at most). */
+async function lastRevision(db: Client, t: string, id: string): Promise<Awaited<ReturnType<typeof getApprovalInTenant>>> {
+  let card = await getApprovalInTenant(db, t, id);
+  for (let i = 0; card && i < 10; i++) {
+    const next = (await db.execute({ sql: "SELECT id FROM approvals WHERE tenant_id = ? AND supersedes_id = ? LIMIT 1", args: [t, card.id] })).rows[0];
+    if (!next) break;
+    card = await getApprovalInTenant(db, t, String(next.id));
+  }
+  return card;
 }
 
 /**
@@ -413,20 +426,20 @@ async function runAuthorization(ctx: ExecutorContext): Promise<ExecutorOutcome> 
       await tx.rollback();
       return failed(reason, message);
     };
-    if (!engagement) return refuse("engagement_missing", "The engagement no longer exists.");
-    if (engagement.stage !== "transcript_review") return refuse("stage_moved", "The engagement is no longer waiting for authorization.");
-    if (engagement.authorization_approval_id !== ctx.approval.id) return refuse("payload_changed", "A newer authorization card exists for this engagement. Approve that one instead.");
-    if (engagement.current_profile_version_id !== p.profile_version_id) return refuse("payload_changed", "The discovery profile changed after this card was made. Approve the newer card.");
+    if (!engagement) return await refuse("engagement_missing", "The engagement no longer exists.");
+    if (engagement.stage !== "transcript_review") return await refuse("stage_moved", "The engagement is no longer waiting for authorization.");
+    if (engagement.authorization_approval_id !== ctx.approval.id) return await refuse("payload_changed", "A newer authorization card exists for this engagement. Approve that one instead.");
+    if (engagement.current_profile_version_id !== p.profile_version_id) return await refuse("payload_changed", "The discovery profile changed after this card was made. Approve the newer card.");
     if (boundName(engagement) !== p.business_name || engagement.business_type !== p.business_type) {
-      return refuse("payload_changed", "The business's name or type changed after this card was made. Ask for authorization again.");
+      return await refuse("payload_changed", "The business's name or type changed after this card was made. Ask for authorization again.");
     }
     const transcripts = await listTranscripts(read, t, engagement.id);
     if (transcriptsHash(transcripts) !== p.transcripts_sha256 || transcripts.length !== p.transcript_count) {
-      return refuse("payload_changed", "A transcript was added or removed after this card was made. Ask for authorization again.");
+      return await refuse("payload_changed", "A transcript was added or removed after this card was made. Ask for authorization again.");
     }
     const notes = (await listCallNotes(read, t, engagement.id)).filter((n) => n.notes.trim());
     if (notesHash(notes) !== p.notes_sha256 || notes.length !== p.note_count) {
-      return refuse("payload_changed", "The call notes changed after this card was made. Ask for authorization again.");
+      return await refuse("payload_changed", "The call notes changed after this card was made. Ask for authorization again.");
     }
     const version = (await tx.execute({ sql: "SELECT status, version_no FROM ai_audit_profile_versions WHERE tenant_id = ? AND id = ? LIMIT 1", args: [t, p.profile_version_id] })).rows[0];
     if (!version || String(version.status) !== "draft") {

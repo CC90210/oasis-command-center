@@ -103,6 +103,8 @@ export function createNoteSaver(o: {
         const a = await o.send(t, version, { keepalive, afterText: null });
         sending = null;
         learn(a);
+        // A closing flush found another tab's edit meanwhile: stop here, never send over it.
+        if (state === "conflict" || state === "closed") break;
         if (a.kind === "saved") {
           if (a.notes !== t && o.read() === t && o.replace) o.replace(a.notes);
           set(o.read() === saved ? "saved" : "dirty");
@@ -145,7 +147,17 @@ export function createNoteSaver(o: {
       // still here. In case it is not, send it now too, naming the save that is
       // out: the server puts this one on top of it in either order.
       again = true;
-      learn(await o.send(o.read(), version, { keepalive: true, afterText: sending }));
+      const a = await o.send(o.read(), version, { keepalive: true, afterText: sending });
+      learn(a);
+      // Another tab changed the note: keep the conflict, and stop the save queued behind
+      // this one, or it would send the box again over the other tab's words (Codex review, fifth pass).
+      if (a.kind === "conflict" && a.notes !== o.read()) {
+        again = false;
+        set("conflict");
+      } else if (a.kind === "closed") {
+        again = false;
+        set("closed");
+      }
     },
     state: () => state,
   };

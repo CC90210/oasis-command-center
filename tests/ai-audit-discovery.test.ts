@@ -562,6 +562,20 @@ async function main() {
     assert.equal((await engagementOf(eid)).authorization_approval_id, again.ok ? again.approvalId : "", "and the engagement points at it now");
     assert.equal(resultOf(await approveAs(again.ok ? again.approvalId : "", USERS.cc))?.outcome, "authorized", "and it can be approved");
   });
+  await check("a card filed but never linked that then expired is revised by the next request, never a dead end (Codex review of phase 2, fifth pass)", async () => {
+    const { eid } = await freshEngagement("Expired Orphan Co");
+    const first = await fileCard(eid);
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "business.team_size", value: 4, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    await db.execute("CREATE TRIGGER fail_orphan_link BEFORE UPDATE OF authorization_approval_id ON ai_audit_engagements BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
+    await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" }).catch(() => undefined);
+    await db.execute("DROP TRIGGER fail_orphan_link");
+    // The unlinked revision expires before anyone asks again.
+    await db.execute({ sql: "UPDATE approvals SET expires_at = ? WHERE tenant_id = ? AND supersedes_id = ?", args: [new Date(Date.now() - 60_000).toISOString(), OASIS, first] });
+    const again = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    assert.ok(again.ok && again.created, !again.ok ? again.error : "a fresh card");
+    assert.equal((await engagementOf(eid)).authorization_approval_id, again.ok ? again.approvalId : "");
+    assert.equal(resultOf(await approveAs(again.ok ? again.approvalId : "", USERS.cc))?.outcome, "authorized");
+  });
   await check("a card whose link loses three writes in a row is reported as a conflict, and the next request links it (Codex review of phase 2, fourth pass)", async () => {
     const { eid } = await freshEngagement("Lost Link Co");
     // Every write that would point the engagement at a card is skipped, as three concurrent writers would make it.
