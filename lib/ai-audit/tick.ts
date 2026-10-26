@@ -64,7 +64,7 @@ export type TickReport = {
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
-  /** Oasis Meet transcripts attached to their engagement; and those left for CC (no AI answer, or a guest who did not agree). */
+  /** Oasis Meet transcripts attached to their engagement; and those listed for CC (no AI answer, a guest who did not agree, a call held for his hand). */
   meetTranscriptsAttached: number;
   meetTranscriptsWaiting: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
@@ -253,8 +253,9 @@ export async function runAiAuditTick(
       if (!over()) await sweepStaleExtractions(db, tenantId, now(), extraction);
     });
 
-    // 7b2. A discovery call held in Oasis Meet: its transcript, once ready, joins the engagement when
-    // every guest agreed to the recording and the client's AI answer is known (lib/ai-audit/meet-link.ts).
+    // 7b2. A discovery call held in Oasis Meet: its transcript, once ready, joins the engagement when every
+    // guest agreed to the recording, the owner recorded the client's AI answer, and nothing holds it for his
+    // hand; a Gate 1 card it makes stale is withdrawn (lib/ai-audit/meet-link.ts autoAttachMeetTranscripts).
     await guard("meet_transcripts", undefined, async () => {
       const r = await autoAttachMeetTranscripts(db, tenantId, now(), deps.payment.alert);
       report.meetTranscriptsAttached += r.attached;

@@ -187,6 +187,6 @@ What the audit can then do: estimate the value of missed calls as a range, from 
 
 ## Right after the call
 
-- Mark the call completed. A call held in the lead's Oasis Meet room attaches its own transcript when Meet has it ready, if every guest agreed to the recording on joining and you recorded the client's answer about AI analysis on the opening question. If you did not record that answer, the engagement shows the transcript waiting, and you attach it by hand with the answer. For a call held elsewhere, paste or upload the transcript, or work from your notes.
+- Mark the call completed. A call held in the lead's Oasis Meet room attaches its own transcript when Meet has it ready, if every guest agreed to the recording on joining and the workspace owner recorded the client's answer about AI analysis on the opening question. Anything else waits under Transcripts, with the reason and an alert, for the owner to attach by hand, saying what the client agreed to: no answer recorded (or one another founder recorded), part of the audio lost, a guest removed or no guest heard, or a call that ended before the engagement was opened. For a call held elsewhere, paste or upload the transcript, or work from your notes.
 - Check the discovery profile. Every field shows its label and where it came from. Correct anything the transcript got wrong.
 - Then authorize processing (Gate 1). Nothing is researched or written before you do. The operating handbook covers everything after this point.

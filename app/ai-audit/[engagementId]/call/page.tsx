@@ -36,8 +36,20 @@ export default async function LiveCallPage({ params }: Props) {
       <LiveCall
         brief={brief ? { hypotheses: brief.content.hypotheses, confirm: brief.content.confirm, weight: brief.content.weight } : null}
         room={(() => {
+          // The room still to be held, else the newest: its box says what became of that call's transcript.
           const open = rooms.find((r) => r.status !== "ended") ?? rooms[0] ?? null;
-          return open ? { code: open.code, title: open.title, status: open.status, recordAudio: open.recordAudio, guests: open.guests } : null;
+          return open
+            ? {
+                code: open.code,
+                title: open.title,
+                status: open.status,
+                recordAudio: open.recordAudio,
+                guests: open.guests,
+                transcript: open.transcript?.status ?? null,
+                attached: !!open.attachedTranscriptId,
+                holds: open.holds,
+              }
+            : null;
         })()}
         engagementId={e.id}
         businessType={e.business_type}
