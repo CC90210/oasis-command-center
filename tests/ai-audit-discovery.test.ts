@@ -821,6 +821,35 @@ async function main() {
     assert.ok(fields.some((f) => f.field_key === "sales.leads_per_month"), "CC's own entries stay");
     assert.equal((((await versions.getProfileVersion(db, OASIS, e.current_profile_version_id!))!.summary as { extraction?: unknown }).extraction), undefined, "and the run's notes went too");
   });
+  await check("a list drawn from two transcripts keeps both, and deleting either takes it out of the draft (Codex review of phase 2b)", async () => {
+    const { eid } = await freshEngagement("Two Sources Co");
+    const second = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsed("Dana: We also do roofing and gutters."), source: "paste", consent: consent(true), actor: cc, now: NOW() });
+    assert.ok(second.ok);
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.windows === 2);
+    for (let i = 0; i < 2; i++) {
+      const job = await macJob(eid);
+      const stored = JSON.parse(String((await db.execute({ sql: "SELECT input_json FROM tool_jobs WHERE id = ?", args: [job.job_id] })).rows[0].input_json)) as { transcript_id: string };
+      const fromSecond = stored.transcript_id === (second.ok ? second.transcript.id : "");
+      await macAnswer(job, [fromSecond ? { key: "business.services", value: ["roofing", "gutters"], from: 1, to: 1, quote: "We also do roofing and gutters" } : { key: "business.services", value: ["calls"], from: 1, to: 1, quote: "gets about 40 calls a week" }]);
+    }
+    const e = await engagementOf(eid);
+    const f = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "business.services");
+    assert.ok(f, "the union was written");
+    assert.deepEqual(((f!.source_ref as { transcript_ids?: string[] }).transcript_ids ?? []).length, 2, "it names both transcripts");
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: second.ok ? second.transcript.id : "", actor: cc, now: NOW() }), { ok: true });
+    assert.ok(!(await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).some((x) => x.field_key === "business.services"), "deleting the second transcript took it out");
+  });
+  await check("a transcript without AI consent added after a draft began stops it before the next window is read (Codex review of phase 2b)", async () => {
+    const { eid } = await freshEngagement("Late Decline Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    assert.ok((await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsed("Dana: no AI on this one please."), source: "paste", consent: consent(false), actor: cc, now: NOW() })).ok);
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    assert.equal(((await res.json()) as { job: unknown }).job, null, "no prompt is handed out");
+    const e = await engagementOf(eid);
+    assert.ok(!(await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).some((x) => x.source_type === "transcript"));
+  });
   await check("consent declined mid-draft: the window already read is not written either (review of phase 2b, H1)", async () => {
     const { eid } = await twoTranscripts("Declined Midway Co");
     const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });

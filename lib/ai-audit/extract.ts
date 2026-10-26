@@ -45,7 +45,17 @@ export type ExtractionSummary = { goals: string[]; problems: string[]; commitmen
 export type ExtractionAnswer = { facts: ExtractedFact[]; summary: ExtractionSummary };
 
 /** `speakers`: who said the quoted lines; `transcript_id`: set by the caller that knows the window. */
-export type KeptFact = { key: string; value: ProfileValue; from: number; to: number; quote: string; speakers?: string[]; transcript_id?: string };
+export type KeptFact = {
+  key: string;
+  value: ProfileValue;
+  from: number;
+  to: number;
+  quote: string;
+  speakers?: string[];
+  transcript_id?: string;
+  /** Every transcript and line range a merged list or table drew on, so a delete finds them all (Codex review of phase 2b). */
+  sources?: Array<{ transcript_id: string | null; from: number; to: number }>;
+};
 export type DroppedFact = { key: string; reason: string };
 export type Contradiction = {
   key: string;
@@ -93,7 +103,8 @@ const SYSTEM = [
 export function extractionPrompt(input: { businessName: string; window: { from: number; to: number; text: string } }): { system: string; prompt: string } {
   const prompt = [
     // The name comes from the lead's own form: data, inside its own fence (review of phase 2b, M7).
-    wrapUntrusted(input.businessName.replace(/[\r\n]+/g, " ").slice(0, 200), { label: "business name", maxLen: 200 }),
+    // Scrubbed too: a name is the prospect's own words, and may carry a key or a link with one (Codex review of phase 2b).
+    wrapUntrusted(scrubCredentials(input.businessName.replace(/[\r\n]+/g, " ").slice(0, 200)).text, { label: "business name", maxLen: 300 }),
     `This part of the call is lines ${input.window.from} to ${input.window.to}. Each line starts with its number (L12), then the time and the speaker when known.`,
     "",
     "Fields you may fill:",
@@ -337,8 +348,43 @@ function statedInQuote(value: number, quote: string, unit: string | undefined): 
     if (!hrs && PERIOD.minute.test(q)) return ns.some((n) => near(value, n / 60));
     if (!hrs && PERIOD.day.test(q)) return ns.some((n) => near(value, n * 24));
   }
-  if (ns.some((n) => near(value, n))) return true;
-  return unit === "%" && fractionsIn(quote).some((f) => Math.abs(value - f * 100) <= 0.5);
+  if (unit === "%") {
+    // A bare number is a share only when the quote says percent: "one of every four" is 25%, never 1 or 4 (Codex review of phase 2b).
+    if (/%|\bper ?cent\b/.test(plain(quote)) && ns.some((n) => near(value, n))) return true;
+    return fractionsIn(quote).some((f) => Math.abs(value - f * 100) <= 0.5);
+  }
+  return ns.some((n) => near(value, n));
+}
+
+/** Table columns whose figures are counted over a period: a cell must come from a line that says it. */
+const COLUMN_PERIODS: Readonly<Record<string, { per: Period; hours?: boolean }>> = {
+  "monthly cost": { per: "month" },
+  "hours per week": { per: "week", hours: true },
+  "per month": { per: "month" },
+};
+
+/** Why a table row's figures do not fit their columns, or null: "1200 dollars a year" is no monthly cost (Codex review of phase 2b). */
+function rowPeriodProblem(row: Record<string, unknown>, span: readonly TranscriptLine[]): string | null {
+  for (const [col, cell] of Object.entries(row)) {
+    const rule = COLUMN_PERIODS[col];
+    if (!rule) continue;
+    const ns = numbersIn(String(cell ?? ""));
+    if (!ns.length) continue;
+    const saying = span.filter((l) => numbersIn(l.text).some((x) => near(x, ns[0])));
+    if (!saying.length) return "a figure the quote does not state";
+    const fits = saying.filter((l) => {
+      const q = plain(l.text);
+      return PERIOD[rule.per].test(q) && (!rule.hours || PERIOD.hour.test(q));
+    });
+    if (!fits.length) {
+      const q = plain(saying[0].text);
+      const other = (["day", "week", "month", "year"] as const).find((p) => p !== rule.per && PERIOD[p].test(q));
+      return other ? `its ${col} is given per ${other}, not per ${rule.per}` : `its ${col} is not said per ${rule.per}`;
+    }
+    const unsure = fits.map((l) => uncertainty(l.text)).find(Boolean);
+    if (unsure && fits.every((l) => uncertainty(l.text))) return unsure;
+  }
+  return null;
 }
 
 /** Every number written in a value (a row's cost, a list item's count). */
@@ -417,7 +463,8 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
   if (speakers.length && speakers.every((x) => isHost(x, hosts))) return { ok: false, reason: "the interviewer said it, not the client" };
   if (!speakers.length && said.every((l) => /\?\s*$/.test(l.text))) return { ok: false, reason: "it was only asked, never answered" };
 
-  const span = lines.filter((l) => l.n >= f.from && l.n <= f.to).map((l) => l.text).join(" ");
+  const spanLines = lines.filter((l) => l.n >= f.from && l.n <= f.to);
+  const span = spanLines.map((l) => l.text).join(" ");
   const spanStems = new Set(contentWords(span).map(stem));
   let value: unknown = f.value;
   let note: string | undefined;
@@ -439,7 +486,14 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
         reasons.push("a figure the quote does not state");
         return false;
       }
-      const words = typeof item === "string" ? item : item && typeof item === "object" ? Object.values(item as Record<string, unknown>).filter((v) => typeof v === "string").join(" ") : "";
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const period = rowPeriodProblem(item as Record<string, unknown>, spanLines);
+        if (period) {
+          reasons.push(period);
+          return false;
+        }
+      }
+      const words = typeof item === "string" ? item : item && typeof item === "object" ? Object.values(item as Record<string, unknown>).filter((v) => typeof v === "string" && !numbersIn(v).length).join(" ") : "";
       if (support(words, spanStems) < 0.5) {
         reasons.push("its words are not what the call said");
         return false;
@@ -545,7 +599,16 @@ export function mergeFacts(
     if (def && (def.type === "list" || def.type === "rows")) {
       const union = unionOf(def, sorted.map((f) => f.value));
       const v = validateProfileField({ field_key: key, value: union, label: "client_reported", source_type: "transcript" });
-      only = v.ok ? { ...sorted[0], value: v.value.value } : sorted[0];
+      const seen = new Set<string>();
+      const sources = sorted
+        .map((f) => ({ transcript_id: f.transcript_id ?? null, from: f.from, to: f.to }))
+        .filter((x) => {
+          const k = `${x.transcript_id}:${x.from}:${x.to}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      only = { ...(v.ok ? { ...sorted[0], value: v.value.value } : sorted[0]), sources };
     } else {
       const distinct = new Map<string, KeptFact>();
       for (const f of sorted) {

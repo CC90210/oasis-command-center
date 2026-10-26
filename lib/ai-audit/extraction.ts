@@ -163,9 +163,11 @@ async function permittedWindow(db: Client, tenantId: string, ref: WindowRef & { 
   if (!engagement || !PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, code: "not_permitted" };
   const transcript = await getTranscript(db, tenantId, ref.transcript_id, true);
   if (!transcript || transcript.engagement_id !== engagement.id || transcript.status !== "active" || !transcript.consent_ai) return { ok: false, code: "not_permitted" };
-  // The profile's own consent answer is read again too: a "declined" recorded after the run began stops it.
+  // The profile's own consent answer is read again too, and every active transcript's: a "declined"
+  // recorded, or a transcript without AI consent added, after the run began stops it (Codex review of phase 2b).
   const fields = engagement.current_profile_version_id ? await listProfileFields(db, tenantId, engagement.current_profile_version_id) : [];
-  if (!aiConsent([transcript], fields)) return { ok: false, code: "not_permitted" };
+  const all = await listTranscripts(db, tenantId, engagement.id);
+  if (!aiConsent([transcript, ...all.filter((x) => x.id !== transcript.id)], fields)) return { ok: false, code: "not_permitted" };
   const lines = transcript.lines ?? [];
   const inWindow = lines.filter((l) => l.n >= ref.from && l.n <= ref.to);
   if (!inWindow.length) return { ok: false, code: "gone" };
@@ -298,9 +300,12 @@ export async function finishExtraction(
       };
       const declined = fieldRows.some((r) => String(r.field_key) === "consent.ai_processing" && parse(r.value_json) === false);
       const tRows = (await tx.execute({ sql: "SELECT id, status, consent_ai FROM ai_audit_transcripts WHERE tenant_id = ? AND engagement_id = ?", args: [t, engagementId] })).rows;
-      const readable = new Set(tRows.filter((r) => String(r.status) === "active" && Number(r.consent_ai) === 1).map((r) => String(r.id)));
-      // A window whose transcript was deleted or whose consent went away since it was read is not written, and counts as not read.
-      const results = declined ? [] : input.results.filter((r) => readable.has(r.transcript_id));
+      const active = tRows.filter((r) => String(r.status) === "active");
+      const readable = new Set(active.filter((r) => Number(r.consent_ai) === 1).map((r) => String(r.id)));
+      // Every active transcript must agree, as at the start and at Gate 1: one added without AI consent stops the
+      // write (Codex review of phase 2b). A window whose transcript was deleted since it was read is not written either.
+      const everyoneAgrees = active.every((r) => Number(r.consent_ai) === 1);
+      const results = declined || !everyoneAgrees ? [] : input.results.filter((r) => readable.has(r.transcript_id));
       const usable = results.filter((r) => !r.unreadable);
       const notRead = input.failedWindows + (input.results.length - usable.length);
       const existing = new Map<string, PriorField>(
@@ -323,7 +328,24 @@ export async function finishExtraction(
                 WHERE ai_audit_profile_fields.source_type = 'transcript' AND ai_audit_profile_fields.owner_corrected = 0
                   AND ai_audit_profile_fields.label = 'client_reported' AND COALESCE(ai_audit_profile_fields.verified_note, '') = ''
                 RETURNING field_key`,
-          args: [newId(), t, version.id, f.key, JSON.stringify(f.value), JSON.stringify({ transcript_id: f.transcript_id ?? null, from: f.from, to: f.to, speakers: f.speakers ?? [] }), f.quote.slice(0, 300), at],
+          args: [
+            newId(),
+            t,
+            version.id,
+            f.key,
+            JSON.stringify(f.value),
+            JSON.stringify({
+              transcript_id: f.transcript_id ?? null,
+              from: f.from,
+              to: f.to,
+              speakers: f.speakers ?? [],
+              // Every transcript a merged list or table drew on: deleting any of them takes the field out of the draft.
+              transcript_ids: [...new Set([f.transcript_id ?? null, ...(f.sources ?? []).map((x) => x.transcript_id)].filter((x): x is string => !!x))],
+              ...(f.sources && f.sources.length > 1 ? { sources: f.sources } : {}),
+            }),
+            f.quote.slice(0, 300),
+            at,
+          ],
         });
         if (rs.rows.length) written.push(f.key);
       }

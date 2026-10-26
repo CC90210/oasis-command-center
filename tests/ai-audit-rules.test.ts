@@ -986,7 +986,7 @@ async function main() {
     assert.deepEqual((kept.get("tech.tools") as Array<Record<string, string>>).map((r) => r.tool), ["Jobber", "QuickBooks"]);
     // The injection line IS on line 5 and states 99, but a share needs a percentage or a fraction in its quote.
     const reasons = new Map(out.dropped.map((d) => [d.key, d.reason]));
-    assert.match(reasons.get("sales.close_rate_pct") ?? "", /no share or percentage/);
+    assert.match(reasons.get("sales.close_rate_pct") ?? "", /no share or percentage|figure the quote does not state/);
     assert.ok(!kept.has("sales.close_rate_pct"));
     assert.match(reasons.get("sales.avg_job_value") ?? "", /figure the quote does not state/);
     assert.match(reasons.get("sales.lead_sources") ?? "", /not on the lines it names/);
@@ -1048,6 +1048,24 @@ async function main() {
     let deep: unknown = "x";
     for (let i = 0; i < 20_000; i++) deep = [deep];
     assert.match(run({ key: "business.services", value: deep, from: 11, to: 11, quote: "We fix pipes and drains" }).why[0], /could not be read|too long/);
+  });
+  await check("a share is never a fraction's parts, a table cell keeps its column's period, and the business name is scrubbed for the model (Codex review of phase 2b)", () => {
+    const lines = (() => {
+      const r = tr.parseTranscriptText(
+        ["Dana: One of every four becomes a customer.", "Dana: We pay Jobber 1200 dollars a year for scheduling.", "Dana: Admin eats 2 hours a day.", "Dana: We pay Jobber 100 a month for scheduling."].join("\n"),
+      );
+      return r.ok ? r.value.lines : [];
+    })();
+    const check1 = (key: string, value: unknown, n: number, quote: string) =>
+      ex.checkFacts({ facts: [{ key, value, from: n, to: n, quote }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }, lines, { from: 1, to: 4 });
+    for (const v of [1, 4]) assert.equal(check1("sales.close_rate_pct", v, 1, "One of every four becomes a customer").kept.length, 0, `${v}% is not one in four`);
+    assert.equal(check1("sales.close_rate_pct", 25, 1, "One of every four becomes a customer").kept.length, 1);
+    assert.match(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "1200" }], 2, "We pay Jobber 1200 dollars a year").dropped[0]?.reason ?? "", /per year, not per month/);
+    assert.match(check1("ops.repetitive_tasks", [{ task: "Admin", "hours per week": "2" }], 3, "Admin eats 2 hours a day").dropped[0]?.reason ?? "", /per day, not per week/);
+    assert.equal(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "100" }], 4, "We pay Jobber 100 a month").kept.length, 1, "said per month: kept");
+    const key = ["sk", "a".repeat(24)].join("-");
+    const pr = ex.extractionPrompt({ businessName: `Acme ${key}`, window: tr.transcriptWindows(lines)[0] });
+    assert.ok(!pr.prompt.includes(key), "the name's key never reaches the model");
   });
   await check("figures are read as written: digits in a word are no figure, scales multiply, and object names are not numbers (review of phase 2b)", () => {
     assert.deepEqual(ex.numbersIn("a constructor and a prototype"), []);

@@ -95,6 +95,14 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
   // Who reads the call for the draft, apart from Gate 1's engine (review of phase 2b: one state served both selects).
   const [readBy, setReadBy] = useState<"mac_claude" | "cloud_workspace">(view.settings.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude");
   const [busy, setBusy] = useState(false);
+  // While a draft is reading the call, the page looks again every 15 seconds, so its status, report and
+  // facts appear when it ends (Codex review of phase 2b: one refresh at the start showed "queued" for good).
+  const drafting = !!view.extraction && ["queued", "running", "waiting_runner"].includes(view.extraction.status);
+  useEffect(() => {
+    if (!drafting) return;
+    const id = setInterval(() => router.refresh(), 15_000);
+    return () => clearInterval(id);
+  }, [drafting, router]);
   const [message, setMessage] = useState<string | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
   const open = PROFILE_EDIT_STAGES.includes(e.stage);

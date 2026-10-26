@@ -296,9 +296,9 @@ export async function deleteTranscript(
       {
         sql: `DELETE FROM ai_audit_profile_fields
                WHERE tenant_id = ? AND source_type = 'transcript' AND owner_corrected = 0 AND label = 'client_reported' AND COALESCE(verified_note, '') = ''
-                 AND json_extract(source_ref, '$.transcript_id') = ?
+                 AND (json_extract(source_ref, '$.transcript_id') = ? OR EXISTS (SELECT 1 FROM json_each(ai_audit_profile_fields.source_ref, '$.transcript_ids') WHERE value = ?))
                  AND profile_version_id IN (SELECT id FROM ai_audit_profile_versions WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft')`,
-        args: [t, input.id, t, input.engagementId],
+        args: [t, input.id, input.id, t, input.engagementId],
       },
       {
         sql: `UPDATE ai_audit_profile_versions SET summary = json_remove(COALESCE(summary, '{}'), '$.extraction'), updated_at = ?
@@ -307,8 +307,9 @@ export async function deleteTranscript(
       },
       {
         sql: `UPDATE ai_audit_profile_fields SET evidence_quote = NULL
-               WHERE tenant_id = ? AND evidence_quote IS NOT NULL AND json_extract(source_ref, '$.transcript_id') = ?`,
-        args: [t, input.id],
+               WHERE tenant_id = ? AND evidence_quote IS NOT NULL
+                 AND (json_extract(source_ref, '$.transcript_id') = ? OR EXISTS (SELECT 1 FROM json_each(ai_audit_profile_fields.source_ref, '$.transcript_ids') WHERE value = ?))`,
+        args: [t, input.id, input.id],
       },
       eventStatement({ tenantId: t, engagementId: input.engagementId, event: "transcript_deleted", actor: input.actor, at, refType: "transcript", refId: input.id }),
       ...(afterGate
