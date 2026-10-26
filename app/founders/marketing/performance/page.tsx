@@ -42,7 +42,7 @@ import { notFound } from "next/navigation";
 import { Card, PageHeader } from "@/components/Card";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder } from "@/lib/founders/gate";
-import { platformLabel, postPermalink } from "@/lib/founders-marketing-core";
+import { platformLabel, postLinkTarget } from "@/lib/founders-marketing-core";
 import {
   EMPTY_PERF,
   channelNote,
@@ -361,7 +361,10 @@ async function PerformanceNumbers({ tenantId }: { tenantId: string }) {
  *
  * Falls back to plain text rather than a guessed URL. Instagram's analytics rows
  * carry a numeric media id and `/p/` needs the base64 shortcode, so those link to
- * the account instead — honest about what we can actually reach.
+ * the account instead — honest about what we can actually reach, and SAID: the
+ * hover and a small "account" mark name where the link goes, because a link
+ * titled "Open on Instagram" that lands on the profile grid sent CC hunting for
+ * the post by hand (audit, 2026-10-26).
  */
 function PostLink({
   r,
@@ -370,20 +373,24 @@ function PostLink({
   r: { platform: string; platform_post_id: string; account_username: string | null };
   children: React.ReactNode;
 }) {
-  const href = postPermalink(r.platform, r.platform_post_id, r.account_username);
-  if (!href) return <>{children}</>;
+  const target = postLinkTarget(r.platform, r.platform_post_id, r.account_username);
+  if (!target) return <>{children}</>;
   // The link's own title is what shows on hover, so it carries the whole
   // caption too: the line it sits in is cut to one line.
-  const where = `Open on ${platformLabel(r.platform)}`;
+  const where =
+    target.reaches === "account"
+      ? `Opens the account on ${platformLabel(r.platform)}: no link to this post is stored`
+      : `Open on ${platformLabel(r.platform)}`;
   return (
     <a
-      href={href}
+      href={target.href}
       target="_blank"
       rel="noopener noreferrer"
       className="underline decoration-fg-dim/40 underline-offset-2 transition-colors hover:text-accent hover:decoration-accent"
       title={typeof children === "string" ? `${children} (${where})` : where}
     >
       {children}
+      {target.reaches === "account" && <span className="ml-1 text-[10px] text-fg-dim no-underline">(account)</span>}
     </a>
   );
 }

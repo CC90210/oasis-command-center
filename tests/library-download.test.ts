@@ -27,6 +27,8 @@ import { createHash, createHmac } from "node:crypto";
 import { downloadDisposition, r2StorageSurface } from "../lib/r2-storage";
 import {
   assetDownloadHref,
+  downloadFailureHref,
+  downloadFailureLine,
   downloadFilename,
   pickDownloadMedia,
   type DownloadMediaRow,
@@ -154,6 +156,36 @@ async function main() {
   await check("the href is the download route", () => {
     assert.equal(assetDownloadHref("abc"), "/api/founders/marketing/assets/abc/download");
     assert.equal(assetDownloadHref("abc", 3), "/api/founders/marketing/assets/abc/download?slide=3");
+  });
+
+  // A failed Download goes back to the Content page it was pressed on (2026-10-26):
+  // a plain link that answered JSON replaced the page with {"ok":false,...}.
+  await check("a failed download goes back to the Content page it came from, and only to one", () => {
+    const route = "https://oasisai.work/api/founders/marketing/assets/abc/download";
+    assert.equal(
+      downloadFailureHref("https://oasisai.work/founders/marketing/library?group=clients&page=2", route, "sign_failed"),
+      "/founders/marketing/library?group=clients&page=2&download=sign_failed",
+      "its own path and query, the reason added",
+    );
+    assert.equal(
+      downloadFailureHref("https://oasisai.work/founders/marketing/extracted?download=not_found#video-1", route, "no_media_attached"),
+      "/founders/marketing/extracted?download=no_media_attached",
+      "an older reason is replaced, and the hash is dropped",
+    );
+    assert.equal(downloadFailureHref("https://oasisai.work/founders/marketing", route, "read_failed"), "/founders/marketing?download=read_failed");
+    assert.equal(downloadFailureHref(null, route, "sign_failed"), null, "no Referer: JSON, as before");
+    assert.equal(downloadFailureHref("https://evil.example/founders/marketing/library", route, "sign_failed"), null, "another site: never");
+    assert.equal(downloadFailureHref("https://oasisai.work/pipeline", route, "sign_failed"), null, "not a Content page");
+    assert.equal(downloadFailureHref("https://oasisai.work/founders/marketingx", route, "sign_failed"), null, "a path boundary, not a prefix");
+    assert.equal(downloadFailureHref("not a url", route, "sign_failed"), null);
+  });
+
+  await check("each reason reads as a sentence; anything else shows nothing", () => {
+    for (const code of ["no_media_attached", "no_such_slide", "sign_failed", "read_failed", "not_found"]) {
+      const line = downloadFailureLine(code);
+      assert.ok(line && /^[A-Z].*\.$/.test(line) && !line.includes("_"), `${code}: ${line}`);
+    }
+    for (const junk of [undefined, null, "", "toString", "__proto__", "<script>", 7]) assert.equal(downloadFailureLine(junk), null, String(junk));
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

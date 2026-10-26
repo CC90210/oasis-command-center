@@ -118,6 +118,17 @@ async function seedAsset(
 
 const id = (n: number) => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`;
 
+/** Run `fn` with console.warn silenced (a route that logs an expected failure). */
+async function quiet<T>(fn: () => Promise<T>): Promise<T> {
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    return await fn();
+  } finally {
+    console.warn = warn;
+  }
+}
+
 async function main() {
   console.log("extracted-videos:");
   const lib = await import("../lib/founders/extracted-videos");
@@ -379,6 +390,50 @@ async function main() {
       () => Library({ searchParams: Promise.resolve({ group: "downloads", page: "3" }) }),
       (e: Error) => e.message === "NEXT_REDIRECT;/founders/marketing/extracted?page=3",
     );
+  });
+
+  // -- 4b. a Download that fails comes back to the page (2026-10-26) ---------------
+  // Download is a plain link: a failure answered as JSON replaced the page with
+  // {"ok":false,...}. From a Content page it now comes back there and says why.
+  await check("a failed Download from a Content page comes back to that page with the reason; from anywhere else it is JSON as before", async () => {
+    await login(USERS.cc);
+    const route = await import("../app/api/founders/marketing/assets/[id]/download/route");
+    const get = (assetId: string, referer?: string) =>
+      route.GET(
+        new Request(`https://oasisai.work/api/founders/marketing/assets/${assetId}/download`, referer ? { headers: { referer } } : undefined),
+        { params: Promise.resolve({ id: assetId }) },
+      );
+    // This harness has no object store: the storage surface THROWS (no R2 on the
+    // Turso backend). That used to be an uncaught 500; it is sign_failed now.
+    const back = await quiet(() => get(dl1, "https://oasisai.work/founders/marketing/extracted?page=2"));
+    assert.equal(back.status, 303);
+    assert.equal(back.headers.get("location"), "https://oasisai.work/founders/marketing/extracted?page=2&download=sign_failed");
+    const gone = await get(id(9), "https://oasisai.work/founders/marketing/library?group=clients");
+    assert.equal(gone.status, 303);
+    assert.equal(gone.headers.get("location"), "https://oasisai.work/founders/marketing/library?group=clients&download=not_found");
+    const noSlide = await route.GET(
+      new Request(`https://oasisai.work/api/founders/marketing/assets/${dl1}/download?slide=7`, { headers: { referer: `https://oasisai.work/founders/marketing/asset/${dl1}` } }),
+      { params: Promise.resolve({ id: dl1 }) },
+    );
+    assert.equal(noSlide.headers.get("location"), `https://oasisai.work/founders/marketing/asset/${dl1}?download=no_such_slide`);
+    const bare = await quiet(() => get(dl1));
+    assert.equal(bare.status, 502, "no Referer: the JSON it always answered");
+    assert.deepEqual(await bare.json(), { ok: false, error: "sign_failed" });
+    const offsite = await quiet(() => get(dl1, "https://evil.example/founders/marketing/extracted"));
+    assert.equal(offsite.status, 502, "another site's Referer is never followed");
+    const elsewhere = await quiet(() => get(dl1, "https://oasisai.work/pipeline"));
+    assert.equal(elsewhere.status, 502, "nor a page outside Content");
+    const { DownloadFailureNotice } = await import("../components/founders/DownloadFailureNotice");
+    const page = nodes(await Page({ searchParams: Promise.resolve({ download: "sign_failed" }) }));
+    const notice = page.find((n) => n.type === DownloadFailureNotice);
+    assert.equal(notice?.props.code, "sign_failed", "the page passes the reason to the notice");
+    const drawn = DownloadFailureNotice({ code: "sign_failed" }) as unknown as { props: { role: string; children: string } };
+    assert.equal(drawn.props.role, "alert");
+    assert.equal(drawn.props.children, "Couldn't prepare the download. Try again in a minute.");
+    assert.equal(DownloadFailureNotice({ code: "made_up" }), null, "an unknown code draws nothing");
+    for (const f of ["app/founders/marketing/library/page.tsx", "app/founders/marketing/asset/[id]/page.tsx", "app/founders/marketing/tools/page.tsx"]) {
+      assert.match(code(f), /<DownloadFailureNotice code=\{/, `${f} says why a Download pressed on it failed`);
+    }
   });
 
   // -- 5. one slug; ASCII --------------------------------------------------------

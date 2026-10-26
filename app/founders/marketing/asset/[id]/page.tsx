@@ -54,6 +54,7 @@ import { TileVideo } from "@/components/founders/TileVideo";
 import { SignedImg } from "@/components/founders/SignedMedia";
 import { SlideReorder } from "@/components/founders/SlideReorder";
 import { AssetActions } from "@/components/founders/AssetActions";
+import { DownloadFailureNotice } from "@/components/founders/DownloadFailureNotice";
 import { DownloadLink } from "@/components/founders/DownloadLink";
 import { AssetPublishPanel } from "@/components/founders/AssetPublishPanel";
 import { EXTRACTED_BRAND_SLUG, EXTRACTED_LABEL, EXTRACTED_ROOT, extractedHref } from "@/lib/founders/extracted-videos";
@@ -98,7 +99,7 @@ export default async function AssetDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ frame?: string; chrome?: string; guides?: string; from?: string }>;
+  searchParams: Promise<{ frame?: string; chrome?: string; guides?: string; from?: string; download?: string }>;
 }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
@@ -294,6 +295,8 @@ export default async function AssetDetailPage({
           )
         }
       />
+      {/* A Download pressed on this page that failed comes back here with ?download=<code>. */}
+      <DownloadFailureNotice code={sp.download} />
 
       <div className={`grid gap-6 ${vertical || !original ? "lg:grid-cols-[minmax(0,380px)_1fr]" : "lg:grid-cols-2"}`}>
         {/* Enlarge opens this asset in the big phone, in either view; a video

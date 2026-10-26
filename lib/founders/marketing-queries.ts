@@ -1141,6 +1141,35 @@ export async function getBrandTabCounts(
 }
 
 /**
+ * How many videos the Extracted videos page lists: one COUNT of the downloads
+ * group, EVERY status, the rows that page reads (loadLibraryPage with
+ * allStatuses: a video there is listed or deleted, archived included). The
+ * Overview's Extracted videos tile reads this, so the tile and the page it opens
+ * agree; getBrandTabCounts hides archived rows, which that page shows.
+ */
+export async function getExtractedVideoCount(
+  tenantId: string,
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<{ count: number; degraded: boolean }> {
+  if (!tenantId) return { count: 0, degraded: false };
+  try {
+    const r = await headCounts("extracted", ["downloads"] as const, (group) =>
+      scopeToBrandGroup(
+        db
+          .from("marketing_asset")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId) as unknown as BrandFilterable,
+        group,
+      ) as unknown as HeadCount,
+    );
+    if (r.absent) return { count: 0, degraded: false };
+    return { count: r.counts.downloads, degraded: r.degraded };
+  } catch {
+    return { count: 0, degraded: true };
+  }
+}
+
+/**
  * The facet counts behind the brand tabs and the author filter.
  *
  * DELIBERATELY SPANS EVERY BRAND. This is the one reader that has to see across
@@ -1159,11 +1188,21 @@ export async function getBrandTabCounts(
  *
  * The Library's tab counts now come from getBrandTabCounts (one COUNT per tab);
  * it still reads this for the brand sub-filter inside a tab and the author facet.
+ *
+ * SCOPED TO A VIEW (2026-10-26), when the Library passes one: its tab and its
+ * stage, by the grid's own rules (scopeToBrandGroup; a lifecycle, else an
+ * explicit ?status=, else archived and rejected hidden), exactly as
+ * getMetaFacets narrows. Unscoped, a sub-pill counted archived rows the grid
+ * behind it hides, so the row read "All 3 · Warner 5" (audit, 2026-10-26).
+ * Without a view it still spans every brand, as before.
  */
-export async function getMarketingFacets(tenantId: string): Promise<MarketingFacets> {
+export async function getMarketingFacets(
+  tenantId: string,
+  view?: { group: BrandGroupKey; lifecycle?: Lifecycle; status?: AssetStatus },
+  db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
+): Promise<MarketingFacets> {
   if (!tenantId) return EMPTY_MARKETING_FACETS;
   try {
-    const db = getServiceSupabase();
     const brands = new Map<string, BrandFacet>();
     const authors = new Map<string, number>();
 
@@ -1173,15 +1212,19 @@ export async function getMarketingFacets(tenantId: string): Promise<MarketingFac
       author_email: string | null;
     }>(
       "facets",
-      () =>
-        db
+      () => {
+        const base = db
           .from("marketing_asset")
           .select("brand_slug, brand_name, author_email")
-          .eq("tenant_id", tenantId) as unknown as PagedQuery<{
-          brand_slug: string;
-          brand_name: string;
-          author_email: string | null;
-        }>,
+          .eq("tenant_id", tenantId);
+        if (!view) return base as unknown as PagedQuery<{ brand_slug: string; brand_name: string; author_email: string | null }>;
+        // The grid's own stage rule (getMarketingAssets, getMetaFacets), branch for branch.
+        let q = scopeToBrandGroup(base as unknown as BrandFilterable, view.group) as unknown as LifecycleFilterable;
+        if (view.lifecycle) q = scopeToLifecycle(q, view.lifecycle);
+        else if (view.status) q = q.eq("status", view.status);
+        else q = hideArchived(q);
+        return q as unknown as PagedQuery<{ brand_slug: string; brand_name: string; author_email: string | null }>;
+      },
       (rows) => {
       for (const row of rows) {
         if (row.brand_slug) {

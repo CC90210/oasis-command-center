@@ -51,6 +51,7 @@ import { createTursoPostgrest } from "../lib/turso-postgrest";
 import {
   DEGRADED_META_FACETS,
   getMarketingAssets,
+  getMarketingFacets,
   getMetaFacets,
   loadLibraryPage,
   loadPackComparison,
@@ -464,7 +465,24 @@ async function main() {
       // Every asset in the view carries one audience and one pack: the pills add up to the whole grid.
       assert.equal(bySegment, all.total, `${name}: the audience pills cover the grid, no more and no less`);
       assert.equal(byPack, all.total, `${name}: so do the pack pills`);
+
+      // The brand sub-pills and the By row count the same view (2026-10-26): they
+      // used to count every status, archived included, above a grid that hides them.
+      const mf = await getMarketingFacets(T, { group: "oasis-ai", ...view }, db);
+      assert.equal(mf.degraded, false, name);
+      assert.equal(mf.brands.reduce((n, b) => n + b.count, 0), all.total, `${name}: the brand pills add up to the grid`);
+      for (const a of mf.authors) {
+        const grid = await getMarketingAssets(T, { ...view, author: a.email, pageSize: 500 }, db);
+        assert.equal(grid.total, a.count, `${name}: the ${a.email} pill says ${a.count} and its grid holds ${grid.total}`);
+      }
+      assert.equal(mf.authors.reduce((n, a) => n + a.count, 0), all.total, `${name}: so do the author pills`);
     }
+    const everyStatus = await getMarketingFacets(T, undefined, db);
+    const defaultView = await getMarketingFacets(T, { group: "oasis-ai" }, db);
+    assert.ok(
+      everyStatus.brands[0].count > defaultView.brands[0].count,
+      "without a view it still spans every status (no caller is left relying on that but the shape stays); the default view hides archived and rejected",
+    );
 
     // Absolute, as well as in agreement: the grid and the options could drift TOGETHER.
     const at = (s: (typeof STATUSES)[number]) => STATUSES.indexOf(s);
