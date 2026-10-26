@@ -2003,6 +2003,112 @@ async function toolTextTorrentUnblock(input: Record<string, unknown>, ctx: ToolC
 // HTTP tools — open-web access with safety rails
 // ----------------------------------------------------------------------------
 
+/** The four octets of a dotted IPv4 address, or null. */
+function parseIpv4(s: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  return parts.every((n) => n <= 255) ? parts : null;
+}
+
+/**
+ * Every IPv4 range an agent's web read must never reach: "this host" (0/8),
+ * loopback (127/8, not only .0.0.1), RFC 1918, carrier-grade NAT (100.64/10,
+ * RFC 6598: the range a cloud's own network sits in), link-local (169.254/16,
+ * where every cloud's metadata endpoint lives), the IETF and benchmarking
+ * blocks, multicast, reserved and broadcast.
+ */
+function forbiddenIpv4([a, b, c]: number[]): boolean {
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+/** The eight 16-bit groups of an IPv6 address (a dotted IPv4 tail allowed), or null when it is not one. */
+function parseIpv6(s: string): number[] | null {
+  if (!s.includes(":") || /[^0-9a-f:.]/i.test(s)) return null;
+  let text = s;
+  const dotted = /^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(text);
+  if (dotted) {
+    const v4 = parseIpv4(dotted[2]);
+    if (!v4) return null;
+    text = `${dotted[1]}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part === "" ? [] : part.split(":").map((g) => (/^[0-9a-f]{1,4}$/i.test(g) ? parseInt(g, 16) : NaN)));
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  if ([...head, ...tail].some(Number.isNaN)) return null;
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  return [...head, ...new Array<number>(halves.length === 2 ? missing : 0).fill(0), ...tail];
+}
+
+/**
+ * The IPv6 addresses an agent's web read must never reach. Only global unicast
+ * (2000::/3) is the public internet, so everything outside it is refused by
+ * default: :: and ::1, unique local (fc00::/7), link-local (fe80::/10), the old
+ * site-local block, multicast, local-use NAT64 (64:ff9b:1::/48), the
+ * IPv4-compatible and IPv4-translated forms, and every block not yet assigned.
+ * Two forms carry an IPv4 address and are judged by the IPv4 table instead:
+ * mapped (::ffff:a.b.c.d) and well-known NAT64 (64:ff9b::a.b.c.d). Inside
+ * 2000::/3, 6to4 (2002::/16) and Teredo (2001::/32) tunnel to an IPv4 address
+ * the IPv4 table never sees, so both are refused whole.
+ *
+ * 2026-10-26 (independent review of #737): the table listed the private ranges
+ * and passed the rest, so 2002:7f00:1::1 (6to4 for 127.0.0.1) went through.
+ */
+function forbiddenIpv6(g: number[]): boolean {
+  const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
+  const tailV4 = [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff];
+  if (zero(0, 5) && g[5] === 0xffff) return forbiddenIpv4(tailV4);
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return forbiddenIpv4(tailV4);
+  if ((g[0] & 0xe000) !== 0x2000) return true;
+  return g[0] === 0x2002 || (g[0] === 0x2001 && g[1] === 0);
+}
+
+/** `host` with the brackets an IPv6 literal carries in a URL, and a zone id, taken off. */
+function bareAddress(host: string): string {
+  let a = host.trim().toLowerCase();
+  if (a.startsWith("[") && a.endsWith("]")) a = a.slice(1, -1);
+  const zone = a.indexOf("%");
+  return zone >= 0 ? a.slice(0, zone) : a;
+}
+
+/** True when `host` is an IP address literal (IPv4, or IPv6 with or without brackets). */
+export function isIpLiteral(host: string): boolean {
+  const a = bareAddress(host);
+  return parseIpv4(a) !== null || parseIpv6(a) !== null;
+}
+
+/**
+ * True when `ip` is an address an agent's web read must never reach, in one
+ * table both guards below use. Anything that is not an address is "false":
+ * the table says nothing about names.
+ *
+ * 2026-10-26 (a sibling session's review): the old checks matched a few exact
+ * strings and prefixes, so [::1] (bracketed, as every URL spells it), 127.0.0.2,
+ * all of 100.64.0.0/10 and an IPv4 address carried inside an IPv6 one went
+ * through. tests/cloud-tool-runner-ssrf.test.ts holds every spelling.
+ */
+export function isForbiddenIp(ip: string): boolean {
+  const a = bareAddress(ip);
+  const v4 = parseIpv4(a);
+  if (v4) return forbiddenIpv4(v4);
+  const v6 = parseIpv6(a);
+  return v6 ? forbiddenIpv6(v6) : false;
+}
+
 export function assertSafeUrl(url: string): URL {
   let parsed: URL;
   try {
@@ -2015,15 +2121,23 @@ export function assertSafeUrl(url: string): URL {
   }
   // Block obvious SSRF targets — agents on the public dashboard should never
   // need to hit our own internal infra. Cloud-tool calls are explicitly
-  // for public web reads.
-  const host = parsed.hostname.toLowerCase();
+  // for public web reads. The URL parser has already turned every numeric
+  // spelling of an address (127.1, 2130706433, 0x7f000001) into dotted form
+  // and keeps IPv6 in brackets. One trailing dot is the DNS root and names the
+  // same host ("localhost." is localhost). Any other empty label
+  // ("localhost..", ".localhost", "a..b") is not a host name: the parser keeps
+  // it, so it is refused here rather than left to a resolver to read.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.split(".").some((label) => label === "")) throw new Error("invalid_url");
   const blocked = [
     "localhost",
     "127.0.0.1",
     "0.0.0.0",
     "::1",
+    "[::1]",
     "169.254.169.254", // AWS/Azure/GCP IMDS v1 + v2
-    "fd00:ec2::254",   // AWS IMDS v6
+    "fd00:ec2::254", // AWS IMDS v6
+    "[fd00:ec2::254]",
     "metadata.google.internal",
     "metadata.azure.com",
   ];
@@ -2031,21 +2145,89 @@ export function assertSafeUrl(url: string): URL {
   if (host.endsWith(".internal") || host.endsWith(".local") || host.endsWith(".localhost")) {
     throw new Error("blocked_host");
   }
-  // Private IP ranges (IPv4) — quick string check, not exhaustive but
-  // covers 10/8, 172.16/12, 192.168/16, 169.254/16 link-local.
-  if (
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) ||
-    /^169\.254\./.test(host)
-  ) {
-    throw new Error("blocked_private_ip");
-  }
-  // IPv6 unique-local / loopback / link-local
-  if (/^(::ffff:0?7f\.|fc|fd|fe[89ab]|::1$)/i.test(host)) {
-    throw new Error("blocked_private_ip");
-  }
+  // Every address inside the network, by the one table (isForbiddenIp).
+  if (isForbiddenIp(host)) throw new Error("blocked_private_ip");
   return parsed;
+}
+
+export type ResolvedAddress = { address: string; family?: number };
+export type AddressResolver = (host: string) => Promise<ResolvedAddress[]>;
+
+/**
+ * Every A and AAAA answer for `host` from Cloudflare's resolver over
+ * DNS-over-HTTPS, CNAMEs followed as the resolver follows them. The answer's
+ * DNS status decides what it means: NOERROR (0) is the addresses (none, when
+ * the name has no record of that type), NXDOMAIN (3) is "no such name" ([]).
+ * Any other status (SERVFAIL 2, REFUSED 5, none at all), an HTTP error or a
+ * failed request throws dns_check_failed: a guard that cannot look is a failed
+ * check, never a pass.
+ *
+ * 2026-10-26 (independent review of #737): the first version read only the
+ * answers, so a SERVFAIL, which carries none, passed as "no addresses".
+ */
+export async function resolveViaDoh(host: string, fetchImpl: typeof fetch = fetch): Promise<ResolvedAddress[]> {
+  const ask = async (type: "A" | "AAAA"): Promise<ResolvedAddress[]> => {
+    const res = await fetchImpl(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=${type}`, {
+      headers: { accept: "application/dns-json" },
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`doh_${res.status}`);
+    const body = (await res.json()) as { Status?: number; Answer?: Array<{ type?: number; data?: string }> };
+    if (body.Status === 3) return []; // NXDOMAIN
+    if (body.Status !== 0) throw new Error(`doh_status_${String(body.Status)}`); // anything but NOERROR
+    const want = type === "A" ? 1 : 28;
+    return (body.Answer ?? [])
+      .filter((a) => a.type === want && typeof a.data === "string")
+      .map((a) => ({ address: a.data as string, family: type === "A" ? 4 : 6 }));
+  };
+  try {
+    const [a, aaaa] = await Promise.all([ask("A"), ask("AAAA")]);
+    return [...a, ...aaaa];
+  } catch (err) {
+    console.warn("[cloud-tools] DNS-over-HTTPS check failed", { host, error: err instanceof Error ? err.message : String(err) });
+    throw new Error("dns_check_failed");
+  }
+}
+
+type NodeLookup = (host: string, opts: { all: true }) => Promise<ResolvedAddress[]>;
+
+/**
+ * Every address `host` resolves to. The runtime's own lookup answers first:
+ * Node's in dev and tests, and on the Worker the node:dns that workerd provides
+ * natively under nodejs_compat. An answer that would leave nothing to check
+ * (an error of any kind, "not found" included, or no addresses) is asked again
+ * over DNS-over-HTTPS (resolveViaDoh), whose status is read, and a resolver
+ * that still cannot answer is dns_check_failed. `deps.lookup` null means "no
+ * runtime lookup"; undefined means "find it".
+ *
+ * 2026-10-26: the old guard returned as if the host were fine whenever the dns
+ * module was missing or threw. The independent review of #737: the first fix
+ * took a lookup's "not found" codes at their word, and which code a resolver
+ * that could not answer reports depends on the runtime, so "not found" is now
+ * confirmed over DoH before it counts.
+ */
+export async function resolveAddresses(
+  host: string,
+  deps: { lookup?: NodeLookup | null; fetchImpl?: typeof fetch } = {},
+): Promise<ResolvedAddress[]> {
+  let lookup = deps.lookup;
+  if (lookup === undefined) {
+    try {
+      const dns = await import("dns/promises");
+      lookup = (h, o) => dns.lookup(h, o);
+    } catch {
+      lookup = null;
+    }
+  }
+  if (lookup) {
+    try {
+      const found = (await lookup(host, { all: true })).map((a) => ({ address: a.address, family: a.family }));
+      if (found.length > 0) return found;
+    } catch {
+      // No address to check, whatever the code says: DoH confirms it below.
+    }
+  }
+  return resolveViaDoh(host, deps.fetchImpl ?? fetch);
 }
 
 /**
@@ -2053,49 +2235,25 @@ export function assertSafeUrl(url: string): URL {
  * literal hostnames + IPs but a public hostname like `evil.com` that
  * resolves to 127.0.0.1 or 169.254.169.254 would slip through.
  *
- * Resolves the hostname via Node's dns.lookup and rejects when any
- * resolved address falls in a private / loopback / IMDS range. Called
- * from fetchWithCap right before issuing the request so the resolved
- * IP we check IS the IP fetch will connect to (modulo TOCTOU — rare in
- * practice for this use case; Codex flagged DNS rebinding as a
- * theoretical risk but the cost of full pin-and-connect is too high
- * for a chat tool's latency budget).
+ * Resolves the hostname (resolveAddresses) and rejects when any resolved
+ * address is in the one forbidden table (isForbiddenIp). A literal address is
+ * judged as it is, with nothing to resolve. Called from fetchWithCap right
+ * before issuing the request so the resolved IP we check IS the IP fetch will
+ * connect to (modulo TOCTOU — rare in practice for this use case; Codex
+ * flagged DNS rebinding as a theoretical risk but the cost of full
+ * pin-and-connect is too high for a chat tool's latency budget).
  *
- * 2026-05-16 Codex review finding #6 hardening.
+ * 2026-05-16 Codex review finding #6 hardening; 2026-10-26 the table, the
+ * literal check and the Worker's resolver.
  */
-export async function assertResolvedIpIsPublic(host: string): Promise<void> {
-  // Skip when the host is already a literal IP — assertSafeUrl above
-  // handled it.
-  if (/^[0-9.]+$/.test(host) || /^\[?[0-9a-f:]+\]?$/i.test(host)) return;
-  let lookup: typeof import("dns/promises").lookup;
-  try {
-    ({ lookup } = await import("dns/promises"));
-  } catch {
-    // dns module unavailable (edge runtime, etc.) — fall back to
-    // hostname-only check. This route declares runtime='nodejs' so
-    // we expect the import to succeed in production.
+export async function assertResolvedIpIsPublic(host: string, resolver: AddressResolver = resolveAddresses): Promise<void> {
+  const bare = bareAddress(host);
+  if (isIpLiteral(bare)) {
+    if (isForbiddenIp(bare)) throw new Error("blocked_private_ip");
     return;
   }
-  let addrs: Array<{ address: string; family: number }>;
-  try {
-    addrs = await lookup(host, { all: true });
-  } catch {
-    // DNS failed — let fetch surface the network error rather than
-    // pretending we know something about the host.
-    return;
-  }
-  for (const a of addrs) {
-    const ip = a.address.toLowerCase();
-    if (
-      ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0" ||
-      /^10\./.test(ip) ||
-      /^192\.168\./.test(ip) ||
-      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip) ||
-      /^169\.254\./.test(ip) ||
-      /^(fc|fd|fe[89ab]|::1)/i.test(ip)
-    ) {
-      throw new Error("blocked_resolved_private_ip");
-    }
+  for (const a of await resolver(bare)) {
+    if (isForbiddenIp(a.address)) throw new Error("blocked_resolved_private_ip");
   }
 }
 
