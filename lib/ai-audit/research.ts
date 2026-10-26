@@ -640,6 +640,9 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
     if (!def || def.group === "consent" || f.value === null || f.value === undefined || f.value === "") continue;
     const ref = f.source_ref as { from?: number; to?: number; note?: string };
     const sourceId = fid("s-client", f.field_key);
+    // Verified only with CC's note of what confirmed it, as the evidence rules require; otherwise it is the client's word,
+    // for the finding and for any estimate that uses it alike (CodeRabbit on #742).
+    const verified = f.label === "verified" && !!(f.verified_note ?? "").trim();
     const where =
       f.source_type === "transcript" && typeof ref.from === "number"
         ? `Discovery call transcript, lines ${ref.from}${ref.to && ref.to !== ref.from ? `-${ref.to}` : ""}`
@@ -650,7 +653,7 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
             : "Entered by CC";
     sources.push({
       id: sourceId,
-      kind: f.label === "verified" ? "other" : "client",
+      kind: verified ? "other" : "client",
       title: where,
       url: null,
       retrieved_at: at,
@@ -661,7 +664,7 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
       excerpt: "",
       reliability: "client_stated",
       published_at: null,
-      confirmed_note: f.label === "verified" ? (f.verified_note ?? null) : null,
+      confirmed_note: verified ? (f.verified_note ?? "").trim() : null,
     });
     const isFigure = (def.type === "number" || def.type === "money") && typeof f.value === "number";
     const said = def.type === "money" && typeof f.value === "number" ? `$${f.value.toLocaleString("en-CA")}` : valueWords(f.value);
@@ -669,14 +672,14 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
       id: fid("f", f.field_key),
       title: def.label,
       statement: `${def.label}: ${said}${def.unit && isFigure && def.type !== "money" ? ` ${def.unit}` : ""}.`,
-      label: f.label === "verified" ? "verified" : f.label === "hypothesis" ? "hypothesis" : "client_reported",
+      label: verified ? "verified" : f.label === "hypothesis" ? "hypothesis" : "client_reported",
       ...(isFigure ? { metric: { value: f.value as number, unit: def.type === "money" ? "$" : (def.unit ?? "") } } : {}),
       source_ids: [sourceId],
       ...(f.label === "hypothesis" ? { how_to_test: "Check it with the client before it is used." } : {}),
     });
     // A figure CC marked a hypothesis is a figure to confirm, never an estimate's input: the estimate becomes a named gap (review of phase 3, F3).
     if (isFigure && IMPACT_KEYS.has(f.field_key) && f.label !== "hypothesis") {
-      impactInputs[f.field_key as keyof ImpactInputs] = { value: f.value as number, label: f.label === "verified" ? "verified" : "client_reported", sourceId };
+      impactInputs[f.field_key as keyof ImpactInputs] = { value: f.value as number, label: verified ? "verified" : "client_reported", sourceId };
     }
   }
   plan.push({ module: "profile", status: fields.length ? "done" : "partial", detail: `${fields.filter((f) => profileFieldDef(f.field_key)?.group !== "consent").length} answers from the discovery profile, as authorized.` });
