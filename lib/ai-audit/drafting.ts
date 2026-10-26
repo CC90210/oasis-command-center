@@ -16,6 +16,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { auditDocIssues, validateAuditDoc, type DocIssue } from "@/lib/ai-audit/doc";
 import { draftAuditDoc, draftProposal } from "@/lib/ai-audit/draft";
+import { validateProposalContent } from "@/lib/ai-audit/proposal";
 import { OPPORTUNITY_SKU, type PlannedOpportunity } from "@/lib/ai-audit/opportunities";
 import { estimateImpact } from "@/lib/ai-audit/impact";
 import { assumptionOverrides, latestResearch, RESEARCH_STAGES } from "@/lib/ai-audit/research";
@@ -120,10 +121,14 @@ export async function draftProposalFromAudit(db: Client, input: { tenantId: stri
     tax: settings.settings.tax,
     depositBps: settings.settings.deposit_bps,
     to: e.contact_email ?? lead?.email ?? "",
-    businessName: e.business_name || lead?.businessName || "",
-    contactName: e.contact_name ?? lead?.contactName ?? "",
+    // One line each: a name with a line break in it would make the email's subject invalid (review of phase 4, F11).
+    businessName: (e.business_name || lead?.businessName || "").replace(/[\r\n]+/g, " ").trim(),
+    contactName: (e.contact_name ?? lead?.contactName ?? "").replace(/[\r\n]+/g, " ").trim(),
     today: input.now.toISOString().slice(0, 10),
   });
+  // Checked before it is saved: a draft that would read back as nothing is never stored.
+  const valid = validateProposalContent(content);
+  if (!valid.ok) return { ok: false, error: "invalid", detail: `${valid.field}: ${valid.error}` };
   const saved = await saveProposalDraft(db, { tenantId: t, engagementId: e.id, content, actor: input.actor, now: input.now, expectedRowVersion: e.row_version, tax: settings.settings.tax });
   if (!saved.ok) return { ok: false, error: saved.error };
   await db.execute(

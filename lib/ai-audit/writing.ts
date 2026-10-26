@@ -33,6 +33,10 @@ const IN_FLIGHT = ["queued", "running", "waiting_runner"];
 export const MAC_WRITE_WAIT_MS = 24 * 3_600_000;
 /** The cloud call may wait this long inside the tick. */
 export const WRITE_CALL_DEADLINE_MS = 55_000;
+/** A cloud pass a tick claimed and never finished is claimed again after this long (the tick that took it died). */
+const CLOUD_CLAIM_MS = 5 * 60_000;
+/** What a pass keeps of what it held back, for CC to read: never the rest of the model's answer. */
+const WITHHELD_KEPT = 20;
 
 export type WriteDeps = {
   model: (call: ToolModelCall) => Promise<ToolModelResult>;
@@ -62,9 +66,22 @@ export async function startWriting(db: Client, input: { tenantId: string; engage
   const audit = e.current_audit_version_id ? await getAuditVersion(db, t, e.current_audit_version_id) : null;
   if (!audit || audit.status !== "draft" || !audit.doc) return { ok: false, error: "no_audit_draft" };
   const running = async () =>
-    (await db.execute({ sql: "SELECT id, runs_on FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ? AND status IN ('queued', 'running', 'waiting_runner') LIMIT 1", args: [t, e.id, WRITE_STEP] })).rows[0];
+    (await db.execute({ sql: "SELECT id, runs_on, result_ref FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ? AND status IN ('queued', 'running', 'waiting_runner') LIMIT 1", args: [t, e.id, WRITE_STEP] })).rows[0];
   const now = await running();
-  if (now) return { ok: true, stepId: String(now.id), created: false, runsOn: String(now.runs_on) === "mac" ? "mac" : "cloud" };
+  if (now) {
+    // A pass over the draft as it stands is handed back; one that read an older draft (CC edited since) is
+    // called off, so this press starts a fresh one instead of waiting a day for it (review of phase 4, F4).
+    let ref: Partial<StepRef> = {};
+    try {
+      ref = JSON.parse(String(now.result_ref ?? "{}")) as StepRef;
+    } catch {
+      ref = {};
+    }
+    if (ref.audit_version_id === audit.id && ref.content_sha256 === audit.content_sha256) {
+      return { ok: true, stepId: String(now.id), created: false, runsOn: String(now.runs_on) === "mac" ? "mac" : "cloud" };
+    }
+    await cancelWriting(db, t, String(now.id), "draft_changed", input.now);
+  }
   const mac = auth.engine === "mac_claude";
   const runNo = int((await db.execute({ sql: "SELECT COUNT(1) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ?", args: [t, e.id, WRITE_STEP] })).rows[0]?.n) + 1;
   const stepId = newId();
@@ -145,6 +162,18 @@ async function endStep(db: Client, t: string, stepId: string, status: "done" | "
   return r.rowsAffected === 1;
 }
 
+/** A pass ended before it could write (the draft changed, the authorization ended): its Mac job goes with it. */
+export async function cancelWriting(db: Client, tenantId: string, stepId: string, code: "draft_changed" | "not_authorized" | "write_failed", now: Date): Promise<boolean> {
+  const t = requireTenant(tenantId);
+  const ended = await endStep(db, t, stepId, code === "write_failed" ? "failed" : "cancelled", code, null, now);
+  const at = now.toISOString();
+  await db.execute({
+    sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'ai_audit_gone', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ? AND status IN ('queued', 'claimed', 'running')",
+    args: [at, at, t, MODEL_TOOL_KEY, stepId],
+  });
+  return ended;
+}
+
 export type FinishWrite = { ok: true; written: boolean; withheld: number } | { ok: false; code: "gone" | "not_permitted" | "bad_input" };
 
 /**
@@ -171,7 +200,7 @@ export async function finishWriting(db: Client, input: { tenantId: string; jobIn
   const valid = validateAuditDoc(next);
   const blocking = valid.ok ? auditDocIssues(valid.doc).filter((i) => i.severity === "block") : [];
   const parts = Object.keys(checked.value.parts);
-  const ref: StepRef = { ...ctx.ref, withheld: checked.value.withheld.slice(0, 40), parts, written: false };
+  const ref: StepRef = { ...ctx.ref, withheld: checked.value.withheld.slice(0, WITHHELD_KEPT), parts, written: false };
   if (!valid.ok || blocking.length || !parts.length) {
     // Whatever the prose broke, the code draft stays: it already passes every rule.
     await endStep(db, t, ctx.stepId, "done", !parts.length ? "nothing_kept" : "rules_broken", ref, input.now);
@@ -205,6 +234,12 @@ export async function advanceCloudWriting(db: Client, input: { tenantId: string;
   const t = requireTenant(input.tenantId);
   const row = (await db.execute({ sql: "SELECT id, engagement_id, status, attempts, max_attempts, runs_on FROM ai_audit_steps WHERE tenant_id = ? AND id = ? AND step_key = ? LIMIT 1", args: [t, input.stepId, WRITE_STEP] })).rows[0];
   if (!row || String(row.runs_on) !== "cloud" || !["queued", "running"].includes(String(row.status))) return "idle";
+  // Claimed first, by compare-and-set: an overlapping tick finds it taken and makes no second metered call.
+  const claimed = await db.execute({
+    sql: "UPDATE ai_audit_steps SET status = 'running', updated_at = ? WHERE tenant_id = ? AND id = ? AND step_key = ? AND runs_on = 'cloud' AND (status = 'queued' OR (status = 'running' AND updated_at < ?))",
+    args: [input.now.toISOString(), t, input.stepId, WRITE_STEP, new Date(input.now.getTime() - CLOUD_CLAIM_MS).toISOString()],
+  });
+  if (claimed.rowsAffected !== 1) return "idle";
   const jobInput = { step_id: input.stepId, engagement_id: String(row.engagement_id), purpose: "write" };
   const built = await writeJobInput(db, { tenantId: t, input: jobInput });
   if (!built.ok) {
@@ -244,8 +279,10 @@ export async function advanceCloudWriting(db: Client, input: { tenantId: string;
 export async function dueWriting(db: Client, tenantId: string, now: Date): Promise<{ cloud: string[]; stale: string[] }> {
   const t = requireTenant(tenantId);
   const cloud = await db.execute({
-    sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND runs_on = 'cloud' AND status IN ('queued', 'running') AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY updated_at LIMIT 2",
-    args: [t, WRITE_STEP, now.toISOString()],
+    sql: `SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND runs_on = 'cloud'
+            AND ((status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (status = 'running' AND updated_at < ?))
+          ORDER BY updated_at LIMIT 2`,
+    args: [t, WRITE_STEP, now.toISOString(), new Date(now.getTime() - CLOUD_CLAIM_MS).toISOString()],
   });
   const stale = await db.execute({
     sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND runs_on = 'mac' AND status = 'waiting_runner' AND updated_at < ? LIMIT 5",

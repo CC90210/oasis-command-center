@@ -310,14 +310,38 @@ export function planRoadmap(opps: readonly PlannedOpportunity[]): { now: DocRoad
     if (o.id === "admin-automation" && ids.has("connect-systems")) d.push(titles.get("connect-systems") as string);
     return d;
   };
-  const out = { now: [] as DocRoadmapItem[], next: [] as DocRoadmapItem[], later: [] as DocRoadmapItem[] };
-  for (const o of opps) {
-    const item: DocRoadmapItem = { opportunity_id: o.id, impact: o.impact, effort: o.effort, dependencies: deps(o), urgency: o.urgency };
-    if (item.dependencies.length === 0 && o.impact === "high" && o.effort === "low") out.now.push(item);
-    else if (o.impact === "high" || (o.impact === "medium" && o.effort === "low")) out.next.push(item);
-    else out.later.push(item);
+  const depIds = (o: PlannedOpportunity): string[] => {
+    const d: string[] = [];
+    if (o.id !== "own-website" && ids.has("own-website") && ["online-booking", "website-enquiries", "website-speed", "measure-website", "secure-site"].includes(o.id)) d.push("own-website");
+    if (o.id === "admin-automation" && ids.has("connect-systems")) d.push("connect-systems");
+    return d;
+  };
+  // 0 now, 1 next, 2 later, by impact and effort.
+  const phase = new Map<string, number>();
+  for (const o of opps) phase.set(o.id, depIds(o).length === 0 && o.impact === "high" && o.effort === "low" ? 0 : o.impact === "high" || (o.impact === "medium" && o.effort === "low") ? 1 : 2);
+  // Something always starts now: the first of "next" with nothing to wait for moves up when nothing qualified.
+  if (![...phase.values()].includes(0)) {
+    const up = opps.find((o) => phase.get(o.id) === 1 && depIds(o).length === 0);
+    if (up) phase.set(up.id, 0);
   }
-  // Something always starts now: the first of "next" moves up when nothing qualified.
-  if (!out.now.length && out.next.length) out.now.push(out.next.shift() as DocRoadmapItem);
+  // A step never comes before what it depends on: it moves to its dependency's phase, or later (review of phase 4, F6).
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const o of opps) {
+      for (const d of depIds(o)) {
+        if ((phase.get(o.id) ?? 2) < (phase.get(d) ?? 0)) {
+          phase.set(o.id, phase.get(d) ?? 0);
+          moved = true;
+        }
+      }
+    }
+  }
+  // Within a phase, what others depend on comes first; otherwise the opportunities' own order.
+  const rank = (o: PlannedOpportunity) => opps.indexOf(o) - (opps.some((x) => depIds(x).includes(o.id)) ? opps.length : 0);
+  const out = { now: [] as DocRoadmapItem[], next: [] as DocRoadmapItem[], later: [] as DocRoadmapItem[] };
+  for (const o of [...opps].sort((a, b) => rank(a) - rank(b))) {
+    const item: DocRoadmapItem = { opportunity_id: o.id, impact: o.impact, effort: o.effort, dependencies: deps(o), urgency: o.urgency };
+    (phase.get(o.id) === 0 ? out.now : phase.get(o.id) === 1 ? out.next : out.later).push(item);
+  }
   return out;
 }

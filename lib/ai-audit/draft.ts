@@ -51,59 +51,70 @@ export type DraftInputs = {
 const CLIENT_FACING_PROFILE = /^f-(?:business|goals|ops|tech|sales)-|^f-finance-(?:staff|kpis)/;
 
 /** The client's version of each likely problem: a short title, what it costs them, and how it would be checked together. */
-const HYPOTHESIS_COPY: Readonly<Record<string, { title: string; consequence: string; test: string }>> = {
+const HYPOTHESIS_COPY: Readonly<Record<string, { title: string; statement: string; consequence: string; test: string }>> = {
   "h-no-own-site": {
     title: "New customers find the business only through platforms it does not control",
+    statement: "Without a website of your own, new customers likely find you only through social platforms, listings or referrals.",
     consequence: "A change on any of those platforms can cut off new enquiries overnight.",
     test: "We would look together at where new customers come from and what a search for the business shows.",
   },
   "h-booking-by-hand": {
     title: "Booking takes someone's time and stops after hours",
+    statement: "Appointments are likely booked by phone, text or email, which takes someone's time and stops after hours.",
     consequence: "Requests that arrive in the evening or at the weekend wait, and some of those customers book elsewhere.",
     test: "We would look together at how bookings arrive today, who handles them, and what happens to a request at night.",
   },
   "h-no-way-to-ask": {
     title: "Website visitors have no easy way to ask a question",
+    statement: "A visitor with a question may have no way to ask it on your site except by phone or email.",
     consequence: "Visitors with a question who will not phone or email simply leave.",
     test: "We would look together at how website enquiries arrive today and who follows them up.",
   },
   "h-unmeasured-visitors": {
     title: "It is hard to know which visitors become customers",
+    statement: "It may be hard to tell how many website visitors become enquiries, or which channel brings your best customers.",
     consequence: "Money can go to channels that bring few customers, while the ones that work are not grown.",
     test: "We would look together at how the business knows where its customers come from.",
   },
   "h-phone-unfriendly": {
     title: "The website may be hard to use on a phone",
+    statement: "The site may be hard to use on a phone, so some visitors may leave before getting in touch.",
     consequence: "Most visitors arrive on a phone, and some leave before they get in touch.",
     test: "We would look at the site on a phone together and at how enquiries arrive.",
   },
   "h-no-tap-to-call": {
     title: "Calling from the website takes extra steps on a phone",
+    statement: "Phone visitors may have to copy your number to call, which can lose some calls.",
     consequence: "Some visitors who were ready to call give up before they do.",
     test: "We would look together at how most new customers first get in touch.",
   },
   "h-not-secure": {
     title: "Browsers warn visitors that the site is not secure",
+    statement: "Browsers may mark the site as not secure, which can put some visitors off before they get in touch.",
     consequence: "The warning puts some visitors off before they read anything.",
     test: "We would check the site's security setting with whoever looks after it.",
   },
   "h-chat-without-booking": {
     title: "Chat questions about availability end in a manual back and forth",
+    statement: "Questions in the chat about availability likely end in a back and forth to find a time.",
     consequence: "Each one takes someone's time, and slow answers lose bookings.",
     test: "We would look together at the most common chat questions and how they are answered.",
   },
   "h-past-vendor": {
     title: "Past work from a provider did not last",
+    statement: "Work from a previous provider did not last, so how a change is handed over and supported may matter as much as the tool.",
     consequence: "Without a clear handover and support, the same thing can happen again.",
     test: "We would agree together how any change is handed over and who looks after it.",
   },
   "h-shelfware": {
     title: "Tools have been paid for that the team does not use",
+    statement: "Tools bought before may not be in use, so getting the team to use a tool is likely the real challenge, more than its features.",
     consequence: "Adding another tool will not help unless the team actually uses it.",
     test: "We would look together at which tools are used and why others were dropped.",
   },
   "h-half-built": {
     title: "Something built in-house only half works",
+    statement: "Something built in-house may already half work, and could be a starting point rather than something to replace.",
     consequence: "Replacing it outright may throw away what already works.",
     test: "We would look together at what it does well and where it breaks.",
   },
@@ -154,6 +165,34 @@ function figurePhrase(f: DocFinding): string | null {
 }
 const joinList = (xs: readonly string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join("; ")}; and ${xs[xs.length - 1]}`);
 
+/**
+ * The research's gaps as the client may read them. The research writes them
+ * for CC ("No AI-audit form answers are on file", "the web search on the Mac
+ * failed"); the client reads what is unknown, never how the Command Center
+ * works, nor anything internal (a budget, a decision-maker). One line per
+ * kind of gap (review of phase 4, F5).
+ */
+function clientGaps(gaps: ResearchPack["gaps"]): Array<{ topic: string; why: string }> {
+  const out: Array<{ topic: string; why: string }> = [];
+  const once = (topic: string, why: string) => {
+    if (!out.some((g) => g.topic === topic)) out.push({ topic, why });
+  };
+  for (const g of gaps) {
+    if (/^To estimate this, the audit needs:/i.test(g.why)) {
+      out.push({ topic: g.topic, why: g.why.replace(/^To estimate this, the audit needs:/i, "To size this, we would need:") });
+    } else if (g.why === "The discovery profile does not have it.") {
+      if (!/budget|decision|\(/i.test(g.topic)) out.push({ topic: g.topic, why: "We do not have this yet from our conversation." });
+    } else if (g.topic === "Website speed") {
+      once("Website speed", "We could not measure how fast your website loads on a phone.");
+    } else if (g.topic === "Web search") {
+      once("Public listings", "We could not check every public listing and review page for the business.");
+    } else if (g.topic === "Website" && !/form answers/i.test(g.why)) {
+      once("Website", "Some of your website could not be read, so what those pages show is not in this audit.");
+    }
+  }
+  return out;
+}
+
 /** The audit's first draft. Run validateAuditDoc and auditDocIssues on it before it is saved. */
 export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunities: PlannedOpportunity[] } {
   const pack = input.pack;
@@ -180,8 +219,12 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
     const fromProfile = f.source_ids.some((id) => id.startsWith("s-client-"));
     if (fromProfile && f.id.startsWith("f-") && !CLIENT_FACING_PROFILE.test(f.id)) continue;
     const copy = HYPOTHESIS_COPY[f.id];
+    // A likely problem reads in the client's words, or stays out: the research writes them for CC ("Ask how ..."),
+    // and a page's claim nothing proved is no finding of ours (review of phase 4, F5).
+    if (f.label === "hypothesis" && (f.id.startsWith("h-") ? !copy : !fromProfile)) continue;
     findings.push({
       ...f,
+      ...(f.label === "hypothesis" && copy ? { statement: copy.statement } : {}),
       source_ids: cite(f.source_ids),
       ...(f.label === "hypothesis" ? { how_to_test: copy?.test ?? "We would confirm this with you before any work starts." } : {}),
     });
@@ -195,9 +238,16 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
   const fromWeb = findings.filter((f) => f.label === "verified" && f.id.startsWith("f-web")).slice(0, 4);
   const hypotheses = findings.filter((f) => f.label === "hypothesis");
 
+  // What the audit drew on, as it did: never a website review or listings it did not read (review of phase 4, F5).
+  const drew: string[] = [];
+  if (sources.some((x) => x.id === CLIENT_SOURCES.call.id)) drew.push("our call with you");
+  if (sources.some((x) => x.id === CLIENT_SOURCES.form.id)) drew.push("your answers on the audit form");
+  if (pack.plan.some((m) => m.module === "site" && (m.status === "done" || m.status === "partial"))) drew.push("a review of your website");
+  if (pack.plan.some((m) => m.module === "pagespeed" && m.status === "done")) drew.push("Google's speed test of your home page");
+  if (findings.some((x) => x.id.startsWith("f-web") && x.label === "verified")) drew.push("what is publicly listed about the business");
   const overview: DocParagraph[] = [
     {
-      text: `This audit looks at how ${name} finds, wins and serves its customers today, and where AI and automation can save time or win back work. It draws on our call with you, a review of your website, and what is publicly listed about the business.`,
+      text: `This audit looks at how ${name} finds, wins and serves its customers today, and where AI and automation can save time or win back work.${drew.length ? ` It draws on ${drew.length === 1 ? drew[0] : `${drew.slice(0, -1).join(", ")} and ${drew[drew.length - 1]}`}.` : ""}`,
       cites: [],
     },
   ];
@@ -225,7 +275,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
     const copy = HYPOTHESIS_COPY[h.id];
     return {
       title: copy?.title ?? "A likely problem to confirm",
-      why_it_matters: { text: h.statement, cites: [h.id] },
+      why_it_matters: { text: copy?.statement ?? h.statement, cites: [h.id] },
       consequence: { text: copy?.consequence ?? "We would confirm it with you before any work starts.", cites: [h.id] },
       finding_ids: [h.id],
     };
@@ -235,8 +285,8 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
     .slice(0, 15)
     .map((f) => f.id);
 
-  // A gap the client reads names what is unknown, never a figure.
-  const gaps = pack.gaps.filter((g) => !statesFigure(g.topic) && !statesFigure(g.why)).slice(0, 15);
+  // A gap the client reads names what is unknown, in words written for the client, never a figure.
+  const gaps = clientGaps(pack.gaps).filter((g) => !statesFigure(g.topic) && !statesFigure(g.why)).slice(0, 15);
 
   const doc: AuditDoc = {
     schema: AUDIT_DOC_SCHEMA,

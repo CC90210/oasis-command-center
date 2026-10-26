@@ -203,7 +203,10 @@ async function main() {
     assert.ok(d.findings.find((f) => f.id === "f-ops-admin-hours-per-week")?.source_ids.includes("src-confirmed"));
     assert.match(String(d.findings.find((f) => f.id === "h-booking-by-hand")?.how_to_test), /^We would look together at how bookings arrive today/);
     assert.ok(d.sources.some((s) => s.title === "Your website: Fixture Plumbing | Calgary plumbers"));
-    assert.deepEqual(d.gaps.map((g) => g.topic), ["Cost of admin time saved"]);
+    assert.deepEqual(d.gaps.map((g) => [g.topic, g.why]), [
+      ["Website speed", "We could not measure how fast your website loads on a phone."],
+      ["Cost of admin time saved", "To size this, we would need: cost of an hour of staff time."],
+    ]);
     const hours = d.estimates.find((e) => e.id === "est-admin-hours")!;
     assert.equal(hours.inputs.find((x) => x.label === "verified")?.basis, "src-confirmed", "a verified input names a source in this audit");
   });
@@ -319,7 +322,7 @@ async function main() {
     };
     const calls = ["f-sales-missed-calls-per-week"];
     assert.equal(one("You miss 10 calls a month.", calls), "it states 10 a month; what it cites gives 10 a week");
-    assert.equal(one("Missed calls cost you 10 jobs every year.", calls), "it states 10 a year; what it cites gives 10 a week");
+    assert.equal(one("Missed calls lose you 10 jobs every year.", calls), "it states 10 a year; what it cites gives 10 a week");
     assert.equal(one("Each week about 10 calls go unanswered.", calls), "kept");
     assert.equal(one("Fixture Plumbing misses 10 calls a week, and each one can be answered within a minute.", calls), "kept");
     assert.match(one("You miss ten calls a week.", calls), /^it writes a figure in a form the check cannot match/);
@@ -332,17 +335,88 @@ async function main() {
     assert.equal(one("It answers calls 24/7.", []), "it states a figure without citing where it comes from");
     assert.equal(one("Most owners lose work this way.", []), "it states a general rule the audit's facts do not");
     assert.equal(one("Studies show that callers rarely leave a message.", []), "it states a general rule the audit's facts do not");
-    assert.equal(one("We can set this up in a week.", []), "it claims something the audit's facts do not state");
-    assert.equal(one("Fixture Plumbing books its jobs in ServiceTitan.", ["f-tech-tools"]), "it claims something the audit's facts do not state");
+    assert.equal(one("We can set this up in a week.", []), 'it says something about the business ("week") without citing where it comes from');
+    assert.equal(one("Fixture Plumbing books its jobs in ServiceTitan.", ["f-tech-tools"]), 'it uses a word the audit\'s facts do not ("servicetitan")');
     assert.equal(one("This would pay for itself.", []), "it promises a result");
-    assert.equal(one("The most valuable change is answering missed calls.", []), "kept");
-    assert.equal(one("You miss 10 calls a week at a 30% close rate.", [...calls, "f-sales-close-rate-pct"]), "kept", "a period another figure took is not this one's");
+    assert.equal(one("The most valuable change is answering missed calls.", []), 'it says something about the business ("valuable") without citing where it comes from', "an uncited sentence only frames");
+    assert.equal(one("You miss 10 calls a week, and 30% of your leads become customers.", [...calls, "f-sales-close-rate-pct"]), "kept", "a period another figure took is not this one's");
     assert.equal(one("Each month, $1,300 to $3,250 could come back.", ["est-missed-calls"]), "kept");
     const digits = { ...d, business: { ...d.business, name: "24 Hour Plumbing" } };
     const named = prose.checkProse(JSON.stringify({ executive_overview: [{ text: "24 Hour Plumbing misses 10 calls a week.", cites: calls }] }), digits);
     assert.ok(named.ok && named.value.parts.executive_overview?.length === 1, JSON.stringify(named));
-    const sourced = prose.checkProse(JSON.stringify({ current_assessment: [{ text: "We read your website and spoke with you.", cites: ["src-call", "s-not-here"] }] }), d);
+    const sourced = prose.checkProse(JSON.stringify({ current_assessment: [{ text: "This audit is based on our call with you.", cites: ["src-call", "s-not-here"] }] }), d);
     assert.ok(sourced.ok && sourced.value.parts.current_assessment?.[0].cites.join() === "src-call", "a source id the draft holds is kept as a cite");
+  });
+
+  await check("review of phase 4: a figure is the same kind of thing, for the same period; no promise, price, rule or name slips past", () => {
+    const one = (text: string, cites: string[]) => {
+      const r = prose.checkProse(JSON.stringify({ executive_overview: [{ text, cites }] }), d);
+      assert.ok(r.ok);
+      return r.ok ? (r.value.withheld[0]?.reason ?? "kept") : "";
+    };
+    const calls = ["f-sales-missed-calls-per-week"];
+    // F1: unit, noun, share against count, and every way of saying a period.
+    // This fixture's statement says "500" with no "$" (as research wrote it before phase 3's fix), so the noun is what catches it.
+    assert.match(one("You miss 500 calls.", [...calls, "f-sales-avg-job-value"]), /^it (?:states 500 as a count, but what it cites gives 500 as an amount of money|counts 500 calls, but what it cites counts something else)/);
+    assert.match(one("You close 30 jobs.", ["f-sales-close-rate-pct"]), /^it states 30 as a count, but what it cites gives 30 as a share/);
+    assert.equal(one("Answering them could win back $1,300 to $3,250 over the next year.", ["est-missed-calls"]), "it states 1,300 a year; what it cites gives 1,300 a month");
+    assert.equal(one("You missed 10 calls last month.", calls), "it states 10 a month; what it cites gives 10 a week");
+    assert.equal(one("You miss 10 calls.", calls), "it states 10 with no period; what it cites gives 10 a week");
+    assert.equal(one("Admin takes 10 hours a week.", [...calls, "f-ops-admin-hours-per-week"]), "it counts 10 hours, but what it cites counts something else");
+    // F2: promises, prices, general rules and names, however phrased.
+    for (const promise of ["You will never miss a call again.", "Your bookings will rise.", "This pays for itself."]) assert.equal(one(promise, calls), "it promises a result", promise);
+    for (const price of ["Setup is free.", "It costs less than a part-time hire."]) assert.match(one(price, []), /^it speaks of prices, costs or payment/, price);
+    for (const rule of ["Most people hang up on voicemail.", "Most small business owners lose work.", "Businesses like yours often lose calls."]) assert.equal(one(rule, calls), "it states a general rule the audit's facts do not", rule);
+    assert.equal(one("Zapier connects your calendar.", ["f-tech-tools"]), 'it uses a word the audit\'s facts do not ("zapier")');
+    assert.equal(one("Twilio can text callers back.", ["f-tech-tools"]), 'it uses a word the audit\'s facts do not ("twilio")');
+    // F3: a likely problem stays likely; an uncited sentence says nothing about the business.
+    assert.match(one("Phone visitors have to copy your number to call, so you lose calls.", ["h-no-tap-to-call"]), /^it states a likely problem as a fact/);
+    assert.equal(one("Phone visitors may have to copy your number to call, which can lose some calls.", ["h-no-tap-to-call"]), "kept");
+    assert.match(one("You have no website.", []), /^it says something about the business \("website"\)/);
+    // F7: what the draft says the same way is the draft's, and a disclaimer is not a promise.
+    assert.equal(one("Visitors could call in one tap.", ["h-no-tap-to-call"]), "kept");
+    assert.equal(one("30 per cent of your leads become customers.", ["f-sales-close-rate-pct"]), "kept");
+    assert.equal(one("The estimates are ranges, not promises.", []), "kept");
+    assert.deepEqual(prose.checkProse("{".repeat(200_000), d), { ok: false, error: "unreadable" }, "an answer longer than any real one is not read");
+  });
+  await check("review of phase 4: the client's audit names only what it drew on, says likely problems in the client's words, and leaves the rest out", () => {
+    const pack2 = {
+      ...(pack as Record<string, unknown>),
+      plan: [{ module: "profile", status: "done", detail: "" }, { module: "site", status: "skipped", detail: "" }, { module: "pagespeed", status: "skipped", detail: "" }, { module: "search", status: "skipped", detail: "" }],
+      sources: (pack as { sources: Array<{ id: string }> }).sources.filter((x) => x.id.startsWith("s-client")),
+      findings: [
+        ...(pack as { findings: Array<{ id: string }> }).findings.filter((x) => x.id.startsWith("f-sales")),
+        { id: "h-shelfware", title: "Likely problem", statement: "They have paid for tools nobody uses, so getting the team to use something is likely the real problem, not features.", label: "hypothesis", source_ids: [], how_to_test: "Ask which tools they bought." },
+        { id: "h-made-up", title: "Likely problem", statement: "Ask them about it.", label: "hypothesis", source_ids: [] },
+        { id: "f-web-9", title: "A page", statement: "Offers emergency service around the clock", label: "hypothesis", source_ids: [] },
+      ],
+      gaps: [
+        { topic: "Website", why: "No AI-audit form answers are on file for this lead." },
+        { topic: "Web search", why: "The web search on the Mac failed (model_timeout)." },
+        { topic: "Web search", why: "yelp.ca could not be read (timeout)." },
+        { topic: "Budget (only if they volunteered it)", why: "The discovery profile does not have it." },
+      ],
+    } as never;
+    const b = draft.draftAuditDoc({ business: { name: "Fixture Plumbing", type: "local_service", location: "Calgary", website: null }, contactName: "Dana Smith", today: "2026-10-26", pack: pack2, estimates, tools: [] }).doc;
+    assert.equal(b.sections.executive_overview.paragraphs[0].text.match(/It draws on (.*)\./)?.[1], "our call with you and your answers on the audit form");
+    const raw = JSON.stringify(b);
+    for (const bad of ["form answers are on file", "on the Mac", "model_timeout", "Budget", "They have paid", "Ask them", "emergency service around the clock"]) assert.ok(!raw.includes(bad), `the client's audit says "${bad}"`);
+    assert.deepEqual(b.gaps.map((g) => g.topic), ["Public listings"]);
+    const shelf = b.sections.inefficiencies.items.find((i) => i.finding_ids.includes("h-shelfware"))!;
+    assert.match(shelf.why_it_matters.text, /^Tools bought before may not be in use/);
+    assert.deepEqual(doc.auditDocIssues(b).filter((i) => i.severity === "block"), []);
+  });
+  await check("review of phase 4: a step never comes before what it depends on", () => {
+    const base = { title: "x", what_it_does: "x", problem: "x", how_it_works: "x", integrations: [], expected_improvement: { text: "x", cites: [] }, finding_ids: [], estimate_ids: [], sku: "s", urgency: "" };
+    const r = opps.planRoadmap([
+      { ...base, id: "admin-automation", title: "Automate admin", impact: "high", effort: "low" },
+      { ...base, id: "connect-systems", title: "Connect your tools", impact: "medium", effort: "high" },
+    ] as never);
+    const where = (id: string) => (["now", "next", "later"] as const).find((k) => r[k].some((x) => x.opportunity_id === id));
+    assert.equal(where("connect-systems"), "later");
+    assert.equal(where("admin-automation"), "later", "it waits for its dependency");
+    assert.deepEqual(r.later.map((x) => x.opportunity_id), ["connect-systems", "admin-automation"]);
+    assert.ok(r.now.length === 0 || !r.now.some((x) => x.dependencies.length));
   });
 
   console.log("drafting after research, on the database");
@@ -532,6 +606,70 @@ async function main() {
     assert.equal(res.status, 409);
     assert.deepEqual(await res.json(), { ok: false, error: "no_ai_engine" });
     await login(null);
+  });
+  await check("review of phase 4: CC's edit before the Mac claims ends the pass, and his press starts a fresh one; a failing finish never strands it", async () => {
+    const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;
+    const writing = await import("../lib/ai-audit/writing");
+    await login(USERS.cc);
+    assert.equal((await post(eid, { action: "write_prose" })).status, 200);
+    await login(null);
+    const first = (await writing.latestWriteStep(db, OASIS, eid))!;
+    assert.ok(["waiting_runner"].includes(first.status));
+    let e = (await store.getEngagement(db, OASIS, eid))!;
+    const audit = (await versions.getAuditVersion(db, OASIS, e.current_audit_version_id!))!;
+    const edited = { ...audit.doc!, sections: { ...audit.doc!.sections, executive_overview: { paragraphs: [{ text: "CC's own words, before the Mac woke up.", cites: [] }] } } };
+    assert.ok((await versions.saveAuditDraft(db, { tenantId: OASIS, engagementId: eid, doc: edited, actor: cc, now: NOW(), expectedRowVersion: e.row_version })).ok);
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    assert.equal(((await res.json()) as { job: unknown }).job, null, "the claim hands out nothing for an old draft");
+    const ended = (await writing.latestWriteStep(db, OASIS, eid))!;
+    assert.deepEqual([ended.status, ended.error], ["cancelled", "draft_changed"]);
+    await login(USERS.cc);
+    const again = await post(eid, { action: "write_prose" });
+    assert.equal(((await again.json()) as { created?: boolean }).created, true, "a fresh pass, not the dead one");
+    await login(null);
+    // A finish that throws after the job closed: the runner still gets its answer, and the pass is not left running.
+    const claim = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const job = ((await claim.json()) as { job: { job_id: string; lease_id: string } | null }).job;
+    assert.ok(job);
+    const broken = { ...runnerDeps(NOW()), aiAuditAlert: async () => { throw new Error("alerts are down"); } };
+    const text = JSON.stringify({ key_findings_intro: { text: "Each finding is labelled, so you can see where it came from.", cites: [] } });
+    const done = await runner.handleToolsComplete(macRequest("complete", { job_id: job!.job_id, lease_id: job!.lease_id, tool_key: "ai_audit_model", text }, NOW()), broken as never);
+    assert.equal(done.status, 200);
+    const last = (await writing.latestWriteStep(db, OASIS, eid))!;
+    assert.ok(!["queued", "running", "waiting_runner"].includes(last.status), last.status);
+    e = (await store.getEngagement(db, OASIS, eid))!;
+  });
+  await check("review of phase 4: two ticks at once make one metered call for a cloud pass", async () => {
+    const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Cloud Prose Co%' LIMIT 1")).rows[0].id as string;
+    const writing = await import("../lib/ai-audit/writing");
+    await login(USERS.cc);
+    assert.equal((await post(eid, { action: "write_prose" })).status, 200);
+    await login(null);
+    const step = (await db.execute({ sql: "SELECT id FROM ai_audit_steps WHERE engagement_id = ? AND step_key = 'write' AND status = 'queued' LIMIT 1", args: [eid] })).rows[0].id as string;
+    let calls = 0;
+    const model = async () => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 30));
+      return { ok: true as const, text: JSON.stringify({ executive_overview: [{ text: "Cloud Prose Co misses 10 calls a week.", cites: ["f-sales-missed-calls-per-week"] }] }) };
+    };
+    const deps2 = { model: model as never, alert: async () => undefined };
+    const both = await Promise.all([writing.advanceCloudWriting(db, { tenantId: OASIS, stepId: step, now: NOW(), deps: deps2 }), writing.advanceCloudWriting(db, { tenantId: OASIS, stepId: step, now: NOW(), deps: deps2 })]);
+    assert.equal(calls, 1, JSON.stringify(both));
+    assert.deepEqual([...both].sort(), ["finished", "idle"]);
+  });
+  await check("review of phase 4: a business name with a line break still drafts a proposal that reads back", async () => {
+    const eid = await authorized("Broken\nName Co");
+    const tickDeps = { payment: { alert: async () => undefined } as never, onboarding: {} as never, site: deps.site, research: deps, writing: { model: (async () => ({ ok: false as const, code: "ai_account_missing" })) as never, alert: async () => undefined } };
+    for (let i = 0; i < 12; i++) {
+      const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps });
+      assert.deepEqual(rep.errors, [], JSON.stringify(rep.errors));
+      await answerSearch();
+      if ((await store.getEngagement(db, OASIS, eid))!.current_proposal_version_id) break;
+    }
+    const e = (await store.getEngagement(db, OASIS, eid))!;
+    const prop = (await versions.getProposalVersion(db, OASIS, e.current_proposal_version_id!))!;
+    assert.ok(prop.content, "it reads back");
+    assert.ok(!/[\r\n]/.test(prop.content!.delivery_email.subject));
   });
   await check("CC's press drafts again only when told to replace, and the proposal follows the audit's opportunities", async () => {
     const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;

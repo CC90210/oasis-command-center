@@ -90,7 +90,7 @@ import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
 import { checkSearchAnswer, searchJobInput } from "@/lib/ai-audit/research";
-import { finishWriting, writeJobInput } from "@/lib/ai-audit/writing";
+import { cancelWriting, finishWriting, writeJobInput } from "@/lib/ai-audit/writing";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import {
   LEASE_GUARD,
@@ -304,6 +304,8 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
       });
       const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
       if (stepId && !writing) await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
+      // A prose pass the claim refused ends too, so CC's next press starts a fresh one (review of phase 4, F4).
+      if (stepId && writing) await cancelWriting(deps.db, job.tenantId, stepId, built.code === "gone" ? "draft_changed" : "not_authorized", deps.now);
       return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
     }
     if (job.toolKey === "ai_audit_search") {
@@ -785,8 +787,16 @@ async function completeAuditWrite(job: { id: string; tenantId: string; input: Re
     args: [at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
   });
   if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
-  const done = await finishWriting(deps.db, { tenantId: job.tenantId, jobInput: job.input, text, now: deps.now, alert: deps.aiAuditAlert ?? writeAgentAlert });
-  return toolsJson(200, { ok: true, duplicate: false, written: done.ok ? done.written : false, withheld: done.ok ? done.withheld : 0 });
+  try {
+    const done = await finishWriting(deps.db, { tenantId: job.tenantId, jobInput: job.input, text, now: deps.now, alert: deps.aiAuditAlert ?? writeAgentAlert });
+    return toolsJson(200, { ok: true, duplicate: false, written: done.ok ? done.written : false, withheld: done.ok ? done.withheld : 0 });
+  } catch (err) {
+    // The job is closed already: the pass must not be left running with nothing to finish it (review of phase 4, F9).
+    console.error("[tools.complete] the prose pass could not be finished", err instanceof Error ? (err.stack ?? err.message) : String(err));
+    const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
+    if (stepId) await cancelWriting(deps.db, job.tenantId, stepId, "write_failed", deps.now).catch(() => false);
+    return toolsJson(200, { ok: true, duplicate: false, written: false, withheld: 0 });
+  }
 }
 
 async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {
