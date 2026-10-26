@@ -444,6 +444,22 @@ async function main() {
     const late = await fetchMod.readPage("https://big.ca/", deps(fakeWeb({})), { accept: "html", deadline: clock - 1 });
     assert.deepEqual(late.ok ? null : late.error, "out_of_time");
   });
+  await check("a page left unread for lack of time says so, never that its robots.txt could not be read", async () => {
+    // The time runs out right after the home page, which links to a page on www. (another host, whose robots.txt is not read yet).
+    let late = false;
+    const web = fakeWeb({ "https://acme.ca/": { body: `<html><head><title>Acme</title></head><body>${"x ".repeat(200)}<a href="https://www.acme.ca/contact">Contact</a></body></html>` } });
+    const d = {
+      fetch: (async (u: string, init: Parameters<typeof web.fetch>[1]) => {
+        if (u === "https://acme.ca/") late = true;
+        return web.fetch(u, init);
+      }) as never,
+      clock: () => (late ? fetchMod.TOTAL_BUDGET_MS + 1 : 0),
+    };
+    const r = await fetchMod.readSite(acme, d);
+    assert.ok(r.notes.includes("https://www.acme.ca/contact was not read: the time for reading the site ran out."), r.notes.join(" | "));
+    assert.ok(!r.notes.some((n) => n.includes("robots.txt could not be read")));
+    assert.ok(!web.seen.some((s) => s.url.startsWith("https://www.acme.ca/")), "nothing is asked for once the time is up");
+  });
   await check("a site that is down or answers with errors gives one gap, with the time, and nothing else about it (review 3b)", async () => {
     const cases: Array<[string, Record<string, Route>, SiteReport["unread"]]> = [
       ["down", {}, "no_answer"],

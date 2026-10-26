@@ -127,6 +127,8 @@ export async function readPage(
       return { ok: false, error: "bad_address", finalUrl: current, status: null };
     }
     if (!isFetchableUrl(u)) return { ok: false, error: hop ? "redirected_off_the_public_web" : "not_public", finalUrl: u.toString(), status: null };
+    // Out of time first: otherwise a robots.txt that ran out of time would be blamed for the page.
+    if (opts.deadline - deps.clock() <= 0) return { ok: false, error: "out_of_time", finalUrl: u.toString(), status: null };
     const closed = opts.mayRead ? await opts.mayRead(u) : null;
     if (closed) return { ok: false, error: closed, finalUrl: u.toString(), status: null };
     const left = opts.deadline - deps.clock();
