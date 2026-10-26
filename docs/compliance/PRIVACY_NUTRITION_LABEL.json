@@ -43,7 +43,7 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": false,
-      "sharedWith": ["Turso", "The workspace's model provider (when included in agent context)", "Google (email and calendar invitations)", "Twilio (SMS)", "Telegram (staff alerts)"],
+      "sharedWith": ["Turso", "The workspace's model provider (when included in agent context)", "Google (email and calendar invitations)", "Twilio (SMS)", "Quo (SMS)", "Telegram (staff alerts)"],
       "retention": "Life of account, then 24 months"
     },
     {
@@ -151,6 +151,13 @@
       "dpaInPlace": true
     },
     {
+      "name": "Quo",
+      "role": "SMS messaging (formerly OpenPhone)",
+      "region": "United States",
+      "dpaInPlace": false,
+      "openIssue": "No data processing agreement with Quo is confirmed yet."
+    },
+    {
       "name": "Telegram",
       "role": "Operational alerts to staff (new-lead, booking, and support alerts)",
       "region": "Global",
@@ -185,7 +192,7 @@
 
   "openGaps": [
     "No signed DPA covering the LLM providers for the document-extraction path.",
-    "No DPA confirmed with Turso (primary database), OpenRouter, Google (Gemini API path), or Telegram.",
+    "No DPA confirmed with Turso (primary database), OpenRouter, Google (Gemini API path), Telegram, or Quo (SMS).",
     "Law 25 s.17 privacy impact assessment not yet completed for any transfer outside Quebec (including sensitive identifiers); the assessments are in progress while the transfers continue.",
     "Sensitive identifiers (SSN, DOB, EIN) are not encrypted at the application level.",
     "Legacy Supabase copy of pre-August-2026 records not yet deleted.",

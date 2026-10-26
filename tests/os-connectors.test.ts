@@ -80,7 +80,7 @@ const REQUIRED = [
   "google-workspace", "slack", "telegram", "meta", "stripe", "quickbooks", "xero", "plaid",
   "gohighlevel", "zoom", "calendly", "cal-com", "fathom", "fireflies", "twilio",
   "constant-contact", "zernio", "discord", "microsoft-teams", "whatsapp",
-  "cloudflare", "hostinger", "github", "firecrawl", "wise",
+  "cloudflare", "hostinger", "github", "firecrawl", "wise", "quo",
 ];
 for (const slug of REQUIRED) assert.ok(connectorBySlug(slug), `the hub is missing ${slug}`);
 
@@ -188,11 +188,13 @@ assert.notEqual(glyphColor(connectorBySlug("cal-com")!), "#292929", "Cal.com's n
 // "coming soon"): Plaid, Discord, Microsoft Teams and Meta Ads with a pasted
 // key and a real Test, QuickBooks, Xero, Zoom and WhatsApp at the vendor's own
 // sign-in page (tests/every-connector-works.test.ts walks every one).
+// 2026-10-26: Quo, texting for OASIS's own workspaces, with a pasted key and a
+// real Test (tests/quo-connector.test.ts).
 const LIVE = [
   "stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev",
   "calendly", "cal-com", "fathom", "fireflies", "zernio", "gohighlevel", "smtp",
   "quickbooks", "xero", "plaid", "zoom", "whatsapp", "discord", "microsoft-teams", "meta",
-  "cloudflare", "hostinger", "github", "firecrawl", "wise",
+  "cloudflare", "hostinger", "github", "firecrawl", "wise", "quo",
 ].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),

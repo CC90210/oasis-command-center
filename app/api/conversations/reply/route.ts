@@ -4,13 +4,17 @@
  * Phase 3b of the TT + Kixie full embedding plan (2026-06-02).
  *
  * Body: { lead_id?: string, to_phone: string, message: string,
- *         provider?: "texttorrent" | "kixie" }
+ *         provider?: "texttorrent" | "kixie" | "twilio" | "quo" }
  *
  * Provider:
  *   - "texttorrent" (default) → TT 1:1 inbox send (lib/integrations/texttorrent.sendSms)
  *   - "kixie"                  → Kixie SMS attributed to the acting employee,
  *                                resolved via the same 3-tier agent-email
  *                                ladder the drawer Call button uses.
+ *   - "quo"                    → Quo (formerly OpenPhone), lib/integrations/quo.ts.
+ *                                OASIS's own workspaces text through Quo whenever
+ *                                it is set up, whichever provider was named
+ *                                (lib/routing/outbound-routing.ts chooseSmsProvider).
  *
  * Safety: every send goes through isDryRun() FIRST. On dry-run we skip the
  * network call and all touch tracking so simulations cannot inflate metrics,
@@ -35,6 +39,15 @@ import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sende
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendSmsDirectTwilio } from "@/lib/sms-direct-twilio";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import {
+  getQuoCredentials,
+  quoCredentialsOrNull,
+  quoFailureHttpStatus,
+  sendQuoSms,
+  QuoError,
+  type QuoCredentials,
+} from "@/lib/integrations/quo";
+import { chooseSmsProvider, smsMayUseQuo, type DashboardSmsProvider } from "@/lib/routing/outbound-routing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -155,7 +168,8 @@ export async function POST(req: NextRequest) {
   if (message.length > 1600) {
     return NextResponse.json({ ok: false, error: "message_too_long" }, { status: 400 });
   }
-  const provider =
+  const requested: DashboardSmsProvider =
+    body.provider === "quo" ? "quo" :
     body.provider === "kixie" ? "kixie" :
     body.provider === "twilio" ? "twilio" :
     "texttorrent";
@@ -202,8 +216,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Which provider sends it. OASIS's own workspaces text through Quo whenever
+  // it is set up (chooseSmsProvider); the Quo key is read only when the rule
+  // could pick Quo, so every other workspace's send is unchanged. A saved Quo
+  // key that cannot be read stops the send here: it never quietly goes out
+  // through another provider instead.
+  let quo: QuoCredentials | null = null;
+  if (smsMayUseQuo({ requested, tenantId })) {
+    try {
+      quo = await quoCredentialsOrNull(tenantId);
+    } catch (err) {
+      return NextResponse.json(
+        { ok: false, error: "quo_unavailable", message: err instanceof Error ? err.message : "Quo could not be checked." },
+        { status: 503 },
+      );
+    }
+  }
+  const provider = chooseSmsProvider({ requested, tenantId, quoReady: quo !== null });
+
   // DRY-RUN: short-circuit before network and tracking writes.
-  // Per-channel: TextTorrent / Kixie can be live independently.
+  // Per-channel: TextTorrent / Kixie / Quo can be live independently.
   if (isDryRun(provider)) {
     return NextResponse.json({
       ok: true,
@@ -225,7 +257,19 @@ export async function POST(req: NextRequest) {
 
   let providerMessageId: string | null = null;
   try {
-    if (provider === "twilio") {
+    if (provider === "quo") {
+      // `quo` is null only when the request named Quo and it is not set up:
+      // getQuoCredentials then throws missing_credentials, answered 400 below.
+      // sendQuoSms re-checks the live switch and STOP itself, failing closed.
+      const result = await sendQuoSms(quo ?? (await getQuoCredentials(tenantId)), { to: toPhone, text: message });
+      if (!result.ok) {
+        return NextResponse.json(
+          { ok: false, error: result.code, message: result.reason },
+          { status: quoFailureHttpStatus(result) },
+        );
+      }
+      providerMessageId = result.id;
+    } else if (provider === "twilio") {
       const result = await sendSmsDirectTwilio({ tenantId, to: toPhone, body: message });
       if (!result.ok) {
         return NextResponse.json(
@@ -288,7 +332,7 @@ export async function POST(req: NextRequest) {
       providerMessageId = result.data.message_id || null;
     }
   } catch (err) {
-    if (err instanceof TextTorrentError || err instanceof KixieError) {
+    if (err instanceof TextTorrentError || err instanceof KixieError || err instanceof QuoError) {
       const status = err.status === 429 ? 429 : err.code === "missing_credentials" ? 400 : 502;
       return NextResponse.json(
         { ok: false, error: err.code, message: err.message },

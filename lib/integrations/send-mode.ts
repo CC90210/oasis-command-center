@@ -44,6 +44,8 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   texttorrent_followup: "LIVE_SEND_TEXTTORRENT_FOLLOWUP",
   kixie: "LIVE_SEND_KIXIE",
   twilio: "LIVE_SEND_TWILIO",
+  // Quo (formerly OpenPhone): every text sent through Quo (lib/integrations/quo.ts).
+  quo: "LIVE_SEND_QUO",
   gws: "LIVE_SEND_EMAIL",
   email: "LIVE_SEND_EMAIL",
   // Constant Contact gets its OWN flag so going live for CC blasts doesn't also

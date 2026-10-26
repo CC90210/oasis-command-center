@@ -57,7 +57,7 @@ export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
  * changed when they did not. /privacy promises to update this date whenever
  * it changes, so bump it in the same commit as any edit to the policy.
  */
-export const PRIVACY_LAST_UPDATED = "October 15, 2026";
+export const PRIVACY_LAST_UPDATED = "October 26, 2026";
 
 /**
  * OASIS's one published contact address: support@oasisai.work.
@@ -243,6 +243,14 @@ export const SUBPROCESSORS: Subprocessor[] = [
     dpaInPlace: true,
   },
   {
+    name: "Quo",
+    role: "SMS messaging",
+    dataReceived: "Recipient phone numbers and message content",
+    region: "United States",
+    dpaInPlace: false,
+    note: "Quo was formerly called OpenPhone. No data processing agreement with Quo is confirmed yet.",
+  },
+  {
     name: "Telegram",
     role: "Operational alerts to staff",
     dataReceived:
@@ -278,7 +286,7 @@ export const DATA_MATRIX: DataCategory[] = [
     examples: "first_name, last_name, email, phone",
     purpose: "Account creation, service delivery, and operator communication",
     sharedWith:
-      "Turso (storage); the workspace's model provider when included in agent context; Google (email and calendar invitations); Twilio (SMS); Telegram (staff alerts)",
+      "Turso (storage); the workspace's model provider when included in agent context; Google (email and calendar invitations); Twilio and Quo (SMS); Telegram (staff alerts)",
     sensitive: false,
     retention: "Life of the account, then 24 months",
   },

@@ -245,6 +245,9 @@ const STACK_EVIDENCE: Record<string, Evidence[]> = {
   "Twilio Inc.": [
     { file: "lib/sms-direct-twilio.ts", proof: /https:\/\/api\.twilio\.com\//, what: "SMS dispatch" },
   ],
+  Quo: [
+    { file: "lib/integrations/quo.ts", proof: /https:\/\/api\.quo\.com\//, what: "SMS dispatch (formerly OpenPhone)" },
+  ],
   Telegram: [
     { file: "lib/notify/telegram.ts", proof: /https:\/\/api\.telegram\.org\//, what: "staff alerts" },
   ],
@@ -417,6 +420,7 @@ const HOST_TO_PROCESSOR: Record<string, string> = {
   "api.openai.com": "OpenAI, L.L.C.",
   "api.stripe.com": "Stripe",
   "api.twilio.com": "Twilio Inc.",
+  "api.quo.com": "Quo",
   "api.telegram.org": "Telegram",
 };
 

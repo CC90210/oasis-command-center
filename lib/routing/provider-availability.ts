@@ -28,6 +28,7 @@ const CREDENTIAL_SERVICE: Record<ProviderId, string> = {
   gws_bluerise: "gws_bluerise",
   texttorrent: "texttorrent",
   twilio: "twilio",
+  quo: "quo",
 };
 
 /**
@@ -56,6 +57,9 @@ const REQUIRED_FIELDS: Record<ProviderId, string[][]> = {
     ["account_sid", "api_key_sid", "api_key_secret", "from_number"],
     ["account_sid", "api_key_sid", "api_key_secret", "messaging_service_sid"],
   ],
+  // The key alone, exactly what getQuoCredentials needs (lib/integrations/quo.ts):
+  // the sender is the saved From number, or the Quo workspace's only number.
+  quo: [["api_key"]],
 };
 
 /** Per-provider kill switch. Set to "0" to stop using a provider without
@@ -65,6 +69,7 @@ const ENABLE_ENV: Record<ProviderId, string> = {
   gws_bluerise: "PROVIDER_GWS_BLUERISE_ENABLED",
   texttorrent: "PROVIDER_TEXTTORRENT_ENABLED",
   twilio: "PROVIDER_TWILIO_ENABLED",
+  quo: "PROVIDER_QUO_ENABLED",
 };
 
 /**
@@ -81,6 +86,10 @@ const DEFAULT_ENABLED: Record<ProviderId, boolean> = {
   gws_bluerise: true,
   texttorrent: true,
   twilio: false,
+  // Quo itself refuses a destination its number may not text yet (a US number
+  // before carrier registration) instead of sending it, so a saved key is
+  // enough. PROVIDER_QUO_ENABLED=0 still switches it off.
+  quo: true,
 };
 
 function envEnabled(p: ProviderId): boolean {
@@ -180,6 +189,7 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
         (process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_MESSAGING_SERVICE_SID),
     ),
     gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_USER),
+    quo: Boolean(process.env.QUO_API_KEY?.trim()),
   };
 
   // Env credentials belong to OASIS's own account, and the resolver hands them

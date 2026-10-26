@@ -144,6 +144,13 @@ export const ENV_FALLBACKS: Readonly<Record<string, Readonly<Record<string, stri
     from_number: "KIXIE_FROM_NUMBER",
     default_agent_email: "KIXIE_DEFAULT_AGENT_EMAIL",
   },
+  // Quo (formerly OpenPhone): OASIS's own texting since 2026-10-26. The same
+  // names send_gateway.py reads in CEO-Agent; a blank From number means the Quo
+  // workspace's only number (lib/integrations/quo.ts quoSender).
+  quo: {
+    api_key: "QUO_API_KEY",
+    from_number: "QUO_FROM_E164",
+  },
   send_gateway: {
     hmac_secret: "OASIS_OUTBOUND_HMAC_SECRET",
   },

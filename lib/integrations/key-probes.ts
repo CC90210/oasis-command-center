@@ -2,7 +2,7 @@
  * lib/integrations/key-probes.ts -- the live Test for each app that connects
  * with a key the owner pastes in Settings > Connections (Calendly, Cal.com,
  * Fathom, Fireflies, Zernio, GoHighLevel, the workspace's own mail server
- * over SMTP, Plaid, a Discord or Teams channel webhook, and Meta Ads).
+ * over SMTP, Plaid, a Discord or Teams channel webhook, Meta Ads, and Quo).
  *
  * ONE READ, NO SIDE EFFECT. Each Test makes the cheapest read the vendor
  * documents for "whose key is this" (or lists one item) and changes nothing in
@@ -17,7 +17,8 @@
  *   missing_permission   the key works but may not read what the Test reads (403)
  *   plan_required        the vendor's plan for this account has no API access
  *   not_found            the account part named beside the key does not exist
- *                        (GoHighLevel's sub-account, a mail server's name)
+ *                        (GoHighLevel's sub-account, a mail server's name, a
+ *                        Quo From number that is not the workspace's)
  *   rate_limited         the vendor asked OASIS to slow down (429)
  *   provider_unreachable the vendor did not answer (network, timeout)
  *   provider_error       any other answer (a 5xx, an unexpected shape)
@@ -53,6 +54,7 @@ import {
   type PlaidEnvironment,
 } from "@/lib/tenant-integration-schemas";
 import { checkPublicHost, connectPlan, dohResolver, type Resolver } from "@/lib/integrations/host-safety";
+import { QUO_API_BASE, describeQuoNumber, quoHeaders, quoNumbersFrom, soleQuoNumber } from "@/lib/integrations/quo";
 
 export type KeyProbeResult = {
   ok: boolean;
@@ -98,6 +100,7 @@ export const KEY_PROBE_SERVICES = [
   "discord",
   "microsoft_teams",
   "meta_ads",
+  "quo",
 ] as const;
 
 export function hasKeyProbe(service: string): boolean {
@@ -423,6 +426,32 @@ async function probeMetaAds(bundle: Record<string, string>, deps: KeyProbeDeps):
 }
 
 /**
+ * Quo (formerly OpenPhone): GET /v1/phone-numbers with the raw key in
+ * Authorization (Quo uses no "Bearer"). It lists the workspace's numbers and
+ * where each may text, and sends nothing. A pass names the number texts leave
+ * from (the saved From number, or the workspace's only number) and where it
+ * may text. Its own answers: a saved From number that is not one of the
+ * workspace's (not_found), and a workspace with no number (no_number) or with
+ * several and none chosen (needs_number), because a send would fail on each.
+ */
+async function probeQuo(bundle: Record<string, string>, deps: KeyProbeDeps): Promise<KeyProbeResult> {
+  const r = await call(deps, `${QUO_API_BASE}/phone-numbers`, { method: "GET", headers: quoHeaders(bundle.api_key.trim()) });
+  if (!r.ok) return r.result;
+  // Quo's 402 is a subscription that expired: the account, not the key.
+  if (r.res.status === 402) return { ok: false, error: "plan_required" };
+  if (r.res.status !== 200) return { ok: false, error: httpFailureCode(r.res.status) };
+  const numbers = quoNumbersFrom(await jsonOf(r.res));
+  if (!numbers) return { ok: false, error: "provider_error: no number list in the answer" };
+  const from = (bundle.from_number ?? "").trim();
+  if (from) {
+    const saved = numbers.find((n) => n.number === from);
+    return saved ? { ok: true, detail: describeQuoNumber(saved) } : { ok: false, error: "not_found" };
+  }
+  const sole = soleQuoNumber(numbers);
+  return sole.ok ? { ok: true, detail: describeQuoNumber(sole.number) } : { ok: false, error: sole.code };
+}
+
+/**
  * Resolve and check an owner-typed host, then decide how to reach it
  * (lib/integrations/host-safety.ts): a refusal result, or the address to use.
  * One lookup per Test: the connection never asks DNS again, so the answer
@@ -507,6 +536,7 @@ const PROBES: Readonly<Record<(typeof KEY_PROBE_SERVICES)[number], (b: Record<st
   discord: probeDiscord,
   microsoft_teams: probeTeams,
   meta_ads: probeMetaAds,
+  quo: probeQuo,
 };
 
 /**
