@@ -25,6 +25,7 @@ import { createShareLink, linkForApproval, mintLinkToken, revokeShareLink } from
 import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
+import { authorizedProfile } from "@/lib/ai-audit/authorize";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
   getAuditVersion,
@@ -56,7 +57,8 @@ export type SubmitResult =
   | { ok: true; engagement: Engagement; audit: AuditVersion; proposal: ProposalVersion }
   | { ok: false; error: string; problems?: string[] };
 
-const SUBMITTABLE = new Set(["transcript_review", "generating", "final_review"]);
+// Only after Gate 1: an engagement reaches generating only through CC's authorization.
+const SUBMITTABLE = new Set(["generating", "final_review"]);
 
 function today(now: Date): string {
   return now.toISOString().slice(0, 10);
@@ -72,6 +74,8 @@ export async function submitForFinalApproval(
   if (!engagement) return { ok: false, error: "not_found" };
   if (engagement.row_version !== input.expectedRowVersion) return { ok: false, error: "conflict" };
   if (!SUBMITTABLE.has(engagement.stage)) return { ok: false, error: "not_submittable_at_this_stage" };
+  // Every later step re-checks Gate 1: the frozen profile still hashes to what CC authorized.
+  if (!(await authorizedProfile(db, t, engagement))) return { ok: false, error: "not_authorized", problems: ["The discovery profile is not authorized (Gate 1), or it changed since. Authorize it first."] };
   const audit = engagement.current_audit_version_id ? await getAuditVersion(db, t, engagement.current_audit_version_id) : null;
   const proposal = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
   if (!audit || audit.status !== "draft" || !audit.doc) return { ok: false, error: "no_audit_draft" };

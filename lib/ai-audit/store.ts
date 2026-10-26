@@ -53,6 +53,9 @@ export type Engagement = {
   customer_id: string | null;
   delivery_project_id: string | null;
   onboarding_status: OnboardingStatus;
+  /** The live-call screen's clock (bravo__239). */
+  call_started_at: string | null;
+  call_ended_at: string | null;
   is_fixture: boolean;
   row_version: number;
   created_by: string | null;
@@ -83,7 +86,7 @@ const ENGAGEMENT_COLUMNS = [
   "business_name", "business_type", "contact_name", "contact_email", "appointment_id", "meet_room_id", "engine",
   "current_profile_version_id", "current_audit_version_id", "current_proposal_version_id",
   "authorization_approval_id", "delivery_approval_id", "share_link_id", "customer_id", "delivery_project_id",
-  "onboarding_status", "is_fixture", "row_version", "created_by", "created_at", "updated_at", "closed_at", "closed_reason",
+  "onboarding_status", "call_started_at", "call_ended_at", "is_fixture", "row_version", "created_by", "created_at", "updated_at", "closed_at", "closed_reason",
 ].join(", ");
 
 export function requireTenant(tenantId: string): string {
@@ -142,6 +145,8 @@ export function mapEngagement(r: Row): Engagement {
     customer_id: text(r.customer_id),
     delivery_project_id: text(r.delivery_project_id),
     onboarding_status: isOneOf(ONBOARDING_STATUSES, onb) ? onb : "not_started",
+    call_started_at: text(r.call_started_at),
+    call_ended_at: text(r.call_ended_at),
     is_fixture: int(r.is_fixture) === 1,
     row_version: int(r.row_version, 1),
     created_by: text(r.created_by),
@@ -368,13 +373,15 @@ const PATCHABLE = new Set([
   "appointment_id", "meet_room_id", "engine", "current_profile_version_id", "current_audit_version_id",
   "current_proposal_version_id", "authorization_approval_id", "delivery_approval_id", "share_link_id",
   "customer_id", "delivery_project_id", "onboarding_status", "closed_at", "closed_reason",
+  "call_started_at", "call_ended_at",
 ]);
 
 export type EngagementPatch = Partial<Record<
   | "health" | "health_reason" | "payment_status" | "business_name" | "business_type" | "contact_name" | "contact_email"
   | "appointment_id" | "meet_room_id" | "engine" | "current_profile_version_id" | "current_audit_version_id"
   | "current_proposal_version_id" | "authorization_approval_id" | "delivery_approval_id" | "share_link_id"
-  | "customer_id" | "delivery_project_id" | "onboarding_status" | "closed_at" | "closed_reason",
+  | "customer_id" | "delivery_project_id" | "onboarding_status" | "closed_at" | "closed_reason"
+  | "call_started_at" | "call_ended_at",
   string | null
 >>;
 
@@ -390,6 +397,8 @@ export function engagementUpdateStatement(
   patch: EngagementPatch,
   at: string,
   stage?: AiAuditStage,
+  /** Write only while the engagement is in one of these stages (a check that cannot go stale between read and write). */
+  onlyInStages?: readonly AiAuditStage[],
 ): InStatement {
   const sets: string[] = [];
   const args: Array<string | number | null> = [];
@@ -404,9 +413,10 @@ export function engagementUpdateStatement(
   }
   sets.push("row_version = row_version + 1", "updated_at = ?");
   args.push(at);
+  const inStages = onlyInStages?.length ? ` AND stage IN (${onlyInStages.map(() => "?").join(", ")})` : "";
   return {
-    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?`,
-    args: [...args, tenantId, id, expectedRowVersion],
+    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?${inStages}`,
+    args: [...args, tenantId, id, expectedRowVersion, ...(onlyInStages ?? [])],
   };
 }
 
@@ -584,9 +594,14 @@ export async function saveSettings(
 
 /** True when the ai_audit tables exist (the migration has been applied). */
 export async function aiAuditTablesInstalled(db: Client): Promise<boolean> {
+  // bravo__237, 238 and 239 must all be in: this code reads 239's two tables
+  // and the two columns it adds to the engagement (review of phase 2, F6). A
+  // column added by ALTER TABLE shows in the table's stored CREATE statement.
   const rs = await db.execute({
-    sql: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links')",
+    sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links', 'ai_audit_transcripts', 'ai_audit_call_notes')",
     args: [],
   });
-  return int(rs.rows[0]?.n) === 2;
+  if (rs.rows.length !== 4) return false;
+  const engagements = String(rs.rows.find((r) => String(r.name) === "ai_audit_engagements")?.sql ?? "");
+  return /\bcall_started_at\b/.test(engagements) && /\bcall_ended_at\b/.test(engagements);
 }

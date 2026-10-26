@@ -26,6 +26,7 @@ import { profileFieldDef, type ProfileFieldInput, type ProfileValue } from "@/li
 import { confirmedCatalogueItem } from "@/lib/ai-audit/catalogue-store";
 import {
   EVIDENCE_LABELS,
+  PROFILE_EDIT_STAGES,
   VERSION_STATUSES,
   isOneOf,
   type EvidenceLabel,
@@ -143,12 +144,27 @@ export async function listProfileFields(db: Client, tenantId: string, versionId:
   return rs.rows.map(mapProfileField);
 }
 
-/** The hash Gate 1 binds to: every field's key, value, label and source, in key order. */
+/**
+ * The hash Gate 1 binds to: every field's key, value, label and source, its
+ * quote from the call, and whether CC corrected it, in key order (plain
+ * code-unit order, the same on every machine). Everything CC sees on a field
+ * is in it (review of phase 2, F10).
+ */
 export function profileHashOf(fields: ProfileField[]): string {
   return contentHash(
     fields
-      .map((f) => ({ key: f.field_key, value: f.value, label: f.label, source_type: f.source_type, source_ref: f.source_ref, verified_note: f.verified_note }))
-      .sort((a, b) => a.key.localeCompare(b.key)),
+      .map((f) => ({
+        key: f.field_key,
+        value: f.value,
+        label: f.label,
+        source_type: f.source_type,
+        source_ref: f.source_ref,
+        verified_note: f.verified_note,
+        evidence_quote: f.evidence_quote ?? null,
+        owner_corrected: !!f.owner_corrected,
+        corrected_from: f.corrected_from ?? null,
+      }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
   );
 }
 
@@ -185,7 +201,11 @@ export async function ensureDraftProfile(db: Client, tenantId: string, engagemen
       });
     }
     stmts.push(eventStatement({ tenantId: t, engagementId, event: "profile_draft_created", actor, at, refType: "profile_version", refId: id, meta: { version_no: no } }));
-    const ok = await casWrite(db, engagementUpdateStatement(t, engagementId, engagement.row_version, { current_profile_version_id: id }, at), stmts);
+    // Only while the engagement is still before Gate 1, checked by the write
+    // itself: an edit that started before CC authorized must not open a draft
+    // behind the profile he just froze (review of phase 2, F3).
+    if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) throw new Error("ai-audit.versions: the profile is frozen (authorized)");
+    const ok = await casWrite(db, engagementUpdateStatement(t, engagementId, engagement.row_version, { current_profile_version_id: id }, at, undefined, PROFILE_EDIT_STAGES), stmts);
     if (ok) {
       const after = await getEngagement(db, t, engagementId);
       const version = await getProfileVersion(db, t, id);
@@ -195,6 +215,17 @@ export async function ensureDraftProfile(db: Client, tenantId: string, engagemen
   throw new Error("ai-audit.versions: could not open a draft profile (concurrent edits)");
 }
 
+/**
+ * After Gate 1 the profile is what CC authorized: no edit may open a new draft
+ * behind it. To change it, move the engagement back to Transcript Awaiting
+ * Approval and authorize again.
+ */
+async function assertProfileEditable(db: Client, tenantId: string, engagementId: string): Promise<void> {
+  const engagement = await getEngagement(db, tenantId, engagementId);
+  if (!engagement) throw new Error("ai-audit.versions: engagement not found");
+  if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) throw new Error("ai-audit.versions: the profile is frozen (authorized)");
+}
+
 /** Save one profile field on the engagement's draft. CC's edit of an extracted value is recorded as a correction. */
 export async function saveProfileField(
   db: Client,
@@ -202,6 +233,7 @@ export async function saveProfileField(
 ): Promise<ProfileField> {
   const t = requireTenant(input.tenantId);
   if (!profileFieldDef(input.field.field_key)) throw new Error("ai-audit.versions: unknown profile field");
+  await assertProfileEditable(db, t, input.engagementId);
   const { version } = await ensureDraftProfile(db, t, input.engagementId, input.actor, input.now);
   const at = input.now.toISOString();
   const existing = (
@@ -251,6 +283,7 @@ export async function saveProfileField(
 
 export async function deleteProfileField(db: Client, input: { tenantId: string; engagementId: string; fieldKey: string; actor: Actor; now: Date }): Promise<boolean> {
   const t = requireTenant(input.tenantId);
+  await assertProfileEditable(db, t, input.engagementId);
   const { version } = await ensureDraftProfile(db, t, input.engagementId, input.actor, input.now);
   const at = input.now.toISOString();
   const results = await db.batch(

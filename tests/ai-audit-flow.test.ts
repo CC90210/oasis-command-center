@@ -160,7 +160,7 @@ function fakeStripe() {
 async function main() {
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
   await seedLead(db, LEAD, "qualified", "owner@fixture.test");
   await seedLead(db, LEAD_B, "qualified", "second@fixture.test");
   await seedLead(db, LEAD_C, "qualified", "third@fixture.test");
@@ -182,6 +182,7 @@ async function main() {
   const execute = await import("../lib/os/approvals/execute");
   const executors = await import("../lib/os/approvals/executors");
   const approvalsStore = await import("../lib/os/approvals/store");
+  const authorize = await import("../lib/ai-audit/authorize");
 
   const cc = { type: "user" as const, id: USERS.cc.id };
   let engagementId = "";
@@ -317,8 +318,20 @@ async function main() {
     let e = (await store.getEngagement(db, OASIS, engagementId))!;
     const early = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
     assert.equal(early.ok, false, "call_scheduled is too early");
-    for (const to of ["call_completed", "transcript_review"] as const) assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to, actor: cc, now: NOW() })).ok);
+    assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to: "call_completed", actor: cc, now: NOW() })).ok);
+    // Gate 1 (phase 2): the owner authorizes the profile; only then is submission possible.
+    const asked = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId, actor: cc, now: NOW(), engine: "none" });
+    assert.ok(asked.ok && asked.created, !asked.ok ? asked.error : "");
     e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "transcript_review");
+    const notYet = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+    assert.equal(notYet.ok, false, "no submission before Gate 1");
+    const authId = asked.ok ? asked.approvalId : "";
+    await db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), authId] });
+    const authed = await execute.executeApproval(db, { tenantId: OASIS, approvalId: authId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, executors.defaultExecutorDeps() as never);
+    assert.equal(authed.ok && (authed.approval.execution_result as { outcome?: string } | null)?.outcome, "authorized");
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "generating");
     const r = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
     assert.ok(r.ok, !r.ok ? `${r.error} ${(r.problems ?? []).join("; ")}` : "");
     assert.equal(r.ok && r.audit.status, "awaiting_approval");

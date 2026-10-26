@@ -18,6 +18,7 @@ import {
   BUSINESS_TYPES,
   BUSINESS_TYPE_LABELS,
   MANUAL_STAGE_TARGETS,
+  PROFILE_EDIT_STAGES,
   STAGE_MOVES,
   type AiAuditStage,
   type BusinessType,
@@ -26,12 +27,14 @@ import { formatMoney } from "@/lib/ai-audit/catalogue";
 import { ProfileEditor } from "./ProfileEditor";
 import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
+import { DiscoveryPanel } from "./DiscoveryPanel";
 import { describeError, postAction } from "./api";
 
-type Tab = "overview" | "profile" | "audit" | "proposal" | "delivery" | "history";
+type Tab = "overview" | "call" | "profile" | "audit" | "proposal" | "delivery" | "history";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "overview", label: "Overview" },
+  { key: "call", label: "Call and transcripts" },
   { key: "profile", label: "Discovery profile" },
   { key: "audit", label: "Audit" },
   { key: "proposal", label: "Proposal" },
@@ -78,7 +81,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
   const auditEditable = !view.audit || view.audit.status === "draft";
   const proposalEditable = !view.proposal || view.proposal.status === "draft";
   const submitted = view.audit?.status === "awaiting_approval";
-  const canSubmit = ["transcript_review", "generating", "final_review"].includes(e.stage) && view.audit?.status === "draft" && view.proposal?.status === "draft";
+  // Submission comes after Gate 1: only an authorized engagement reaches generating.
+  const canSubmit = ["generating", "final_review"].includes(e.stage) && view.audit?.status === "draft" && view.proposal?.status === "draft";
   const cur = view.proposal?.currency ?? view.settings.default_currency;
 
   return (
@@ -242,10 +246,16 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
         </div>
       ) : null}
 
+      {/* Kept mounted, hidden, so pasted text and the consent answers survive a switch of tab. */}
+      <div hidden={tab !== "call"}>
+        <DiscoveryPanel view={view} isOwner={isOwner} />
+      </div>
+
       {/* The three editors stay mounted, hidden, so a draft survives a switch of tab.
           Each re-seeds from the server when its saved content changes (the key). */}
       <div hidden={tab !== "profile"}>
-        <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={view.profile?.version.status === "frozen"} />
+        {/* Editable until Gate 1; an edit after a frozen version opens a new draft (versions.ts). */}
+        <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={!PROFILE_EDIT_STAGES.includes(e.stage)} />
       </div>
 
       <div hidden={tab !== "audit"}>

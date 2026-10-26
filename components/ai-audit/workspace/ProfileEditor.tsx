@@ -113,7 +113,7 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
           <div className="mt-1 text-fg-muted">{missing.map((m) => m.label).join(", ")}.</div>
         </div>
       ) : null}
-      {frozen ? <p className="text-sm text-fg-muted">This profile version is frozen (authorized). Editing opens a new version.</p> : null}
+      {frozen ? <p className="text-sm text-fg-muted">This profile is authorized (Gate 1), so it cannot change. To correct it, move the engagement back to Transcript Awaiting Approval and authorize it again.</p> : null}
       {error ? <p className="text-sm text-status-hot">{error}</p> : null}
       {PROFILE_GROUPS.map((g) => (
         <section key={g} className="rounded-xl border border-hairline bg-bg-panel">
@@ -142,7 +142,7 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
                         <div className="mt-0.5 text-sm text-fg-dim">Not captured</div>
                       )}
                     </div>
-                    {!editing ? (
+                    {!editing && !frozen ? (
                       <div className="flex gap-2">
                         <button type="button" className="btn-secondary" onClick={() => open(def)} disabled={busy}>
                           {f ? "Edit" : "Add"}

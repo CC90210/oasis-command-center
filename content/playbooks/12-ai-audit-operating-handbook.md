@@ -13,7 +13,7 @@ updated: 2026-10-25
 
 1. A lead asks for the free audit, or you start one from their lead page (**Start AI audit**).
 2. You run the discovery call and capture what the client tells you.
-3. **Gate 1: you authorize** the client's information for processing. Nothing is researched or written before this. (The automated research and writing arrive in later phases. Today you write the profile and the audit yourself.)
+3. **Gate 1: you authorize** the client's information for processing: an approval card, in Needs you, that names the exact profile, transcripts and call notes. Nothing is researched or written, and nothing can be submitted, before you approve it. (The automated research and writing arrive in later phases. Today you write the audit yourself.)
 4. The audit is drafted: nine sections, every finding labelled.
 5. You price it from the confirmed catalogue, or type a price for custom work.
 6. You submit it. The Mac prints the PDF.
@@ -52,6 +52,8 @@ Decision point: if the business is not a fit, mark the engagement **declined** w
 
 ## During the call
 
+Run it from the **live-call screen** (Call and transcripts, Open the live-call screen): the questions in order, notes that save as you type, a box for each figure, and what the audit still needs. The Discovery Call Handbook explains every question.
+
 - Get consent to record, and say plainly that the call is analysed with AI services that work for OASIS.
 - Ask about the business before any technology. AI comes in only after you understand their process.
 - When they give a vague answer ("a lot of leads"), ask for a range and how they know.
@@ -60,9 +62,11 @@ Decision point: if the business is not a fit, mark the engagement **declined** w
 
 ## Right after the call
 
-- Move the engagement to **Discovery Call Completed**.
-- Open **Discovery profile** and enter each fact with its label and where it came from. Mark something Verified only if you saw the evidence, and say what it was.
-- Move to **Transcript Awaiting Approval** when the profile is complete. This is your Gate 1 moment: you are confirming the client's information may be used for the audit.
+- Open **Call and transcripts**. Paste or upload the transcript (.txt, .vtt or .srt), tick that the client agreed to the recording, and say whether they agreed to AI analysis. Answer both again for each transcript. For a call recorded in Oasis Meet, open the meeting's Transcript in Meet, press Copy transcript, and paste it here; attaching Meet calls by themselves comes in a later phase.
+- What looks like a password, a PIN, a card or account number or a key is taken out before the transcript is stored, and the screen says how many. No check catches every way a person can say one, so press **View lines** and read what is stored before you ask for authorization. Only you (the workspace owner) can delete a transcript; after Gate 1, deleting one cancels the authorization.
+- Open **Discovery profile** and check each fact: its label and where it came from. Mark something Verified only if you saw the evidence, and say what it was. Figures you typed on the live-call screen are already there.
+- Press **Ask for authorization**. The card lists what will be frozen, who processes it (Claude on your Mac, the cloud account, or no AI if the client said no), and what is still missing. Approve it in **Needs you**. Only the owner can.
+- Any change to the profile or the transcripts afterwards withdraws the card; ask again. Once approved, the profile is frozen. To correct it, move the engagement back to **Transcript Awaiting Approval** and authorize again.
 
 ## Writing the audit
 
