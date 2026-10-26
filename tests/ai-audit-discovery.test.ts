@@ -540,6 +540,28 @@ async function main() {
     assert.equal(await store.deliveryInFlight(db, OASIS, eid, later), false);
     assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: later }), { ok: true });
   });
+  await check("a Gate 1 card filed but never linked (the write after it was interrupted) is linked by the next request, not filed again (Codex review of phase 2, third pass)", async () => {
+    const { eid } = await freshEngagement("Unlinked Card Co");
+    const first = await fileCard(eid);
+    // New information, so the next request files a revision; the write that points the engagement at it fails once.
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "business.team_size", value: 7, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    await db.execute("CREATE TRIGGER fail_card_link BEFORE UPDATE OF authorization_approval_id ON ai_audit_engagements BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
+    let threw = false;
+    try {
+      await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    } catch {
+      threw = true;
+    } finally {
+      await db.execute("DROP TRIGGER fail_card_link");
+    }
+    assert.ok(threw, "the link write failed");
+    assert.equal((await engagementOf(eid)).authorization_approval_id, first, "still pointing at the first card");
+    const again = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    assert.ok(again.ok, !again.ok ? again.error : "");
+    assert.ok(again.ok && !again.created && again.approvalId !== first, "the card already filed is the one handed back");
+    assert.equal((await engagementOf(eid)).authorization_approval_id, again.ok ? again.approvalId : "", "and the engagement points at it now");
+    assert.equal(resultOf(await approveAs(again.ok ? again.approvalId : "", USERS.cc))?.outcome, "authorized", "and it can be approved");
+  });
   await check("a rename that read the engagement before Gate 1 cannot land after it; anything changed behind an authorization voids it (review of phase 2, second pass)", async () => {
     const { eid } = await freshEngagement("Late Rename Co");
     assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");

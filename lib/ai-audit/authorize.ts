@@ -227,6 +227,20 @@ export async function requestAuthorization(
     }
     if (prior && ["pending", "sent_back", "cancelled"].includes(prior.status)) supersedesId = prior.id;
   }
+  // A card for this same information that was filed but never linked (the pointer write after it was
+  // interrupted) is linked now, not filed again: a second filing found the first card already revised
+  // and failed on every try after (Codex review of phase 2, third pass).
+  const orphan = (
+    await db.execute({
+      sql: `SELECT id FROM approvals WHERE tenant_id = ? AND action_kind = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > ?)
+              AND (idempotency_key = ? OR idempotency_key LIKE ?) ORDER BY created_at DESC LIMIT 1`,
+      args: [t, AUTHORIZE_AI_AUDIT_KIND, input.now.toISOString(), baseKey, `${baseKey}:retry-%`],
+    })
+  ).rows[0];
+  if (orphan && String(orphan.id) !== first.authorization_approval_id) {
+    const linked = await linkAuthorizationCard(db, t, input.engagementId, String(orphan.id), input.actor, input.now, payload.engine);
+    return linked.ok ? { ok: true, approvalId: String(orphan.id), created: false } : linked;
+  }
   // A card for this same information that ended (failed, expired, sent back,
   // cancelled) is never handed back as if new: the fresh one gets its own key
   // (the pattern requestDeliveryApproval uses; review of phase 2, F1).
@@ -234,62 +248,85 @@ export async function requestAuthorization(
     (await db.execute({ sql: "SELECT COUNT(1) AS n FROM approvals WHERE tenant_id = ? AND (idempotency_key = ? OR idempotency_key LIKE ?)", args: [t, baseKey, `${baseKey}:retry-%`] })).rows[0]?.n,
   );
   const idempotencyKey = tries ? `${baseKey}:retry-${tries}` : baseKey;
-  const created = await createApproval(
-    db,
-    {
-      tenantId: t,
-      departmentKey: null,
-      requestedBy: { type: "human", id: input.actor.id },
-      actionKind: AUTHORIZE_AI_AUDIT_KIND,
-      title: `Authorize ${shortName(payload.business_name, "the business")}'s information for their Free AI Audit`,
-      targetRef: `lead:${payload.lead_id}`,
-      payload: payload as unknown as Record<string, unknown>,
-      riskLevel: "data",
-      idempotencyKey,
-      expiresAt: new Date(input.now.getTime() + AUTHORIZATION_TTL_DAYS * 86_400_000).toISOString(),
-      ...(supersedesId ? { supersedesId } : {}),
-    },
-    input.now,
-  );
+  const file = (supersedes: string | undefined) =>
+    createApproval(
+      db,
+      {
+        tenantId: t,
+        departmentKey: null,
+        requestedBy: { type: "human", id: input.actor.id },
+        actionKind: AUTHORIZE_AI_AUDIT_KIND,
+        title: `Authorize ${shortName(payload.business_name, "the business")}'s information for their Free AI Audit`,
+        targetRef: `lead:${payload.lead_id}`,
+        payload: payload as unknown as Record<string, unknown>,
+        riskLevel: "data",
+        idempotencyKey,
+        expiresAt: new Date(input.now.getTime() + AUTHORIZATION_TTL_DAYS * 86_400_000).toISOString(),
+        ...(supersedes ? { supersedesId: supersedes } : {}),
+      },
+      input.now,
+    );
+  let created = await file(supersedesId);
+  if (!created.ok && created.error === "already_revised" && "successorId" in created && created.successorId) {
+    // The linked card was already replaced by one that never got linked, for other information: replace that one instead.
+    const successor = await getApprovalInTenant(db, t, String(created.successorId));
+    if (successor && effectiveStatus(successor, input.now.toISOString()) === "pending") created = await file(successor.id);
+  }
   if (!created.ok) return { ok: false, error: created.error };
+  const linked = await linkAuthorizationCard(db, t, input.engagementId, created.approval.id, input.actor, input.now, payload.engine);
+  if (!linked.ok) return linked;
+  return { ok: true, approvalId: created.approval.id, created: created.created };
+}
 
-  // Point the engagement at the card, moving Discovery Call Completed on to
-  // Transcript Awaiting Approval. A concurrent write only means re-reading.
+/**
+ * Point the engagement at a Gate 1 card, moving Discovery Call Completed on to
+ * Transcript Awaiting Approval. A concurrent write only means re-reading; a
+ * card left unlinked is picked up by the next request (the orphan check above).
+ */
+async function linkAuthorizationCard(
+  db: Client,
+  t: string,
+  engagementId: string,
+  cardId: string,
+  actor: Actor,
+  now: Date,
+  engine: AiEngine,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const e = await getEngagement(db, t, input.engagementId);
+    const e = await getEngagement(db, t, engagementId);
     if (!e) return { ok: false, error: "not_found" };
-    if (e.authorization_approval_id === created.approval.id && e.stage === "transcript_review") break;
+    if (e.authorization_approval_id === cardId && e.stage === "transcript_review") return { ok: true };
     if (e.stage === "call_completed") {
       const moved = await advanceEngagement(db, {
         tenantId: t,
         engagementId: e.id,
         to: "transcript_review",
-        actor: input.actor,
-        now: input.now,
+        actor,
+        now,
         expectedRowVersion: e.row_version,
-        patch: { authorization_approval_id: created.approval.id },
+        patch: { authorization_approval_id: cardId },
         event: "authorization_requested",
-        meta: { approval_id: created.approval.id, engine: payload.engine },
+        meta: { approval_id: cardId, engine },
       });
-      if (moved.ok) break;
+      if (moved.ok) return { ok: true };
       continue;
     }
     if (e.stage !== "transcript_review") return { ok: false, error: "stage_moved" };
-    const at = input.now.toISOString();
+    const at = now.toISOString();
     const tx = await db.transaction("write");
     try {
-      const r = await tx.execute(engagementUpdateStatement(t, e.id, e.row_version, { authorization_approval_id: created.approval.id }, at));
+      const r = await tx.execute(engagementUpdateStatement(t, e.id, e.row_version, { authorization_approval_id: cardId }, at));
       if (r.rowsAffected === 1) {
-        await tx.execute(eventStatement({ tenantId: t, engagementId: e.id, event: "authorization_requested", actor: input.actor, at, refType: "approval", refId: created.approval.id, meta: { engine: payload.engine } }));
+        await tx.execute(eventStatement({ tenantId: t, engagementId: e.id, event: "authorization_requested", actor, at, refType: "approval", refId: cardId, meta: { engine } }));
         await tx.commit();
-        break;
+        return { ok: true };
       }
       await tx.rollback();
     } finally {
       tx.close();
     }
   }
-  return { ok: true, approvalId: created.approval.id, created: created.created };
+  return { ok: true };
 }
 
 /** Withdraw a pending Gate 1 outright (the engagement moved back, or the card no longer describes anything). The trail says so. */

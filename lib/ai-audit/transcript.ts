@@ -774,6 +774,18 @@ const CREDENTIAL_LABEL = /\b(?:pass(?:word|code|phrase)?s?|passwd|pwd|pw|pins?|c
 const ROLE = /^(?:speaker|interviewer|interviewee|host|guest|client|customer|caller|agent|rep|me|you|unknown)(?:\s+\d+)?$/i;
 
 /**
+ * Does this text hold a label the scrub knows ("security answer", "routing number", "IBAN")? Such a
+ * label before a colon is the line's own words, never a speaker: "Security Answer: Anderson" split
+ * as speaker and text kept "Anderson" whole (Codex review of phase 2, third pass).
+ */
+function credentialLabelIn(s: string): boolean {
+  LABEL.lastIndex = 0;
+  const hit = LABEL.test(s);
+  LABEL.lastIndex = 0;
+  return hit;
+}
+
+/**
  * A speaker's name before a colon: one to four capitalised words ("Dana Lee",
  * "Dr. Smith", "Speaker 1", "CC"), a name with particles ("van der Berg"),
  * "Q" or "A" in interview notes, or a role. Lower case ("dana", "cc") only
@@ -791,7 +803,7 @@ export function speakerLabel(raw: string, opts: { afterTime?: boolean; repeated?
   if (words.length > 4) return null;
   const bare = (w: string) => w.toLowerCase().replace(/[.']/g, "");
   if (NOT_SPEAKERS.has(bare(s)) || NOT_SPEAKERS.has(bare(words[0]))) return null;
-  if (CREDENTIAL_LABEL.test(s)) return null;
+  if (CREDENTIAL_LABEL.test(s) || credentialLabelIn(s)) return null;
   if (ROLE.test(s)) return s.slice(0, SPEAKER_MAX_CHARS);
   const capitalised = (w: string) => /^[\p{Lu}\d(]/u.test(w);
   const particle = (w: string) => PARTICLES.has(w.toLowerCase());
@@ -1041,8 +1053,11 @@ function splitLong(line: RawLine): RawLine[] {
   return parts;
 }
 
-function finish(format: TranscriptFormat, raw: RawLine[]): { ok: true; value: ParsedTranscript } | { ok: false; error: ParseError } {
-  if (raw.length > TRANSCRIPT_MAX_LINES) return { ok: false, error: "too_many_lines" };
+function finish(format: TranscriptFormat, given: RawLine[]): { ok: true; value: ParsedTranscript } | { ok: false; error: ParseError } {
+  if (given.length > TRANSCRIPT_MAX_LINES) return { ok: false, error: "too_many_lines" };
+  // A "speaker" that is a credential's label (a caption's <v Security Answer>, a Meet name, an export) is put
+  // back in front of its words, so the scrub reads the label and its value together.
+  const raw = given.map((r) => (r.speaker && credentialLabelIn(r.speaker) ? { ...r, speaker: null, text: `${r.speaker}: ${r.text}` } : r));
   // Scrub before anything else, whole lines in order (a label at one line's end
   // reaches the next), and before long lines are cut, so no cut separates a label from its value.
   const scrubbed = scrubTexts(raw.map((r) => r.text));
