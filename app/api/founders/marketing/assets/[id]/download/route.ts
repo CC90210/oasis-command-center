@@ -58,7 +58,10 @@ export async function GET(req: Request, ctx: Ctx) {
     .eq("tenant_id", founder.tenantId)
     .eq("id", id)
     .maybeSingle();
-  if (asset.error) return failed(req, "read_failed", 500);
+  if (asset.error) {
+    console.error("[founders:download] asset read failed", { assetId: id, error: asset.error.message });
+    return failed(req, "read_failed", 500);
+  }
   // Tenant-scoped, any brand: saving a file is not publishing it. The Content Tools
   // video extractor writes its downloads under the `downloads` brand (rights unknown,
   // never postable from OASIS's accounts: the publish route keeps its own oasis-ai
@@ -70,7 +73,10 @@ export async function GET(req: Request, ctx: Ctx) {
     .select("kind, storage_bucket, storage_path")
     .eq("tenant_id", founder.tenantId)
     .eq("asset_id", id);
-  if (media.error) return failed(req, "read_failed", 500);
+  if (media.error) {
+    console.error("[founders:download] media read failed", { assetId: id, error: media.error.message });
+    return failed(req, "read_failed", 500);
+  }
 
   const pick = pickDownloadMedia((media.data || []) as DownloadMediaRow[], asset.data.media_urls, slide);
   if (!pick) return failed(req, slide == null ? "no_media_attached" : "no_such_slide", 404);

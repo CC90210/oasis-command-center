@@ -124,6 +124,9 @@ async function main(): Promise<void> {
     assert.match(all, /Open Training/);
     assert.doesNotMatch(all, /See all on Training/, "no promise of a full list the Training page does not keep");
     assert.doesNotMatch(draw({ ...base, total: 10, indexed: 10 }, many(10, "all"), null), /Showing the newest/, "everything shown: no footer");
+    // The page's read size never exceeds what the reader returns, or a clamped read reads as a total.
+    const { TRAINING_ROWS_MAX } = await import("../lib/os/training-notes");
+    assert.ok(LEARNED_NOTES_READ <= TRAINING_ROWS_MAX, `LEARNED_NOTES_READ (${LEARNED_NOTES_READ}) must not exceed trainingRowsFor's cap (${TRAINING_ROWS_MAX})`);
     console.log("  ok - counts never present a read's cap as a total, and the footer shows whenever the list is partial");
   }
 
