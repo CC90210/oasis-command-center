@@ -104,3 +104,62 @@ export function sameAgentAccess(a: AgentAccess, b: AgentAccess): boolean {
   if (a === "all" || b === "all") return a === b;
   return a.length === b.length && a.every((k) => b.includes(k));
 }
+
+/**
+ * A picked list that names every department is "All agents": an owner who
+ * unticks one and ticks it back expects to be where they started, not on a
+ * list that quietly leaves out agents with no department.
+ */
+export function collapseToAll(departments: readonly DepartmentKey[]): AgentAccess {
+  const ordered = orderedDepartments(departments);
+  return ordered.length === AGENT_CHOICES.length ? "all" : ordered;
+}
+
+/**
+ * The agent tools that use each app's credentials, by tool name. An app's
+ * agent choice decides which agents are offered these tools
+ * (lib/cloud-tool-runner.ts); tests/agent-access.test.ts counts the credential
+ * reads in the runner to keep this list whole. send_sms texts from the
+ * operator's computer, which sends OASIS's texts through Quo (CEO-Agent
+ * send_gateway). TextTorrent and Kixie are SunBiz's and have no card.
+ */
+export const APP_TOOLS: Readonly<Record<string, string>> = {
+  send_sms: "quo",
+  kixie_call: "kixie",
+  kixie_send_sms: "kixie",
+  texttorrent_send: "texttorrent",
+  texttorrent_blast: "texttorrent",
+  texttorrent_inbox_reply: "texttorrent",
+  texttorrent_create_list: "texttorrent",
+  texttorrent_add_contact: "texttorrent",
+  texttorrent_block: "texttorrent",
+  texttorrent_unblock: "texttorrent",
+};
+
+/** The app a tool uses, or null. Own keys only: a tool named "constructor" is no app's. */
+export function appForTool(tool: string): string | null {
+  return Object.prototype.hasOwnProperty.call(APP_TOOLS, tool) ? APP_TOOLS[tool] : null;
+}
+
+/** What an app's agent tools do, in a few words, for its card; null when no agent tool uses the app. */
+const APP_TOOL_WORDS: Readonly<Record<string, string>> = {
+  quo: "texting a lead from your computer",
+  kixie: "Kixie calls and texts",
+  texttorrent: "TextTorrent texts and lists",
+};
+export function agentToolsOf(slug: string): string | null {
+  return Object.prototype.hasOwnProperty.call(APP_TOOL_WORDS, slug) ? APP_TOOL_WORDS[slug] : null;
+}
+
+/** Why an agent may not use something, as the code a caller acts on. */
+export type RefusalCode = "not_given" | "unreadable" | "read_failed";
+
+/**
+ * The sentence an agent (and the person reading its answer) gets when it is
+ * refused `subject`: what happened and where an owner fixes it.
+ */
+export function refusalSentence(code: RefusalCode, subject: string, access: AgentAccess | null, where: string): string {
+  if (code === "not_given") return `${subject} is set for ${agentAccessLabel(access ?? [])}. An owner can give this agent access in ${where}.`;
+  if (code === "unreadable") return `${subject}'s agent choice could not be read, so no agent may use it until an owner saves it again in ${where}.`;
+  return `Could not check which agents may use ${subject} right now. Try again shortly.`;
+}

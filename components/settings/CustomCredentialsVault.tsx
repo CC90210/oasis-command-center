@@ -47,6 +47,8 @@ type CustomCredentialRow = {
   /** Which agents may use it (CC, 2026-10-26); null when the choices could not be read. */
   agents: AgentAccess | null;
   agents_saved: boolean;
+  /** Its saved choice cannot be read: no agent may use it until it is saved again. */
+  agents_unreadable?: boolean;
 };
 
 type UpsertResult = {
@@ -65,12 +67,16 @@ export function CustomCredentialsVault() {
   const [singleKey, setSingleKey] = useState("");
   const [singleValue, setSingleValue] = useState("");
   const [singleAgents, setSingleAgents] = useState<AgentAccess>("all");
+  // Agents are sent only when the picker was touched: re-saving a key's value
+  // must not widen a choice the owner made earlier (review of OCC #743).
+  const [singleAgentsTouched, setSingleAgentsTouched] = useState(false);
   const [singleBusy, setSingleBusy] = useState(false);
 
   // Bulk-paste form
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkAgents, setBulkAgents] = useState<AgentAccess>("all");
+  const [bulkAgentsTouched, setBulkAgentsTouched] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkResults, setBulkResults] = useState<UpsertResult[] | null>(null);
 
@@ -119,7 +125,7 @@ export function CustomCredentialsVault() {
       const r = await fetch("/api/credentials/custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: singleKey, value: singleValue, agents: singleAgents }),
+        body: JSON.stringify({ key: singleKey, value: singleValue, ...(singleAgentsTouched ? { agents: singleAgents } : {}) }),
       });
       const j = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -134,6 +140,8 @@ export function CustomCredentialsVault() {
       setMsg(`Saved ${singleKey.toUpperCase()}.`);
       setSingleKey("");
       setSingleValue("");
+      setSingleAgents("all");
+      setSingleAgentsTouched(false);
       await fetchRows();
     } finally {
       setSingleBusy(false);
@@ -150,7 +158,7 @@ export function CustomCredentialsVault() {
       const r = await fetch("/api/credentials/custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dotenv: bulkText, agents: bulkAgents }),
+        body: JSON.stringify({ dotenv: bulkText, ...(bulkAgentsTouched ? { agents: bulkAgents } : {}) }),
       });
       const j = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -169,6 +177,8 @@ export function CustomCredentialsVault() {
       if (failed === 0 && saved > 0) {
         setMsg(`Saved ${saved} credential${saved === 1 ? "" : "s"}.`);
         setBulkText("");
+        setBulkAgents("all");
+        setBulkAgentsTouched(false);
       } else if (saved > 0) {
         setMsg(`Saved ${saved}, ${failed} failed — see details below.`);
       } else {
@@ -190,12 +200,12 @@ export function CustomCredentialsVault() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key }),
       });
-      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string; warning?: string };
       if (!j.ok) {
         setErr(j.error || `http_${r.status}`);
         return;
       }
-      setMsg(`Removed ${key}.`);
+      setMsg(j.warning ? `Removed ${key}. ${j.warning}` : `Removed ${key}.`);
       await fetchRows();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "delete_failed");
@@ -275,14 +285,19 @@ export function CustomCredentialsVault() {
                       value masked · updated {timeAgo(row.updated_at)}
                     </div>
                     <div className="text-[11px] text-fg-muted mt-0.5" data-testid={`custom-key-agents-${row.key}`}>
-                      Used by: {row.agents === null ? "couldn't read" : agentAccessLabel(row.agents)}
+                      Used by:{" "}
+                      {row.agents_unreadable
+                        ? "no agent: its saved choice could not be read. Pick agents and save to fix it."
+                        : row.agents === null
+                          ? "couldn't read"
+                          : agentAccessLabel(row.agents)}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => (editingKey === row.key ? setEditingKey(null) : startEditingAgents(row))}
-                      disabled={row.agents === null}
+                      disabled={row.agents === null && !row.agents_unreadable}
                       className="text-[11px] text-fg-muted hover:text-fg px-2 py-1 rounded-md border border-bg-border disabled:opacity-50"
                       aria-expanded={editingKey === row.key}
                     >
@@ -380,7 +395,18 @@ export function CustomCredentialsVault() {
         </p>
         <div className="space-y-1.5">
           <div className="text-[11px] text-fg-muted">Which agents may use it</div>
-          <AgentPicker value={singleAgents} onChange={setSingleAgents} disabled={singleBusy} label="Agents that may use the new key" />
+          <AgentPicker
+            value={singleAgents}
+            onChange={(next) => {
+              setSingleAgents(next);
+              setSingleAgentsTouched(true);
+            }}
+            disabled={singleBusy}
+            label="Agents that may use the new key"
+          />
+          <p className="text-[10px] text-fg-dim">
+            A new key is for all agents unless you pick. Saving a new value for an existing key keeps its agents unless you change them here.
+          </p>
         </div>
       </form>
 
@@ -417,7 +443,15 @@ export function CustomCredentialsVault() {
             />
             <div className="space-y-1.5">
               <div className="text-[11px] text-fg-muted">Which agents may use every key in this paste</div>
-              <AgentPicker value={bulkAgents} onChange={setBulkAgents} disabled={bulkBusy} label="Agents that may use the pasted keys" />
+              <AgentPicker
+                value={bulkAgents}
+                onChange={(next) => {
+                  setBulkAgents(next);
+                  setBulkAgentsTouched(true);
+                }}
+                disabled={bulkBusy}
+                label="Agents that may use the pasted keys"
+              />
             </div>
             <div className="flex items-center gap-3">
               <button

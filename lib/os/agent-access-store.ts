@@ -9,9 +9,12 @@
  * Rows are tenant-scoped like every other credential row, and encrypted like
  * them (harmless for a list of department names).
  *
- * FAILS CLOSED. A choice that cannot be read is not replaced by the default:
- * the default can be wider than what the owner saved, so a read error answers
- * "not allowed" and says why.
+ * FAILS CLOSED, AND NARROWLY. A choice that cannot be read is never replaced
+ * by the default, which can be wider than what the owner saved: that key or
+ * app is refused to every agent until an owner saves it again, and the page
+ * lets them. One unreadable row does not shut every other key and app (review
+ * of OCC #743). A read that fails outright refuses everything this time, since
+ * nothing is known.
  */
 
 import "server-only";
@@ -21,13 +24,13 @@ import { departmentForAgent } from "@/lib/os/approvals/rules";
 import {
   CUSTOM_DEFAULT_ACCESS,
   accessAllows,
-  agentAccessLabel,
   connectorDefaultAccess,
   parseAgentAccess,
   sameAgentAccess,
   serializeAgentAccess,
   type AccessTarget,
   type AgentAccess,
+  type RefusalCode,
 } from "@/lib/os/agent-access";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -46,11 +49,14 @@ export function defaultAccess(target: AccessTarget): AgentAccess {
   return connectorDefaultAccess(CONNECTOR_CATALOG.find((d) => d.slug === target.slug) ?? null);
 }
 
-export type AccessOverrides = { ok: true; byField: ReadonlyMap<string, AgentAccess> } | { ok: false; error: string };
+export type AccessOverrides =
+  | { ok: true; byField: ReadonlyMap<string, AgentAccess>; unreadable: ReadonlySet<string> }
+  | { ok: false; error: string };
 
 /** Every saved choice for a workspace, by field. One read for a whole page or turn. */
 export async function readAgentAccessOverrides(tenantId: string): Promise<AccessOverrides> {
   if (!tenantId) return { ok: false, error: "missing_tenant" };
+  let rows: { field_key: string; encrypted_value: string }[];
   try {
     const r = await getServiceSupabase()
       .from("tenant_integration_credentials")
@@ -58,32 +64,49 @@ export async function readAgentAccessOverrides(tenantId: string): Promise<Access
       .eq("tenant_id", tenantId)
       .eq("service", AGENT_ACCESS_SERVICE);
     if (r.error) return { ok: false, error: r.error.message || "agent_access_read_failed" };
-    const byField = new Map<string, AgentAccess>();
-    for (const row of (r.data || []) as { field_key: string; encrypted_value: string }[]) {
-      const access = parseAgentAccess(decryptField(row.encrypted_value));
-      if (access === null) return { ok: false, error: `agent_access_unreadable:${row.field_key}` };
-      byField.set(row.field_key, access);
-    }
-    return { ok: true, byField };
+    rows = (r.data || []) as typeof rows;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "agent_access_read_failed" };
   }
+  const byField = new Map<string, AgentAccess>();
+  const unreadable = new Set<string>();
+  for (const row of rows) {
+    let access: AgentAccess | null = null;
+    try {
+      access = parseAgentAccess(decryptField(row.encrypted_value));
+    } catch {
+      access = null;
+    }
+    if (access === null) {
+      unreadable.add(row.field_key);
+      console.error("[agent-access] a saved agent choice could not be read; refused until saved again", { tenantId, field: row.field_key });
+    } else {
+      byField.set(row.field_key, access);
+    }
+  }
+  return { ok: true, byField, unreadable };
 }
 
-/** The choice in force for a target, given a workspace's saved overrides. */
-export function effectiveAccess(overrides: ReadonlyMap<string, AgentAccess>, target: AccessTarget): { access: AgentAccess; saved: boolean } {
-  const saved = overrides.get(accessField(target));
+/** The choice in force for a target: saved, the default, or null when the saved one cannot be read. */
+export function effectiveAccess(
+  overrides: { byField: ReadonlyMap<string, AgentAccess>; unreadable?: ReadonlySet<string> },
+  target: AccessTarget,
+): { access: AgentAccess | null; saved: boolean } {
+  const field = accessField(target);
+  if (overrides.unreadable?.has(field)) return { access: null, saved: true };
+  const saved = overrides.byField.get(field);
   return saved !== undefined ? { access: saved, saved: true } : { access: defaultAccess(target), saved: false };
 }
 
-export type AccessVerdict = { allowed: true } | { allowed: false; reason: string };
+export type AccessVerdict = { allowed: true } | { allowed: false; code: RefusalCode; access: AgentAccess | null };
 
-/** May the agent `agentKey` use the target? A read failure is "no", with the reason. */
+/** May the agent `agentKey` use the target? Anything unknown is "no", with the reason as a code. */
 export function judgeAccess(overrides: AccessOverrides, target: AccessTarget, agentKey: string | null | undefined): AccessVerdict {
-  if (!overrides.ok) return { allowed: false, reason: `could not check which agents may use this (${overrides.error})` };
-  const { access } = effectiveAccess(overrides.byField, target);
+  if (!overrides.ok) return { allowed: false, code: "read_failed", access: null };
+  const { access } = effectiveAccess(overrides, target);
+  if (access === null) return { allowed: false, code: "unreadable", access: null };
   if (accessAllows(access, departmentForAgent(agentKey))) return { allowed: true };
-  return { allowed: false, reason: `set for ${agentAccessLabel(access)}` };
+  return { allowed: false, code: "not_given", access };
 }
 
 export async function agentMayUse(tenantId: string, target: AccessTarget, agentKey: string | null | undefined): Promise<AccessVerdict> {
@@ -110,7 +133,7 @@ export async function saveAgentAccess(input: {
   return r.ok ? { ok: true } : { ok: false, error: r.error };
 }
 
-/** Back to the default (also how a deleted credential's choice goes with it). */
+/** Back to the default (also how a deleted credential's choice goes with it, and how an unreadable one is repaired). */
 export async function clearAgentAccess(input: { tenantId: string; target: AccessTarget }): Promise<{ ok: true } | { ok: false; error: string }> {
   return deleteTenantIntegrationValue({ tenantId: input.tenantId, service: AGENT_ACCESS_SERVICE, fieldKey: accessField(input.target) });
 }

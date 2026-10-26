@@ -7,20 +7,23 @@
  *
  * The suggestion is the catalog's "Used by" departments plus the Chief of
  * Staff (lib/os/agent-access.ts connectorDefaultAccess). An owner can change it
- * and put it back. An agent the app is not given is not offered the app's tools
- * (lib/cloud-tool-runner.ts TOOL_CONNECTOR). Someone who cannot manage the
- * workspace sees the agents without the controls.
+ * and put it back. An agent the app is not given is not offered the app's
+ * agent tools (APP_TOOLS); an app no agent tool uses yet says so, so the choice
+ * never claims to do more than it does (review of OCC #743). A saved choice
+ * that cannot be read is shown as such and can be saved again. Someone who
+ * cannot manage the workspace sees the suggestion, labelled as one.
  */
 
 import { useEffect, useState } from "react";
 import { AgentPicker } from "@/components/os/connections/AgentPicker";
-import { agentAccessLabel, connectorDefaultAccess, sameAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
+import { agentAccessLabel, agentToolsOf, connectorDefaultAccess, sameAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
 import type { DepartmentKey } from "@/lib/os/types";
 
-type Loaded = { access: AgentAccess; saved: boolean; suggested: AgentAccess };
+type Loaded = { access: AgentAccess | null; saved: boolean; suggested: AgentAccess; unreadable?: boolean };
 
 export function ConnectorAgentAccess({ slug, departments }: { slug: string; departments: readonly DepartmentKey[] }) {
   const suggested = connectorDefaultAccess({ departments });
+  const tools = agentToolsOf(slug);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const [draft, setDraft] = useState<AgentAccess>(suggested);
@@ -41,7 +44,10 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
         if (!r.ok || !j.ok || !mine) throw new Error("not_loaded");
         if (!live) return;
         setLoaded(mine);
-        setDraft(mine.access);
+        setDraft(mine.access ?? connectorDefaultAccess({ departments }));
+        if (mine.access === null) {
+          setNote({ tone: "bad", text: "The saved choice could not be read, so no agent gets this app's tools. Pick agents and save to fix it." });
+        }
       } catch {
         if (live) setNote({ tone: "bad", text: "Couldn't read which agents use this app. The suggestion is shown." });
       }
@@ -49,7 +55,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
     return () => {
       live = false;
     };
-  }, [slug]);
+    // `departments` is the card's catalog list: the same array for the life of the card.
+  }, [slug, departments]);
 
   async function save(agents: AgentAccess | null) {
     setBusy(true);
@@ -76,19 +83,21 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
   }
 
   if (readOnly) {
-    return <p className="text-[12.5px] text-fg-muted">{agentAccessLabel(suggested)}</p>;
+    return <p className="text-[12.5px] text-fg-muted">Suggested: {agentAccessLabel(suggested)}. An owner can change this.</p>;
   }
-  const current = loaded?.access ?? suggested;
-  const changed = !sameAgentAccess(draft, current);
+  const current = loaded ? loaded.access : suggested;
+  const changed = current === null || !sameAgentAccess(draft, current);
   return (
     <div className="space-y-2" data-testid="connector-agent-access">
       <AgentPicker value={draft} onChange={setDraft} disabled={busy || !loaded} label="Agents that use this app" />
       <p className="text-[11.5px] leading-4 text-fg-dim">
-        {loaded?.saved ? "Your choice." : "Suggested: the agents this app is built for, plus the Chief of Staff."} Only
-        these agents are given the app&apos;s tools.
+        {loaded?.saved && loaded.access !== null ? "Your choice." : "Suggested: the agents this app is built for, plus the Chief of Staff."}{" "}
+        {tools
+          ? `Only these agents are offered ${tools}.`
+          : "No agent tool uses this app yet; your choice applies to any that does."}
       </p>
       <div className="flex flex-wrap items-center gap-2">
-        {changed && (
+        {changed && loaded && (
           <button
             type="button"
             disabled={busy}

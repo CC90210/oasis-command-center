@@ -4,12 +4,13 @@
  * AgentPicker - choose which agents may use a key or an app.
  *
  * "All agents" means every agent, including one with no department. Turning
- * one department off from "All agents" leaves the other five; turning every
- * department off leaves "No agents", which an owner may want for a key kept on
- * file but not in use. The rules and defaults are lib/os/agent-access.ts.
+ * one department off from "All agents" leaves the other five; ticking it back
+ * returns to "All agents" (collapseToAll). Turning every department off leaves
+ * "No agents", which an owner may want for a key kept on file but not in use.
+ * The rules and defaults are lib/os/agent-access.ts.
  */
 
-import { AGENT_CHOICES, type AgentAccess } from "@/lib/os/agent-access";
+import { AGENT_CHOICES, collapseToAll, type AgentAccess } from "@/lib/os/agent-access";
 import type { DepartmentKey } from "@/lib/os/types";
 
 const CHIP = "rounded-md border px-2 py-0.5 text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-60";
@@ -32,7 +33,7 @@ export function AgentPicker({
   const toggle = (k: DepartmentKey) => {
     const current = all ? AGENT_CHOICES.map((c) => c.key) : [...(value as readonly DepartmentKey[])];
     const next = current.includes(k) ? current.filter((x) => x !== k) : [...current, k];
-    onChange(AGENT_CHOICES.map((c) => c.key).filter((x) => next.includes(x)));
+    onChange(collapseToAll(next));
   };
   return (
     <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">

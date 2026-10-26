@@ -13,7 +13,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { AGENT_CHOICES, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
+import { AGENT_CHOICES, APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
 import {
   clearAgentAccess,
   defaultAccess,
@@ -43,13 +43,20 @@ export async function GET() {
     console.error("[connections.agents] read failed", { tenantId: auth.sess.tenantId, error: overrides.error });
     return NextResponse.json({ ok: false, error: "agent_access_read_failed" }, { status: 500 });
   }
-  const connectors: Record<string, { access: unknown; saved: boolean; suggested: unknown }> = {};
-  for (const def of CONNECTOR_CATALOG) {
-    const target: AccessTarget = { kind: "connector", slug: def.slug };
-    const { access, saved } = effectiveAccess(overrides.byField, target);
-    connectors[def.slug] = { access, saved, suggested: defaultAccess(target) };
+  // Every card, and every app an agent tool uses even without a card. A choice
+  // that cannot be read comes back as access null so the owner can save it again.
+  const connectors: Record<string, { access: unknown; saved: boolean; suggested: unknown; unreadable: boolean }> = {};
+  for (const slug of knownApps()) {
+    const target: AccessTarget = { kind: "connector", slug };
+    const { access, saved } = effectiveAccess(overrides, target);
+    connectors[slug] = { access, saved, suggested: defaultAccess(target), unreadable: access === null };
   }
   return NextResponse.json({ ok: true, choices: AGENT_CHOICES, connectors });
+}
+
+/** The apps a choice may be saved for: every card, plus the apps agent tools use (TextTorrent, Kixie have no card). */
+function knownApps(): string[] {
+  return [...new Set([...CONNECTOR_CATALOG.map((d) => d.slug), ...Object.values(APP_TOOLS)])];
 }
 
 export async function PUT(req: NextRequest) {
@@ -63,7 +70,7 @@ export async function PUT(req: NextRequest) {
   }
 
   let target: AccessTarget;
-  if (body.kind === "connector" && typeof body.id === "string" && CONNECTOR_CATALOG.some((d) => d.slug === body.id)) {
+  if (body.kind === "connector" && typeof body.id === "string" && knownApps().includes(body.id)) {
     target = { kind: "connector", slug: body.id };
   } else if (body.kind === "custom" && typeof body.id === "string" && VAULT_KEY_PATTERN.test(body.id.trim().toUpperCase())) {
     target = { kind: "custom", key: body.id.trim().toUpperCase() };

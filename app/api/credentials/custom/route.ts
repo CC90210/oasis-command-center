@@ -66,10 +66,12 @@ type CustomCredentialRow = {
   key: string;
   has_value: boolean;
   updated_at: string | null;
-  /** The agents that may use it; null when the choices could not be read. */
+  /** The agents that may use it; null when its choice (or every choice) could not be read. */
   agents: AgentAccess | null;
   /** True when the owner picked the agents; false for the default (every agent). */
   agents_saved: boolean;
+  /** True when this key's saved choice cannot be read: no agent may use it until it is saved again. */
+  agents_unreadable: boolean;
 };
 
 export async function GET() {
@@ -95,13 +97,14 @@ export async function GET() {
     (r.data || []) as { field_key: string; encrypted_value: string; updated_at: string | null }[]
   ).map((row) => {
     const key = row.field_key.toUpperCase();
-    const choice = overrides.ok ? effectiveAccess(overrides.byField, { kind: "custom", key }) : null;
+    const choice = overrides.ok ? effectiveAccess(overrides, { kind: "custom", key }) : null;
     return {
       key,
       has_value: !!row.encrypted_value,
       updated_at: row.updated_at,
       agents: choice ? choice.access : null,
       agents_saved: choice ? choice.saved : false,
+      agents_unreadable: !!choice && choice.access === null,
     };
   });
   return NextResponse.json({
