@@ -1029,7 +1029,13 @@ async function main() {
     Object.defineProperty(r, "nextUrl", { value: new URL(u) });
     return route.POST(r as never, { params: Promise.resolve({ engagementId: eid }) });
   };
-  const tickDeps = () => ({ payment: { alert: async () => undefined } as never, onboarding: {} as never, site: deps(fakeWeb({})) });
+  const tickDeps = () => ({
+    payment: { alert: async () => undefined } as never,
+    onboarding: {} as never,
+    site: deps(fakeWeb({})),
+    // Research (phase 3) runs for an engagement past Gate 1: on the fake web here, never the real one.
+    research: { site: deps(fakeWeb({})), pagespeed: { fetch: (async () => new Response("{}", { status: 503 })) as never, key: null }, alert: async () => undefined },
+  });
 
   await check("without bravo__241 only the brief stops: the audit's guard passes, the tick runs its other steps, the pages show no brief (review 8)", async () => {
     assert.equal(await store.aiAuditTablesInstalled(db), true, "237 to 239 are the audit's guard; 241 is not part of it");
@@ -1048,6 +1054,8 @@ async function main() {
     await login(null);
   });
   await apply(db, "bravo__241_ai_audit_briefs.sql");
+  // Phase 3's research tables, so the tick's research step has what it needs once an engagement passes Gate 1.
+  await apply(db, "bravo__243_ai_audit_research.sql");
 
   await check("a brief is stored as a version with one source per request and one for the form; it never changes", async () => {
     const eid = await openWith(1, "fixture-plumbing.ca", FORM);

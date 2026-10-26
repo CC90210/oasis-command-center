@@ -26,6 +26,7 @@ import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type Transcri
 import { AUTHORIZATION_VOIDED_REASONS, PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
 import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
+import { researchPurgeStatements, researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 
 export const TRANSCRIPT_SOURCES = ["paste", "upload", "meet"] as const;
 export type TranscriptSource = (typeof TRANSCRIPT_SOURCES)[number];
@@ -282,6 +283,8 @@ export async function deleteTranscript(
   // Not while the audit email is going out: the send already checked the authorization this voids.
   const guard = noDeliveryInFlight(t, input.engagementId, input.now);
   const afterGate = !!engagement && !PROFILE_EDIT_STAGES.includes(engagement.stage) && !TERMINAL_STAGES.includes(engagement.stage) && !!engagement.authorization_approval_id;
+  // The research built on the authorization this voids goes with it (review of phase 3, F4).
+  const purge = afterGate && (await researchTablesInstalled(db)) ? researchPurgeStatements(t, input.engagementId) : [];
   const ok = await casWrite(
     db,
     {
@@ -321,6 +324,7 @@ export async function deleteTranscript(
                  AND profile_version_id IN (SELECT id FROM ai_audit_profile_versions WHERE tenant_id = ? AND engagement_id = ? AND status = 'draft')`,
         args: [t, input.id, input.id, t, input.engagementId],
       },
+      ...purge,
       eventStatement({ tenantId: t, engagementId: input.engagementId, event: "transcript_deleted", actor: input.actor, at, refType: "transcript", refId: input.id }),
       ...(afterGate
         ? [eventStatement({ tenantId: t, engagementId: input.engagementId, event: "authorization_voided", actor: input.actor, at, refType: "transcript", refId: input.id, meta: { reason: "transcript_deleted" } })]

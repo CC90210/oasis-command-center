@@ -27,6 +27,8 @@
  *   create_meet_room                                      the lead's Oasis Meet call room: the open one, or a new one
  *   attach_meet_transcript { room_id, ai? }               attach a room's ready Meet transcript; `ai` (the client's answer
  *                                                         about AI analysis, said by hand) is the owner's only
+ *   start_research                                        run the research again (after Gate 1); owner only
+ *   save_assumptions   { overrides }                       CC's own ranges for the impact calculator; owner only
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -60,6 +62,7 @@ import { attachMeetTranscript, createAuditRoom } from "@/lib/ai-audit/meet-link"
 import { meetMediaReady } from "@/lib/meet/handlers";
 import { liveMeetDeps } from "@/lib/meet/live-deps";
 import { revokeShareLink } from "@/lib/ai-audit/link";
+import { saveAssumptions, startResearch } from "@/lib/ai-audit/research";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
 
@@ -340,6 +343,19 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       }
       if (!r.duplicate) await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
       return json(200, { ok: true, transcript_id: r.transcriptId, duplicate: r.duplicate });
+    }
+    case "start_research": {
+      // Research reads the client's website and searches the web about them: after Gate 1, the owner's press.
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await startResearch(s.db, { tenantId: s.tenantId, engagementId, actor, now });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "not_installed" ? 503 : 409, { ok: false, error: r.error === "not_installed" ? "research_not_installed" : r.error });
+      return json(200, { ok: true, step_id: r.stepId, created: r.created });
+    }
+    case "save_assumptions": {
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await saveAssumptions(s.db, { tenantId: s.tenantId, engagementId, overrides: body.overrides, actor, now });
+      if (!r.ok) return json(400, { ok: false, error: r.error });
+      return json(200, { ok: true, overrides: r.overrides });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

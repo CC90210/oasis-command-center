@@ -18,6 +18,8 @@ import {
   HEALTH_FLAGS,
   ONBOARDING_STATUSES,
   PAYMENT_STATUSES,
+  PROFILE_EDIT_STAGES,
+  TERMINAL_STAGES,
   isOneOf,
   mayMoveStage,
   type AiAuditStage,
@@ -28,6 +30,7 @@ import {
 } from "@/lib/ai-audit/rules";
 import { validateTaxRule, type TaxRule } from "@/lib/ai-audit/proposal";
 import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
+import { researchPurgeStatements, researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 
 export type Engagement = {
   id: string;
@@ -541,7 +544,11 @@ export async function moveStage(
   });
   // A declined or cancelled engagement stops any profile draft still running, in the same write (review of phase 2b, F5).
   const stops = input.to === "declined" || input.to === "cancelled" ? stopEngagementRunsStatements(tenantId, current.id, "stage_closed", at) : [];
-  const applied = await casWrite(db, update, [ev, ...stops, ...(input.extra ?? [])]);
+  // Moved back before Gate 1, declined or cancelled: the research built on the authorization goes in the same write
+  // (re-review of phase 3, finding 2; the tick's sweep is the backstop).
+  const voids = PROFILE_EDIT_STAGES.includes(input.to) || TERMINAL_STAGES.includes(input.to);
+  const purge = voids && !PROFILE_EDIT_STAGES.includes(current.stage) && (await researchTablesInstalled(db)) ? researchPurgeStatements(tenantId, current.id) : [];
+  const applied = await casWrite(db, update, [ev, ...stops, ...purge, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
   if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
     return { ok: false, error: "delivery_in_progress", engagement: after };
