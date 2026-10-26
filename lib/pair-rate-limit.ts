@@ -6,7 +6,9 @@
  * /api/auth/pair-code/redeem (keyed on `redeem:<address bucket>`, see
  * ipRateBucket), and the places claimCappedSlot hands out
  * (`redeem-attempts:<bucket>` for redemptions, `unsubscribe-unsigned:<bucket>`
- * for unsigned opt-outs). The `profile_id` column accepts every shape — see
+ * for unsigned opt-outs, `alert-email:<lane>` and `alert-email-held:<lane>` for
+ * the hourly cap on alert emails, lib/notify/alert-route.ts). The `profile_id`
+ * column accepts every shape — see
  * migration 034's table comment for the rationale. /api/unsubscribe no longer
  * counts failures here: it only claims places (review of #715).
  *
