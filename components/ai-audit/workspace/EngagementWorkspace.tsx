@@ -18,6 +18,7 @@ import {
   BUSINESS_TYPES,
   BUSINESS_TYPE_LABELS,
   MANUAL_STAGE_TARGETS,
+  PROFILE_EDIT_STAGES,
   STAGE_MOVES,
   type AiAuditStage,
   type BusinessType,
@@ -26,12 +27,14 @@ import { formatMoney } from "@/lib/ai-audit/catalogue";
 import { ProfileEditor } from "./ProfileEditor";
 import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
+import { DiscoveryPanel } from "./DiscoveryPanel";
 import { describeError, postAction } from "./api";
 
-type Tab = "overview" | "profile" | "audit" | "proposal" | "delivery" | "history";
+type Tab = "overview" | "call" | "profile" | "audit" | "proposal" | "delivery" | "history";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "overview", label: "Overview" },
+  { key: "call", label: "Call and transcripts" },
   { key: "profile", label: "Discovery profile" },
   { key: "audit", label: "Audit" },
   { key: "proposal", label: "Proposal" },
@@ -52,9 +55,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
-  const [details, setDetails] = useState({
+  const [details, setDetails] = useState<{ business_name: string; business_type: BusinessType | ""; contact_name: string; contact_email: string }>({
     business_name: e.business_name ?? "",
-    business_type: (e.business_type ?? "other") as BusinessType,
+    // Empty until someone chooses one. Sending a type nobody picked would change
+    // what Gate 1 binds, and after Gate 1 the save would be refused (CodeRabbit on #733).
+    business_type: e.business_type ?? "",
     contact_name: e.contact_name ?? "",
     contact_email: e.contact_email ?? "",
   });
@@ -78,7 +83,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
   const auditEditable = !view.audit || view.audit.status === "draft";
   const proposalEditable = !view.proposal || view.proposal.status === "draft";
   const submitted = view.audit?.status === "awaiting_approval";
-  const canSubmit = ["transcript_review", "generating", "final_review"].includes(e.stage) && view.audit?.status === "draft" && view.proposal?.status === "draft";
+  // Submission comes after Gate 1: only an authorized engagement reaches generating.
+  const canSubmit = ["generating", "final_review"].includes(e.stage) && view.audit?.status === "draft" && view.proposal?.status === "draft";
   const cur = view.proposal?.currency ?? view.settings.default_currency;
 
   return (
@@ -158,7 +164,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               </div>
               <div>
                 <div className="label">Business type</div>
-                <select className="select" value={details.business_type} onChange={(ev) => setDetails({ ...details, business_type: ev.target.value as BusinessType })}>
+                <select className="select" value={details.business_type} onChange={(ev) => setDetails({ ...details, business_type: ev.target.value as BusinessType | "" })}>
+                  {details.business_type === "" ? <option value="">Not chosen yet</option> : null}
                   {BUSINESS_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {BUSINESS_TYPE_LABELS[t]}
@@ -175,7 +182,10 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                 <input className="input" value={details.contact_email} onChange={(ev) => setDetails({ ...details, contact_email: ev.target.value })} />
               </div>
             </div>
-            <button type="button" className="btn-primary justify-self-start" disabled={busy} onClick={() => act("save_details", details, "Details saved.")}>
+            <button type="button" className="btn-primary justify-self-start" disabled={busy} onClick={() => {
+                const { business_type, ...rest } = details;
+                void act("save_details", business_type ? { ...rest, business_type } : rest, "Details saved.");
+              }}>
               Save details
             </button>
           </section>
@@ -242,10 +252,16 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
         </div>
       ) : null}
 
+      {/* Kept mounted, hidden, so pasted text and the consent answers survive a switch of tab. */}
+      <div hidden={tab !== "call"}>
+        <DiscoveryPanel view={view} isOwner={isOwner} />
+      </div>
+
       {/* The three editors stay mounted, hidden, so a draft survives a switch of tab.
           Each re-seeds from the server when its saved content changes (the key). */}
       <div hidden={tab !== "profile"}>
-        <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={view.profile?.version.status === "frozen"} />
+        {/* Editable until Gate 1; an edit after a frozen version opens a new draft (versions.ts). */}
+        <ProfileEditor engagementId={e.id} fields={view.profile?.fields ?? []} frozen={!PROFILE_EDIT_STAGES.includes(e.stage)} />
       </div>
 
       <div hidden={tab !== "audit"}>

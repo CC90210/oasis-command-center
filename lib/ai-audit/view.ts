@@ -3,6 +3,9 @@
  * read in one place. Plain data: it crosses the server/client boundary.
  */
 import "server-only";
+import { authorizedProfile } from "@/lib/ai-audit/authorize";
+import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
+import { effectiveStatus } from "@/lib/os/approvals/rules";
 import type { Client } from "@libsql/client";
 import {
   AI_AUDIT_STAGE_LABELS,
@@ -26,7 +29,13 @@ import { listCatalogue } from "@/lib/ai-audit/catalogue-store";
 import type { CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { getShareLink, type ShareLink } from "@/lib/ai-audit/link";
 import { listCheckouts, listReceipts, type Checkout, type Receipt } from "@/lib/ai-audit/payment";
-import { getApprovalInTenant } from "@/lib/os/approvals/store";
+import { getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
+import { listTranscripts, type Transcript } from "@/lib/ai-audit/transcripts";
+import { listCallNotes, type CallNote } from "@/lib/ai-audit/call-notes";
+import { aiConsent } from "@/lib/ai-audit/authorize";
+import { essentialGaps } from "@/lib/ai-audit/framework";
+import { profileFieldDef } from "@/lib/ai-audit/profile";
+import { AI_ENGINE_LABELS, validateAuthorizeAiAuditPayload, type AiEngine } from "@/lib/ai-audit/authorize-payload";
 
 export type BoardRow = {
   id: string;
@@ -85,6 +94,12 @@ export type EngagementView = {
   receipts: Receipt[];
   settings: AiAuditSettings;
   catalogue: CatalogueItem[];
+  /** Phase 2: the call, its transcripts and Gate 1. */
+  transcripts: Transcript[];
+  callNotes: CallNote[];
+  consentAi: boolean;
+  gaps: Array<{ key: string; label: string }>;
+  authorization: { id: string; status: string; outcome: string | null; message: string | null; engine: AiEngine | null; engine_label: string | null; plan: string[] } | null;
 };
 
 export async function engagementView(db: Client, tenantId: string, engagementId: string, now: Date): Promise<EngagementView | null> {
@@ -105,6 +120,23 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
   const audit = auditVersions.find((v) => v.id === engagement.current_audit_version_id) ?? null;
   const proposal = proposalVersions.find((v) => v.id === engagement.current_proposal_version_id) ?? null;
   const approval = engagement.delivery_approval_id ? await getApprovalInTenant(db, tenantId, engagement.delivery_approval_id) : null;
+  const [transcripts, callNotes] = await Promise.all([listTranscripts(db, tenantId, engagement.id), listCallNotes(db, tenantId, engagement.id)]);
+  const authApproval = engagement.authorization_approval_id ? await getApprovalInTenant(db, tenantId, engagement.authorization_approval_id) : null;
+  let authPayload: ReturnType<typeof validateAuthorizeAiAuditPayload> | null = null;
+  if (authApproval) {
+    try {
+      authPayload = validateAuthorizeAiAuditPayload(parsePayload(authApproval));
+    } catch {
+      authPayload = null;
+    }
+  }
+  const captured = new Set(fields.map((f) => f.field_key));
+  const authVoided =
+    !!authApproval &&
+    authApproval.status === "executed" &&
+    !PROFILE_EDIT_STAGES.includes(engagement.stage) &&
+    !TERMINAL_STAGES.includes(engagement.stage) &&
+    !(await authorizedProfile(db, tenantId, engagement));
   const link = engagement.share_link_id ? await getShareLink(db, tenantId, engagement.share_link_id) : null;
   return {
     engagement,
@@ -133,5 +165,24 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     receipts,
     settings: settings.settings,
     catalogue: catalogue.filter((i) => i.status === "confirmed"),
+    transcripts,
+    callNotes,
+    consentAi: aiConsent(transcripts, fields),
+    gaps: essentialGaps(captured, engagement.business_type).map((key) => ({ key, label: profileFieldDef(key)?.label ?? key })),
+    authorization: authApproval
+      ? {
+          id: authApproval.id,
+          // "expired" once past its expiry, though the stored row still says pending;
+          // "voided" once an executed authorization no longer holds (a transcript it covered deleted, review of phase 2).
+          status: authVoided ? "voided" : effectiveStatus(authApproval, new Date().toISOString()),
+          outcome: (authApproval.execution_result as { outcome?: string } | null)?.outcome ?? null,
+          message: authVoided
+            ? "The authorization no longer holds: something it covered changed or was deleted. Move the engagement back to Transcript Awaiting Approval and authorize again."
+            : ((authApproval.execution_result as { message?: string } | null)?.message ?? null),
+          engine: authPayload?.ok ? authPayload.value.engine : null,
+          engine_label: authPayload?.ok ? AI_ENGINE_LABELS[authPayload.value.engine] : null,
+          plan: authPayload?.ok ? authPayload.value.plan : [],
+        }
+      : null,
   };
 }

@@ -93,6 +93,7 @@ import {
 import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
 import { postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
 import { deliverAiAuditExecutor, type AiAuditExecutorDeps } from "@/lib/ai-audit/delivery";
+import { authorizeAiAuditExecutor, type AuthorizeExecutorDeps } from "@/lib/ai-audit/authorize";
 
 export type ExecutorTenant = { id: string; slug: string | null };
 
@@ -127,6 +128,8 @@ export type ExecutorDeps = {
    * Absent = the real one. reply_ticket refuses before posting anything when null.
    */
   supportMailboxFrom?: (tenantId: string) => Promise<string | null>;
+  /** authorize_ai_audit's owner check (lib/ai-audit/authorize.ts). Absent = the real one. */
+  aiAuditAuthorize?: AuthorizeExecutorDeps;
   /** deliver_ai_audit's link secret, base URL, Stripe and owner checks (lib/ai-audit/delivery.ts). Absent = the real ones. */
   aiAudit?: AiAuditExecutorDeps;
 };
@@ -753,6 +756,7 @@ export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> 
   // proposal hashes, then mints the private link and sends the one email
   // through the same OASIS mailbox as send_email (dry run: LIVE_SEND_AI_AUDIT).
   deliver_ai_audit: deliverAiAuditExecutor,
+  authorize_ai_audit: authorizeAiAuditExecutor,
 };
 
 export function noExecutorMessage(kind: string): string {

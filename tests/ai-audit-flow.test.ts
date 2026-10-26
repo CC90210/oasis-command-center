@@ -160,7 +160,7 @@ function fakeStripe() {
 async function main() {
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
   await seedLead(db, LEAD, "qualified", "owner@fixture.test");
   await seedLead(db, LEAD_B, "qualified", "second@fixture.test");
   await seedLead(db, LEAD_C, "qualified", "third@fixture.test");
@@ -182,6 +182,7 @@ async function main() {
   const execute = await import("../lib/os/approvals/execute");
   const executors = await import("../lib/os/approvals/executors");
   const approvalsStore = await import("../lib/os/approvals/store");
+  const authorize = await import("../lib/ai-audit/authorize");
 
   const cc = { type: "user" as const, id: USERS.cc.id };
   let engagementId = "";
@@ -317,8 +318,20 @@ async function main() {
     let e = (await store.getEngagement(db, OASIS, engagementId))!;
     const early = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
     assert.equal(early.ok, false, "call_scheduled is too early");
-    for (const to of ["call_completed", "transcript_review"] as const) assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to, actor: cc, now: NOW() })).ok);
+    assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to: "call_completed", actor: cc, now: NOW() })).ok);
+    // Gate 1 (phase 2): the owner authorizes the profile; only then is submission possible.
+    const asked = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId, actor: cc, now: NOW(), engine: "none" });
+    assert.ok(asked.ok && asked.created, !asked.ok ? asked.error : "");
     e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "transcript_review");
+    const notYet = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+    assert.equal(notYet.ok, false, "no submission before Gate 1");
+    const authId = asked.ok ? asked.approvalId : "";
+    await db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), authId] });
+    const authed = await execute.executeApproval(db, { tenantId: OASIS, approvalId: authId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, executors.defaultExecutorDeps() as never);
+    assert.equal(authed.ok && (authed.approval.execution_result as { outcome?: string } | null)?.outcome, "authorized");
+    e = (await store.getEngagement(db, OASIS, engagementId))!;
+    assert.equal(e.stage, "generating");
     const r = await delivery.submitForFinalApproval(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
     assert.ok(r.ok, !r.ok ? `${r.error} ${(r.problems ?? []).join("; ")}` : "");
     assert.equal(r.ok && r.audit.status, "awaiting_approval");
@@ -433,6 +446,28 @@ async function main() {
       for (const [k, v] of saved) stored.set(k, v);
     }
   });
+  await check("Gate 2 refuses once Gate 1 no longer holds: nothing is minted or sent (Codex review of phase 2)", async () => {
+    await approve();
+    // A transcript the authorization never covered, as a delete after submission leaves the set different from the one CC authorized.
+    const at = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO ai_audit_transcripts (id, tenant_id, engagement_id, source, format, lines_json, line_count, char_count, speakers_json, text_sha256, redactions,
+              consent_recording, consent_ai, consent_basis, consent_by, consent_at, status, created_by, created_at)
+            VALUES ('voids-gate-1', ?, ?, 'paste', 'txt', '[]', 0, 0, '[]', ?, 0, 1, 1, 'owner_attested', ?, ?, 'active', ?, ?)`,
+      args: [OASIS, engagementId, "f".repeat(64), USERS.cc.id, at, USERS.cc.id, at],
+    });
+    try {
+      const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+      assert.equal(r.ok && r.approval.status, "failed");
+      assert.equal(r.ok && (r.approval.execution_result as { reason?: string } | null)?.reason, "not_authorized");
+      assert.equal(sent.length, 0);
+      const refile = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+      assert.deepEqual(refile, { ok: false, error: "not_authorized" }, "no new card either");
+      assert.equal((await store.getEngagement(db, OASIS, engagementId))!.health, "attention");
+    } finally {
+      await db.execute("DELETE FROM ai_audit_transcripts WHERE id = 'voids-gate-1'");
+    }
+  });
   let token = "";
   await check("the owner's approval mints the private link, sends ONE email, and delivers", async () => {
     const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
@@ -441,8 +476,27 @@ async function main() {
     // The write after the send fails (review of PR #732): the outcome must still be "sent",
     // so nobody retries into a second email, and the tick finishes the record.
     await db.execute("CREATE TRIGGER fail_delivered_event BEFORE INSERT ON ai_audit_events WHEN NEW.event = 'delivered' BEGIN SELECT RAISE(ABORT, 'injected_failure'); END");
-    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    // While the send runs (the approval is executing), Reopen and a stage move by hand wait their turn:
+    // the send already checked the versions and the authorization they would change (Codex review of phase 2, second pass).
+    const during: string[] = [];
+    const base = deps();
+    const inFlight = {
+      ...base,
+      aiAudit: {
+        ...base.aiAudit,
+        readPdf: async (path: string) => {
+          const e = (await store.getEngagement(db, OASIS, engagementId))!;
+          const reopened = await delivery.reopenForEdits(db, { tenantId: OASIS, engagementId, expectedRowVersion: e.row_version, actor: cc, now: NOW() });
+          during.push(reopened.ok ? "reopened" : reopened.error);
+          const moved = await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId, to: "cancelled", actor: cc, now: NOW(), expectedRowVersion: e.row_version, event: "stage_set_by_owner", unlessDeliveryInFlight: true });
+          during.push(moved.ok ? "moved" : moved.error);
+          return stored.get(path) ?? null;
+        },
+      },
+    };
+    const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, inFlight as never);
     await db.execute("DROP TRIGGER fail_delivered_event");
+    assert.deepEqual(during, ["delivery_in_progress", "delivery_in_progress"]);
     assert.equal(r.ok && (r.approval.execution_result as { outcome?: string } | null)?.outcome, "sent");
     assert.equal(sent.length, 1);
     assert.equal((await store.getEngagement(db, OASIS, engagementId))!.stage, "final_review", "not yet recorded");

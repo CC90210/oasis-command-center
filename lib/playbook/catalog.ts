@@ -244,6 +244,11 @@ export const CATALOG: readonly CatalogDoc[] = [
     required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "07-new-client-onboarding" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,
   },
   {
+    slug: "ai-audit-discovery-handbook", title: "Free AI Audit discovery call handbook", kind: "runbook", category: "sales_delivery", visibility: "founders",
+    summary: "How to run the discovery call a Free AI Audit is built on: consent, the question bank, getting real figures, and the rules (no prices, no promises, no passwords).",
+    required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "11-ai-audit-discovery-handbook" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,
+  },
+  {
     slug: "ai-audit-operating-handbook", title: "Free AI Audit operating handbook", kind: "runbook", category: "sales_delivery", visibility: "founders",
     summary: "How a Free AI Audit runs from the first call to an onboarded client: the two approvals, the four evidence labels, pricing, payment and onboarding.",
     required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "12-ai-audit-operating-handbook" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,

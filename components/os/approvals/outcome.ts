@@ -62,6 +62,9 @@ export function describeOutcome(a: OutcomeInput, fmt: (iso: string) => string, n
           detail: "Nothing was sent: live sending is off on this deployment.",
         };
       }
+      if (r?.outcome === "authorized") {
+        return { tone: "ok", text: `Authorized ✓${at(a.executed_at)}`, detail: r.detail ?? (by ? `Approved${by}` : null) };
+      }
       if (r?.outcome === "queued") {
         return {
           tone: "ok",

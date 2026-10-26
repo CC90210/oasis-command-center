@@ -93,9 +93,10 @@ export const STAGE_MOVES: Readonly<Record<AiAuditStage, readonly AiAuditStage[]>
   pre_call_research: ["call_scheduled", "call_completed", "declined", "cancelled"],
   call_scheduled: ["call_completed", "pre_call_research", "declined", "cancelled"],
   call_completed: ["transcript_review", "declined", "cancelled"],
-  // transcript_review → final_review is the hand-written path (phase 1): CC
-  // wrote the profile and the audit himself, so nothing is generated.
-  transcript_review: ["generating", "final_review", "declined", "cancelled"],
+  // Phase 2: Transcript Awaiting Approval moves on ONLY through Gate 1 (the
+  // authorize_ai_audit executor), to generating, even when CC writes the audit
+  // himself. Back to Discovery Call Completed reopens the call's capture.
+  transcript_review: ["generating", "call_completed", "declined", "cancelled"],
   generating: ["final_review", "transcript_review", "declined", "cancelled"],
   // Out of final review only by delivery, Reopen (to generating, which withdraws
   // the frozen versions and opens drafts), decline or cancel. A bare move back
@@ -146,6 +147,16 @@ export type OnboardingStatus = (typeof ONBOARDING_STATUSES)[number];
 // ---------------------------------------------------------------------------
 // Evidence labels (brief section 5)
 // ---------------------------------------------------------------------------
+
+/**
+ * The warnings that say an earlier Gate 1 no longer holds. A new authorization
+ * clears these, and only these (Codex review of phase 2, fourth pass).
+ */
+export const AUTHORIZATION_VOIDED_REASONS = {
+  transcriptDeleted: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript Awaiting Approval and authorize again.",
+  notAuthorized:
+    "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript Awaiting Approval, authorize it again, then submit again.",
+} as const;
 
 export const EVIDENCE_LABELS = ["verified", "client_reported", "estimate", "hypothesis"] as const;
 export type EvidenceLabel = (typeof EVIDENCE_LABELS)[number];
@@ -251,6 +262,9 @@ export function stallReason(
   return t - Date.parse(link.first_viewed_at) > STALL_NO_PAYMENT_DAYS * DAY_MS ? `Opened, but no payment ${STALL_NO_PAYMENT_DAYS} days later.` : null;
 }
 
+/** Stages where the discovery profile and transcripts may still change: before Gate 1. */
+export const PROFILE_EDIT_STAGES: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review"];
+
 export function isOneOf<T extends string>(list: readonly T[], v: unknown): v is T {
   return typeof v === "string" && (list as readonly string[]).includes(v);
 }
@@ -284,11 +298,11 @@ export function nextActionFor(e: {
     case "call_scheduled":
       return "Run the discovery call";
     case "call_completed":
-      return "Add the transcript or notes";
+      return "Add the transcript, check the profile, then ask for authorization";
     case "transcript_review":
-      return "Review the discovery profile";
+      return "Approve the authorization in Needs you (Gate 1)";
     case "generating":
-      return "Waiting for the audit draft";
+      return "Write the audit and the proposal";
     case "final_review":
       return "Review and approve the audit";
     case "delivered":
@@ -307,4 +321,15 @@ export function nextActionFor(e: {
     case "cancelled":
       return "Closed";
   }
+}
+
+/**
+ * A business's name for a title: approvals and alerts cap their titles, and a
+ * name may be 200 characters (review of phase 2: a long name made Gate 1 fail
+ * with title_too_long).
+ */
+export function shortName(name: string | null | undefined, fallback: string, max = 80): string {
+  const n = (name ?? "").trim();
+  if (!n) return fallback;
+  return n.length > max ? `${n.slice(0, max - 3).trimEnd()}...` : n;
 }

@@ -25,6 +25,8 @@ import { createShareLink, linkForApproval, mintLinkToken, revokeShareLink } from
 import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
+import { authorizedProfile } from "@/lib/ai-audit/authorize";
+import { AUTHORIZATION_VOIDED_REASONS, shortName } from "@/lib/ai-audit/rules";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
   getAuditVersion,
@@ -37,9 +39,11 @@ import {
 } from "@/lib/ai-audit/versions";
 import {
   casWrite,
+  deliveryInFlight,
   engagementUpdateStatement,
   eventStatement,
   getEngagement,
+  noDeliveryInFlight,
   patchEngagement,
   requireTenant,
   type Actor,
@@ -56,7 +60,8 @@ export type SubmitResult =
   | { ok: true; engagement: Engagement; audit: AuditVersion; proposal: ProposalVersion }
   | { ok: false; error: string; problems?: string[] };
 
-const SUBMITTABLE = new Set(["transcript_review", "generating", "final_review"]);
+// Only after Gate 1: an engagement reaches generating only through CC's authorization.
+const SUBMITTABLE = new Set(["generating", "final_review"]);
 
 function today(now: Date): string {
   return now.toISOString().slice(0, 10);
@@ -72,6 +77,8 @@ export async function submitForFinalApproval(
   if (!engagement) return { ok: false, error: "not_found" };
   if (engagement.row_version !== input.expectedRowVersion) return { ok: false, error: "conflict" };
   if (!SUBMITTABLE.has(engagement.stage)) return { ok: false, error: "not_submittable_at_this_stage" };
+  // Every later step re-checks Gate 1: the frozen profile still hashes to what CC authorized.
+  if (!(await authorizedProfile(db, t, engagement))) return { ok: false, error: "not_authorized", problems: ["The discovery profile is not authorized (Gate 1), or it changed since. Authorize it first."] };
   const audit = engagement.current_audit_version_id ? await getAuditVersion(db, t, engagement.current_audit_version_id) : null;
   const proposal = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
   if (!audit || audit.status !== "draft" || !audit.doc) return { ok: false, error: "no_audit_draft" };
@@ -140,12 +147,14 @@ export async function reopenForEdits(
     await cancelPendingApproval(db, t, engagement.delivery_approval_id, { type: "user", id: input.actor.id }, { reason: "reopened_for_edits" }, input.now);
   }
   const at = input.now.toISOString();
-  const ok = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null }, at, "generating"), [
+  // Not while the approved email is going out: it was checked against the versions this withdraws.
+  const guard = noDeliveryInFlight(t, engagement.id, input.now);
+  const ok = await casWrite(db, engagementUpdateStatement(t, engagement.id, engagement.row_version, { delivery_approval_id: null }, at, "generating", undefined, guard), [
     { sql: "UPDATE ai_audit_versions SET status = 'withdrawn', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, t, audit.id] },
     { sql: "UPDATE ai_audit_proposal_versions SET status = 'withdrawn', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'awaiting_approval'", args: [at, t, proposal.id] },
     eventStatement({ tenantId: t, engagementId: engagement.id, event: "reopened_for_edits", actor: input.actor, at, fromStage: "final_review", toStage: "generating" }),
   ]);
-  if (!ok) return { ok: false, error: "conflict" };
+  if (!ok) return { ok: false, error: (await deliveryInFlight(db, t, engagement.id, input.now)) ? "delivery_in_progress" : "conflict" };
   let current = await getEngagement(db, t, engagement.id);
   if (!current) return { ok: false, error: "not_found" };
   const a = await saveAuditDraft(db, { tenantId: t, engagementId: current.id, doc: audit.doc, actor: input.actor, now: input.now, expectedRowVersion: current.row_version });
@@ -202,6 +211,15 @@ export async function requestDeliveryApproval(
   const t = requireTenant(input.tenantId);
   const engagement = await getEngagement(db, t, input.engagementId);
   if (!engagement || engagement.stage !== "final_review") return { ok: false, error: "not_in_final_review" };
+  // Gate 1 must still hold when Gate 2 is filed: a transcript deleted after
+  // submission voids it (Codex review of phase 2).
+  if (!(await authorizedProfile(db, t, engagement))) {
+    const why = AUTHORIZATION_VOIDED_REASONS.notAuthorized;
+    if (engagement.health !== "attention" || engagement.health_reason !== why) {
+      await patchEngagement(db, { tenantId: t, id: engagement.id, expectedRowVersion: engagement.row_version, patch: { health: "attention", health_reason: why }, event: "authorization_voided", actor: { type: "system", id: null }, now: input.now });
+    }
+    return { ok: false, error: "not_authorized" };
+  }
   if (engagement.delivery_approval_id) {
     const prior = await getApprovalInTenant(db, t, engagement.delivery_approval_id);
     const priorOutcome = (prior?.execution_result as { outcome?: unknown } | null)?.outcome;
@@ -257,7 +275,7 @@ export async function requestDeliveryApproval(
       departmentKey: null,
       requestedBy: { type: "routine", id: "ai-audit" },
       actionKind: DELIVER_AI_AUDIT_KIND,
-      title: `Send ${payload.business_name} their Free AI Audit and proposal`,
+      title: `Send ${shortName(payload.business_name, "the client")} their Free AI Audit and proposal`,
       targetRef: `lead:${engagement.lead_id}`,
       payload: valid.value as unknown as Record<string, unknown>,
       riskLevel: "spend",
@@ -328,6 +346,10 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   const engagement = await getEngagement(ctx.db, t, p.engagement_id);
   if (!engagement) return failed("engagement_missing", "The engagement no longer exists, so nothing was sent.");
   if (engagement.stage !== "final_review") return failed("stage_moved", "The engagement is no longer waiting for final approval, so nothing was sent.");
+  // And at the moment of sending: an authorization voided after this card was filed stops it (Codex review of phase 2).
+  if (!(await authorizedProfile(ctx.db, t, engagement))) {
+    return failed("not_authorized", "The client's information is no longer authorized (Gate 1), so nothing was sent. Move the engagement back, authorize it again, then submit again.");
+  }
   if (engagement.current_audit_version_id !== p.audit_version_id || engagement.current_proposal_version_id !== p.proposal_version_id) {
     return failed("payload_changed", "A newer version of the audit or proposal exists. Approve that one instead.");
   }
@@ -399,7 +421,7 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
         tenantId: t,
         alertType: "ai_audit_delivery_unknown",
         severity: "urgent",
-        title: `Audit email may have been sent: ${engagement.business_name || "an AI audit"}`,
+        title: `Audit email may have been sent: ${shortName(engagement.business_name, "an AI audit")}`,
         body: "The mail server stopped answering after taking the message. Check the Sent folder, then on the engagement choose It was sent, or It was not sent: send again.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,
@@ -442,7 +464,7 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
         tenantId: t,
         alertType: "ai_audit_delivery_unrecorded",
         severity: "urgent",
-        title: `Audit sent, but not yet recorded: ${engagement.business_name || "an AI audit"}`,
+        title: `Audit sent, but not yet recorded: ${shortName(engagement.business_name, "an AI audit")}`,
         body: "The client has the email and its link. The engagement has not moved to Audit Delivered yet; the next tick finishes the record. Do not retry delivery: that would send a second email.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,

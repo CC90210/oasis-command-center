@@ -53,6 +53,9 @@ export type Engagement = {
   customer_id: string | null;
   delivery_project_id: string | null;
   onboarding_status: OnboardingStatus;
+  /** The live-call screen's clock (bravo__239). */
+  call_started_at: string | null;
+  call_ended_at: string | null;
   is_fixture: boolean;
   row_version: number;
   created_by: string | null;
@@ -83,7 +86,7 @@ const ENGAGEMENT_COLUMNS = [
   "business_name", "business_type", "contact_name", "contact_email", "appointment_id", "meet_room_id", "engine",
   "current_profile_version_id", "current_audit_version_id", "current_proposal_version_id",
   "authorization_approval_id", "delivery_approval_id", "share_link_id", "customer_id", "delivery_project_id",
-  "onboarding_status", "is_fixture", "row_version", "created_by", "created_at", "updated_at", "closed_at", "closed_reason",
+  "onboarding_status", "call_started_at", "call_ended_at", "is_fixture", "row_version", "created_by", "created_at", "updated_at", "closed_at", "closed_reason",
 ].join(", ");
 
 export function requireTenant(tenantId: string): string {
@@ -142,6 +145,8 @@ export function mapEngagement(r: Row): Engagement {
     customer_id: text(r.customer_id),
     delivery_project_id: text(r.delivery_project_id),
     onboarding_status: isOneOf(ONBOARDING_STATUSES, onb) ? onb : "not_started",
+    call_started_at: text(r.call_started_at),
+    call_ended_at: text(r.call_ended_at),
     is_fixture: int(r.is_fixture) === 1,
     row_version: int(r.row_version, 1),
     created_by: text(r.created_by),
@@ -368,13 +373,15 @@ const PATCHABLE = new Set([
   "appointment_id", "meet_room_id", "engine", "current_profile_version_id", "current_audit_version_id",
   "current_proposal_version_id", "authorization_approval_id", "delivery_approval_id", "share_link_id",
   "customer_id", "delivery_project_id", "onboarding_status", "closed_at", "closed_reason",
+  "call_started_at", "call_ended_at",
 ]);
 
 export type EngagementPatch = Partial<Record<
   | "health" | "health_reason" | "payment_status" | "business_name" | "business_type" | "contact_name" | "contact_email"
   | "appointment_id" | "meet_room_id" | "engine" | "current_profile_version_id" | "current_audit_version_id"
   | "current_proposal_version_id" | "authorization_approval_id" | "delivery_approval_id" | "share_link_id"
-  | "customer_id" | "delivery_project_id" | "onboarding_status" | "closed_at" | "closed_reason",
+  | "customer_id" | "delivery_project_id" | "onboarding_status" | "closed_at" | "closed_reason"
+  | "call_started_at" | "call_ended_at",
   string | null
 >>;
 
@@ -383,6 +390,37 @@ export type EngagementPatch = Partial<Record<
  * Returned, not run: casWrite runs it first, and the rest only when it changed
  * exactly one row.
  */
+/**
+ * How long a delivery's `executing` mark holds changes off. Far longer than a
+ * send takes; the mark of a run that crashed lapses after it (execute.ts never
+ * re-runs an `executing` approval, so nothing is waiting on it).
+ */
+export const DELIVERY_IN_FLIGHT_MS = 15 * 60_000;
+
+/**
+ * SQL that is true while no final-approval email for this engagement is being
+ * sent: no deliver_ai_audit approval for it is `executing` (claimed in the last
+ * DELIVERY_IN_FLIGHT_MS). Placed inside the UPDATE of a change that would void
+ * what the delivery checked (a transcript deleted, a stage moved, a reopen), it
+ * makes the two take turns: if the change commits first, the delivery's checks
+ * after its claim see it and send nothing; if the claim commits first, the
+ * change is refused until the send is over (Codex review of phase 2, second pass).
+ */
+export function noDeliveryInFlight(tenantId: string, engagementId: string, now: Date): { sql: string; args: string[] } {
+  return {
+    sql: `NOT EXISTS (SELECT 1 FROM approvals a WHERE a.tenant_id = ? AND a.action_kind = 'deliver_ai_audit' AND a.status = 'executing'
+            AND a.executing_at > ? AND json_extract(a.payload_json, '$.engagement_id') = ?)`,
+    args: [tenantId, new Date(now.getTime() - DELIVERY_IN_FLIGHT_MS).toISOString(), engagementId],
+  };
+}
+
+/** Whether a final-approval email for this engagement is being sent right now (see noDeliveryInFlight). */
+export async function deliveryInFlight(db: Client, tenantId: string, engagementId: string, now: Date): Promise<boolean> {
+  const guard = noDeliveryInFlight(requireTenant(tenantId), engagementId, now);
+  const rs = await db.execute({ sql: `SELECT ${guard.sql} AS clear`, args: guard.args });
+  return Number(rs.rows[0]?.clear ?? 1) === 0;
+}
+
 export function engagementUpdateStatement(
   tenantId: string,
   id: string,
@@ -390,6 +428,10 @@ export function engagementUpdateStatement(
   patch: EngagementPatch,
   at: string,
   stage?: AiAuditStage,
+  /** Write only while the engagement is in one of these stages (a check that cannot go stale between read and write). */
+  onlyInStages?: readonly AiAuditStage[],
+  /** One more condition the write needs, checked inside it (noDeliveryInFlight). */
+  guard?: { sql: string; args: Array<string | number> },
 ): InStatement {
   const sets: string[] = [];
   const args: Array<string | number | null> = [];
@@ -404,13 +446,17 @@ export function engagementUpdateStatement(
   }
   sets.push("row_version = row_version + 1", "updated_at = ?");
   args.push(at);
+  const inStages = onlyInStages?.length ? ` AND stage IN (${onlyInStages.map(() => "?").join(", ")})` : "";
+  const extra = guard ? ` AND ${guard.sql}` : "";
   return {
-    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?`,
-    args: [...args, tenantId, id, expectedRowVersion],
+    sql: `UPDATE ai_audit_engagements SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND row_version = ?${inStages}${extra}`,
+    args: [...args, tenantId, id, expectedRowVersion, ...(onlyInStages ?? []), ...(guard?.args ?? [])],
   };
 }
 
-export type CasResult = { ok: true; engagement: Engagement } | { ok: false; error: "conflict" | "not_found" | "move_not_allowed"; engagement: Engagement | null };
+export type CasResult =
+  | { ok: true; engagement: Engagement }
+  | { ok: false; error: "conflict" | "not_found" | "move_not_allowed" | "delivery_in_progress"; engagement: Engagement | null };
 
 /**
  * Patch an engagement (no stage change) with its event. `expectedRowVersion`
@@ -430,11 +476,13 @@ export async function patchEngagement(
     refType?: string;
     refId?: string;
     extra?: InStatement[];
+    /** Write only while the engagement is in one of these stages, checked by the UPDATE itself. */
+    onlyInStages?: readonly AiAuditStage[];
   },
 ): Promise<CasResult> {
   const tenantId = requireTenant(input.tenantId);
   const at = input.now.toISOString();
-  const update = engagementUpdateStatement(tenantId, input.id, input.expectedRowVersion, input.patch, at);
+  const update = engagementUpdateStatement(tenantId, input.id, input.expectedRowVersion, input.patch, at, undefined, input.onlyInStages);
   const event = eventStatement({ tenantId, engagementId: input.id, event: input.event, actor: input.actor, at, meta: input.meta, refType: input.refType, refId: input.refId });
   const applied = await casWrite(db, update, [event, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, input.id);
@@ -462,6 +510,8 @@ export async function moveStage(
     meta?: Record<string, unknown>;
     event?: string;
     extra?: InStatement[];
+    /** Refuse while a final-approval email for this engagement is being sent (a move by hand). */
+    unlessDeliveryInFlight?: boolean;
   },
 ): Promise<CasResult> {
   const tenantId = requireTenant(input.tenantId);
@@ -476,7 +526,8 @@ export async function moveStage(
   // Active Client ends the audit cycle too: the delivery project carries the client from here, and
   // the lead is free for other deals (an open engagement holds website sales off it, ownership.ts).
   const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" || input.to === "active_client" ? { closed_at: at, closed_reason: input.to } : {};
-  const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to);
+  const guard = input.unlessDeliveryInFlight ? noDeliveryInFlight(tenantId, current.id, input.now) : undefined;
+  const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to, undefined, guard);
   const ev = eventStatement({
     tenantId,
     engagementId: current.id,
@@ -489,6 +540,9 @@ export async function moveStage(
   });
   const applied = await casWrite(db, update, [ev, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
+  if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
+    return { ok: false, error: "delivery_in_progress", engagement: after };
+  }
   if (!applied) return { ok: false, error: after ? "conflict" : "not_found", engagement: after };
   if (!after) return { ok: false, error: "not_found", engagement: null };
   return { ok: true, engagement: after };
@@ -584,9 +638,14 @@ export async function saveSettings(
 
 /** True when the ai_audit tables exist (the migration has been applied). */
 export async function aiAuditTablesInstalled(db: Client): Promise<boolean> {
+  // bravo__237, 238 and 239 must all be in: this code reads 239's two tables
+  // and the two columns it adds to the engagement (review of phase 2, F6). A
+  // column added by ALTER TABLE shows in the table's stored CREATE statement.
   const rs = await db.execute({
-    sql: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links')",
+    sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links', 'ai_audit_transcripts', 'ai_audit_call_notes')",
     args: [],
   });
-  return int(rs.rows[0]?.n) === 2;
+  if (rs.rows.length !== 4) return false;
+  const engagements = String(rs.rows.find((r) => String(r.name) === "ai_audit_engagements")?.sql ?? "");
+  return /\bcall_started_at\b/.test(engagements) && /\bcall_ended_at\b/.test(engagements);
 }

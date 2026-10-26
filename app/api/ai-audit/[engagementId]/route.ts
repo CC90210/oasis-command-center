@@ -18,6 +18,11 @@
  *   revoke_link                                           the client's link stops working
  *   retry_onboarding                                      run the onboarding steps again (idempotent)
  *   retry_pdf                                             after three failed prints: forget them and print again
+ *   save_call_note     { question_id, notes, expected_version, after_text? }  one question's notes (live-call screen)
+ *   start_call / end_call                                 the call's clock
+ *   delete_transcript  { transcript_id }                  wipe a transcript's lines (and the quotes taken from it); owner only
+ *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
+ * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
  * owner approves the deliver_ai_audit approval (lib/ai-audit/delivery.ts).
@@ -27,6 +32,7 @@ import { requireAiAuditSession } from "@/lib/ai-audit/access";
 import {
   BUSINESS_TYPES,
   MANUAL_STAGE_TARGETS,
+  PROFILE_EDIT_STAGES,
   isAiAuditStage,
   isOneOf,
 } from "@/lib/ai-audit/rules";
@@ -40,6 +46,9 @@ import { confirmUncertainDelivery, reopenForEdits, requestDeliveryApproval, subm
 import { expireOpenCheckouts, listCheckouts, verifyCheckout } from "@/lib/ai-audit/payment";
 import { clearPdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
+import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
+import { deleteTranscript } from "@/lib/ai-audit/transcripts";
+import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -94,8 +103,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const rv = rowVersion(body);
       if (!isAiAuditStage(to) || !MANUAL_STAGE_TARGETS.includes(to)) return json(400, { ok: false, error: "stage_not_settable_by_hand" });
       if (!rv) return json(400, { ok: false, error: "expected_row_version_required" });
-      const r = await advanceEngagement(s.db, { tenantId: s.tenantId, engagementId, to, actor, now, expectedRowVersion: rv, event: "stage_set_by_owner" });
+      // Not while the audit email is going out: the send already checked the stage and the authorization.
+      const r = await advanceEngagement(s.db, { tenantId: s.tenantId, engagementId, to, actor, now, expectedRowVersion: rv, event: "stage_set_by_owner", unlessDeliveryInFlight: true });
       if (!r.ok) return casError(r.error);
+      // A Gate 1 card still waiting no longer describes an engagement that moved away from it.
+      if (to !== "transcript_review") await withdrawAuthorization(s.db, s.tenantId, r.engagement, actor, now, "stage_moved");
       // A declined or cancelled engagement's payment link must stop working at Stripe too.
       // A failure here is retried by the tick (closedEngagementsWithOpenCheckouts).
       let checkouts: { expired: number; failed: number } | null = null;
@@ -117,6 +129,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (email && !EMAIL_RE.test(email)) return json(400, { ok: false, error: "contact_email_invalid" });
       const type = body.business_type === undefined ? engagement.business_type : body.business_type;
       if (type !== null && !isOneOf(BUSINESS_TYPES, type)) return json(400, { ok: false, error: "business_type_invalid" });
+      // The business's name and type are part of what Gate 1 authorizes; after
+      // it, only the contact (who receives the audit, bound again at Gate 2)
+      // may change (review of phase 2, F3). The row version makes this check
+      // hold: an approval in between moves it, and this save then conflicts.
+      const bindingChanges = (name || null) !== engagement.business_name || type !== engagement.business_type;
+      if (!PROFILE_EDIT_STAGES.includes(engagement.stage) && bindingChanges) {
+        return json(409, { ok: false, error: "details_frozen" });
+      }
       const r = await patchEngagement(s.db, {
         tenantId: s.tenantId,
         id: engagementId,
@@ -125,15 +145,23 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         event: "details_saved",
         actor,
         now,
+        // The check above read the engagement before this write: an approval in
+        // between could pass it on the version the approval leaves. The UPDATE
+        // itself says "still before Gate 1" (review of phase 2, second pass).
+        ...(bindingChanges ? { onlyInStages: PROFILE_EDIT_STAGES } : {}),
       });
+      if (!r.ok && bindingChanges && r.engagement && !PROFILE_EDIT_STAGES.includes(r.engagement.stage)) return json(409, { ok: false, error: "details_frozen" });
       if (!r.ok) return casError(r.error);
-      return json(200, { ok: true, row_version: r.engagement.row_version });
+      const withdrawn = await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+      const after = withdrawn ? await getEngagement(s.db, s.tenantId, engagementId) : null;
+      return json(200, { ok: true, row_version: after?.row_version ?? r.engagement.row_version, authorization_withdrawn: withdrawn });
     }
     case "save_profile_field": {
       const field = validateProfileField(body.field);
       if (!field.ok) return json(400, { ok: false, error: "field_invalid", field: field.field, detail: field.error });
       try {
         const saved = await saveProfileField(s.db, { tenantId: s.tenantId, engagementId, field: field.value, actor, now });
+        await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
         return json(200, { ok: true, field: saved });
       } catch (err) {
         if (err instanceof Error && /frozen/.test(err.message)) return json(409, { ok: false, error: "profile_frozen" });
@@ -143,8 +171,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }
     case "delete_profile_field": {
       const key = typeof body.field_key === "string" ? body.field_key : "";
-      const removed = await deleteProfileField(s.db, { tenantId: s.tenantId, engagementId, fieldKey: key, actor, now });
-      return json(200, { ok: true, removed });
+      try {
+        const removed = await deleteProfileField(s.db, { tenantId: s.tenantId, engagementId, fieldKey: key, actor, now });
+        await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+        return json(200, { ok: true, removed });
+      } catch (err) {
+        if (err instanceof Error && /frozen/.test(err.message)) return json(409, { ok: false, error: "profile_frozen" });
+        throw err;
+      }
     }
     case "save_audit": {
       const rv = rowVersion(body);
@@ -223,6 +257,38 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         await recordEvent(s.db, { tenantId: s.tenantId, engagementId, event: "pdf_retry", actor, now, meta: { cleared } });
       }
       return json(200, { ok: true, queued, cleared });
+    }
+    case "save_call_note": {
+      const questionId = typeof body.question_id === "string" ? body.question_id : "";
+      const notes = typeof body.notes === "string" ? body.notes : null;
+      const expected = Number(body.expected_version);
+      if (notes === null || !Number.isInteger(expected) || expected < 0) return json(400, { ok: false, error: "note_invalid" });
+      const afterText = typeof body.after_text === "string" ? body.after_text : null;
+      const r = await saveCallNote(s.db, { tenantId: s.tenantId, engagementId, questionId, notes, expectedVersion: expected, afterText, actor, now });
+      if (!r.ok) return json(r.error === "conflict" || r.error === "stage_closed" ? 409 : r.error === "not_found" ? 404 : 400, { ok: false, error: r.error, ...("current" in r ? { current: r.current } : {}) });
+      // Gate 1 binds the notes: a real change withdraws a card still waiting.
+      await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+      return json(200, { ok: true, note: r.note });
+    }
+    case "start_call":
+    case "end_call": {
+      const r = await markCall(s.db, { tenantId: s.tenantId, engagementId, what: body.action === "start_call" ? "start" : "end", actor, now });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, row_version: r.engagement.row_version, call_started_at: r.engagement.call_started_at, call_ended_at: r.engagement.call_ended_at });
+    }
+    case "delete_transcript": {
+      // Deleting cannot be undone, and after Gate 1 it voids the authorization: the owner's call (review of phase 2, F9).
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const id = typeof body.transcript_id === "string" ? body.transcript_id : "";
+      const r = await deleteTranscript(s.db, { tenantId: s.tenantId, engagementId, id, actor, now });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
+      await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+      return json(200, { ok: true });
+    }
+    case "request_authorization": {
+      const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });
+      if (!r.ok) return json(409, { ok: false, error: r.error });
+      return json(200, { ok: true, approval_id: r.approvalId, created: r.created });
     }
     default:
       return json(400, { ok: false, error: "unknown_action" });

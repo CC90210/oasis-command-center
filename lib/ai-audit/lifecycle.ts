@@ -102,6 +102,8 @@ export async function advanceEngagement(
     patch?: EngagementPatch;
     meta?: Record<string, unknown>;
     event?: string;
+    /** A move by hand: refused while a final-approval email is being sent (store.noDeliveryInFlight). */
+    unlessDeliveryInFlight?: boolean;
   },
 ): Promise<CasResult & { lead?: LeadMove }> {
   const { engagementId, ...rest } = input;

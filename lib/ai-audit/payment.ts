@@ -28,7 +28,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { newId } from "@/lib/ai-audit/hash";
 import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
-import { CHECKOUT_TTL_HOURS, type InstallmentKind } from "@/lib/ai-audit/rules";
+import { CHECKOUT_TTL_HOURS, shortName, type InstallmentKind } from "@/lib/ai-audit/rules";
 import { getProposalVersion } from "@/lib/ai-audit/versions";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { casWrite, engagementUpdateStatement, eventStatement, getEngagement, int, patchEngagement, requireTenant, text, type Engagement } from "@/lib/ai-audit/store";
@@ -410,7 +410,7 @@ export async function settlePayment(
         tenantId: t,
         alertType: "ai_audit_overpaid",
         severity: "urgent",
-        title: `Second payment for ${e.business_name || "an AI audit proposal"}`,
+        title: `Second payment for ${shortName(e.business_name, "an AI audit proposal")}`,
         body: "Stripe confirmed two payments for the same proposal. Nothing was onboarded twice. Refund one in Stripe.",
         subjectType: "ai_audit_engagement",
         subjectId: e.id,
@@ -453,7 +453,7 @@ export async function settlePayment(
       tenantId: t,
       alertType: "ai_audit_payment_unplaced",
       severity: "urgent",
-      title: `Payment received for a ${e.stage.replace(/_/g, " ")} audit: ${e.business_name || "a client"}`,
+      title: `Payment received for a ${e.stage.replace(/_/g, " ")} audit: ${shortName(e.business_name, "a client")}`,
       body: reason,
       subjectType: "ai_audit_engagement",
       subjectId: e.id,
@@ -605,7 +605,7 @@ async function flagPaymentProblem(db: Client, engagement: Engagement, code: stri
     tenantId: engagement.tenant_id,
     alertType: "ai_audit_payment_problem",
     severity: "warn",
-    title: `Payment check needs you: ${engagement.business_name || "AI audit"}`,
+    title: `Payment check needs you: ${shortName(engagement.business_name, "AI audit")}`,
     body: reason,
     subjectType: "ai_audit_engagement",
     subjectId: engagement.id,
