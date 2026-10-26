@@ -281,7 +281,6 @@ const LANE_ALLOWED: Readonly<Record<string, string>> = {
   "lib/health/department-chat-checks.ts": "department-chat health checks; the route pages only a workspace alertAudienceFor() resolves to OASIS's operator chat, every other workspace is recorded without a page",
   "lib/health/drip-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/deploy-checks.ts": "estate health checks, run only under OASIS's own workspace",
-  "lib/website-sales-booking.ts": "OASIS's own website-sales program",
   "lib/delivery/notify.ts": "OASIS's own support desk (deskUsesOasisLanes); a client desk moves to its own bot in the desk-lanes track",
   "lib/tenant/public-identity.ts": "notifyLanesForTenant: no sender calls it since the form failure moved to the resolver (2026-10-08); tests/tenant-public-identity.test.ts still does",
   "lib/drips/reply-handoff.ts": "LO4: no caller",

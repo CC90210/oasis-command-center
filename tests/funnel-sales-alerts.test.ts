@@ -84,13 +84,21 @@ async function main(): Promise<void> {
   }
   console.log("  ok - retired group availability cannot affect CC alerts");
 
-  // 4. Everything down: an honest failure, so the funnel records a marker.
+  // 4. Everything down: an honest failure, so the funnel records a marker. "Everything"
+  // includes the founder email that stands in for a refused OASIS alert
+  // (lib/notify/alert-route.ts), stubbed here with its hourly cap so the test never
+  // depends on what the machine running it can reach.
   {
     const { restore } = stubFetch(new Set([CC_DM]));
-    const r = await pushWorkspaceAlert(OASIS, "x", { desk: "sales" });
+    const r = await pushWorkspaceAlert(OASIS, "x", {
+      desk: "sales",
+      slot: async () => ({ allowed: true, release: async () => undefined }),
+      email: async () => ({ ok: false, error: "smtp unreachable" }),
+    });
     restore();
     assert.equal(r.delivered, false);
     assert.match(r.outcome, /^Not sent/);
+    assert.match(r.outcome, /\. The email fallback failed too \(smtp unreachable\)$/, "and it says the email failed too");
   }
   console.log("  ok - when nothing is reachable the alert reports not delivered");
 
