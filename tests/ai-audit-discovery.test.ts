@@ -465,6 +465,42 @@ async function main() {
     assert.ok(!late.ok && late.error === "conflict");
     assert.equal((await notes.listCallNotes(db, OASIS, eid)).find((n) => n.question_id === "sales-conversion")!.notes, "ab");
   });
+  await check("an expired card is never handed back; asking again files a fresh one (Codex review of phase 2)", async () => {
+    const { eid } = await freshEngagement("Expired Card Co");
+    const a = await fileCard(eid);
+    await db.execute({ sql: "UPDATE approvals SET expires_at = ? WHERE id = ?", args: [new Date(Date.now() - 60_000).toISOString(), a] });
+    const again = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine: "mac_claude" });
+    assert.ok(again.ok && again.created && again.approvalId !== a, "a fresh card, not the expired one");
+  });
+  await check("a field delete on a profile frozen in between removes nothing (Codex review of phase 2)", async () => {
+    const { eid } = await freshEngagement("Delete Race Co");
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const e = await engagementOf(eid);
+    const before = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).length;
+    const r = await db.execute(versions.deleteDraftFieldStatement(OASIS, e.current_profile_version_id!, "sales.leads_per_month"));
+    assert.equal(r.rowsAffected, 0);
+    assert.equal((await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).length, before);
+    assert.ok(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)), "the authorization still holds");
+  });
+  await check("a transcript deleted after Gate 1 takes a waiting final approval out of Needs you (Codex review of phase 2)", async () => {
+    const { eid, transcriptId: tid } = await freshEngagement("Voided Delivery Co");
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const e = await engagementOf(eid);
+    const payload = {
+      engagement_id: eid, lead_id: e.lead_id, business_name: "Voided Delivery Co", audit_version_id: "ver-voided", audit_sha256: "a".repeat(64),
+      proposal_version_id: "prop-voided", proposal_sha256: "b".repeat(64), pdf_sha256: "c".repeat(64), to: "owner@fixture.test",
+      subject: "Your audit", body: "Hi\n\n{{audit_link}}", currency: "CAD", total_cents: 100, due_now_cents: 100,
+    };
+    const card = await approvals.createApproval(
+      db,
+      { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: "deliver_ai_audit", title: "Deliver", payload, riskLevel: "spend", idempotencyKey: `voided-delivery:${eid}` },
+      NOW(),
+    );
+    assert.ok(card.ok, !card.ok ? card.error : "");
+    assert.ok((await store.patchEngagement(db, { tenantId: OASIS, id: eid, expectedRowVersion: e.row_version, patch: { delivery_approval_id: card.ok ? card.approval.id : null }, event: "test_link_card", actor: cc, now: NOW() })).ok);
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    assert.equal((await approvals.getApprovalInTenant(db, OASIS, card.ok ? card.approval.id : ""))!.status, "cancelled");
+  });
   await check("the install guard needs every table and column phase 2 reads (review F6)", async () => {
     const { createClient } = await import("@libsql/client");
     const bare = createClient({ url: ":memory:" });

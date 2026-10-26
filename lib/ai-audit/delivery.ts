@@ -206,6 +206,15 @@ export async function requestDeliveryApproval(
   const t = requireTenant(input.tenantId);
   const engagement = await getEngagement(db, t, input.engagementId);
   if (!engagement || engagement.stage !== "final_review") return { ok: false, error: "not_in_final_review" };
+  // Gate 1 must still hold when Gate 2 is filed: a transcript deleted after
+  // submission voids it (Codex review of phase 2).
+  if (!(await authorizedProfile(db, t, engagement))) {
+    const why = "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript Awaiting Approval, authorize it again, then submit again.";
+    if (engagement.health !== "attention" || engagement.health_reason !== why) {
+      await patchEngagement(db, { tenantId: t, id: engagement.id, expectedRowVersion: engagement.row_version, patch: { health: "attention", health_reason: why }, event: "authorization_voided", actor: { type: "system", id: null }, now: input.now });
+    }
+    return { ok: false, error: "not_authorized" };
+  }
   if (engagement.delivery_approval_id) {
     const prior = await getApprovalInTenant(db, t, engagement.delivery_approval_id);
     const priorOutcome = (prior?.execution_result as { outcome?: unknown } | null)?.outcome;
@@ -332,6 +341,10 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   const engagement = await getEngagement(ctx.db, t, p.engagement_id);
   if (!engagement) return failed("engagement_missing", "The engagement no longer exists, so nothing was sent.");
   if (engagement.stage !== "final_review") return failed("stage_moved", "The engagement is no longer waiting for final approval, so nothing was sent.");
+  // And at the moment of sending: an authorization voided after this card was filed stops it (Codex review of phase 2).
+  if (!(await authorizedProfile(ctx.db, t, engagement))) {
+    return failed("not_authorized", "The client's information is no longer authorized (Gate 1), so nothing was sent. Move the engagement back, authorize it again, then submit again.");
+  }
   if (engagement.current_audit_version_id !== p.audit_version_id || engagement.current_proposal_version_id !== p.proposal_version_id) {
     return failed("payload_changed", "A newer version of the audit or proposal exists. Approve that one instead.");
   }

@@ -286,14 +286,24 @@ export async function deleteProfileField(db: Client, input: { tenantId: string; 
   await assertProfileEditable(db, t, input.engagementId);
   const { version } = await ensureDraftProfile(db, t, input.engagementId, input.actor, input.now);
   const at = input.now.toISOString();
-  const results = await db.batch(
-    [
-      { sql: "DELETE FROM ai_audit_profile_fields WHERE tenant_id = ? AND profile_version_id = ? AND field_key = ?", args: [t, version.id, input.fieldKey] },
-      eventStatement({ tenantId: t, engagementId: input.engagementId, event: "profile_field_removed", actor: input.actor, at, refType: "profile_field", refId: input.fieldKey }),
-    ],
-    "write",
-  );
-  return results[0].rowsAffected === 1;
+  // The delete carries "this version is still a draft" itself. The database
+  // guards inserts and updates on a frozen profile (bravo__237) but not
+  // deletes, so Gate 1 landing between the check above and this write must
+  // leave the field where it is (Codex review of phase 2).
+  const removed = await casWrite(db, deleteDraftFieldStatement(t, version.id, input.fieldKey), [
+    eventStatement({ tenantId: t, engagementId: input.engagementId, event: "profile_field_removed", actor: input.actor, at, refType: "profile_field", refId: input.fieldKey }),
+  ]);
+  if (!removed && (await getProfileVersion(db, t, version.id))?.status !== "draft") throw new Error("ai-audit.versions: the profile is frozen (authorized)");
+  return removed;
+}
+
+/** Delete one field, only while its version is a draft. */
+export function deleteDraftFieldStatement(tenantId: string, versionId: string, fieldKey: string): InStatement {
+  return {
+    sql: `DELETE FROM ai_audit_profile_fields WHERE tenant_id = ? AND profile_version_id = ? AND field_key = ?
+            AND EXISTS (SELECT 1 FROM ai_audit_profile_versions WHERE tenant_id = ? AND id = ? AND status = 'draft')`,
+    args: [tenantId, versionId, fieldKey, tenantId, versionId],
+  };
 }
 
 // ---------------------------------------------------------------------------

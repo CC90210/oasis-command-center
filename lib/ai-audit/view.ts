@@ -2,6 +2,7 @@
  * lib/ai-audit/view.ts — everything the engagement page and the board show,
  * read in one place. Plain data: it crosses the server/client boundary.
  */
+import { effectiveStatus } from "@/lib/os/approvals/rules";
 import "server-only";
 import type { Client } from "@libsql/client";
 import {
@@ -163,7 +164,8 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     authorization: authApproval
       ? {
           id: authApproval.id,
-          status: authApproval.status,
+          // "expired" once past its expiry, though the stored row still says pending.
+          status: effectiveStatus(authApproval, new Date().toISOString()),
           outcome: (authApproval.execution_result as { outcome?: string } | null)?.outcome ?? null,
           message: (authApproval.execution_result as { message?: string } | null)?.message ?? null,
           engine: authPayload?.ok ? authPayload.value.engine : null,

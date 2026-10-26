@@ -78,7 +78,14 @@ export function createNoteSaver(o: {
       saved = a.notes;
     }
   };
-  const unsaved = () => o.read() !== saved && state !== "conflict" && state !== "closed";
+  // With a save out, what counts is whether the box still says what that save
+  // carries: typing the old text back while a draft is out must be saved too,
+  // or the draft lands as the note (Codex review of phase 2).
+  const unsaved = () => {
+    if (state === "conflict" || state === "closed") return false;
+    const box = o.read();
+    return inFlight && sending !== null ? box !== sending : box !== saved;
+  };
 
   async function run(keepalive: boolean): Promise<void> {
     inFlight = true;
@@ -140,5 +147,45 @@ export function createNoteSaver(o: {
       learn(await o.send(o.read(), version, { keepalive: true, afterText: sending }));
     },
     state: () => state,
+  };
+}
+
+/**
+ * A figure box: one save at a time, and the LAST value CC entered is the one
+ * the profile ends with, whatever order the answers come back in (Codex review
+ * of phase 2: enter 20, put 10 back before the first save answered, and the
+ * profile kept 20 while the box showed 10). Clearing the box removes the figure.
+ */
+export type FigureSend = (value: number | null) => Promise<{ ok: true } | { ok: false; message: string }>;
+
+export function createFigureSaver(o: {
+  initial: number | null;
+  send: FigureSend;
+  onResult: (r: { ok: true; value: number | null } | { ok: false; message: string }) => void;
+}): { set(value: number | null): Promise<void>; saved(): number | null } {
+  let saved = o.initial;
+  let wanted = o.initial;
+  let inFlight = false;
+  return {
+    async set(value) {
+      wanted = value;
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        while (wanted !== saved) {
+          const v = wanted;
+          const r = await o.send(v);
+          if (!r.ok) {
+            o.onResult(r);
+            return;
+          }
+          saved = v;
+          if (wanted === saved) o.onResult({ ok: true, value: v });
+        }
+      } finally {
+        inFlight = false;
+      }
+    },
+    saved: () => saved,
   };
 }

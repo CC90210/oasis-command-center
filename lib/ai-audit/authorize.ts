@@ -52,6 +52,7 @@ import {
   type Engagement,
 } from "@/lib/ai-audit/store";
 import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
+import { effectiveStatus } from "@/lib/os/approvals/rules";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
 import { dbBool } from "@/lib/db-bool";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
@@ -212,8 +213,11 @@ export async function requestAuthorization(
   if (first.authorization_approval_id) {
     const prior = await getApprovalInTenant(db, t, first.authorization_approval_id);
     const sameInformation = !!prior && (prior.idempotency_key === baseKey || prior.idempotency_key.startsWith(`${baseKey}:retry-`));
-    // The same information, still waiting or already decided yes: that card.
-    if (prior && sameInformation && ["pending", "approved", "executing", "executed"].includes(prior.status)) {
+    // The same information, still waiting or already decided yes: that card. A
+    // card past its expiry still says "pending" until someone acts on it, and
+    // Needs you no longer shows it, so it counts as ended (Codex review of phase 2).
+    const priorStatus = prior ? effectiveStatus(prior, input.now.toISOString()) : null;
+    if (prior && sameInformation && priorStatus && ["pending", "approved", "executing", "executed"].includes(priorStatus)) {
       return { ok: true, approvalId: prior.id, created: false };
     }
     if (prior && ["pending", "sent_back", "cancelled"].includes(prior.status)) supersedesId = prior.id;

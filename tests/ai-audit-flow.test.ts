@@ -446,6 +446,28 @@ async function main() {
       for (const [k, v] of saved) stored.set(k, v);
     }
   });
+  await check("Gate 2 refuses once Gate 1 no longer holds: nothing is minted or sent (Codex review of phase 2)", async () => {
+    await approve();
+    // A transcript the authorization never covered, as a delete after submission leaves the set different from the one CC authorized.
+    const at = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO ai_audit_transcripts (id, tenant_id, engagement_id, source, format, lines_json, line_count, char_count, speakers_json, text_sha256, redactions,
+              consent_recording, consent_ai, consent_basis, consent_by, consent_at, status, created_by, created_at)
+            VALUES ('voids-gate-1', ?, ?, 'paste', 'txt', '[]', 0, 0, '[]', ?, 0, 1, 1, 'owner_attested', ?, ?, 'active', ?, ?)`,
+      args: [OASIS, engagementId, "f".repeat(64), USERS.cc.id, at, USERS.cc.id, at],
+    });
+    try {
+      const r = await execute.executeApproval(db, { tenantId: OASIS, approvalId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+      assert.equal(r.ok && r.approval.status, "failed");
+      assert.equal(r.ok && (r.approval.execution_result as { reason?: string } | null)?.reason, "not_authorized");
+      assert.equal(sent.length, 0);
+      const refile = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });
+      assert.deepEqual(refile, { ok: false, error: "not_authorized" }, "no new card either");
+      assert.equal((await store.getEngagement(db, OASIS, engagementId))!.health, "attention");
+    } finally {
+      await db.execute("DELETE FROM ai_audit_transcripts WHERE id = 'voids-gate-1'");
+    }
+  });
   let token = "";
   await check("the owner's approval mints the private link, sends ONE email, and delivers", async () => {
     const retry = await delivery.requestDeliveryApproval(db, { tenantId: OASIS, engagementId, now: NOW(), retry: true });

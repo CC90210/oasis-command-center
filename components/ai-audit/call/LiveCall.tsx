@@ -22,7 +22,7 @@ import { PROFILE_FIELDS, type ProfileFieldDef } from "@/lib/ai-audit/profile";
 import type { BusinessType } from "@/lib/ai-audit/rules";
 import { describeError, postAction } from "@/components/ai-audit/workspace/api";
 import { NumberInput } from "@/components/ai-audit/workspace/inputs";
-import { createNoteSaver, type NoteAnswer, type NoteState } from "@/components/ai-audit/call/note-saver";
+import { createFigureSaver, createNoteSaver, type NoteAnswer, type NoteState } from "@/components/ai-audit/call/note-saver";
 
 type Note = { question_id: string; notes: string; row_version: number };
 type Field = { field_key: string; value: unknown; label: string };
@@ -137,22 +137,29 @@ function NoteBox({ engagementId, q, initial, disabled }: { engagementId: string;
 }
 
 /** A figure the question answers, saved to the profile as Client-reported from the call. */
-function FigureBox({ engagementId, def, initial, disabled, onSaved }: { engagementId: string; def: ProfileFieldDef; initial: number | null; disabled: boolean; onSaved: (key: string) => void }) {
+function FigureBox({ engagementId, def, initial, disabled, onSaved }: { engagementId: string; def: ProfileFieldDef; initial: number | null; disabled: boolean; onSaved: (key: string, present: boolean) => void }) {
   const [value, setValue] = useState<number | null>(initial);
   const [msg, setMsg] = useState<string | null>(null);
-  // What the profile holds now: changing a figure and then changing it back must save both times.
-  const saved = useRef<number | null>(initial);
-  async function save(n: number | null) {
-    if (n === null || n === saved.current) return;
-    const r = await postAction(engagementId, "save_profile_field", {
-      field: { field_key: def.key, value: n, label: "client_reported", source_type: "call_notes", source_note: "said on the discovery call" },
-    });
-    setMsg(r.ok ? "Saved to the profile" : describeError(r));
-    if (r.ok) {
-      saved.current = n;
-      onSaved(def.key);
-    }
-  }
+  // One save at a time; the last figure entered wins; clearing removes it (components/ai-audit/call/note-saver.ts).
+  const [saver] = useState(() =>
+    createFigureSaver({
+      initial,
+      send: async (v) => {
+        const r =
+          v === null
+            ? await postAction(engagementId, "delete_profile_field", { field_key: def.key })
+            : await postAction(engagementId, "save_profile_field", {
+                field: { field_key: def.key, value: v, label: "client_reported", source_type: "call_notes", source_note: "said on the discovery call" },
+              });
+        return r.ok ? { ok: true as const } : { ok: false as const, message: describeError(r) };
+      },
+      onResult: (r) => {
+        setMsg(r.ok ? (r.value === null ? "Removed from the profile" : "Saved to the profile") : r.message);
+        if (r.ok) onSaved(def.key, r.value !== null);
+      },
+    }),
+  );
+  const save = (n: number | null) => saver.set(n);
   return (
     <label className="grid gap-1">
       <span className="text-[12px] text-fg-muted">
@@ -333,7 +340,14 @@ export function LiveCall({ engagementId, businessType, callStartedAt, callEndedA
                             def={d}
                             initial={typeof fieldBy.get(d.key)?.value === "number" ? (fieldBy.get(d.key)!.value as number) : null}
                             disabled={!editable}
-                            onSaved={(key) => setCaptured((s) => new Set([...s, key]))}
+                            onSaved={(key, present) =>
+                              setCaptured((s) => {
+                                const next = new Set(s);
+                                if (present) next.add(key);
+                                else next.delete(key);
+                                return next;
+                              })
+                            }
                           />
                         ))}
                       </div>

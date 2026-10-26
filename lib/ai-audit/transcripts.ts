@@ -24,6 +24,7 @@ import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { casWrite, eventStatement, getEngagement, int, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
 import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type TranscriptFormat, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { cancelPendingApproval } from "@/lib/os/approvals/store";
 
 export const TRANSCRIPT_SOURCES = ["paste", "upload", "meet"] as const;
 export type TranscriptSource = (typeof TRANSCRIPT_SOURCES)[number];
@@ -284,5 +285,11 @@ export async function deleteTranscript(
         : []),
     ],
   );
+  // The audit was built on what this transcript said: a final approval still
+  // waiting must not go out on an authorization that no longer holds (the
+  // executor refuses it too; this takes the card out of Needs you).
+  if (ok && afterGate && engagement?.delivery_approval_id) {
+    await cancelPendingApproval(db, t, engagement.delivery_approval_id, { type: input.actor.type === "user" ? "user" : "system", id: input.actor.id }, { reason: "authorization_voided" }, input.now);
+  }
   return ok ? { ok: true } : { ok: false, error: "not_found" };
 }
