@@ -37,6 +37,7 @@ const ERROR_WORDS: Record<string, string> = {
   stage_moved: "The engagement moved on. Reload to see where it stands.",
   stage_closed: "The profile is authorized, so this can no longer change. Move the engagement back to Transcript Awaiting Approval first.",
   no_recording_consent: "A transcript can only be added for a call the client agreed to record.",
+  recording_declined: "The profile records that the client said no to the recording, so no transcript of the call can be used. Correct that answer on the profile first if it was recorded wrongly.",
   consent_ai_required: "Say whether the client agreed to AI analysis.",
   filename_required: "Choose the file to upload.",
   transcript_too_large: "That transcript is over 500 KB. Split it, or paste the part that matters.",

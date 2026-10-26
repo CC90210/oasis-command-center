@@ -66,6 +66,9 @@ export const MEET_TRANSCRIPT_NEEDS_YOU = "meet_transcript_needs_you";
 export const MEET_TRANSCRIPT_NEEDS_AI_ANSWER = "meet_transcript_needs_ai_answer";
 
 const AI_ANSWER_KEY = "consent.ai_processing";
+const RECORDING_ANSWER_KEY = "consent.recording";
+/** A room whose lines are on the engagement already (pasted by hand): not picked again. */
+export const MEET_TRANSCRIPT_ALREADY_HERE = "meet_transcript_already_here";
 /** Meet's recorder sends 10-second pieces of audio (lib/meet/recording.ts). */
 const CHUNK_SECONDS = 10;
 const ROOM_LIST_LIMIT = 10;
@@ -134,7 +137,7 @@ export async function roomsForEngagement(db: Client, tenantId: string, engagemen
                    EXISTS (SELECT 1 FROM ai_audit_transcripts b WHERE b.tenant_id = r.tenant_id AND b.meet_room_id = r.id) AS attached_before,
                    CASE WHEN m.status = 'ready' AND json_valid(m.lines_json) AND NOT EXISTS (${attachedHere}) THEN EXISTS (
                      SELECT 1 FROM json_each(m.lines_json) j
-                       JOIN meet_participants p ON p.id = json_extract(j.value, '$.participant_id')
+                       JOIN meet_participants p ON j.type = 'object' AND p.id = (CASE WHEN j.type = 'object' THEN json_extract(j.value, '$.participant_id') END)
                       WHERE p.tenant_id = r.tenant_id AND p.room_id = r.id AND p.role = 'guest'
                    ) ELSE 0 END AS guest_heard
               FROM meet_rooms r
@@ -254,6 +257,7 @@ export type AttachError =
   | "owner_only"
   | "no_guests"
   | "no_recording_consent"
+  | "recording_declined"
   | "held"
   | "ai_answer_needed"
   | "ai_answer_unconfirmed"
@@ -276,8 +280,11 @@ async function userIsOwner(db: Client, t: string, userId: string): Promise<boole
  * Client-reported or Verified, saved by the workspace owner (review of phase 2c, F2). Another founder's answer,
  * a hypothesis or an estimate is not the client's yes.
  */
-async function ownersAiAnswer(db: Client, t: string, e: Engagement): Promise<{ ok: true; value: boolean; by: string } | { ok: false; error: "ai_answer_needed" | "ai_answer_unconfirmed" }> {
-  const fields = e.current_profile_version_id ? await listProfileFields(db, t, e.current_profile_version_id) : [];
+async function ownersAiAnswer(
+  db: Client,
+  t: string,
+  fields: Awaited<ReturnType<typeof listProfileFields>>,
+): Promise<{ ok: true; value: boolean; by: string } | { ok: false; error: "ai_answer_needed" | "ai_answer_unconfirmed" }> {
   const answer = fields.find((f) => f.field_key === AI_ANSWER_KEY);
   if (!answer || typeof answer.value !== "boolean") return { ok: false, error: "ai_answer_needed" };
   const said = answer.label === "client_reported" || answer.label === "verified";
@@ -329,6 +336,11 @@ export async function attachMeetTranscript(
   const guests = (await db.execute({ sql: "SELECT id, consent_at, removed_at FROM meet_participants WHERE tenant_id = ? AND room_id = ? AND role = 'guest'", args: [t, input.roomId] })).rows;
   if (!guests.length) return { ok: false, error: "no_guests" };
   if (guests.some((g) => !present(g.consent_at))) return { ok: false, error: "no_recording_consent" };
+  // The client's own no to the recording, as recorded on the call's opening question, stands over Meet's join
+  // notice: the call cannot be used, even by hand (review of phase 2c, second pass, F1).
+  const fields = e.current_profile_version_id ? await listProfileFields(db, t, e.current_profile_version_id) : [];
+  if (fields.some((f) => f.field_key === RECORDING_ANSWER_KEY && f.value === false)) return { ok: false, error: "recording_declined" };
+  const lines = meet.lines.filter((l): l is MeetLine => !!l && typeof l === "object");
   const guestIds = new Set(guests.map((g) => String(g.id)));
   const holds = holdsOf({
     roomEndedAt: text(room.ended_at),
@@ -339,20 +351,20 @@ export async function attachMeetTranscript(
     recorderFailed: meet.recorderFailed,
     recorderErrored: meet.recorderErrored,
     guestRemoved: guests.some((g) => present(g.removed_at)),
-    guestHeard: meet.lines.some((l) => guestIds.has(String(l.participant_id))),
+    guestHeard: lines.some((l) => guestIds.has(String(l.participant_id))),
   });
   // The owner has seen why (the engagement lists it), and only he decides it is the client's call anyway.
   if (holds.length && !input.byOwner) return { ok: false, error: "held", holds };
   let ai = input.ai;
   let by: string | null = input.actor.id ?? null;
   if (ai === undefined) {
-    const answer = await ownersAiAnswer(db, t, e);
+    const answer = await ownersAiAnswer(db, t, fields);
     if (!answer.ok) return { ok: false, error: answer.error };
     ai = answer.value;
     // The AI answer is the owner's word; the recording consent is the guests' own (basis meet_guests).
     by = answer.by;
   }
-  const parsed = parseMeetLines(onCallClock(meet.lines, text(room.started_at)));
+  const parsed = parseMeetLines(onCallClock(lines, text(room.started_at)));
   if (!parsed.ok) return { ok: false, error: `meet_transcript_${parsed.error}` };
   const r = await addTranscript(db, {
     tenantId: t,
@@ -393,6 +405,8 @@ function waitWords(r: Extract<AttachResult, { ok: false }>): { why: string; next
       return { why: (r.holds ?? []).map((h) => h.words).join("; "), next: "Check that it is this audit's call, then attach it by hand on the engagement." };
     case "no_recording_consent":
       return { why: "a guest joined without agreeing to the recording", next: "It cannot be used, even by hand: work from your notes." };
+    case "recording_declined":
+      return { why: "the profile records that the client said no to the recording", next: "It cannot be used, even by hand: work from your notes, or correct that answer on the profile if it was recorded wrongly." };
     case "no_guests":
       return { why: "no guest joined the room", next: "It is not the client's call, so it is not used." };
     case "too_many_transcripts":
@@ -432,12 +446,12 @@ export async function autoAttachMeetTranscripts(db: Client, tenantId: string, no
              AND NOT EXISTS (
                SELECT 1 FROM ai_audit_events v
                 WHERE v.tenant_id = e.tenant_id AND v.engagement_id = e.id AND v.ref_id = r.id
-                  AND (v.event = ? OR (v.event = ? AND NOT EXISTS (
+                  AND (v.event IN (?, ?) OR (v.event = ? AND NOT EXISTS (
                     SELECT 1 FROM ai_audit_profile_fields f
                      WHERE f.tenant_id = e.tenant_id AND f.profile_version_id = e.current_profile_version_id
                        AND f.field_key = ? AND f.updated_at > v.created_at))))
            ORDER BY m.updated_at LIMIT ?`,
-    args: [t, ...stages, MEET_TRANSCRIPT_NEEDS_YOU, MEET_TRANSCRIPT_NEEDS_AI_ANSWER, AI_ANSWER_KEY, limit],
+    args: [t, ...stages, MEET_TRANSCRIPT_NEEDS_YOU, MEET_TRANSCRIPT_ALREADY_HERE, MEET_TRANSCRIPT_NEEDS_AI_ANSWER, AI_ANSWER_KEY, limit],
   });
   let attached = 0;
   let waiting = 0;
@@ -446,11 +460,22 @@ export async function autoAttachMeetTranscripts(db: Client, tenantId: string, no
   for (const row of rs.rows) {
     const engagementId = String(row.engagement_id);
     const roomId = String(row.room_id);
-    const r = await attachMeetTranscript(db, { tenantId: t, engagementId, roomId, actor: system, now });
+    // One bad room (a row Meet wrote wrongly) never stops the rooms after it (review of phase 2c, second pass, F3).
+    let r: AttachResult;
+    try {
+      r = await attachMeetTranscript(db, { tenantId: t, engagementId, roomId, actor: system, now });
+    } catch (err) {
+      console.error("[ai-audit.meet-link] a room could not be attached", { engagementId, roomId, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
     if (r.ok) {
       if (r.duplicate) {
-        // The same lines are on the engagement already (pasted by hand): nothing waits, and the room is not picked again.
-        await db.execute(eventStatement({ tenantId: t, engagementId, event: MEET_TRANSCRIPT_NEEDS_YOU, actor: system, at, refType: "meet_room", refId: roomId, meta: { reason: "already_on_engagement" } }));
+        // Another run attached this room a moment ago: nothing to record. The same lines pasted by hand: the room is
+        // not picked again, under its own event (never "needs you": nothing waits) (second pass, F5).
+        const same = (await db.execute({ sql: "SELECT meet_room_id FROM ai_audit_transcripts WHERE tenant_id = ? AND id = ? LIMIT 1", args: [t, r.transcriptId] })).rows[0];
+        if (String(same?.meet_room_id ?? "") !== roomId) {
+          await db.execute(eventStatement({ tenantId: t, engagementId, event: MEET_TRANSCRIPT_ALREADY_HERE, actor: system, at, refType: "meet_room", refId: roomId, meta: { reason: "already_on_engagement" } }));
+        }
         continue;
       }
       attached += 1;

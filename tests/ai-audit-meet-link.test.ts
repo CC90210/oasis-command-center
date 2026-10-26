@@ -583,6 +583,53 @@ async function main() {
     assert.ok(!seen.some((q) => q.columns.includes("lines_json") || q.columns.includes("text")), "no transcript text read back");
   });
 
+  console.log("second review of phase 2c");
+  await check("F1: the client's recorded no to the recording stands over Meet's join notice: never attached, by the tick or by hand, nor pasted", async () => {
+    await settle();
+    const { eid, lead } = await engagementFor("Declined Recording Co");
+    await aiAnswer(eid, true);
+    const declined = await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "consent.recording", value: false, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    assert.equal((declined as { value?: unknown }).value, false, JSON.stringify(declined));
+    const room = await meetCall(lead, [{ name: "Dana", consented: true }], call.slice(0, 1));
+    assert.deepEqual(await tick(), { attached: 0, waiting: 1 });
+    assert.deepEqual(await link.attachMeetTranscript(db, { tenantId: OASIS, engagementId: eid, roomId: room, actor: cc, now: NOW(), ai: true, byOwner: true }), { ok: false, error: "recording_declined" });
+    const parsedText = (await import("../lib/ai-audit/transcript")).parseTranscriptText("Dana: We agreed after all.");
+    assert.ok(parsedText.ok);
+    const pasted = await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: eid, parsed: parsedText.ok ? parsedText.value : (null as never), source: "paste", consent: { recording: true, ai: true, basis: "owner_attested", by: USERS.cc.id }, actor: cc, now: NOW() });
+    assert.deepEqual(pasted, { ok: false, error: "recording_declined" });
+    assert.equal((await transcripts.listTranscripts(db, OASIS, eid)).length, 0);
+    assert.ok(alerts.some((a) => String(a.body).includes("said no to the recording")), "the alert says why");
+    // Corrected to Agreed, the call attaches.
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "consent.recording", value: true, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    assert.ok((await link.attachMeetTranscript(db, { tenantId: OASIS, engagementId: eid, roomId: room, actor: cc, now: NOW(), ai: true, byOwner: true })).ok);
+  });
+  await check("F3: a Meet row with lines that are not objects is skipped: the page still reads, and the tick goes on to the next room", async () => {
+    await settle();
+    const { eid, lead } = await engagementFor("Odd Rows Co");
+    await aiAnswer(eid, true);
+    const odd = await meetCall(lead, [{ name: "Dana", consented: true }], call, { rawLines: ["oops"] });
+    const rooms = await link.roomsForEngagement(db, OASIS, (await store.getEngagement(db, OASIS, eid))!);
+    assert.ok(rooms.some((r) => r.id === odd), "the page lists the room instead of failing");
+    const nulls = await meetCall(lead, [{ name: "Dana", consented: true }], call, { rawLines: [null] });
+    const good = await meetCall(lead, [{ name: "Dana", consented: true }], call);
+    for (let i = 0; i < 5; i++) await tick();
+    const attached = (await transcripts.listTranscripts(db, OASIS, eid)).map((x) => x.meet_room_id);
+    assert.ok(attached.includes(good), "the good room after the bad ones is attached");
+    assert.ok(!attached.includes(nulls) && !attached.includes(odd));
+  });
+  await check("F5: a room whose lines were pasted by hand is marked once under its own event, never as waiting, and never picked again", async () => {
+    await settle();
+    const { eid, lead } = await engagementFor("Pasted First Co");
+    await aiAnswer(eid, true);
+    const room = await meetCall(lead, [{ name: "Dana", consented: true }], call);
+    // Attached by hand first (as another run would have, a moment before): the same lines, so the tick finds a duplicate.
+    const first = await link.attachMeetTranscript(db, { tenantId: OASIS, engagementId: eid, roomId: room, actor: cc, now: NOW(), ai: true, byOwner: true });
+    assert.ok(first.ok);
+    await tick();
+    assert.equal((await transcripts.listTranscripts(db, OASIS, eid)).length, 1);
+    assert.deepEqual(await events(eid, link.MEET_TRANSCRIPT_NEEDS_YOU), [], "nothing waits on an attached room");
+  });
+
   finish("ai-audit-meet-link");
 }
 
