@@ -41,6 +41,7 @@ import { profileFieldDef } from "@/lib/ai-audit/profile";
 import { AI_ENGINE_LABELS, validateAuthorizeAiAuditPayload, type AiEngine } from "@/lib/ai-audit/authorize-payload";
 import { assumptionOverrides, latestResearch, latestResearchStep, researchTablesInstalled, type StoredResearch } from "@/lib/ai-audit/research";
 import { estimateImpact, type AssumptionOverrides } from "@/lib/ai-audit/impact";
+import { latestWriteStep } from "@/lib/ai-audit/writing";
 import type { DocEstimate } from "@/lib/ai-audit/doc";
 
 export type BoardRow = {
@@ -120,6 +121,8 @@ export type EngagementView = {
     step: { id: string; status: string; phase: string | null; error: string | null; created_at: string } | null;
     assumptions: AssumptionOverrides;
     estimates: DocEstimate[];
+    /** Phase 4b: the latest model pass over the audit's opening, and what it held back. */
+    writing: Awaited<ReturnType<typeof latestWriteStep>>;
   } | null;
   /** The last finished draft's report, from the profile version (lib/ai-audit/extraction.ts finishExtraction). */
   extractionReport: {
@@ -179,14 +182,15 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
   const link = engagement.share_link_id ? await getShareLink(db, tenantId, engagement.share_link_id) : null;
   let research: EngagementView["research"] = null;
   if (await researchTablesInstalled(db)) {
-    const [latest, step, assumptions] = await Promise.all([
+    const [latest, step, assumptions, writing] = await Promise.all([
       latestResearch(db, tenantId, engagement.id),
       latestResearchStep(db, tenantId, engagement.id),
       assumptionOverrides(db, tenantId, engagement.id),
+      latestWriteStep(db, tenantId, engagement.id),
     ]);
     // A run built on an authorization that stopped holding is not shown; the tick deletes it (lib/ai-audit/research-purge.ts).
     const shown = authVoided || PROFILE_EDIT_STAGES.includes(engagement.stage) || TERMINAL_STAGES.includes(engagement.stage) ? null : latest;
-    research = { latest: shown, step, assumptions, estimates: shown ? estimateImpact(shown.content.impact_inputs, assumptions).estimates : [] };
+    research = { latest: shown, step, assumptions, estimates: shown ? estimateImpact(shown.content.impact_inputs, assumptions).estimates : [], writing };
   }
   return {
     engagement,
