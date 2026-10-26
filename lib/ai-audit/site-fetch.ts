@@ -389,18 +389,21 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
     batch.forEach((r, j) => {
       const w = wanted[i + j];
       record("site_page", w.url, r);
-      // Like the home page, a page that is not the business's own (a bot check, a page that sends visitors on) is not measured as part of the site.
-      const other = r.ok && r.page.status >= 200 && r.page.status < 300 ? notTheSite(r.page) : null;
       if (!r.ok) {
         notes.push(describeReadError(w.url, r.error));
         unread.push(w);
       } else if (r.page.status < 200 || r.page.status >= 300) {
         notes.push(`${w.url} answered with HTTP ${r.page.status}, so it was not checked.`);
         unread.push(w);
-      } else if (other) {
-        notes.push(`${w.url} showed what looks like ${other.what} ("${other.seen.replace(/\s+/g, " ")}"), so it was not checked.`);
-        unread.push(w);
-      } else extra.push(r.page);
+      } else {
+        // Like the home page, a page that is not the business's own (a bot check, a page that sends visitors on) is not measured as part of the site.
+        const other = notTheSite(r.page);
+        if (!other) extra.push(r.page);
+        else {
+          notes.push(`${w.url} showed what looks like ${other.what} ("${other.seen.replace(/\s+/g, " ")}"), so it was not checked.`);
+          unread.push(w);
+        }
+      }
     });
   }
   const snapshots = [home.page, ...extra];

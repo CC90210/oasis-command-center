@@ -589,8 +589,9 @@ export function notTheSite(page: PageSnapshot): { what: string; seen: string } |
     if ((t.attrs["http-equiv"] ?? "").trim().toLowerCase() === "refresh" && /[;,]\s{0,20}\S/.test(content)) return { what: "a page that sends visitors on to another address", seen: content.slice(0, 80) };
   }
   const frameset = nextTag(markup, lower, "frameset", 0);
-  // A page with links or words of its own that also shows a frame (a map, a booking tool) is the site.
-  const frame = frameset ? (nextTag(markup, lower, "frame", frameset.end) ?? frameset) : text.length < 200 && !nextTag(markup, lower, "a", 0) ? nextTag(markup, lower, "iframe", 0) : null;
+  // A body that is only a frame has no link of its own and next to no text; a page with links or words that also shows a map or a booking tool is the site.
+  const onlyFrame = text.length < 200 && !nextTag(markup, lower, "a", 0) ? nextTag(markup, lower, "iframe", 0) : null;
+  const frame = frameset ? (nextTag(markup, lower, "frame", frameset.end) ?? frameset) : onlyFrame;
   if (frame) return { what: "a page that shows another address in a frame", seen: (frame.attrs.src || frame.raw).slice(0, 80) };
   return null;
 }
@@ -604,10 +605,10 @@ function metaContent(metas: readonly Tag[], name: string): { content: string; ta
 
 /**
  * A page as the checks read it: `live` and `markup` (liveViews), each lowered
- * (`liveLower`, `lower`: A to Z only, so indexes match), the name the brief
- * gives it, and its links, read once from its markup.
+ * (`liveLower`, `markupLower`: A to Z only, so indexes match), the name the
+ * brief gives it, and its links, read once from its markup.
  */
-type Reading = { page: PageSnapshot; live: string; liveLower: string; markup: string; lower: string; name: string; links: Link[]; linksCapped: string | null };
+type Reading = { page: PageSnapshot; live: string; liveLower: string; markup: string; markupLower: string; name: string; links: Link[]; linksCapped: string | null };
 
 /** The first link, on any page, whose address passes `test`. */
 function firstLink(readings: readonly Reading[], test: (href: string) => boolean): { page: PageSnapshot; href: string; index: number } | null {
@@ -663,7 +664,7 @@ function contactForms(readings: readonly Reading[]): FormFinding {
   let unsure: string | null = null;
   let capped: string | null = null;
   for (const r of readings) {
-    for (const { tag: form, inner, innerLower } of elementsOf(r.markup, r.lower, "form")) {
+    for (const { tag: form, inner, innerLower } of elementsOf(r.markup, r.markupLower, "form")) {
       if (/\bsearch/i.test(form.raw)) continue;
       const scan: Scan = { capped: null };
       const boxes = tagsOf(inner, "textarea", innerLower, scan);
@@ -812,7 +813,7 @@ export function runSiteChecks(input: {
     const name = page === home ? "the home page" : page.finalUrl;
     const scan: Scan = { capped: null };
     const links = linksOf(markup, markupLower, scan);
-    return { page, live, liveLower, markup, lower: markupLower, name, links, linksCapped: scan.capped && `${name} ${scan.capped}` };
+    return { page, live, liveLower, markup, markupLower, name, links, linksCapped: scan.capped && `${name} ${scan.capped}` };
   });
   // Whether the pages build themselves in the browser is told without their comments.
   const js = readings.every((r) => builtInBrowser({ ...r.page, html: r.live }));
@@ -841,7 +842,7 @@ export function runSiteChecks(input: {
         : { key: "https", status: "no", detail: "The site's secure HTTPS address sends visitors to plain HTTP, so it was read there.", found: [], evidence: { url: home.finalUrl, excerpt: home.finalUrl } },
   );
 
-  const homeLower = homeReading.lower;
+  const homeLower = homeReading.markupLower;
   const metaScan: Scan = { capped: null };
   const metas = tagsOf(homeReading.markup, "meta", homeLower, metaScan);
   const metaCapped = metaScan.capped && `the home page ${metaScan.capped}`;
