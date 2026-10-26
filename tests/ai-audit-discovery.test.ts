@@ -351,6 +351,14 @@ async function main() {
     const contact = await route.POST(postJson(`http://t.test/api/ai-audit/${eid}`, { action: "save_details", expected_row_version: rv, contact_email: "new-contact@fixture.test" }), params(eid));
     assert.equal(contact.status, 200, JSON.stringify(await contact.clone().json()));
     assert.equal((await engagementOf(eid)).contact_email, "new-contact@fixture.test");
+    // As the screen sends it: every field, the business type left out because nobody chose one (CodeRabbit on #733).
+    const e2 = await engagementOf(eid);
+    const asScreen = await route.POST(
+      postJson(`http://t.test/api/ai-audit/${eid}`, { action: "save_details", expected_row_version: e2.row_version, business_name: e2.business_name, contact_name: "Dana Lee", contact_email: "dana@fixture.test" }),
+      params(eid),
+    );
+    assert.equal(asScreen.status, 200, JSON.stringify(await asScreen.clone().json()));
+    assert.equal((await engagementOf(eid)).business_type, null, "no type was invented");
     assert.ok(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)), "a new contact does not touch the authorization");
     await login(null);
   });

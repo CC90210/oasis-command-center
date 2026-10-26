@@ -55,9 +55,11 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
-  const [details, setDetails] = useState({
+  const [details, setDetails] = useState<{ business_name: string; business_type: BusinessType | ""; contact_name: string; contact_email: string }>({
     business_name: e.business_name ?? "",
-    business_type: (e.business_type ?? "other") as BusinessType,
+    // Empty until someone chooses one. Sending a type nobody picked would change
+    // what Gate 1 binds, and after Gate 1 the save would be refused (CodeRabbit on #733).
+    business_type: e.business_type ?? "",
     contact_name: e.contact_name ?? "",
     contact_email: e.contact_email ?? "",
   });
@@ -162,7 +164,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               </div>
               <div>
                 <div className="label">Business type</div>
-                <select className="select" value={details.business_type} onChange={(ev) => setDetails({ ...details, business_type: ev.target.value as BusinessType })}>
+                <select className="select" value={details.business_type} onChange={(ev) => setDetails({ ...details, business_type: ev.target.value as BusinessType | "" })}>
+                  {details.business_type === "" ? <option value="">Not chosen yet</option> : null}
                   {BUSINESS_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {BUSINESS_TYPE_LABELS[t]}
@@ -179,7 +182,10 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
                 <input className="input" value={details.contact_email} onChange={(ev) => setDetails({ ...details, contact_email: ev.target.value })} />
               </div>
             </div>
-            <button type="button" className="btn-primary justify-self-start" disabled={busy} onClick={() => act("save_details", details, "Details saved.")}>
+            <button type="button" className="btn-primary justify-self-start" disabled={busy} onClick={() => {
+                const { business_type, ...rest } = details;
+                void act("save_details", business_type ? { ...rest, business_type } : rest, "Details saved.");
+              }}>
               Save details
             </button>
           </section>
