@@ -112,8 +112,11 @@ const SUMMARY: Record<string, string> = {
   published: "Posted on every network it was booked for.",
   partial: "Posted on some networks; at least one failed.",
   failed: "Booked, but every network refused it.",
-  scheduled: "Booked in Zernio and waiting for its slot.",
-  missing: "Zernio no longer has this post; it was removed or rebooked.",
+  // "The posting service", as the Post panel beside this card calls it: the vendor's
+  // name stays off the screen (tests/content-iphone.test.ts INTERNAL), and the copy
+  // does not go stale when the vendor is swapped again (audit, 2026-10-26).
+  scheduled: "Booked with the posting service and waiting for its slot.",
+  missing: "The posting service no longer has this post; it was removed or rebooked.",
 };
 
 /** The asset's Zernio tracking, or null when the row carries none. */
@@ -147,7 +150,7 @@ export function postTrackingOf(rawMeta: unknown): PostTracking | null {
   return {
     postId: text(z.post_id, 80),
     outcome,
-    summary: SUMMARY[outcome] ?? "Tracked in Zernio.",
+    summary: SUMMARY[outcome] ?? "Tracked by the posting service.",
     scheduledFor: text(z.scheduled_for, 40),
     checkedAt: text(z.checked_at, 40),
     networks,

@@ -3,11 +3,12 @@
  * OS shell (2026-10-01): ContentTabs, its layout, the breadcrumb alias, the
  * hidden founders banner, and one name for the hub.
  *
- *   1. ContentTabs lists Overview · Library · Extracted videos · Content Tools ·
- *      Performance in that order, each a founders page that gates itself; the active tab is the
+ *   1. ContentTabs lists Overview · Library · Content Tools · Performance in
+ *      that order, each a founders page that gates itself; the active tab is the
  *      longest matching one, Overview only on its exact path (an asset page
- *      lights no tab); every tab is a Link with aria-current on the active one;
- *      the bar scrolls on a phone (overflow-x-auto) and carries no founders
+ *      lights no tab); Extracted videos is no tab (CC, 2026-10-25) and its page
+ *      lights Content Tools; every tab is a Link with aria-current on the active
+ *      one; the bar scrolls on a phone (overflow-x-auto) and carries no founders
  *      cyan.
  *   2. app/founders/marketing/layout.tsx mounts ContentTabs above its pages,
  *      keeps the founder gate (defence in depth) and has a loading boundary
@@ -178,18 +179,21 @@ async function main() {
   const { foundersBannerHidden } = await import("../components/founders/FoundersPortalBanner");
 
   // ── 1. the tabs ──────────────────────────────────────────────────────────
-  await check("ContentTabs: Overview · Library · Extracted videos · Content Tools · Performance, each a founders page that gates itself", () => {
+  await check("ContentTabs: Overview · Library · Content Tools · Performance, each a founders page that gates itself", () => {
     assert.equal(CONTENT_ROOT, "/founders/marketing");
     // Content Tools took the Training tab's slot on 2026-10-06 (the whiteboard
     // moved in). The /train PAGE still exists by direct URL — the Overview's
     // Training card links to it — it is simply no longer a tab.
     // Extracted videos (2026-10-17, CC: "a separate category ... rather than
-    // the main library") sits beside the Library it was taken out of.
-    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Extracted videos", "Content Tools", "Performance"]);
+    // the main library") had a tab of its own for eight days; CC, 2026-10-25:
+    // it cluttered the bar. The list lives inside the Video extractor on
+    // Content Tools now, and its page still resolves by direct URL.
+    assert.deepEqual(CONTENT_TABS.map((t) => t.label), ["Overview", "Library", "Content Tools", "Performance"]);
     assert.deepEqual(
       CONTENT_TABS.map((t) => t.href),
-      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/extracted`, `${CONTENT_ROOT}/tools`, `${CONTENT_ROOT}/performance`],
+      [CONTENT_ROOT, `${CONTENT_ROOT}/library`, `${CONTENT_ROOT}/tools`, `${CONTENT_ROOT}/performance`],
     );
+    assert.ok(existsSync(join(root, "app/founders/marketing/extracted/page.tsx")), "the Extracted videos page still exists by URL");
     for (const t of CONTENT_TABS) {
       const page = `app${t.href}/page.tsx`;
       assert.ok(existsSync(join(root, page)), `${t.href} has a page`);
@@ -205,6 +209,10 @@ async function main() {
     assert.equal(activeContentTab("/founders/marketing/library/anything"), `${CONTENT_ROOT}/library`);
     assert.equal(activeContentTab("/founders/marketing/tools"), `${CONTENT_ROOT}/tools`);
     assert.equal(activeContentTab("/founders/marketing/performance"), `${CONTENT_ROOT}/performance`);
+    // The Extracted videos page belongs to the Video extractor on Content Tools: that tab lights.
+    assert.equal(activeContentTab("/founders/marketing/extracted"), `${CONTENT_ROOT}/tools`);
+    assert.equal(activeContentTab("/founders/marketing/extracted/"), `${CONTENT_ROOT}/tools`);
+    assert.equal(activeContentTab("/founders/marketing/extractedx"), null, "a path boundary, not a string prefix");
     // /train still resolves but is no longer a tab, so it lights none.
     for (const p of ["/founders/marketing/train", "/founders/marketing/asset/a_1", "/founders/marketing/arthrisil", "/founders/marketingx", "/founders/finances", "/money", "/"]) {
       assert.equal(activeContentTab(p), null, `${p} lights no Content tab`);
@@ -264,9 +272,10 @@ async function main() {
     }
     assert.deepEqual(
       Object.keys(alias!.tabs).filter((k) => !segs.includes(k)),
-      ["train", "asset"],
-      "Train and Asset are crumbs but not tabs; nothing else is known to only one of them",
+      ["extracted", "train", "asset"],
+      "Extracted videos, Train and Asset are crumbs but not tabs; nothing else is known to only one of them",
     );
+    assert.equal(alias!.tabs.extracted, "Extracted videos", "the crumb keeps the page's name");
     const rows = [
       { id: "today", href: "/", label: "Today" },
       { id: "content", href: CONTENT_ROOT, label: rail!.label },

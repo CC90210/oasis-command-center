@@ -153,9 +153,11 @@ export function AssetPublishPanel({
     setBusy(false);
 
     if (!res?.ok || !body?.ok) {
-      // Show the server's own reason. A generic "failed" is exactly what made
-      // invite_create_failed take months to diagnose.
-      setMsg({ ok: false, text: body?.error ? String(body.error) : `Could not queue (${res?.status ?? "network"}).` });
+      // Show the server's own reason, in the sentence the route wrote for it
+      // (`detail`), falling back to its code. A generic "failed" is exactly what
+      // made invite_create_failed take months to diagnose; a bare "already_queued"
+      // read as a bug rather than as "a publish is already in flight" (audit, 2026-10-26).
+      setMsg({ ok: false, text: body?.detail ? String(body.detail) : body?.error ? String(body.error) : `Could not queue (${res?.status ?? "network"}).` });
       return;
     }
     setPicked([]);
@@ -250,7 +252,7 @@ export function AssetPublishPanel({
 
       {msg && (
         <div
-          role="status"
+          role={msg.ok ? "status" : "alert"}
           className={
             "rounded-lg px-3 py-1.5 text-[11px] " +
             (msg.ok

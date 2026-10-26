@@ -74,12 +74,17 @@ async function safely<T>(label: string, read: Promise<T>, fallback: T): Promise<
  * long as the slowest corpus query takes (Codex review of #612).
  */
 async function LearnedNotesLoader({ tenantId, agent }: { tenantId: string; agent: DepartmentKey | null }) {
-  const [stats, agentItems] = await Promise.all([
+  // Both reads side by side, so the placeholder waits for the slower of the two,
+  // not their sum (audit, 2026-10-26); the general read follows an agent read
+  // only off Turso, where trainingRowsFor answers null.
+  const [stats, read] = await Promise.all([
     safely("stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
     // One agent's tab: filtered in the database by the rule the agent's own read uses (null off Turso).
-    agent ? safely("agent_items", trainingRowsFor(tenantId, agent), { rows: [], degraded: true }) : Promise.resolve(null),
+    agent
+      ? safely("agent_items", trainingRowsFor(tenantId, agent), { rows: [], degraded: true })
+      : safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }),
   ]);
-  const items = agentItems ?? (await safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }));
+  const items = read ?? (await safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }));
   return <LearnedNotes stats={stats} items={items} agent={agent} />;
 }
 

@@ -31,7 +31,12 @@
  * Since 2026-10-17 it leads with the Video extractor (CC: "the first tool ... is a
  * video extractor"): paste a TikTok, YouTube or Instagram link, CMO-Agent's
  * scripts/content_tools_runner.py fetches it on OASIS's PC, and the finished run
- * offers Download and Open in Library. Repurpose a post is off this page
+ * offers Download, Open in Extracted videos and Done, which clears the card for
+ * the next link (components/tools/ToolGrid.tsx). The Extracted videos list is
+ * reached from inside that card, not from Content's tab bar (CC, 2026-10-25).
+ * RefreshOnToolRun re-reads this page's server data when an offline card asks
+ * to check its connection (only that: nothing here depends on a finished run
+ * on the server). Repurpose a post is off this page
  * (lib/tools/catalog.ts CONTENT_TOOLS_HIDDEN). More runner tools plug in the same
  * way: a registry entry here and a handler in the runner's TOOLS. "Score a hook" was removed from the product on 2026-10-10 (dead
  * code, including its worker and tests); "Learn from a link" moved the same
@@ -47,7 +52,9 @@ import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
 import { OasisWhiteboard } from "@/components/founders/OasisWhiteboard";
+import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import { ToolsSection } from "@/components/tools/ToolsSection";
+import { VIDEO_CARD_ID } from "@/components/tools/tool-grid-format";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Content Tools · Content · OASIS" };
@@ -58,7 +65,8 @@ export default async function ContentToolsPage() {
 
   return (
     <PageFrame title="Content Tools" className="space-y-6">
-      <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false} keepMounted>
+      {/* Extracted videos links back to #video-extractor: the hash opens this section even if it was left collapsed. */}
+      <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false} keepMounted openForHash={`#${VIDEO_CARD_ID}`}>
         <ToolsSection tenantId={founder.tenantId} showCodes showHeading={false} className="" />
       </CollapsibleSection>
       <CollapsibleSection title="Whiteboard" storageKey="content-tools:whiteboard" defaultCollapsed={false} keepMounted>
@@ -69,6 +77,8 @@ export default async function ContentToolsPage() {
           <OasisWhiteboard />
         </div>
       </CollapsibleSection>
+      {/* Only Check connection re-reads this page: nothing here depends on a finished run on the server. */}
+      <RefreshOnToolRun finished={false} />
     </PageFrame>
   );
 }

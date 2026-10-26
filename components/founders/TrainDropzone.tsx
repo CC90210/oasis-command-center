@@ -42,6 +42,21 @@ const KIND_ICON: Record<string, string> = {
   web: "⌘",
 };
 
+/**
+ * Plain sentences for the codes this box can get from POST /api/founders/marketing/ingest
+ * (and from middleware, for an expired session). The links stay in the box on every
+ * one of them, so one more press retries. No vendor or agent name here
+ * (tests/content-iphone.test.ts INTERNAL).
+ */
+const FAILED: Record<string, string> = {
+  insert_failed: "Couldn't save these links. They are still in the box; try again.",
+  nothing_parseable: "None of these look like links that can be read.",
+  no_links_found: "No links found in the box.",
+  invalid_json: "The request was malformed. Reload the page and try again.",
+  not_found: "Your session no longer passes the gate. Sign in again; the links are still in the box.",
+  unauthorized: "Your session ended. Sign in again; the links are still in the box.",
+};
+
 export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
   const router = useRouter();
   const [text, setText] = useState("");
@@ -112,10 +127,16 @@ export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
         // in 30 seconds and the operator is the only one who can fix it.
         setResult({ tone: "warn", msg: body.detail || "Storage not ready yet." });
       } else {
-        setResult({ tone: "bad", msg: body.error || `Failed (${res.status}).` });
+        // A sentence for each code this box can get, never the bare token (audit,
+        // 2026-10-26: "insert_failed" in a red box said nothing about what to do).
+        // The links are still in the box on every one of these, so one more
+        // press retries. middleware answers `unauthorized` for an expired cookie
+        // before the route runs; the route's `not_found` means the account no
+        // longer passes the gate.
+        setResult({ tone: "bad", msg: FAILED[String(body.error)] ?? `Couldn't queue them (${res.status}). They are still in the box; try again.` });
       }
     } catch (e) {
-      setResult({ tone: "bad", msg: e instanceof Error ? e.message : "Network error." });
+      setResult({ tone: "bad", msg: e instanceof Error ? `${e.message}. The links are still in the box; try again.` : "Network error. The links are still in the box; try again." });
     }
     setBusy(false);
   }
@@ -235,6 +256,8 @@ export function TrainDropzone({ onQueued }: { onQueued?: () => void }) {
 
       {result && (
         <div
+          // A failure is announced; a screen-reader user heard nothing after pressing Learn.
+          role={result.tone === "bad" ? "alert" : "status"}
           className="rounded-xl border px-4 py-3 text-sm"
           style={
             result.tone === "ok"

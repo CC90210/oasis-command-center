@@ -186,12 +186,25 @@ async function TrainingContents({ tenantId }: { tenantId: string }) {
                           </a>
                         )}
                       </div>
+                      {/* A failed link says why, in the worker's first line (it stores a
+                          traceback after the newline), and how to retry: "Failed" alone sent
+                          the founder to Admin > Agent training for the reason (audit, 2026-10-26). */}
+                      {c.tone === "bad" && it.last_error && (
+                        <div className="mt-0.5 text-[11px] text-status-warm">
+                          {(it.last_error.split("\n")[0].trim() || "The background job could not read it").slice(0, 160)} · Paste the link again to retry.
+                        </div>
+                      )}
                     </div>
                   </li>
                 );
               })}
             </ul>
           </Card>
+        )}
+        {/* The list is the newest 40; the count above is every item. Say so when
+            they differ, or the rest reads as missing (audit, 2026-10-26). */}
+        {!items.degraded && stats.total > items.rows.length && (
+          <p className="mt-2 px-1 text-xs text-fg-dim">Showing the newest {items.rows.length} of {stats.total}.</p>
         )}
       </div>
     </>

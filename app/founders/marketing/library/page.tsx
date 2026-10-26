@@ -92,6 +92,7 @@ import {
   lifecycleLabel,
   parseLibraryPage,
   parseLibraryView,
+  brandFilterAllowed,
   isChannel,
   trackForChannel,
   trackLabel,
@@ -228,12 +229,27 @@ export default async function MarketingLibraryPage({
 
   /** Brands inside the current tab — the sub-filter, e.g. Warner within Clients. */
   const brandsInGroup = facets.brands.filter((b) => brandGroupFor(b.slug) === group);
+  // A chosen brand the facet read did not return (the read failed, or a bookmark
+  // names a brand with no rows now) is still drawn, lit, so the filter that is
+  // narrowing the grid can always be cleared (audit, 2026-10-26: it used to
+  // vanish with the row, leaving the grid narrowed by nothing on the page). A
+  // brand the reader ignores for this tab (brandFilterAllowed) narrows nothing,
+  // so it draws no pill.
+  const appliedBrand = brand && brandFilterAllowed(brand, group) ? brand : undefined;
+  const brandOptions =
+    appliedBrand && !brandsInGroup.some((b) => b.slug === appliedBrand)
+      ? [...brandsInGroup, { slug: appliedBrand, name: appliedBrand, count: 0 }]
+      : brandsInGroup;
 
   // ONE author means no choice to make, so the control is hidden rather than
   // rendered with a single dead option. Today every row carries the schema
   // default `conaugh@oasisai.work` — Maven has never stamped a second author —
-  // so this row is invisible and lights up the moment that changes.
-  const showAuthors = facets.authors.length > 1;
+  // so this row is invisible and lights up the moment that changes. A chosen
+  // author the read did not return (a stale link) is drawn, lit, for the same
+  // reason as a brand: the filter must always be clearable.
+  const authorOptions =
+    author && !facets.authors.some((a) => a.email === author) ? [...facets.authors, { email: author, count: 0 }] : facets.authors;
+  const showAuthors = authorOptions.length > 1 || !!author;
 
   // Derive ONE supported-channel list and use it for row visibility, pill
   // rendering and active state. The earlier version made `activeChannels` a
@@ -255,7 +271,10 @@ export default async function MarketingLibraryPage({
   const thisView = pageHref(currentPage);
 
   const activeGroup = LIBRARY_BRAND_GROUPS.find((g) => g.key === group)!;
-  const filtered = !!(track || channel || brand || author || status || lifecycle);
+  // Only what lives INSIDE Refine lights its "active" marker: the lifecycle and
+  // brand pills above it are their own controls, and a marker that lit for them
+  // sent CC hunting inside Refine for a filter that was not there (audit, 2026-10-26).
+  const refineActive = !!(track || channel || author);
 
   // The audience and pack options for THIS view (getMetaFacets). A chosen value
   // that the view holds nothing of (a bookmark, an archived-only pack) is still
@@ -369,13 +388,13 @@ export default async function MarketingLibraryPage({
       {/* Sub-filter WITHIN the tab: Warner / Arthrisil / blyss inside Clients.
           Hidden when the tab holds a single brand, where it would be a control
           with one option. */}
-      {brandsInGroup.length > 1 && (
+      {(brandOptions.length > 1 || appliedBrand) && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">
             {activeGroup.label}
           </span>
           <FilterPill href={filterHref({ brand: null })} label="All" active={!brand} subtle />
-          {brandsInGroup.map((item) => (
+          {brandOptions.map((item) => (
             <FilterPill
               key={item.slug}
               href={filterHref({ brand: item.slug })}
@@ -385,6 +404,13 @@ export default async function MarketingLibraryPage({
             />
           ))}
         </div>
+      )}
+      {facets.degraded && (
+        // The sub-filters come from their own read; when it fails, say so rather
+        // than silently drawing the tab without them.
+        <p className="px-1 text-[11px] text-fg-dim">
+          The brand and author filters did not load, so this tab cannot be narrowed by brand or author right now. Nothing has been lost.
+        </p>
       )}
 
       {/* Audience and pack (CC, 2026-10-08, through Maven). Who a creative was
@@ -448,10 +474,10 @@ export default async function MarketingLibraryPage({
 
       {/* ── Axis 3: CHANNEL, demoted. Under a "Refine" label and rendered subtle,
           so it stops reading as the primary way into the library. */}
-      <details className="group/refine" open={!!(track || channel || author)}>
+      <details className="group/refine" open={refineActive}>
         <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim transition-colors hover:text-fg-muted">
           Refine
-          {filtered && !status && <span className="font-medium normal-case tracking-normal text-accent">· active</span>}
+          {refineActive && <span className="font-medium normal-case tracking-normal text-accent">· active</span>}
         </summary>
 
         <div className="mt-3 space-y-2">
@@ -495,7 +521,7 @@ export default async function MarketingLibraryPage({
             <div className="flex flex-wrap items-center gap-2">
               <span className="mr-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">By</span>
               <FilterPill href={filterHref({ author: null })} label="Anyone" active={!author} subtle />
-              {facets.authors.map((a) => (
+              {authorOptions.map((a) => (
                 <FilterPill
                   key={a.email}
                   href={filterHref({ author: a.email })}
@@ -566,11 +592,13 @@ export default async function MarketingLibraryPage({
                   ? "Nothing for this audience"
                   : track || channel
                     ? "Nothing in this channel yet"
-                    : author
-                      ? "Nothing from this author"
-                      : brand
-                        ? "Nothing under this brand yet"
-                        : `${activeGroup.label} is empty`
+                    : facets.degraded && (author || brand)
+                      ? "Couldn't load the brand filter"
+                      : author
+                        ? "Nothing from this author"
+                        : brand
+                          ? "Nothing under this brand yet"
+                          : `${activeGroup.label} is empty`
             }
             detail={
               libraryDegraded
@@ -583,11 +611,13 @@ export default async function MarketingLibraryPage({
                   ? "No assets in this tab carry that audience or pack. Clear the filter to see the rest of the library."
                   : track || channel
                     ? "No assets are registered for this channel. Produce something, or clear the filter to see everything."
-                    : author
-                      ? "Nobody has registered an asset under this address in this tab."
-                      : brand
-                        ? "This brand has no assets in the library yet."
-                        : activeGroup.empty
+                    : facets.degraded && (author || brand)
+                      ? "The brand and author filters did not load, so this is not a statement about what this brand or author holds. Clear the filter, or try again in a minute; the cause is logged for the OASIS team."
+                      : author
+                        ? "Nobody has registered an asset under this address in this tab."
+                        : brand
+                          ? "This brand has no assets in the library yet."
+                          : activeGroup.empty
             }
             // Not "drop links in the Train tab": training material teaches the
             // marketing agent, it never adds anything to this library.

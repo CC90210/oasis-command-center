@@ -39,6 +39,16 @@ export function SlideReorder({
   const [order, setOrder] = useState<number[]>(() => slidePaths.map((_, i) => i));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // The strip keeps the operator's order until the refreshed slidePaths arrive
+  // (the page re-reads media_urls after a save); only then does `order` go back
+  // to identity. Resetting it on save re-numbered the OLD arrangement under
+  // "Order saved" for the whole round trip (audit, 2026-10-26).
+  const pathsKey = slidePaths.join("\n");
+  const [seenKey, setSeenKey] = useState(pathsKey);
+  if (pathsKey !== seenKey) {
+    setSeenKey(pathsKey);
+    setOrder(slidePaths.map((_, i) => i));
+  }
 
   const dirty = useMemo(() => order.some((n, i) => n !== i), [order]);
   const working = busy || pending;
@@ -73,9 +83,8 @@ export function SlideReorder({
       return;
     }
     setMsg({ ok: true, text: "Order saved. This is the order it will publish in." });
-    // The page re-reads media_urls, so the strip comes back in the new order and
-    // `order` is identity again.
-    setOrder(slidePaths.map((_, i) => i));
+    // The page re-reads media_urls; the strip keeps the saved order until the new
+    // props land, and the block above then makes `order` identity again.
     start(() => router.refresh());
   }
 

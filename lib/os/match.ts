@@ -55,6 +55,9 @@ export const PATH_ALIASES: ReadonlyArray<{
     tabs: {
       "": "Overview",
       library: "Library",
+      // extracted is a crumb but no longer a tab (CC, 2026-10-25): the list
+      // lives inside the Video extractor on Content Tools, and its page still
+      // resolves by direct URL.
       extracted: "Extracted videos",
       // train is a crumb but no longer a tab (Content Tools took its slot,
       // 2026-10-06); the page still resolves by direct URL.

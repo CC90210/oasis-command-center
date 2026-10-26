@@ -266,12 +266,23 @@ async function main() {
   });
 
   // -- 3. the ways in, and no verdicts -----------------------------------------
-  await check("Content Tools, the Overview tile and the asset page lead to Extracted videos", () => {
-    assert.match(code("components/tools/ToolsSection.tsx"), /assetHrefPrefix = "\/founders\/marketing\/extracted\?video="/);
+  await check("Content Tools, the Overview tile and the asset page lead to Extracted videos; the list is reached from inside the Video extractor", () => {
+    const section = code("components/tools/ToolsSection.tsx");
+    assert.match(section, /assetHrefPrefix = "\/founders\/marketing\/extracted\?video="/);
+    assert.match(section, /extractedVideosHref = "\/founders\/marketing\/extracted"/, "the card's history drawer leads to the whole list");
     const grid = code("components/tools/ToolGrid.tsx");
     assert.doesNotMatch(grid, />\s*Open in Library\s*</);
-    assert.ok((grid.match(/Open in Extracted videos/g) || []).length >= 2, "latest run and recent runs");
-    assert.match(code("lib/tools/registry.ts"), /Content > Extracted videos/);
+    const format = code("components/tools/tool-grid-format.ts");
+    assert.match(format, /OPEN_EXTRACTED = "Open in Extracted videos"/);
+    assert.ok((grid.match(/\{OPEN_EXTRACTED\}/g) || []).length >= 2, "the finished run and the history drawer both open the video");
+    assert.match(format, /ALL_EXTRACTED = "All extracted videos"/);
+    assert.match(grid, /\{ALL_EXTRACTED\}/, "the drawer leads to the whole list");
+    // CC, 2026-10-25: Extracted videos is no longer a tab; the page leads back into the tool.
+    assert.match(code("lib/tools/registry.ts"), /Extracted videos, inside this tool/);
+    assert.match(code("app/founders/marketing/extracted/page.tsx"), /tools#video-extractor/, "the list links back to the Video extractor card");
+    assert.match(format, /VIDEO_CARD_ID = "video-extractor"/);
+    assert.match(grid, /id=\{isVideo \? VIDEO_CARD_ID : undefined\}/, "the card carries that id");
+    assert.match(code("app/founders/marketing/tools/page.tsx"), /openForHash=\{`#\$\{VIDEO_CARD_ID\}`\}/, "the hash opens the Tools section even when it was left collapsed");
     const overview = code("app/founders/marketing/page.tsx");
     assert.match(overview, /href=\{extracted \? EXTRACTED_ROOT : `\/founders\/marketing\/library\?group=\$\{g\.key\}`\}/);
     assert.match(overview, /label=\{extracted \? EXTRACTED_LABEL : g\.label\}/);
