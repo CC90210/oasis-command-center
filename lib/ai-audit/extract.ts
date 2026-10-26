@@ -251,7 +251,7 @@ export function figuresIn(text: string): FigureAt[] {
       flush();
       const at = toks[i].at;
       if (at > 0 && /[a-z]/.test(s[at - 1])) continue;
-      if (glued(i + 1) && /^(?:st|nd|rd|th)$/.test(tok(i + 1))) {
+      if (glued(i + 1) && /^(?:st|nd|rd|th|s)$/.test(tok(i + 1))) {
         i += 1;
         continue;
       }
@@ -348,6 +348,10 @@ export function figuresIn(text: string): FigureAt[] {
       i = j - 1;
       continue;
     }
+    if (t === "one" && tok(i - 1) === "no") {
+      flush();
+      continue;
+    }
     const one = ONES.get(t);
     if (one !== undefined) {
       if (!((last === "tens" && one > 0) || last === "hundred" || last === "scale")) flush();
@@ -396,6 +400,12 @@ export function figuresIn(text: string): FigureAt[] {
           word(i, "scale", toks[i - 1].at);
         }
       }
+      continue;
+    }
+    if (t === "k" && last && last !== "scale") {
+      total += (chunk || 1) * 1_000;
+      chunk = 0;
+      word(i, "scale");
       continue;
     }
     if (t === "and" && last) continue;
@@ -457,8 +467,13 @@ type ClauseAt = { start: number; end: number; question: boolean };
 const SENTENCE_END = /[.!;]+(?=\s|$)|\?+/g;
 const CLAUSE_BREAK = /,\s*(?:so|but|and|which|though|although|whereas|while)\b|\s(?:but|whereas|although|while)\s|(?<!\bor)\sso\s/g;
 /** "So about 40 a month, right": a figure put to the other side to confirm is a question. */
-const TAG_QUESTION = /,\s*(?:right|correct|yeah|yes|no|is that right|isn't it|is it|don't you|didn't you|aren't you)\s*$/;
+const TAG_QUESTION = /,\s*(?:right|correct|is that right|isn't it|is it|don't you|didn't you|aren't you)\s*$/;
 
+/** A tag the speaker puts on their own statement, and a first-person statement it may end. */
+const OWN_TAG = /,\s*(?:right|correct|okay|ok|no|yeah|yes|eh|you know)\s*$/;
+const FIRST_PERSON = /\b(?:we|i|our|us|my|we're|i'm|we've|i've|we'd|i'd)\b/;
+/** An answer that says yes to what was just asked. */
+const AFFIRM = /^\s*(?:yes|yeah|yep|yup|yea|correct|exactly|sure|right|that's right|uh-huh|mm-hm|mhm|we do|we use|i do|of course|definitely)\b/;
 function clausesOf(s: string): ClauseAt[] {
   const sentences: ClauseAt[] = [];
   let from = 0;
@@ -469,10 +484,13 @@ function clausesOf(s: string): ClauseAt[] {
   }
   sentences.push({ start: from, end: s.length, question: false });
   const out: ClauseAt[] = [];
-  for (const sen of sentences) {
+  for (const [k, sen] of sentences.entries()) {
     const text = s.slice(sen.start, sen.end);
     if (!text.trim()) continue;
-    const question = sen.question || TAG_QUESTION.test(text.trimEnd());
+    let question = sen.question || TAG_QUESTION.test(text.trimEnd());
+    if (question && OWN_TAG.test(text.trimEnd()) && FIRST_PERSON.test(text)) question = false;
+    const next = sentences[k + 1];
+    if (question && next && AFFIRM.test(s.slice(next.start, next.end))) question = false;
     let at = 0;
     for (const m of text.matchAll(CLAUSE_BREAK)) {
       out.push({ start: sen.start + at, end: sen.start + (m.index ?? 0), question });
@@ -484,15 +502,23 @@ function clausesOf(s: string): ClauseAt[] {
 }
 
 /** One line of the call, read once: its text, figures, shares, words and clauses. */
-type LineRead = { s: string; figures: FigureAt[]; fractions: FigureAt[]; words: WordAt[]; clauses: ClauseAt[] };
+type LineRead = { s: string; figures: FigureAt[]; fractions: FigureAt[]; words: WordAt[]; clauses: ClauseAt[]; sentences: Array<{ start: number; end: number }> };
 function readLine(text: string): LineRead {
   const s = baseText(text);
+  const sentences: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  for (const m of s.matchAll(SENTENCE_END)) {
+    sentences.push({ start: from, end: m.index ?? 0 });
+    from = (m.index ?? 0) + m[0].length;
+  }
+  sentences.push({ start: from, end: s.length });
   return {
     s,
     figures: figuresIn(s),
     fractions: fractionsAt(s),
     words: [...s.matchAll(/[a-z]+(?:'[a-z]+)?/g)].map((m) => ({ w: m[0], start: m.index ?? 0, end: (m.index ?? 0) + m[0].length })),
     clauses: clausesOf(s),
+    sentences,
   };
 }
 function clauseAt(r: LineRead, at: number): ClauseAt {
@@ -542,20 +568,38 @@ function bind(r: LineRead, clause: ClauseAt, f: FigureAt): Bound {
   return b;
 }
 
-/** What a field's figure is counted in. */
-type Need = { per?: Period; hours?: boolean; duration?: boolean; share?: boolean; perJob?: boolean };
+/** What a field's figure is counted in. `key` names the field, for the checks only it has. */
+type Need = { per?: Period; hours?: boolean; duration?: boolean; share?: boolean; perJob?: boolean; key?: string };
 function needOf(def: ProfileFieldDef): Need {
-  if (def.key === "finance.staff_hourly_cost") return { per: "hour" };
-  if (def.key === "sales.avg_job_value") return { perJob: true };
-  if (def.unit === "leads/month") return { per: "month" };
-  if (def.unit === "calls/week") return { per: "week" };
-  if (def.unit === "hours/week") return { per: "week", hours: true };
-  if (def.unit === "hours") return { duration: true };
-  if (def.unit === "%") return { share: true };
-  return {};
+  const key = def.key;
+  if (key === "finance.staff_hourly_cost") return { per: "hour", key };
+  if (key === "sales.avg_job_value") return { perJob: true, key };
+  if (def.unit === "leads/month") return { per: "month", key };
+  if (def.unit === "calls/week") return { per: "week", key };
+  if (def.unit === "hours/week") return { per: "week", hours: true, key };
+  if (def.unit === "hours") return { duration: true, key };
+  if (def.unit === "%") return { share: true, key };
+  return { key };
 }
 /** Table columns whose figures are counted over a period, as a field's own figures are. */
 const COLUMN_NEEDS: Readonly<Record<string, Need>> = { "monthly cost": { per: "month" }, "hours per week": { per: "week", hours: true }, "per month": { per: "month" } };
+
+/**
+ * A period word that makes a rate: "40 leads a month", "25 an hour", "$25/hr",
+ * "every month", "monthly". `from` is where the figure (or the word before)
+ * ends; a word before the figure is read with what comes before it.
+ */
+function rateWord(r: LineRead, from: number, w: WordAt): boolean {
+  if (/^(?:hourly|daily|nightly|weekly|monthly|yearly|annually|annual)$/.test(w.w)) return true;
+  const after = w.start >= from;
+  const lead = after ? r.s.slice(from, w.start) : r.s.slice(Math.max(0, w.start - 24), w.start);
+  if (after && /,|\b(?:twice|once|times)\b/.test(lead)) return false;
+  return /(?:^|[\s$])(?:a|an|per|each|every|last|this)\s+(?:(?:typical|normal|average|usual|regular|given|single)\s+)?$/.test(lead) || /\/\s*$/.test(lead);
+}
+/** A period word that counts: "25 hours", "2 business days", and "an hour" (where "an" is the figure). */
+function countWord(r: LineRead, f: FigureAt, w: WordAt): boolean {
+  return w.start >= f.end && /^\s*(?:(?:business|working|full|whole)\s+)?$/.test(r.s.slice(f.end, w.start));
+}
 
 /** A figure read for a field: its value in the field's unit, why it does not fit, the words it leans on, and whether its period came after it. */
 type Reading = { value: number | null; why: string | null; used: Array<{ start: number; end: number }>; explicit: boolean };
@@ -572,23 +616,32 @@ function readFigure(need: Need, r: LineRead, f: FigureAt, b: Bound): Reading {
   }
   if (need.duration) {
     take(b.afterWord);
+    // How long it takes counts its unit ("2 hours", "an hour"); "25 an hour" is a rate.
+    if (!b.afterWord || !countWord(r, f, b.afterWord)) {
+      return { value: null, why: b.afterWord && rateWord(r, f.end, b.afterWord) ? "the quote gives a rate, not how long it takes" : "the quote does not say how long", used, explicit: false };
+    }
     const factor = b.after === "minute" ? 1 / 60 : b.after === "hour" ? 1 : b.after === "day" ? 24 : null;
-    if (factor === null) return { value: null, why: b.after ? `the quote gives it in ${b.after}s, not minutes, hours or days` : "the quote does not say how long", used, explicit: false };
+    if (factor === null) return { value: null, why: `the quote gives it in ${b.after}s, not minutes, hours or days`, used, explicit: false };
     return { value: f.value * factor, why: null, used, explicit: true };
   }
   if (need.hours) {
-    if (b.after !== "hour") return { value: f.value, why: "the quote does not say hours", used, explicit: false };
+    if (b.after !== "hour" || !b.afterWord || !countWord(r, f, b.afterWord)) return { value: f.value, why: "the quote does not say hours", used, explicit: false };
     take(b.afterWord);
     const per = b.next ?? b.before;
-    take(b.next ? b.nextWord : b.beforeWord);
+    const perWord = b.next ? b.nextWord : b.beforeWord;
+    take(perWord);
     if (per !== "week") return { value: f.value, why: per ? `the quote gives it per ${per}, not per week` : "the quote does not say per week", used, explicit: false };
+    if (perWord && !rateWord(r, b.afterWord.end, perWord)) return { value: f.value, why: "the quote does not say it is every week", used, explicit: false };
     return { value: f.value, why: null, used, explicit: !!b.next };
   }
   if (need.per) {
     const per = b.after ?? b.before;
-    take(b.after ? b.afterWord : b.beforeWord);
-    if (!per) return { value: f.value, why: `the quote does not say per ${need.per}`, used, explicit: false };
+    const word = b.after ? b.afterWord : b.beforeWord;
+    take(word);
+    if (!per || !word) return { value: f.value, why: `the quote does not say per ${need.per}`, used, explicit: false };
     if (per !== need.per) return { value: f.value, why: `the quote gives it per ${per}, not per ${need.per}`, used, explicit: false };
+    // "40 leads a month" is a rate; "25 hours a week" and "every other month" are not one per period.
+    if (!rateWord(r, f.end, word)) return { value: f.value, why: `the quote does not give it as a figure per ${per}`, used, explicit: false };
     return { value: f.value, why: null, used, explicit: !!b.after };
   }
   // A job's value is per job: "$400 a month" is a fee, not a job.
@@ -598,56 +651,128 @@ function readFigure(need: Need, r: LineRead, f: FigureAt, b: Bound): Reading {
 
 const NOT_STATED = "a figure the quote does not state";
 const RANGE_REASON = "a range, not one figure: it belongs in the open questions";
+const LIMIT_REASON = 'the client gave it as a limit, a goal, an "if" or a past figure, not as what is';
 const NUMBER_WORD = "(?:\\d|\\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|a hundred|a thousand|a couple)\\b)";
 const RANGE_JOIN = "(?:-|\\u2013|\\u2014|,|/|to|through|thru|or|up to)";
-const RANGE_AFTER = new RegExp(`^\\s*${RANGE_JOIN}\\s*(?:about|around|maybe)?\\s*\\$?\\s*${NUMBER_WORD}`);
+const RANGE_AFTER = new RegExp(`^\\s*(?:${RANGE_JOIN}\\s*(?:about|around|maybe)?\\s*\\$?\\s*${NUMBER_WORD}|-?\\s*(?:something|odd)\\b)`);
 const RANGE_BEFORE = new RegExp(`${NUMBER_WORD}\\s*(?:k|grand|thousand|hundred|%|percent)?\\s*${RANGE_JOIN}\\s*(?:about|around|maybe)?\\s*\\$?\\s*$`);
 const BETWEEN_FIRST = /\bbetween\s+(?:[a-z$]+\s+){0,2}\$?$/;
 const BETWEEN_AND = /^\s*(?:[a-z]+\s+){0,2}(?:and|&)\s/;
 const BETWEEN_SECOND = /\bbetween\s+\S+(?:\s+\S+){0,4}\s+(?:and|&)\s+(?:[a-z]+\s+)?\$?$/;
-/** Words before a figure that make it no figure of what is: a negation, a past, a goal, an "if", a bound. */
-const LIMIT_WORDS = [
-  "don't", "do not", "doesn't", "does not", "didn't", "did not", "never", "no longer", "not", "isn't", "is not", "aren't", "are not", "wasn't", "was not",
-  "weren't", "were not", "won't", "will not", "can't", "cannot", "nowhere near", "far from",
-  "used to", "previously", "formerly",
-  "want", "wants", "wanted", "wanting", "wish", "hope", "hoping", "hoped", "would love", "would like", "love to", "like to", "aim", "aiming", "target",
-  "targeting", "goal", "planning", "planned", "plan to", "expect", "expecting", "projected", "forecast", "trying to", "try to", "we need", "i need", "we'd need",
-  "if", "unless", "suppose", "supposing", "imagine", "hypothetically",
-  "at least", "at most", "up to", "more than", "less than", "fewer than", "over", "under", "below", "above", "upwards of", "north of", "no more than",
-  "no less than", "beyond", "exceeds", "exceeded",
-];
-const LIMIT_AFTER = /^\s*(?:\+|or (?:more|less|fewer|over|under|above|below)\b|and (?:up|over|above|more)\b|plus\b(?!\s+(?:tax|taxes|hst|gst|pst|vat|fees?|shipping)\b)|max\b|maximum\b|minimum\b|tops\b|at (?:the )?(?:least|most)\b)/;
-const LIMIT_REASON = 'the client gave it as a limit, a goal, an "if" or a past figure, not as what is';
-const LIMIT_BEFORE = new RegExp(`(?:\\b(?:${LIMIT_WORDS.join("|")})|\\b[a-z]+'d (?:love|like))\\s+(?:[a-z$']+\\s+){0,3}\\$?$`);
-const THIRD_PARTY = /\b(?:competitors?|competition|the industry|industry average|other (?:shops|companies|businesses|guys|contractors)|the average (?:shop|company|business|contractor)|most (?:shops|companies|businesses|contractors))\b/;
-const HEDGE = /\b(?:maybe|perhaps|not sure|no idea|i guess|guessing|had to guess|my guess|i'd guess|i would guess|could be|might be|possibly|i don't know|i do not know|dunno|hard to say|no clue|not certain)\b/;
+/** After a figure's own unit: "an hour or two", "30 minutes to an hour", "an hour, two at the most". */
+const RANGE_AFTER_UNIT = new RegExp(`^\\s*(?:,\\s*|(?:or|to|-|\\u2013|\\u2014)\\s*)(?:about\\s+|around\\s+|maybe\\s+)?(?:an?\\s+(?:hour|day|minute|week|couple)|half|${NUMBER_WORD})`);
+
+// Anywhere in a figure's clause, each of these makes it no figure of what is, now, for this business.
+const NEGATION =
+  /\b(?:not|never|no longer|nowhere near|far from|hardly|barely|don't|doesn't|didn't|haven't|hasn't|hadn't|couldn't|can't|cannot|won't|wouldn't|shouldn't|isn't|aren't|wasn't|weren't|do not|does not|did not|have not|has not|had not|could not|will not|would not|should not|is not|are not|was not|were not)\b/;
+const LIMIT =
+  /\b(?:at least|at most|at the most|up to|more than|less than|fewer than|over|under|below|above|upwards of|north of|no more than|no less than|beyond|exceeds?|exceeded|max|maximum|minimum|cap|caps|capped|top out|tops out|topped out|tops|max out|maxes out|maxed out|or more|or less|or fewer|and up|plus(?!\s+(?:tax|taxes|hst|gst|pst|vat|fees?|shipping)\b)|peak)\b|\+/;
+const GOAL =
+  /\b(?:want|wants|wanted|wanting|wish|wishes|hope|hopes|hoping|hoped|would(?!\s+say)|love to|like to|aim|aims|aiming|target|targets|targeting|goal|goals|quota|plan to|plans to|planning|planned|expect|expects|expecting|projected|projection|forecast|forecasting|trying to|try to|looking to|going to|gonna|will|should|could|might|ideally|ideal|if|unless|suppose|supposing|imagine|hypothetically|we need|i need|next (?:year|month|week|season|quarter|spring|summer|fall|winter)|by (?:spring|summer|fall|autumn|winter|next|the end)|once the)\b|\b[a-z]+'d (?:love|like|need)\b|\b[a-z]+'ll\b/;
+const PAST =
+  /\b(?:last (?:year|summer|winter|spring|fall|autumn|season|quarter)|ago|back (?:in|then|when)|before (?:covid|the pandemic|the lockdown|we)|used to|previously|formerly|originally|once (?:had|got|did|was|were|hit|reached|made)|at (?:one point|our peak|the peak|the start|first)|when we (?:started|opened|began|first)|in (?:the )?first (?:year|month|week|few)|over the (?:last|past)|in (?:19|20)\d{2}|since (?:19|20)\d{2}|until (?:last|recently))\b/;
+const THIRD_PARTY =
+  /\b(?:competitors?|competition|the industry|industry average|franchise|market average|national average|other (?:shops|companies|businesses|guys|contractors|plumbers|electricians|roofers|landscapers|cleaners|firms|agencies|salons|clinics|people|places)|(?:a|my|our) (?:buddy|friend|neighbou?r|brother|sister|cousin|dad|father|mom|mother|uncle|aunt|brother-in-law|sister-in-law)(?:'s)?|a (?:guy|shop|company|business|contractor|firm) (?:i know|that|who|down)|another (?:shop|company|business|contractor|guy|firm)|someone (?:else|i know)|they say|the average (?:shop|company|business|contractor|plumber)|most (?:shops|companies|businesses|contractors|people))\b/;
+const HEDGE = /\b(?:maybe|perhaps|probably|not sure|no idea|i guess|guessing|a guess|had to guess|my guess|i'd guess|i would guess|could be|might be|possibly|i don't know|i do not know|dunno|hard to say|no clue|not certain)\b/;
 const VARIES =
-  /\b(?:sometimes|some (?:months|weeks|days)|it depends|depends on|depending on|it varies|varies|on a (?:good|bad|busy|slow|quiet) (?:month|week|day)|in (?:the )?(?:summer|winter|spring|fall|autumn|busy season|slow season|peak season|off season)|seasonal(?:ly)?)\b/;
+  /\b(?:sometimes|some (?:months|weeks|days)|it depends|depends on|depending on|it varies|varies|on a (?:good|bad|busy|slow|quiet) (?:month|week|day)|in (?:the )?(?:summer|winter|spring|fall|autumn|busy season|slow season|peak season|off season)|seasonal(?:ly)?|in (?:january|february|march|april|may|june|july|august|september|october|november|december)|when (?:it's|it is|things are) (?:busy|slow|quiet)|(?:busy|slow|quiet) (?:times|months|weeks|season)|during the (?:day|week)|overnight|weekdays?|weekends?|at night|after hours)\b/;
+/** "So you get about 40 a month": a figure put to the client, not said by them. */
+const SECOND_PERSON = /\b(?:so you|you (?:get|have|see|do|said|mentioned|told|are|were|guys|folks|all)|you're|your (?:leads|calls|business|team|shop|close|customers|jobs))\b/;
+/** A hedge that reaches back to what was just said ("I'm not sure about that"); "not sure about the sales side" is about something else. */
+const REFERRING_HEDGE =
+  /\b(?:not (?:sure|certain|positive)|no (?:idea|clue)|(?:just |only )?(?:a )?guess(?:ing)?|don'?t quote me|could be wrong|have to check|i don'?t (?:really )?know|dunno|hard to say|i think so)\b(?!\s+(?:(?:about|on|of|with)\s+(?:the|our|their|my|his|her|its|what|how|why|who|when|where|whether|if)|how|why|who|when|where|whether|if|what)\b)/;
+const MISSED_PHRASE = /\b(?:can't|cannot|don't|do not|didn't|did not|couldn't|could not)\s+(?:answer|pick up|get to|take)\b/g;
+
+/** Words a field's figure needs nearby (in its clause, or the question it answers), and nouns it may count. */
+const FIELD_WORDS: Readonly<Record<string, RegExp>> = {
+  "sales.missed_calls_per_week":
+    /\b(?:miss|misses|missed|missing|voicemails?|unanswered|(?:can't|cannot|don't|do not|didn't|did not|couldn't|could not) (?:answer|pick up|get to|take)|hang up|hangs up|hung up|lose|lost|ring out|rings out|go to voicemail)\b/,
+  "sales.close_rate_pct":
+    /\b(?:close|closes|closed|closing|convert|converts|converted|conversion|win|wins|won|book|books|booked|sign|signs|signed|buy|buys|bought|hire|hires|hired|go ahead|goes ahead|say yes|says yes|becom(?:e|es|ing) (?:a |our )?(?:customers?|clients?|jobs?)|turns? into|ends? up|takes? the job|accept|accepts|accepted|land|lands|landed)\b/,
+  "sales.response_time_hours":
+    /\b(?:reply|replies|replied|respond|responds|responded|response|answer|answers|answered|get back|gets back|got back|call back|calls back|called back|text back|follow up|follows up|followed up|return|returns|returned|hear back|hears back|reach out|reaches out|first contact)\b/,
+  "ops.admin_hours_per_week":
+    /\b(?:admin|administration|administrative|paperwork|office work|bookkeeping|books|invoic\w*|billing|scheduling|schedule|emails?|data entry|quotes|quoting|estimates|estimating|phones?|calls|follow[- ]ups?|chasing|filing|payroll|reports?|reporting|social media|posting)\b/,
+  "finance.staff_hourly_cost": /\b(?:pay|pays|paid|paying|wage|wages|make|makes|made|earn|earns|earned|costs? (?:us|me)|salary|hourly rate)\b/,
+  "sales.avg_job_value":
+    /\$|\b(?:job|jobs|project|projects|order|orders|ticket|tickets|invoice|invoices|sale|average|typical|typically|each|usually|charge|charges|costs?|price|prices|priced|worth|spend|spends|pay|pays|bill|bills|dollars?|bucks|grand|k)\b/,
+};
+const FIELD_NOT: Readonly<Record<string, RegExp>> = {
+  "finance.staff_hourly_cost": /\b(?:charge|charges|charged|charging|bill|bills|billed|billing|price|prices|our rate|labou?r rate)\b/,
+  "sales.avg_job_value":
+    /\b(?:retainer|subscription|deposit|rent|payroll|salary|salaries|wages?|ads|advertising|marketing|budget|insurance|loan|revenue|sales|turnover|profit|margin|we pay|costs? (?:us|me)|fees?|small|smallest|smaller|big|biggest|bigger|large|largest|cheapest|cheap|most expensive)\b/,
+};
+const NOUNS: Readonly<Record<string, ReadonlySet<string>>> = {
+  "sales.leads_per_month": new Set("leads lead enquiries enquiry inquiries inquiry requests request calls call quotes quote estimates estimate prospects people messages message emails email submissions contacts opportunities texts referrals".split(" ")),
+  "sales.missed_calls_per_week": new Set("calls call phone voicemails voicemail rings people callers".split(" ")),
+  "business.team_size": new Set(
+    "people person staff employees employee workers worker techs tech technicians technician guys guy folks members member crew hands helpers plumbers electricians roofers installers cleaners admins full-time part-time fulltime parttime full part team us drivers apprentices laborers labourers nurses stylists therapists agents reps salespeople associates partners owners".split(" "),
+  ),
+};
+const COUNT_NOUNS = new Set("jobs job leads lead calls call customers clients people hours hour days day weeks week months month years year minutes trucks vans employees projects".split(" "));
+const NOUN_SKIP = new Set("new fresh inbound incoming online qualified real solid good decent web website organic paid warm cold phone more extra or so odd ish about roughly around of them those these the our my total full time".split(" "));
+const NOUN_END = new Set("a an per each every that which who come comes coming came in through from for on at by to and".split(" "));
+/** The noun a figure counts ("40 leads", "15 jobs"), or null when it names none. */
+function headNoun(r: LineRead, clause: ClauseAt, f: FigureAt): string | null {
+  for (const w of r.words) {
+    if (w.start < f.end || w.start >= clause.end) continue;
+    if (NOUN_END.has(w.w)) return null;
+    if (NOUN_SKIP.has(w.w)) continue;
+    return w.w;
+  }
+  return null;
+}
 
 /** A range or a question is no figure, wherever its period word is. */
-function rangeOrQuestion(r: LineRead, clause: ClauseAt, f: FigureAt): string | null {
+function rangeOrQuestion(r: LineRead, clause: ClauseAt, f: FigureAt, b: Bound): string | null {
   const before = r.s.slice(Math.max(0, f.start - 48), f.start);
   const after = r.s.slice(f.end, f.end + 48);
   if (RANGE_AFTER.test(after) || RANGE_BEFORE.test(before) || (BETWEEN_FIRST.test(before) && BETWEEN_AND.test(after)) || BETWEEN_SECOND.test(before)) return RANGE_REASON;
-  if (LIMIT_AFTER.test(after)) return LIMIT_REASON;
+  if (b.afterWord && countWord(r, f, b.afterWord) && RANGE_AFTER_UNIT.test(r.s.slice(b.afterWord.end, b.afterWord.end + 40))) return RANGE_REASON;
   if (clause.question) return "the client asked it as a question";
   return null;
 }
-/** What the words around a figure, in its clause, say about it. */
-function contextWhy(r: LineRead, clause: ClauseAt, f: FigureAt): string | null {
-  const lead = r.s.slice(clause.start, f.start);
-  if (LIMIT_BEFORE.test(lead)) return LIMIT_REASON;
-  if (THIRD_PARTY.test(lead)) return "the figure is someone else's, not this business's";
-  const whole = r.s.slice(clause.start, clause.end);
+/** What the words of a figure's clause say about it: anywhere in the clause, not just beside it. */
+function contextWhy(need: Need, r: LineRead, clause: ClauseAt): string | null {
+  let whole = r.s.slice(clause.start, clause.end);
+  // "We can't answer about 10 calls a week" counts missed calls; the "can't" is the miss, not a denial.
+  if (need.key === "sales.missed_calls_per_week") whole = whole.replace(MISSED_PHRASE, " missed ");
+  if (SECOND_PERSON.test(whole)) return "the figure is put to the client, not said by them";
+  if (NEGATION.test(whole) || LIMIT.test(whole) || GOAL.test(whole) || PAST.test(whole)) return LIMIT_REASON;
+  if (THIRD_PARTY.test(whole)) return "the figure is someone else's, not this business's";
   if (HEDGE.test(whole)) return "the client was not sure of it";
   if (VARIES.test(whole)) return "the client said it varies, so it is not one figure";
   return null;
 }
-/** Two figures for one field in one clause ("60 a month, 30 a month in winter") are not one figure. */
+/** The checks only one field has: the words it needs (in the clause, or the question it answers) and the nouns it may count. */
+function fieldWhy(need: Need, r: LineRead, clause: ClauseAt, f: FigureAt, b: Bound, around: string): string | null {
+  const key = need.key;
+  if (!key) return null;
+  const whole = r.s.slice(clause.start, clause.end);
+  const needs = FIELD_WORDS[key];
+  if (needs && !needs.test(whole) && !needs.test(around)) return "the quote does not say what the figure is about";
+  const not = FIELD_NOT[key];
+  if (not && not.test(whole)) return key === "sales.avg_job_value" ? "the figure is not what an average job is worth" : "the figure is a price the business charges, not what staff time costs it";
+  const noun = headNoun(r, clause, f);
+  const nouns = NOUNS[key];
+  if (nouns && noun && !nouns.has(noun)) return `the quote counts ${noun}, not ${key === "business.team_size" ? "people" : key === "sales.missed_calls_per_week" ? "missed calls" : "leads"}`;
+  if (key === "business.team_size" && b.afterWord && countWord(r, f, b.afterWord)) return "the quote gives a length of time, not a number of people";
+  if (key === "sales.avg_job_value" && noun && COUNT_NOUNS.has(noun)) return `the quote counts ${noun}, not dollars`;
+  if (key === "sales.close_rate_pct" && /^\s*(?:%|percent|per\s?cent)\s+(?:deposit|discount|markup|margin|tax|tip|commission|interest|off|down|upfront|up front|growth|increase|decrease|of (?:the )?(?:price|cost|bill|invoice|job|revenue|sales|profit))\b/.test(r.s.slice(f.end))) {
+    return "the share is of something else, not of leads won";
+  }
+  return null;
+}
+/** Two figures for one field in one clause ("60 a month, 30 a month in winter", "$200 small, $2,000 big") are not one figure. */
 function severalFigures(need: Need, r: LineRead, clause: ClauseAt, f: FigureAt, n: number): string | null {
-  if (!need.per && !need.hours && !need.duration && !need.share) return null;
   for (const g of r.figures) {
-    if (g === f || g.start < clause.start || g.start >= clause.end) continue;
+    if (g === f || g.start < clause.start || g.start >= clause.end || near(g.value, n)) continue;
+    if (need.perJob) {
+      const money = r.s[g.start] === "$" || /^\s*(?:dollars?|bucks|k|grand)\b/.test(r.s.slice(g.end));
+      if (money) return "the client gave more than one figure for it";
+      continue;
+    }
+    if (!need.per && !need.hours && !need.duration && !need.share) return null;
     const other = readFigure(need, r, g, bind(r, clause, g));
     if (other.why === null && other.explicit && other.value !== null && !near(other.value, n)) return "the client gave more than one figure for it";
   }
@@ -665,9 +790,11 @@ type Fit = { ok: true } | { ok: false; reason: string };
  * Does `n` stand, in the field's unit, as a fact in what the client said? It
  * must be a figure inside the quote, on a line the client said (the
  * interviewer's lines never count), with the words it leans on inside the
- * quote too, and pass every check beside it.
+ * quote too, and pass every check beside it. `around` is the question it
+ * answers (the lines before the quote) and the interviewer's lines in it, for
+ * the words a field needs; `guard` is a caller's own check (a table row's).
  */
-function figureFits(need: Need, n: number, ctx: readonly LineCtx[]): Fit {
+function figureFits(need: Need, n: number, ctx: readonly LineCtx[], around = "", guard?: (c: LineCtx, f: FigureAt) => string | null): Fit {
   let reason: string | null = null;
   let hostSaid = false;
   for (const c of ctx) {
@@ -675,7 +802,8 @@ function figureFits(need: Need, n: number, ctx: readonly LineCtx[]): Fit {
     if (need.share) for (const f of c.read.fractions) options.push({ f, fraction: true });
     for (const { f, fraction } of options) {
       const clause = clauseAt(c.read, f.start);
-      const reading: Reading = fraction ? { value: f.value * 100, why: null, used: [], explicit: true } : readFigure(need, c.read, f, bind(c.read, clause, f));
+      const b = bind(c.read, clause, f);
+      const reading: Reading = fraction ? { value: f.value * 100, why: null, used: [], explicit: true } : readFigure(need, c.read, f, b);
       const valueMatch = reading.value !== null && (fraction ? Math.abs(reading.value - n) <= 0.5 : near(reading.value, n));
       const rawMatch = !fraction && near(f.value, n);
       if ((!valueMatch && !rawMatch) || !inside(c.cover, f)) continue;
@@ -685,11 +813,15 @@ function figureFits(need: Need, n: number, ctx: readonly LineCtx[]): Fit {
       }
       const why = !valueMatch
         ? (reading.why ?? "the quote gives it in other units: it is a different number of hours")
-        : (rangeOrQuestion(c.read, clause, f) ??
+        : (rangeOrQuestion(c.read, clause, f, b) ??
+          // What the clause says about the figure comes first: "40 or more" is a limit before it is anything else.
+          contextWhy(need, c.read, clause) ??
           reading.why ??
           (reading.used.every((u) => inside(c.cover, u)) ? null : "the quote leaves out the words that say what the figure counts") ??
-          contextWhy(c.read, clause, f) ??
-          severalFigures(need, c.read, clause, f, n));
+          fieldWhy(need, c.read, clause, f, b, around) ??
+          severalFigures(need, c.read, clause, f, n) ??
+          guard?.(c, f) ??
+          null);
       if (!why) return { ok: true };
       reason ??= why;
     }
@@ -698,9 +830,12 @@ function figureFits(need: Need, n: number, ctx: readonly LineCtx[]): Fit {
 }
 
 /** The figures a piece of prose writes, each with the period words the prose binds to it ("Admin 2 hours per week"). */
-function proseFigures(text: string): Array<{ value: number; bound: Bound | null }> {
+function proseFigures(text: string): Array<{ value: number; bound: Bound | null; qualifier?: string | null }> {
   const r = readLine(text);
-  return r.figures.map((f) => ({ value: f.value, bound: bind(r, clauseAt(r, f.start), f) }));
+  return r.figures.map((f) => {
+    const clause = clauseAt(r, f.start);
+    return { value: f.value, bound: bind(r, clause, f), qualifier: contextWhy({}, r, clause) };
+  });
 }
 /**
  * Why a figure written in a text value, a list item or a table cell does not
@@ -708,7 +843,7 @@ function proseFigures(text: string): Array<{ value: number; bound: Bound | null 
  * period the prose gives it ("Admin 2 hours per week" from "2 hours a day" is
  * not what was said).
  */
-function proseFigureWhy(fig: { value: number; bound: Bound | null }, ctx: readonly LineCtx[]): string | null {
+function proseFigureWhy(fig: { value: number; bound: Bound | null; qualifier?: string | null }, ctx: readonly LineCtx[]): string | null {
   let hostSaid = false;
   let found = false;
   const per = fig.bound ? (fig.bound.after ?? fig.bound.before) : null;
@@ -721,9 +856,15 @@ function proseFigureWhy(fig: { value: number; bound: Bound | null }, ctx: readon
         continue;
       }
       found = true;
-      const b = bind(c.read, clauseAt(c.read, f.start), f);
+      const lineClause = clauseAt(c.read, f.start);
+      const b = bind(c.read, lineClause, f);
       if (per && (b.after ?? b.before) !== per) continue;
       if (second && (b.next ?? b.before) !== second) continue;
+      // The value's own "more than", "used to" or "maybe" must be the call's, and the call's the value's.
+      if (fig.qualifier !== undefined && (fig.qualifier ?? null) !== contextWhy({}, c.read, lineClause)) {
+        found = true;
+        continue;
+      }
       return null;
     }
   }
@@ -800,46 +941,101 @@ function namedIn(name: string, stems: ReadonlySet<string>): boolean {
  * footage" is not Square and "sales team" is not Salesforce (review of phase
  * 2b). A call written all in lower case says nothing by case.
  */
+/** Tool names that are everyday words: a capital at the start of a sentence says nothing about them ("Square footage", "Monday is busy"). */
+const COMMON_WORD_NAMES = new Set(
+  "square monday wave notion teams slack box close front buffer sage gusto harvest copper zoom stripe ramp pilot bonsai clay loom later keep word office outlook excel mail calendar sheets docs drive forms sites meet chat".split(" "),
+);
 function writtenAsName(name: string, said: readonly TranscriptLine[]): boolean {
   const text = said.map((l) => l.text).join(" ").normalize("NFKD");
   if (!/[A-Z]/.test(text)) return true;
   const first = contentWords(name)[0];
   if (!first) return false;
   const want = stemOf(first);
-  const words = [...text.matchAll(/[A-Za-z0-9']+/g)].map((m) => m[0]);
-  return words.some((w, i) => /^[A-Z0-9]/.test(w) && (stemOf(w.toLowerCase()) === want || (i + 1 < words.length && stemOf(`${w}${words[i + 1]}`.toLowerCase()) === want)));
+  const common = COMMON_WORD_NAMES.has(first);
+  const toks = [...text.matchAll(/[A-Za-z0-9']+/g)].map((m) => ({ w: m[0], at: m.index ?? 0 }));
+  return toks.some((t, i) => {
+    if (!/^[A-Z0-9]/.test(t.w)) return false;
+    const hit = stemOf(t.w.toLowerCase()) === want || (i + 1 < toks.length && stemOf(`${t.w}${toks[i + 1].w}`.toLowerCase()) === want);
+    if (!hit) return false;
+    const startOfSentence = /(?:^|[.!?:;])$/.test(text.slice(0, t.at).trimEnd());
+    return !(common && startOfSentence);
+  });
 }
-/** "We stopped using Jobber", "we do not do roofing": the client said they do not, or no longer. */
-const NOT_USING =
-  /\b(?:don't|do not|doesn't|does not|didn't|did not|never|no longer|not|stopped|quit|cancelled|canceled|dropped|got rid of|used to|switched from|moved off|moved away from|ditched|tried|instead of|rather than|without)\s+((?:[a-z']+\s+){0,2})$/;
-const NEGATION_RESET = new Set(["to", "and", "but", "now", "then", "so", "also", "with", "about", "of"]);
-function negatedIn(item: string, ctx: readonly LineCtx[]): boolean {
-  const first = contentWords(item)[0];
-  if (!first) return false;
-  const want = stemOf(first);
-  let seen = 0;
-  let negated = 0;
-  for (const c of ctx) {
-    if (c.host) continue;
-    for (const w of c.read.words) {
-      if (stemOf(w.w) !== want) continue;
-      seen += 1;
-      const clause = clauseAt(c.read, w.start);
-      const m = NOT_USING.exec(c.read.s.slice(clause.start, w.start));
-      if (m && !m[1].trim().split(/\s+/).some((x) => NEGATION_RESET.has(x))) negated += 1;
-    }
+/** The words written with a capital inside a sentence (names, mostly), lower case: what a table row's figure must not be closer to than its own name. */
+function capitalisedWords(text: string): Set<string> {
+  const t = text.normalize("NFKD").replace(/\p{M}+/gu, "");
+  const out = new Set<string>();
+  for (const m of t.matchAll(/[A-Za-z][A-Za-z0-9']*/g)) {
+    const at = m.index ?? 0;
+    if (!/^[A-Z]/.test(m[0]) || m[0] === "I") continue;
+    if (/(?:^|[.!?:;])$/.test(t.slice(0, at).trimEnd())) continue;
+    out.add(m[0].toLowerCase());
   }
-  return seen > 0 && negated === seen;
+  return out;
+}
+/**
+ * "We stopped using Jobber", "we do not do roofing", "we replaced Jobber",
+ * "we are thinking about getting Jobber": the client does not use it, or no
+ * longer, or not yet.
+ */
+const NOT_USING =
+  /\b(?:don't|do not|doesn't|does not|didn't|did not|haven't|have not|hasn't|has not|never|no longer|not|stopped|quit|cancelled|canceled|dropped|got rid of|getting rid of|used to|switched from|switching from|moved off|moved from|moved away from|replaced|replacing|ditched|done with|finished with|gave up on|gave up|tried|tried out|trialled|trialed|demoed|evaluated|considered|considering|thinking about|thinking of|looking at|looked at|looking into|looked into|might try|want to try|wanted to try|going to try|plan to|planning to|hope to|hoping to|want to|wants to|would like to|instead of|rather than|without)\s+((?:[a-z']+\s+){0,3})$/;
+/** "Jobber was cancelled last year". */
+const NOT_USING_AFTER = /^\s*(?:(?:was|were|got|has been|have been|is|are)\s+)?(?:cancelled|canceled|dropped|discontinued|replaced|retired|gone|turned off|shut off|switched off)\b/;
+const NEGATION_RESET = new Set(["to", "and", "but", "now", "then", "so", "also", "with", "about", "of"]);
+/** An item is negated when any of its words is mentioned by the client only where they say they do not, or no longer. */
+function negatedIn(item: string, ctx: readonly LineCtx[]): boolean {
+  for (const word of contentWords(item)) {
+    const want = stemOf(word);
+    let seen = 0;
+    let negated = 0;
+    for (const c of ctx) {
+      if (c.host) continue;
+      for (const w of c.read.words) {
+        if (stemOf(w.w) !== want) continue;
+        seen += 1;
+        const clause = clauseAt(c.read, w.start);
+        const m = NOT_USING.exec(c.read.s.slice(clause.start, w.start));
+        const before = !!m && !m[1].trim().split(/\s+/).some((x) => NEGATION_RESET.has(x));
+        if (before || NOT_USING_AFTER.test(c.read.s.slice(w.end, clause.end))) negated += 1;
+      }
+    }
+    if (seen > 0 && negated === seen) return true;
+  }
+  return false;
+}
+/** Magnitude words a value may not add: "hundreds of leads" from "a lot of leads". */
+const MAGNITUDE = /\b(?:hundreds|thousands|dozens|millions|billions|tons|loads|scores)\b/g;
+/**
+ * A short item's words are all the client's, said together in one clause
+ * ("commercial plumbing ... not roofing" is not "commercial roofing"); a
+ * longer one's are mostly theirs. Magnitude words are never added.
+ */
+function wordsWhy(text: string, ctx: readonly LineCtx[], stems: ReadonlySet<string>): string | null {
+  const no = "its words are not what the call said";
+  for (const m of baseText(text).matchAll(MAGNITUDE)) if (!stems.has(stemOf(m[0]))) return no;
+  const words = contentWords(text);
+  if (!words.length) return null;
+  if (words.length > 3) return support(text, stems) >= 0.75 ? null : no;
+  if (!words.every((w) => stems.has(stemOf(w)))) return no;
+  const want = words.map(stemOf);
+  const together = ctx.some(
+    (c) =>
+      !c.host &&
+      c.read.clauses.some((cl) => {
+        const inClause = c.read.words.filter((w) => w.start >= cl.start && w.end <= cl.end);
+        const have = new Set(inClause.flatMap((w, i) => [stemOf(w.w), ...(i + 1 < inClause.length ? [stemOf(`${w.w}${inClause[i + 1].w}`)] : [])]));
+        return want.every((x) => have.has(x));
+      }),
+  );
+  return together ? null : no;
 }
 
-/** The lines a quote is on: the shortest run inside [from, to] that holds it. */
+/** The lines a quote is on, found word for word in one pass over the cited range. */
 function quoteSpan(lines: readonly TranscriptLine[], from: number, to: number, quote: string): TranscriptLine[] {
-  for (let len = 0; len <= to - from; len++) {
-    for (let a = from; a + len <= to; a++) {
-      if (quoteInLines(lines, a, a + len, quote)) return lines.filter((l) => l.n >= a && l.n <= a + len);
-    }
-  }
-  return lines.filter((l) => l.n >= from && l.n <= to);
+  const range = lines.filter((l) => l.n >= from && l.n <= to);
+  const cover = quoteCover(range, quote);
+  return cover ? range.filter((l) => cover.has(l.n)) : range;
 }
 
 /** Words as the quote check (lib/ai-audit/transcript.ts quoteWords) reads them: "$" and "%" alone, "1,200" and "2.5" whole. */
@@ -866,7 +1062,16 @@ function quoteCover(said: readonly TranscriptLine[], quote: string): Map<number,
 
 /** The interviewer's labels when the workspace's owner names are not known. */
 export const DEFAULT_HOSTS: ReadonlySet<string> = new Set(["cc", "interviewer", "host", "oasis"]);
-const speakerKey = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+const speakerKey = (s: string) =>
+  s
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/[^a-z0-9' -]+/g, " ")
+    .replace(/\s+\d+\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
 /**
  * The interviewer's labels in this call. The owners' first names count only
  * when no full name and no usual label appears in it, so a client who shares
@@ -895,6 +1100,31 @@ type ItemCheck = { ok: true; value: unknown } | { ok: false; reason: string };
 
 /** Table columns that hold a name the call must say as itself. */
 const NAME_COLUMNS = new Set(["tool", "source"]);
+/** Lead sources that are everyday words, never a brand: no capital is asked of them. */
+const GENERIC_SOURCES = new Set(
+  "referrals referral word mouth repeat returning customers customer walk ins walkins signs sign flyers flyer mailers mailer door hangers website site events event trade shows show networking partners partner friends family signage truck trucks wraps wrap local ads radio print newspaper magazine billboards billboard yard".split(" "),
+);
+const looksProper = (text: string) => /^[A-Z]/.test(text.trim()) && !contentWords(text).every((w) => GENERIC_SOURCES.has(w));
+/**
+ * A row's figure belongs to its own name: in a sentence with the name, and no
+ * other name between them ("We use Jobber and pay QuickBooks 30 a month" gives
+ * QuickBooks the 30, not Jobber).
+ */
+function tieGuard(name: string): (c: LineCtx, f: FigureAt) => string | null {
+  const want = contentWords(name).map(stemOf);
+  return (c, f) => {
+    if (!want.length) return null;
+    const r = c.read;
+    const sentence = r.sentences.find((x) => f.start >= x.start && f.start < x.end) ?? { start: 0, end: r.s.length };
+    const hits = r.words.filter((w) => w.start >= sentence.start && w.end <= sentence.end && stemOf(w.w) === want[0]);
+    if (!hits.length) return "its figure is said apart from its name";
+    const nearest = hits.reduce((a, w) => (Math.abs(w.start - f.start) < Math.abs(a.start - f.start) ? w : a));
+    const [lo, hi] = nearest.start < f.start ? [nearest.end, f.start] : [f.end, nearest.start];
+    const capped = capitalisedWords(c.line.text);
+    const other = r.words.some((w) => w.start >= lo && w.end <= hi && capped.has(w.w) && !want.includes(stemOf(w.w)));
+    return other ? "its figure belongs to another name in the call" : null;
+  };
+}
 const columnKey = (k: string) => k.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 /** A table row as the model may give it (an object, an array in column order, or a bare name) as an object with the field's own column names. */
 function rowObject(def: ProfileFieldDef, item: unknown): Record<string, string> | null {
@@ -916,17 +1146,38 @@ function rowObject(def: ProfileFieldDef, item: unknown): Record<string, string> 
   return Object.keys(out).length ? out : null;
 }
 
+/** Is the person a row names, where the text names them, never in a sentence with the row's task? */
+function whoApart(who: string, task: string, ctx: readonly LineCtx[]): boolean {
+  const w0 = contentWords(who)[0];
+  const t0 = contentWords(task)[0];
+  if (!w0 || !t0) return false;
+  const [ws, ts] = [stemOf(w0), stemOf(t0)];
+  for (const c of ctx) {
+    if (c.host) continue;
+    const r = c.read;
+    if (!r.words.some((w) => stemOf(w.w) === ws)) continue;
+    const together = r.sentences.some((x) => {
+      const inside2 = r.words.filter((w) => w.start >= x.start && w.end <= x.end).map((w) => stemOf(w.w));
+      return inside2.includes(ws) && inside2.includes(ts);
+    });
+    if (!together) return true;
+  }
+  return false;
+}
+
 /** One table row against its columns: names said as themselves, figures in their column's period, words from the call. */
-function checkRow(def: ProfileFieldDef, item: unknown, ctx: readonly LineCtx[], stems: ReadonlySet<string>, said: readonly TranscriptLine[]): ItemCheck {
+function checkRow(def: ProfileFieldDef, item: unknown, ctx: readonly LineCtx[], stems: ReadonlySet<string>, said: readonly TranscriptLine[], around: string): ItemCheck {
   const row = rowObject(def, item);
   if (!row) return { ok: false, reason: "not a row of the table" };
+  const name = row.tool ?? row.source ?? row.task ?? null;
+  const guard = name ? tieGuard(name) : undefined;
   const prose: string[] = [];
   for (const [col, text] of Object.entries(row)) {
     const figures = numbersIn(text);
     const need = COLUMN_NEEDS[col];
     if (need) {
       for (const n of figures) {
-        const fit = figureFits(need, n, ctx);
+        const fit = figureFits(need, n, ctx, around, guard);
         if (!fit.ok) return { ok: false, reason: `its ${col}: ${fit.reason}` };
       }
       if (!figures.length) prose.push(text);
@@ -936,13 +1187,21 @@ function checkRow(def: ProfileFieldDef, item: unknown, ctx: readonly LineCtx[], 
     if (unstated) return { ok: false, reason: `its ${col}: ${unstated}` };
     if (NAME_COLUMNS.has(col)) {
       if (!namedIn(text, stems)) return { ok: false, reason: `its ${col} is a name the call does not say` };
-      if (col === "tool" && !writtenAsName(text, said)) return { ok: false, reason: "the call does not name it as a product" };
+      if ((col === "tool" || looksProper(text)) && !writtenAsName(text, said)) return { ok: false, reason: col === "tool" ? "the call does not name it as a product" : "the call does not name it as a name" };
       if (negatedIn(text, ctx)) return { ok: false, reason: "the call says they do not use it, or no longer do" };
+      continue;
+    }
+    // Who does it may be the speaker ("I do it myself"): the speakers' names count.
+    if (col === "who") {
+      if (contentWords(text).length && support(text, stems) < 0.5) return { ok: false, reason: "its who is not someone the call names" };
+      const task = row.task ?? row.tool ?? null;
+      if (task && whoApart(text, task, ctx)) return { ok: false, reason: "its who is named with another task in the call" };
       continue;
     }
     if (!figures.length) prose.push(text);
   }
-  if (support(prose.join(" "), stems) < 0.5) return { ok: false, reason: "its words are not what the call said" };
+  const why = prose.length ? wordsWhy(prose.join(" "), ctx, stems) : null;
+  if (why) return { ok: false, reason: why };
   return { ok: true, value: row };
 }
 
@@ -951,7 +1210,8 @@ function checkListItem(item: unknown, ctx: readonly LineCtx[], stems: ReadonlySe
   if (typeof item !== "string" || !item.trim()) return { ok: false, reason: "not a line of the list" };
   const unstated = proseWhy(item, ctx);
   if (unstated) return { ok: false, reason: unstated };
-  if (support(item, stems) < 0.5) return { ok: false, reason: "its words are not what the call said" };
+  const words = wordsWhy(item, ctx, stems);
+  if (words) return { ok: false, reason: words };
   if (negatedIn(item, ctx)) return { ok: false, reason: "the call says they do not, or no longer" };
   return { ok: true, value: item.trim() };
 }
@@ -982,15 +1242,28 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
   const cover = quoteCover(said, quote);
   if (!cover) return { ok: false, reason: "its quote is not on the lines it names" };
   const ctx: LineCtx[] = said.map((l) => ({ line: l, host: !!l.speaker && isHost(l.speaker), read: readLine(l.text), cover: cover.get(l.n) ?? null }));
-  // Words are weighed on the quote's own lines, never on the whole range the model named (review of phase 2b, F4).
-  const stems = stemsOf(said);
+  // Words are weighed on the client's own lines of the quote, never the interviewer's ("CC: Do you use Jobber? / Dana: No.")
+  // and never the whole range the model named (review of phase 2b, F4 and round 3).
+  const clientSaid = said.filter((l) => !(l.speaker && isHost(l.speaker)));
+  const confirmed = said.filter(
+    (l, i) => !!l.speaker && isHost(l.speaker) && /\?\s*$/.test(l.text) && !!said[i + 1] && !(said[i + 1].speaker && isHost(said[i + 1].speaker as string)) && AFFIRM.test(baseText(said[i + 1].text)),
+  );
+  const theirs = [...clientSaid, ...confirmed];
+  const stems = stemsOf(theirs);
+  // The question a figure answers, for the words a field needs ("How fast do you get back to a lead? / Within 30 minutes").
+  const first = said[0]?.n ?? f.from;
+  const last = said[said.length - 1]?.n ?? f.to;
+  const around = [...lines.filter((l) => l.n >= first - 2 && l.n < first), ...said.filter((l) => l.speaker && isHost(l.speaker))].map((l) => baseText(l.text)).join(" ");
 
   let value: unknown = f.value;
   let note: string | undefined;
   if (def.type === "number" || def.type === "money") {
-    const n = typeof f.value === "number" ? f.value : Number(String(f.value ?? "").replace(/[$,\s]/g, ""));
+    const n = typeof f.value === "number" ? f.value : Number(String(f.value ?? "").replace(/[$,%\s]/g, ""));
     if (!Number.isFinite(n)) return { ok: false, reason: NOT_STATED };
-    const fit = figureFits(needOf(def), n, ctx);
+    // A hedge in the client's lines around the quote reaches back to it: "We get 40 a month. I'm not sure about that."
+    const nearby = lines.filter((l) => l.n >= Math.min(f.from, first) && l.n <= Math.max(f.to, last + 1) && !(l.speaker && isHost(l.speaker)));
+    if (nearby.some((l) => REFERRING_HEDGE.test(baseText(l.text)))) return { ok: false, reason: "the client was not sure of it" };
+    const fit = figureFits(needOf(def), n, ctx, around);
     if (!fit.ok) return { ok: false, reason: fit.reason };
     value = n;
   } else if (def.type === "list" || def.type === "rows") {
@@ -999,7 +1272,7 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
     const reasons: string[] = [];
     const keptItems: unknown[] = [];
     for (const item of items) {
-      const r = def.type === "rows" ? checkRow(def, item, ctx, stems, said) : checkListItem(item, ctx, stems);
+      const r = def.type === "rows" ? checkRow(def, item, ctx, stems, theirs, around) : checkListItem(item, ctx, stems);
       if (r.ok) keptItems.push(r.value);
       else reasons.push(r.reason);
     }
@@ -1009,7 +1282,11 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
   } else {
     const unstated = proseWhy(f.value, ctx);
     if (unstated) return { ok: false, reason: unstated };
-    if (typeof f.value === "string" && support(f.value, stems) < 0.6) return { ok: false, reason: "its words are not what the call said" };
+    if (typeof f.value === "string") {
+      for (const m of baseText(f.value).matchAll(MAGNITUDE)) if (!stems.has(stemOf(m[0]))) return { ok: false, reason: "its words are not what the call said" };
+      if (support(f.value, stems) < 0.6) return { ok: false, reason: "its words are not what the call said" };
+      if (!NEGATION.test(baseText(f.value)) && negatedIn(f.value, ctx)) return { ok: false, reason: "the call says they do not, or no longer" };
+    }
   }
   const v = validateProfileField({ field_key: key, value, label: "client_reported", source_type: "transcript" });
   if (!v.ok) return { ok: false, reason: `the value is not ${v.error}` };

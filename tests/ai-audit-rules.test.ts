@@ -1201,6 +1201,116 @@ async function main() {
     const long = ex.checkFacts({ facts: [{ key: `x${"y".repeat(5_000)}`, value: 1, from: 1, to: 1, quote: "nothing at all here" }], summary: empty }, [], { from: 1, to: 1 });
     assert.ok(long.dropped[0].key.length <= 80, String(long.dropped[0].key.length));
   });
+  await check("what the clause says, the words a field needs, the noun a figure counts and the client's own yes (review of phase 2b, round 4)", () => {
+    const empty = { goals: [], problems: [], commitments: [], open_questions: [] };
+    const run = (text: string, key: string, value: unknown, quote: string) => {
+      const r = tr.parseTranscriptText(text);
+      assert.ok(r.ok, text);
+      const L = r.ok ? r.value.lines : [];
+      const out = ex.checkFacts({ facts: [{ key, value, from: 1, to: L.length, quote }], summary: empty }, L, { from: 1, to: L.length });
+      return out.kept.length ? { kept: out.kept[0].value as unknown, why: "" } : { kept: undefined, why: out.dropped.map((d) => d.reason).join("; ") };
+    };
+    const L = "sales.leads_per_month";
+    const drop: Array<[string, string, unknown, string?]> = [
+      ["Dana: We haven't ever hit 40 leads a month.", L, 40],
+      ["Dana: Our cap is 40 leads a month.", L, 40],
+      ["Dana: We max out at 40 leads a month.", L, 40],
+      ["Dana: We get 40 leads a month at most.", L, 40],
+      ["Dana: We get 40 leads a month, tops.", L, 40],
+      ["Dana: We're looking to get 100 leads a month.", L, 100],
+      ["Dana: Next year we will get 100 leads a month.", L, 100],
+      ["Dana: 100 leads a month would be great.", L, 100],
+      ["Dana: Our quota is 100 leads a month.", L, 100],
+      ["Dana: Last year we got 60 leads a month.", L, 60],
+      ["Dana: Back in 2019 we had 60 leads a month.", L, 60],
+      ["Dana: At our peak we got 60 leads a month.", L, 60],
+      ["Dana: We got 60 leads a month before the pandemic.", L, 60],
+      ["Dana: We get 40 leads a month, but I'm not sure about that.", L, 40, "We get 40 leads a month"],
+      ["Dana: We get 40 leads a month. That's a guess.", L, 40, "We get 40 leads a month"],
+      ["Dana: I'm just guessing here. We get 40 leads a month.", L, 40, "We get 40 leads a month"],
+      ["Dana: We get 40 leads a month.\nDana: Honestly I'm not sure though.", L, 40, "We get 40 leads a month"],
+      ["Dana: A buddy of mine runs a shop that gets 200 leads a month.", L, 200],
+      ["Dana: Other plumbers around here get 200 leads a month.", L, 200],
+      ["Dana: We get in the 40s each month for leads.", L, 40],
+      ["Dana: We get forty-something leads a month.", L, 40],
+      ["Dana: In July we get 60 leads a month, and in January we get 30 a month.", L, 60],
+      ["Dana: When it's busy we get 60 leads a month, but when it's slow we get 30 a month.", L, 60],
+      ["Dana: We get 40 leads, twice a month.", L, 40],
+      ["Dana: We get 40 leads every other month.", L, 40],
+      ["Dana: Over the last few months we've had 240 leads.", L, 240],
+      ["Dana: We do 15 jobs a month.", L, 15],
+      ["CC (Oasis): So that's 40 leads a month.\nDana: Mm-hm.", L, 40, "So that's 40 leads a month"],
+      ["So you get about 40 leads a month.\nYeah, roughly.", L, 40, "So you get about 40 leads a month"],
+      ["Dana: We usually reply within an hour or two.", "sales.response_time_hours", 1],
+      ["Dana: We usually reply within a day or two.", "sales.response_time_hours", 24],
+      ["Dana: We usually reply within 30 minutes to an hour.", "sales.response_time_hours", 0.5],
+      ["Dana: I pay him 25 an hour.", "sales.response_time_hours", 25],
+      ["Dana: My guy works 25 hours a week.", "finance.staff_hourly_cost", 25],
+      ["Dana: We reply to leads within an hour.", "finance.staff_hourly_cost", 1],
+      ["Dana: We charge 120 an hour for labour.", "finance.staff_hourly_cost", 120],
+      ["Dana: We take 50 calls a week.", "sales.missed_calls_per_week", 50],
+      ["Dana: We have 12 trucks.", "business.team_size", 12],
+      ["Dana: We have been in business 15 years.", "business.team_size", 15],
+      ["Dana: No one else works here, it's just me.", "business.team_size", 1],
+      ["Dana: We require a 50 percent deposit.", "sales.close_rate_pct", 50],
+      ["Dana: The sales tax is 13 percent here.", "sales.close_rate_pct", 13],
+      ["Dana: We use a third party for payroll.", "sales.close_rate_pct", 33],
+      ["Dana: Our monthly retainer is $400.", "sales.avg_job_value", 400],
+      ["Dana: Small jobs are $200 and big jobs are $2,000.", "sales.avg_job_value", 200],
+      ["Dana: Our shop is at 1200 Main Street.", "sales.avg_job_value", 1200],
+      ["Dana: An average job is about five k.", "sales.avg_job_value", 5],
+      ["CC: Do you use Jobber?\nDana: No.", "tech.tools", [{ tool: "Jobber" }], "Do you use Jobber? No"],
+      ["CC: Is it QuickBooks or Xero?\nDana: Xero.", "tech.tools", [{ tool: "QuickBooks" }], "Is it QuickBooks or Xero? Xero"],
+      ["Dana: We use Jobber and pay QuickBooks 30 a month.", "tech.tools", [{ tool: "Jobber", "monthly cost": "30" }]],
+      ["Dana: We use Jobber for scheduling.", "tech.tools", [{ tool: "Jobber", "what it is for": "scheduling and invoicing" }]],
+      ["Dana: We are thinking about getting Jobber.", "tech.tools", [{ tool: "Jobber" }]],
+      ["Dana: We replaced Jobber with ServiceTitan last month.", "tech.tools", [{ tool: "Jobber" }]],
+      ["Dana: Jobber was cancelled last year.", "tech.tools", [{ tool: "Jobber" }]],
+      ["Dana: Monday is our busiest day.", "tech.tools", [{ tool: "Monday" }]],
+      ["Dana: I google competitors sometimes to check prices.", "sales.lead_sources", [{ source: "Google" }]],
+      ["Dana: Dana does invoicing. Alex does scheduling 10 hours a week.", "ops.repetitive_tasks", [{ task: "scheduling", "hours per week": "10", who: "Dana" }]],
+      ["Dana: We do plumbing and HVAC.", "business.services", ["plumbing and roofing"]],
+      ["Dana: We do commercial plumbing but we do not do roofing.", "business.services", ["commercial roofing"]],
+      ["Dana: We get a lot of leads every month.", "business.description", "Hundreds of leads every month"],
+      ["Dana: We get about 40 leads a month.", "business.description", "A shop that gets more than 40 leads a month"],
+      ["Dana: We do not do roofing, only plumbing.", "business.description", "A plumbing and roofing company"],
+    ];
+    for (const [text, key, value, quote] of drop) {
+      const r = run(text, key, value, quote ?? text.split("\n")[0].replace(/^[^:]+:\s*/, ""));
+      assert.equal(r.kept, undefined, `${text} => ${key}=${JSON.stringify(value)} was kept`);
+    }
+    const keep: Array<[string, string, unknown, string?, unknown?]> = [
+      ["Dana: Last month we got 40 leads.", L, 40],
+      ["Dana: We get about 40 leads a month, right.", L, 40],
+      ["Dana: Forty leads a month? Yes, forty.", L, 40],
+      ["Dana: So we get about 40 leads a month, okay?", L, 40],
+      ["Dana: We get about 40 leads a month, yeah.", L, 40],
+      ["Dana: We close 30 percent of them.", "sales.close_rate_pct", "30%", undefined, 30],
+      ["CC: Do you use Jobber for scheduling?\nDana: Yes, for scheduling.", "tech.tools", [{ tool: "Jobber" }], "Do you use Jobber for scheduling? Yes, for scheduling"],
+      ["CC: Do you offer financing to customers?\nDana: Yes, through the bank.", "business.description", "Offers financing through the bank", "Do you offer financing to customers? Yes, through the bank"],
+      ["CC: How fast do you get back to a new lead?\nDana: Within 30 minutes, usually.", "sales.response_time_hours", 0.5, "Within 30 minutes, usually"],
+      ["CC: How many calls do you miss in a week?\nDana: About 5 calls a week, I'd say.", "sales.missed_calls_per_week", 5, "About 5 calls a week"],
+      ["Dana: We can't answer about 10 calls a week.", "sales.missed_calls_per_week", 10],
+      ["Dana: I pay him 25 an hour.", "finance.staff_hourly_cost", 25],
+      ["Dana: We pay Jobber 100 a month for scheduling.", "tech.tools", [{ tool: "Jobber", "monthly cost": "100" }]],
+      ["Dana: We switched from Jobber to Housecall Pro last spring.", "tech.tools", [{ tool: "Housecall Pro" }]],
+    ];
+    for (const [text, key, value, quote, want] of keep) {
+      const r = run(text, key, value, quote ?? text.split("\n")[0].replace(/^[^:]+:\s*/, ""));
+      assert.ok(r.kept !== undefined, `${text} => ${key}=${JSON.stringify(value)} was dropped: ${r.why}`);
+      if (want !== undefined) assert.deepEqual(r.kept, want);
+    }
+    // The cited lines are searched once for the quote: two hundred facts on a long call stay quick.
+    const long = Array.from({ length: 2_000 }, (_, i) => `Dana: Line ${i} about the business and the weather and the jobs.`);
+    long[1_500] = "Dana: We get about 40 leads a month.";
+    const parsedLong = tr.parseTranscriptText(long.join("\n"));
+    assert.ok(parsedLong.ok);
+    const lines = parsedLong.ok ? parsedLong.value.lines : [];
+    const facts = Array.from({ length: 200 }, () => ({ key: L, value: 40, from: 1_470, to: 1_510, quote: "We get about 40 leads a month" }));
+    const t0 = Date.now();
+    ex.checkFacts({ facts, summary: empty }, lines, { from: 1, to: lines.length });
+    assert.ok(Date.now() - t0 < 3_000, `${Date.now() - t0} ms`);
+  });
   await check("figures in words: punctuation and impossible joins split them, and the common spoken forms read right (review of phase 2b, F7)", () => {
     const cases: Array<[string, number[]]> = [
       ["six. Four are full time", [6, 4]],
