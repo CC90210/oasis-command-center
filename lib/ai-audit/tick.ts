@@ -17,7 +17,9 @@
  *       waits before the next (lib/ai-audit/briefs.ts dueBriefs);
  *   7d. research after Gate 1: start a run for an engagement in Research &
  *       Audit Generation that has none, and move each run one phase
- *       (lib/ai-audit/research.ts);
+ *       (lib/ai-audit/research.ts); when a run finishes and nothing has been
+ *       drafted yet, draft the audit and its proposal from it
+ *       (lib/ai-audit/drafting.ts);
  *   8. repair a lead whose pipeline stage fell behind its engagement.
  * Nothing here contacts a client. Every step is safe to repeat.
  */
@@ -49,8 +51,10 @@ import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
 import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, purgeUnauthorizedResearch, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
+import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
+import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
 
-export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps };
+export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps; writing?: WriteDeps };
 
 export type TickReport = {
   tenants: number;
@@ -75,6 +79,11 @@ export type TickReport = {
   /** Research runs started after Gate 1, and phases moved. */
   researchStarted: number;
   researchAdvanced: number;
+  /** First drafts of an audit (and its proposal) made from a research run that just finished. */
+  auditsDrafted: number;
+  /** Passes over an audit's opening prose started, and cloud passes run. */
+  writingStarted: number;
+  writingRun: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
   stoppedForBudget: boolean;
 };
@@ -111,6 +120,9 @@ export async function runAiAuditTick(
     meetTranscriptsWaiting: 0,
     researchStarted: 0,
     researchAdvanced: 0,
+    auditsDrafted: 0,
+    writingStarted: 0,
+    writingRun: 0,
     errors: [],
     stoppedForBudget: false,
   };
@@ -327,14 +339,50 @@ export async function runAiAuditTick(
       // A phase may take a minute (PageSpeed): it starts only with that much of the budget left (review of phase 3, F8).
       if (over() || budget - (Date.now() - started) < RESEARCH_PHASE_MS) break;
       await guard("research", undefined, async () => {
+        let r: Awaited<ReturnType<typeof advanceResearch>>;
         try {
-          const r = await advanceResearch(db, { tenantId, stepId, now: now(), deps: researchDeps });
-          if (r === "advanced" || r === "finished") report.researchAdvanced += 1;
+          r = await advanceResearch(db, { tenantId, stepId, now: now(), deps: researchDeps });
         } catch (err) {
           // Counted and backed off, so one failing run never holds the queue (review of phase 3, F6).
           await noteResearchFailure(db, { tenantId, stepId, now: now(), alert: researchDeps.alert });
           throw err;
         }
+        if (r === "advanced" || r === "finished") report.researchAdvanced += 1;
+        if (r !== "finished") return;
+        // The first drafts, once, where nothing is drafted yet: CC's own drafts are never replaced from here.
+        const row = (await db.execute({ sql: "SELECT engagement_id FROM ai_audit_steps WHERE tenant_id = ? AND id = ? LIMIT 1", args: [tenantId, stepId] })).rows[0];
+        if (!row) return;
+        const system = { type: "system" as const, id: null };
+        const engagementId = String(row.engagement_id);
+        const audit = await draftAuditFromResearch(db, { tenantId, engagementId, actor: system, now: now() });
+        if (!audit.ok && audit.error === "invalid") throw new Error(`the drafted audit did not validate: ${audit.detail ?? ""}`);
+        if (!audit.ok) return;
+        report.auditsDrafted += 1;
+        const proposal = await draftProposalFromAudit(db, { tenantId, engagementId, actor: system, now: now() });
+        if (!proposal.ok && proposal.error !== "draft_exists") throw new Error(`the proposal could not be drafted: ${proposal.error}`);
+        // Then the model's pass over the opening, on the engine CC authorized (none when the client said no to AI).
+        const write = await startWriting(db, { tenantId, engagementId, actor: system, now: now() });
+        if (write.ok && write.created) report.writingStarted += 1;
+      });
+    }
+
+    // 7e. The model's passes over audits' opening prose: cloud passes run here; Mac passes nobody ran for a day are called off.
+    const writeDeps: WriteDeps = deps.writing ?? { model: defaultWriteModel(), alert: deps.payment.alert };
+    let dueWrites: { cloud: string[]; stale: string[] } = { cloud: [], stale: [] };
+    await guard("writing", undefined, async () => {
+      dueWrites = await dueWriting(db, tenantId, now());
+    });
+    for (const stepId of dueWrites.cloud) {
+      if (over()) break;
+      await guard("writing", undefined, async () => {
+        const r = await advanceCloudWriting(db, { tenantId, stepId, now: now(), deps: writeDeps });
+        if (r === "finished") report.writingRun += 1;
+      });
+    }
+    for (const stepId of dueWrites.stale) {
+      if (over()) break;
+      await guard("writing", undefined, async () => {
+        await callOffStaleWriting(db, tenantId, stepId, now(), writeDeps.alert);
       });
     }
 
