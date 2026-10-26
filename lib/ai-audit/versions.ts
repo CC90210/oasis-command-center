@@ -23,6 +23,7 @@ import {
   type TaxRule,
 } from "@/lib/ai-audit/proposal";
 import { profileFieldDef, type ProfileFieldInput, type ProfileValue } from "@/lib/ai-audit/profile";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { confirmedCatalogueItem } from "@/lib/ai-audit/catalogue-store";
 import {
   EVIDENCE_LABELS,
@@ -241,6 +242,9 @@ export async function saveProfileField(
   ).rows[0];
   const valueJson = JSON.stringify(input.field.value);
   const sourceRef = JSON.stringify(input.field.source_note ? { note: input.field.source_note } : {});
+  // An update merges the note into the reference the field already has: its transcript, lines and speakers
+  // stay, so deleting that transcript still finds the field and its quote (review of phase 2b, F1).
+  const notePatch = JSON.stringify({ note: input.field.source_note ? input.field.source_note : null });
   const prior = existing ? mapProfileField(existing) : null;
   // A correction: someone changed a value that came from the transcript, the form or research.
   const correcting = !!prior && prior.source_type !== "owner" && prior.source_type !== "call_notes" && JSON.stringify(prior.value) !== valueJson;
@@ -253,18 +257,20 @@ export async function saveProfileField(
               ON CONFLICT (tenant_id, profile_version_id, field_key) DO UPDATE SET
                 value_json = excluded.value_json, label = excluded.label,
                 source_type = CASE WHEN ? = 1 THEN ai_audit_profile_fields.source_type ELSE excluded.source_type END,
-                source_ref = excluded.source_ref,
+                source_ref = json_patch(COALESCE(ai_audit_profile_fields.source_ref, '{}'), ?),
                 owner_corrected = CASE WHEN ? = 1 THEN 1 ELSE ai_audit_profile_fields.owner_corrected END,
                 corrected_from = CASE WHEN ? = 1 THEN ai_audit_profile_fields.value_json ELSE ai_audit_profile_fields.corrected_from END,
-                -- A corrected value no longer matches the quote that came with the old one (review of phase 2b, H2).
-                evidence_quote = CASE WHEN ? = 1 THEN NULL ELSE ai_audit_profile_fields.evidence_quote END,
+                -- A changed value no longer matches the quote that came with the old one (review of phase 2b, H2 and F1).
+                evidence_quote = CASE WHEN ai_audit_profile_fields.value_json IS NOT excluded.value_json THEN NULL ELSE ai_audit_profile_fields.evidence_quote END,
                 verified_note = excluded.verified_note, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
         args: [
           newId(), t, version.id, input.field.field_key, valueJson, input.field.label, input.field.source_type, sourceRef,
           0, null, input.field.verified_note ?? null, input.actor.id, at,
-          correcting ? 1 : 0, correcting ? 1 : 0, correcting ? 1 : 0, correcting ? 1 : 0,
+          correcting ? 1 : 0, notePatch, correcting ? 1 : 0, correcting ? 1 : 0,
         ],
       },
+      // The client's "no" to AI analysis stops a draft still reading the call (review of phase 2b, F5).
+      ...(input.field.field_key === "consent.ai_processing" && input.field.value === false ? stopEngagementRunsStatements(t, input.engagementId, "no_ai_consent", at) : []),
       eventStatement({
         tenantId: t,
         engagementId: input.engagementId,

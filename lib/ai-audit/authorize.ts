@@ -55,6 +55,7 @@ import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayloa
 import { effectiveStatus } from "@/lib/os/approvals/rules";
 import { AUTHORIZATION_VOIDED_REASONS, PROFILE_EDIT_STAGES, TERMINAL_STAGES, shortName } from "@/lib/ai-audit/rules";
 import { dbBool } from "@/lib/db-bool";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
 
@@ -469,6 +470,8 @@ async function runAuthorization(ctx: ExecutorContext): Promise<ExecutorOutcome> 
                WHERE tenant_id = ? AND id = ? AND status = 'draft'`,
         args: [p.profile_sha256, p.transcripts_sha256, at, at, t, p.profile_version_id],
       },
+      // A draft still running reads a profile that is now frozen: it stops, and keeps nothing (review of phase 2b, F5).
+      ...stopEngagementRunsStatements(t, engagement.id, "stage_closed", at),
       {
         // A warning that an earlier authorization stopped holding is answered by this one; other warnings stay.
         sql: `UPDATE ai_audit_engagements SET health = 'ok', health_reason = NULL

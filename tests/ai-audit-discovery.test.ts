@@ -858,13 +858,15 @@ async function main() {
     const a = await macJob(eid);
     assert.equal((await macAnswer(a, [{ key: "business.team_size", value: 12, from: 1, to: 1, quote: "There are twelve of us in total" }])).status, 200);
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "consent.ai_processing", value: false, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
-    // The second window is refused at claim time; with every window in, the run finishes and writes nothing.
+    // The save stops the run in the same write (review of phase 2b, F5): the second window is never handed out,
+    // the window already read is cleared, and nothing is written.
     const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
     assert.equal(((await res.json()) as { job: unknown }).job, null);
-    assert.equal(String((await stepOf(stepId)).status), "failed", "nothing could be read, and it says so");
+    const s = await stepOf(stepId);
+    assert.deepEqual([String(s.status), String(s.error_code)], ["cancelled", "no_ai_consent"]);
+    assert.ok((await jobsOf(stepId)).every(([, , result]) => result === null || result === '{"stored":false}'), "no window's facts stay on a job");
     const e = await engagementOf(eid);
     assert.ok(!(await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).some((f) => f.source_type === "transcript"));
-    assert.equal(alerts.at(-1)?.alertType, "ai_audit_extraction_failed");
   });
   await check("two finishers: one writes, one alert, one trail line (review of phase 2b, M4)", async () => {
     const { eid } = await freshEngagement("Two Finishers Co");
@@ -906,7 +908,7 @@ async function main() {
     const told: Array<Record<string, unknown>> = [];
     assert.equal(await extraction.sweepStaleExtractions(db, OASIS, later, { alert: async (x: Record<string, unknown>) => void told.push(x) }), 1);
     assert.equal(String((await stepOf(again.ok ? again.stepId : "")).error_code), "runner_offline");
-    assert.match(String(told[0]?.body), /No Mac picked up the draft/);
+    assert.match(String(told[0]?.body), /did no work on the draft for a day/);
   });
   await check("a re-run never overwrites a value CC verified; the report lists the disagreement, not a write (review of phase 2b, H2)", async () => {
     const { eid, transcriptId: tid } = await freshEngagement("Verified Value Co");
@@ -939,6 +941,133 @@ async function main() {
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "sales.missed_calls_per_week", value: 38, label: "client_reported", source_type: "transcript" } as never, actor: cc, now: NOW() });
     const after = (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.missed_calls_per_week")!;
     assert.deepEqual([after.value, after.owner_corrected, after.evidence_quote ?? null], [38, true, null]);
+  });
+
+  console.log("review of phase 2b, round 3: a save keeps where a fact came from; every stop stops the run");
+  const missedCalls = async (eid: string) => {
+    const e = await engagementOf(eid);
+    return (await versions.listProfileFields(db, OASIS, e.current_profile_version_id!)).find((x) => x.field_key === "sales.missed_calls_per_week");
+  };
+  const draftOne = async (name: string) => {
+    const base = await freshEngagement(name);
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: base.eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    assert.equal((await macAnswer(await macJob(base.eid), [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "gets about 40 calls a week" }])).status, 200);
+    assert.equal((await missedCalls(base.eid))?.evidence_quote, "gets about 40 calls a week");
+    return base;
+  };
+  const ref = (f: { source_ref: unknown } | undefined) => (f?.source_ref ?? {}) as { transcript_id?: string; speakers?: string[]; note?: string };
+
+  await check("marking a drafted fact Verified keeps where it came from: deleting the call still clears its quote and who said it (review of phase 2b, F1)", async () => {
+    const { eid, transcriptId: tid } = await draftOne("Verify Then Delete Co");
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "sales.missed_calls_per_week", value: 40, label: "verified", source_type: "transcript", verified_note: "Phone system export shows 40" } as never, actor: cc, now: NOW() });
+    const verified = await missedCalls(eid);
+    assert.equal(ref(verified).transcript_id, tid, "the save kept the transcript it came from");
+    assert.deepEqual(ref(verified).speakers, ["Dana"], "and who said it");
+    assert.equal(verified?.evidence_quote, "gets about 40 calls a week", "the same value keeps its quote");
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    const after = await missedCalls(eid);
+    assert.deepEqual([after?.value, after?.label], [40, "verified"], "a verified fact stays");
+    assert.equal(after?.evidence_quote ?? null, null, "but the call's words go with the call");
+    assert.equal(ref(after).speakers, undefined, "and so does who said them");
+  });
+  await check("a drafted fact saved unchanged, or given a note that is then cleared, is still found and taken out by the delete (review of phase 2b, F1)", async () => {
+    const { eid, transcriptId: tid } = await draftOne("Saved Unchanged Co");
+    const save = (note: string) =>
+      versions.saveProfileField(db, { tenantId: OASIS, engagementId: eid, field: { field_key: "sales.missed_calls_per_week", value: 40, label: "client_reported", source_type: "transcript", source_note: note } as never, actor: cc, now: NOW() });
+    await save("Also in their CRM");
+    assert.deepEqual([ref(await missedCalls(eid)).note, ref(await missedCalls(eid)).transcript_id], ["Also in their CRM", tid]);
+    await save("");
+    const f = await missedCalls(eid);
+    assert.deepEqual([ref(f).note, ref(f).transcript_id, f?.evidence_quote], [undefined, tid, "gets about 40 calls a week"], "an emptied note leaves; the source and quote stay");
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    assert.equal(await missedCalls(eid), undefined, "an untouched, unverified fact leaves with its call");
+  });
+  await check("Gate 1 stops a draft still running: the window already read is cleared, and the Mac is handed nothing more (review of phase 2b, F5)", async () => {
+    const { eid } = await twoTranscripts("Frozen Midway Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.windows === 2);
+    const stepId = r.ok ? r.stepId : "";
+    assert.equal((await macAnswer(await macJob(eid), [{ key: "business.team_size", value: 12, from: 1, to: 1, quote: "There are twelve of us in total" }])).status, 200);
+    const out = await approveAs(await fileCard(eid), USERS.cc);
+    assert.equal(resultOf(out)?.outcome, "authorized", JSON.stringify(out));
+    const s = await stepOf(stepId);
+    assert.deepEqual([String(s.status), String(s.error_code)], ["cancelled", "stage_closed"]);
+    const jobs = await jobsOf(stepId);
+    assert.ok(jobs.every(([status]) => status === "done" || status === "failed"), JSON.stringify(jobs));
+    assert.ok(jobs.every(([, , result]) => result === null || result === '{"stored":false}'), "no window's facts stay on a job");
+    const res = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    assert.equal(((await res.json()) as { job: unknown }).job, null, "nothing is handed out");
+  });
+  await check("declined or cancelled, an engagement stops its draft in the same write (review of phase 2b, F5)", async () => {
+    for (const to of ["cancelled", "declined"] as const) {
+      const { eid } = await freshEngagement(`Closed Midway ${to} Co`);
+      const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+      assert.ok(r.ok);
+      const moved = await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to, actor: cc, now: NOW(), expectedRowVersion: (await engagementOf(eid)).row_version });
+      assert.ok(moved.ok, !moved.ok ? moved.error : "");
+      const s = await stepOf(r.ok ? r.stepId : "");
+      assert.deepEqual([String(s.status), String(s.error_code)], ["cancelled", "stage_closed"], to);
+      assert.deepEqual((await jobsOf(r.ok ? r.stepId : ""))[0].slice(0, 2), ["failed", "ai_audit_cancelled"], to);
+    }
+  });
+  await check("the client's no to AI analysis, or a call added without that consent, stops the draft at once (review of phase 2b, F5)", async () => {
+    const one = await freshEngagement("Said No Midway Co");
+    const r1 = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: one.eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r1.ok);
+    await versions.saveProfileField(db, { tenantId: OASIS, engagementId: one.eid, field: { field_key: "consent.ai_processing", value: false, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
+    const s1 = await stepOf(r1.ok ? r1.stepId : "");
+    assert.deepEqual([String(s1.status), String(s1.error_code)], ["cancelled", "no_ai_consent"]);
+    const two = await freshEngagement("No AI Call Midway Co");
+    const r2 = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: two.eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r2.ok);
+    assert.ok((await transcripts.addTranscript(db, { tenantId: OASIS, engagementId: two.eid, parsed: parsed("Dana: no AI on this call, please."), source: "paste", consent: consent(false), actor: cc, now: NOW() })).ok);
+    const s2 = await stepOf(r2.ok ? r2.stepId : "");
+    assert.deepEqual([String(s2.status), String(s2.error_code)], ["cancelled", "no_ai_consent"]);
+  });
+  await check("a Mac run with one window in and no work for a day is called off and cleared, so a new press can start (review of phase 2b, F5)", async () => {
+    const { eid } = await twoTranscripts("Half Done Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok && r.windows === 2);
+    const stepId = r.ok ? r.stepId : "";
+    assert.equal((await macAnswer(await macJob(eid), [{ key: "business.team_size", value: 12, from: 1, to: 1, quote: "There are twelve of us in total" }])).status, 200);
+    const told: Array<Record<string, unknown>> = [];
+    const soon = new Date(Date.now() + 60_000);
+    await extraction.sweepStaleExtractions(db, OASIS, soon, { alert: async (x: Record<string, unknown>) => void told.push(x) });
+    assert.equal(String((await stepOf(stepId)).status), "waiting_runner", "an hour, or a minute, is not a day");
+    const later = new Date(Date.now() + extraction.MAC_RUN_UNCLAIMED_MS + 60_000);
+    assert.ok((await extraction.sweepStaleExtractions(db, OASIS, later, { alert: async (x: Record<string, unknown>) => void told.push(x) })) >= 1);
+    const s = await stepOf(stepId);
+    assert.deepEqual([String(s.status), String(s.error_code)], ["cancelled", "runner_offline"]);
+    assert.ok((await jobsOf(stepId)).every(([, , result]) => result === null || result === '{"stored":false}'), "no window's facts stay on a job");
+    const again = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(again.ok && again.created, "a new run may start");
+  });
+  await check("a cancel that loses to the run's own end says nothing was running, and leaves no trail line (review of phase 2b)", async () => {
+    const { eid } = await freshEngagement("Lost Cancel Co");
+    const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    const stepId = r.ok ? r.stepId : "";
+    let first = true;
+    // The run ends between the cancel's read and its write.
+    const racing = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "execute") {
+          return async (stmt: Parameters<typeof db.execute>[0]) => {
+            const out = await target.execute(stmt);
+            if (first) {
+              first = false;
+              await target.execute({ sql: "UPDATE ai_audit_steps SET status = 'done' WHERE id = ?", args: [stepId] });
+            }
+            return out;
+          };
+        }
+        const v = Reflect.get(target, prop, receiver) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    assert.deepEqual(await extraction.cancelExtraction(racing, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() }), { ok: false, error: "nothing_running" });
+    assert.equal(await eventCount(eid, "extraction_cancelled"), 0);
   });
 
   finish("ai-audit-discovery");

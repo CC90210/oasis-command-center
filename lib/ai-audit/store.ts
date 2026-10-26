@@ -27,6 +27,7 @@ import {
   type PaymentStatus,
 } from "@/lib/ai-audit/rules";
 import { validateTaxRule, type TaxRule } from "@/lib/ai-audit/proposal";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 
 export type Engagement = {
   id: string;
@@ -538,7 +539,9 @@ export async function moveStage(
     toStage: input.to,
     meta: input.meta,
   });
-  const applied = await casWrite(db, update, [ev, ...(input.extra ?? [])]);
+  // A declined or cancelled engagement stops any profile draft still running, in the same write (review of phase 2b, F5).
+  const stops = input.to === "declined" || input.to === "cancelled" ? stopEngagementRunsStatements(tenantId, current.id, "stage_closed", at) : [];
+  const applied = await casWrite(db, update, [ev, ...stops, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
   if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
     return { ok: false, error: "delivery_in_progress", engagement: after };

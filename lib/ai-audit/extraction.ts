@@ -27,22 +27,23 @@
 import "server-only";
 import type { Client, InStatement } from "@libsql/client";
 import { contentHash, newId } from "@/lib/ai-audit/hash";
-import { checkFacts, DEFAULT_HOSTS, extractionPrompt, mergeFacts, mergeSummaries, MODEL_MAX_TOKENS, parseExtraction, type Contradiction, type DroppedFact, type ExtractionSummary, type KeptFact, type PriorField } from "@/lib/ai-audit/extract";
+import { checkFacts, DEFAULT_HOSTS, extractionPrompt, mergeFacts, mergeSummaries, MODEL_MAX_TOKENS, parseExtraction, type CheckOptions, type Contradiction, type DroppedFact, type ExtractionSummary, type KeptFact, type PriorField } from "@/lib/ai-audit/extract";
 import { renderLine, transcriptWindows, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { getTranscript, listTranscripts } from "@/lib/ai-audit/transcripts";
 import { ensureDraftProfile, listProfileFields } from "@/lib/ai-audit/versions";
 import { aiConsent, withdrawAuthorization } from "@/lib/ai-audit/authorize";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
-import { eventStatement, getEngagement, int, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
+import { casWrite, eventStatement, getEngagement, int, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
 import { inputHashOf } from "@/lib/tools/store";
 import { runToolModelCall, type ToolModelCall, type ToolModelResult } from "@/lib/tools/worker/ai";
 
-export const EXTRACT_STEP = "extract";
+import { closeRunStatements, EXTRACT_STEP, MODEL_TOOL_KEY } from "@/lib/ai-audit/extraction-stop";
+
+export { EXTRACT_STEP, MODEL_TOOL_KEY };
 const IN_FLIGHT = ["queued", "running", "waiting_runner"] as const;
 const inFlight = (status: unknown) => (IN_FLIGHT as readonly string[]).includes(String(status));
-/** A Mac run nobody has picked up for this long is called off: the Mac is off, and nothing else may start meanwhile (review of phase 2b, M2). */
+/** A Mac run nobody has worked on for this long is called off: the Mac is off, and nothing else may start meanwhile (review of phase 2b, M2 and F5). */
 export const MAC_RUN_UNCLAIMED_MS = 24 * 3_600_000;
-export const MODEL_TOOL_KEY = "ai_audit_model";
 /** The CLI model the Mac uses for extraction. */
 export const MAC_MODEL = "sonnet";
 
@@ -133,20 +134,22 @@ export async function startExtraction(
  * The interviewer's names, for telling the client's words from the host's: the
  * workspace's owners (full and first name), and the usual labels ("CC", "host").
  */
-export async function interviewerNames(db: Client, tenantId: string): Promise<ReadonlySet<string>> {
-  const out = new Set(DEFAULT_HOSTS);
+export async function interviewerNames(db: Client, tenantId: string): Promise<CheckOptions> {
+  const hosts = new Set(DEFAULT_HOSTS);
+  const firstNames = new Set<string>();
   try {
     const rs = await db.execute({ sql: "SELECT full_name FROM user_profiles WHERE tenant_id = ? AND is_owner = 1 AND deactivated_at IS NULL", args: [requireTenant(tenantId)] });
     for (const r of rs.rows) {
       const name = String(r.full_name ?? "").toLowerCase().replace(/\s+/g, " ").trim();
       if (!name) continue;
-      out.add(name);
-      out.add(name.split(" ")[0]);
+      hosts.add(name);
+      // A first name alone is the interviewer's only in a call that names nobody by full name or usual label (lib/ai-audit/extract.ts hostsFor).
+      if (name.includes(" ")) firstNames.add(name.split(" ")[0]);
     }
   } catch (err) {
     console.error("[ai-audit.extraction] could not read the owners' names; using the usual labels", err instanceof Error ? err.message : String(err));
   }
-  return out;
+  return { hosts, firstNames };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +205,7 @@ export async function checkWindowAnswer(db: Client, tenantId: string, input: Rec
   try {
     const parsed = parseExtraction(answer);
     if (!parsed.ok) return { ok: true, stepId: ref.step_id, engagementId: ref.engagement_id, result: unreadable() };
-    const checked = checkFacts(parsed.value, p.lines, { from: ref.from, to: ref.to }, { hosts: await interviewerNames(db, tenantId) });
+    const checked = checkFacts(parsed.value, p.lines, { from: ref.from, to: ref.to }, await interviewerNames(db, tenantId));
     const kept = checked.kept.map((k) => ({ ...k, transcript_id: ref.transcript_id }));
     return { ok: true, stepId: ref.step_id, engagementId: ref.engagement_id, result: { ...base, kept, dropped: checked.dropped, summary: parsed.value.summary } };
   } catch (err) {
@@ -222,24 +225,6 @@ export type FinishDeps = { alert: (input: { tenantId: string; alertType: string;
 async function closeRun(db: Client, t: string, stepId: string, code: string, at: string): Promise<{ ok: false; error: string }> {
   await db.batch(closeRunStatements(t, stepId, code, at), "write");
   return { ok: false, error: code };
-}
-function closeRunStatements(t: string, stepId: string, code: string, at: string): InStatement[] {
-  return [
-    {
-      sql: "UPDATE ai_audit_steps SET status = 'cancelled', error_code = ?, result_ref = NULL, finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner')",
-      args: [code, at, at, t, stepId],
-    },
-    {
-      // A window still out on the Mac stops too: its answer, if it comes, finds the lease gone and is never stored.
-      sql: `UPDATE tool_jobs SET
-              status = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'failed' ELSE status END,
-              error_code = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'ai_audit_cancelled' ELSE error_code END,
-              finished_at = CASE WHEN status IN ('queued', 'claimed', 'running') THEN ? ELSE finished_at END,
-              result_json = CASE WHEN result_json IS NULL THEN NULL ELSE '{"stored":false}' END, updated_at = ?
-            WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ?`,
-      args: [at, at, t, MODEL_TOOL_KEY, stepId],
-    },
-  ];
 }
 
 export type Finished = { ok: true; written: number; contradictions: number; dropped: number } | { ok: false; error: string };
@@ -427,25 +412,25 @@ export async function cancelExtraction(db: Client, input: { tenantId: string; en
   const step = (await db.execute({ sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ? AND status IN ('queued', 'running', 'waiting_runner') ORDER BY created_at DESC LIMIT 1", args: [t, input.engagementId, EXTRACT_STEP] })).rows[0];
   if (!step) return { ok: false, error: "nothing_running" };
   const at = input.now.toISOString();
-  await db.batch(
-    [
-      ...closeRunStatements(t, String(step.id), input.reason ?? "cancelled_by_owner", at),
-      eventStatement({ tenantId: t, engagementId: input.engagementId, event: "extraction_cancelled", actor: input.actor, at, refType: "step", refId: String(step.id), meta: { reason: input.reason ?? "cancelled_by_owner" } }),
-    ],
-    "write",
-  );
+  const [stopStep, ...stopJobs] = closeRunStatements(t, String(step.id), input.reason ?? "cancelled_by_owner", at);
+  const stopped = await casWrite(db, stopStep, [
+    ...stopJobs,
+    eventStatement({ tenantId: t, engagementId: input.engagementId, event: "extraction_cancelled", actor: input.actor, at, refType: "step", refId: String(step.id), meta: { reason: input.reason ?? "cancelled_by_owner" } }),
+  ]);
+  // The run finished (or was stopped) between the read and the write: nothing was cancelled.
+  if (!stopped) return { ok: false, error: "nothing_running" };
   return { ok: true, stepId: String(step.id) };
 }
 
-/** Mac runs no computer has picked up for a day: called off, and CC is told, so a new run (on the cloud, say) can start. */
+/** Mac runs no computer has worked on for a day (none picked up, or one window in and the rest never): called off, and CC is told, so a new run (on the cloud, say) can start. */
 export async function sweepStaleExtractions(db: Client, tenantId: string, now: Date, deps: FinishDeps): Promise<number> {
   const t = requireTenant(tenantId);
   const cutoff = new Date(now.getTime() - MAC_RUN_UNCLAIMED_MS).toISOString();
   const rs = await db.execute({
     sql: `SELECT s.id, s.engagement_id FROM ai_audit_steps s WHERE s.tenant_id = ? AND s.step_key = ? AND s.runs_on = 'mac' AND s.status = 'waiting_runner' AND s.created_at < ?
-            AND NOT EXISTS (SELECT 1 FROM tool_jobs j WHERE j.tenant_id = s.tenant_id AND j.tool_key = ? AND json_extract(j.input_json, '$.step_id') = s.id AND j.status <> 'queued')
+            AND NOT EXISTS (SELECT 1 FROM tool_jobs j WHERE j.tenant_id = s.tenant_id AND j.tool_key = ? AND json_extract(j.input_json, '$.step_id') = s.id AND COALESCE(j.updated_at, j.created_at) >= ?)
           LIMIT 5`,
-    args: [t, EXTRACT_STEP, cutoff, MODEL_TOOL_KEY],
+    args: [t, EXTRACT_STEP, cutoff, MODEL_TOOL_KEY, cutoff],
   });
   let n = 0;
   for (const r of rs.rows) {
@@ -459,7 +444,7 @@ export async function sweepStaleExtractions(db: Client, tenantId: string, now: D
       alertType: "ai_audit_extraction_failed",
       severity: "warn",
       title: `Profile not drafted: ${e?.business_name || "an AI audit"}`,
-      body: "No Mac picked up the draft in a day, so it was called off. Turn the Mac on and draft again, or draft it on the cloud model.",
+      body: "The Mac did no work on the draft for a day, so it was called off and nothing it read was kept. Turn the Mac on and draft again, or draft it on the cloud model.",
       subjectType: "ai_audit_engagement",
       subjectId: engagementId,
     });
