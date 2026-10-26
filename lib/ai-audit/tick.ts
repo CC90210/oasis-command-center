@@ -10,6 +10,9 @@
  *   5. finish onboarding when the checklist is done;
  *   6. re-check recent receipts for refunds and disputes (each at most hourly);
  *   7. flag stalls (not opened in 3 days, opened but unpaid for 7 days), once;
+ *   7b. advance profile drafting from transcripts;
+ *   7c. build the first pre-call brief for engagements at Research in Progress
+ *       or Discovery Call Scheduled (it reads the client's public website);
  *   8. repair a lead whose pipeline stage fell behind its engagement.
  * Nothing here contacts a client. Every step is safe to repeat.
  */
@@ -36,8 +39,10 @@ import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type On
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, sweepStaleExtractions, type CloudDeps } from "@/lib/ai-audit/extraction";
 import { getShareLink } from "@/lib/ai-audit/link";
+import { buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
+import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 
-export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps };
+export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps };
 
 export type TickReport = {
   tenants: number;
@@ -55,6 +60,7 @@ export type TickReport = {
   stallsFlagged: number;
   leadsRepaired: number;
   extractionsAdvanced: number;
+  briefsBuilt: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
   stoppedForBudget: boolean;
 };
@@ -85,6 +91,7 @@ export async function runAiAuditTick(
     stallsFlagged: 0,
     leadsRepaired: 0,
     extractionsAdvanced: 0,
+    briefsBuilt: 0,
     errors: [],
     stoppedForBudget: false,
   };
@@ -234,6 +241,15 @@ export async function runAiAuditTick(
         if (await finishMacExtractionIfComplete(db, tenantId, stepId, now(), extraction)) report.extractionsAdvanced += 1;
       }
       if (!over()) await sweepStaleExtractions(db, tenantId, now(), extraction);
+    });
+
+    // 7c. The first pre-call brief, two per tick at most: each reads a website (up to 25 seconds).
+    await guard("briefs", undefined, async () => {
+      for (const id of await dueBriefs(db, tenantId, 2)) {
+        if (over()) break;
+        const r = await buildBrief(db, { tenantId, engagementId: id, actor: { type: "system", id: null }, now: now(), deps: deps.site ?? defaultSiteDeps() });
+        if (r.ok && r.created) report.briefsBuilt += 1;
+      }
     });
 
     // 8. Leads that fell behind (recently active engagements only).

@@ -22,6 +22,7 @@
  *   start_call / end_call                                 the call's clock
  *   delete_transcript  { transcript_id }                  wipe a transcript's lines (and the quotes taken from it); owner only
  *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
+ *   build_brief                                           build a new version of the pre-call brief (reads the client's public website)
  *   extract_profile    { engine? }                         draft profile facts from the consented transcripts (before Gate 1)
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
@@ -51,6 +52,7 @@ import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
 import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
 import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
+import { buildBrief, defaultSiteDeps } from "@/lib/ai-audit/briefs";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -300,6 +302,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const r = await cancelExtraction(s.db, { tenantId: s.tenantId, engagementId, actor, now });
       if (!r.ok) return json(409, { ok: false, error: r.error });
       return json(200, { ok: true, step_id: r.stepId });
+    }
+    case "build_brief": {
+      const r = await buildBrief(s.db, { tenantId: s.tenantId, engagementId, actor, now, deps: defaultSiteDeps() });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error === "stage_closed" ? "brief_stage_closed" : r.error === "too_soon" ? "brief_too_soon" : r.error });
+      return json(200, { ok: true, brief_id: r.brief.id, version_no: r.brief.version_no, status: r.brief.status });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

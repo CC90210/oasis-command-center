@@ -3,6 +3,7 @@
  * read in one place. Plain data: it crosses the server/client boundary.
  */
 import "server-only";
+import { latestBrief, type StoredBrief } from "@/lib/ai-audit/briefs";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
@@ -102,6 +103,8 @@ export type EngagementView = {
   gaps: Array<{ key: string; label: string }>;
   authorization: { id: string; status: string; outcome: string | null; message: string | null; engine: AiEngine | null; engine_label: string | null; plan: string[] } | null;
   extraction: ExtractionStatus | null;
+  /** Phase 2d: the latest pre-call brief, or null before the first is built. */
+  brief: StoredBrief | null;
   /** The last finished draft's report, from the profile version (lib/ai-audit/extraction.ts finishExtraction). */
   extractionReport: {
     written: string[];
@@ -133,7 +136,12 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
   const audit = auditVersions.find((v) => v.id === engagement.current_audit_version_id) ?? null;
   const proposal = proposalVersions.find((v) => v.id === engagement.current_proposal_version_id) ?? null;
   const approval = engagement.delivery_approval_id ? await getApprovalInTenant(db, tenantId, engagement.delivery_approval_id) : null;
-  const [transcripts, callNotes, extraction] = await Promise.all([listTranscripts(db, tenantId, engagement.id), listCallNotes(db, tenantId, engagement.id), latestExtraction(db, tenantId, engagement.id)]);
+  const [transcripts, callNotes, extraction, brief] = await Promise.all([
+    listTranscripts(db, tenantId, engagement.id),
+    listCallNotes(db, tenantId, engagement.id),
+    latestExtraction(db, tenantId, engagement.id),
+    latestBrief(db, tenantId, engagement.id),
+  ]);
   const rawReport = profileVersion?.summary && typeof profileVersion.summary === "object" ? (profileVersion.summary as Record<string, unknown>).extraction : null;
   const authApproval = engagement.authorization_approval_id ? await getApprovalInTenant(db, tenantId, engagement.authorization_approval_id) : null;
   let authPayload: ReturnType<typeof validateAuthorizeAiAuditPayload> | null = null;
@@ -182,6 +190,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     transcripts,
     callNotes,
     extraction,
+    brief,
     extractionReport: rawReport && typeof rawReport === "object" ? (rawReport as EngagementView["extractionReport"]) : null,
     consentAi: aiConsent(transcripts, fields),
     gaps: essentialGaps(captured, engagement.business_type).map((key) => ({ key, label: profileFieldDef(key)?.label ?? key })),

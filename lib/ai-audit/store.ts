@@ -641,14 +641,15 @@ export async function saveSettings(
 
 /** True when the ai_audit tables exist (the migration has been applied). */
 export async function aiAuditTablesInstalled(db: Client): Promise<boolean> {
-  // bravo__237, 238 and 239 must all be in: this code reads 239's two tables
-  // and the two columns it adds to the engagement (review of phase 2, F6). A
-  // column added by ALTER TABLE shows in the table's stored CREATE statement.
+  // bravo__237, 238, 239 and 241 must all be in: this code reads 239's two
+  // tables and the two columns it adds to the engagement (review of phase 2,
+  // F6), and 241's brief tables. A column added by ALTER TABLE shows in the
+  // table's stored CREATE statement.
   const rs = await db.execute({
-    sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links', 'ai_audit_transcripts', 'ai_audit_call_notes')",
+    sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links', 'ai_audit_transcripts', 'ai_audit_call_notes', 'ai_audit_briefs', 'ai_audit_sources')",
     args: [],
   });
-  if (rs.rows.length !== 4) return false;
+  if (rs.rows.length !== 6) return false;
   const engagements = String(rs.rows.find((r) => String(r.name) === "ai_audit_engagements")?.sql ?? "");
   return /\bcall_started_at\b/.test(engagements) && /\bcall_ended_at\b/.test(engagements);
 }

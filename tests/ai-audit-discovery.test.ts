@@ -81,7 +81,7 @@ async function apply(db: Client, file: string) {
 async function main() {
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__241_ai_audit_briefs.sql"]) await apply(db, f);
   await db.execute({
     sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
     args: [LEAD, OASIS, JSON.stringify({ stage: "qualified", company: "[TEST] OASIS Audit Fixture Co", name: "Test Owner", email: "owner@fixture.test" })],
@@ -757,6 +757,8 @@ async function main() {
     assert.equal(await store.aiAuditTablesInstalled(bare), false, "the engagement lacks the call clock");
     await bare.execute("ALTER TABLE ai_audit_engagements ADD COLUMN call_started_at text");
     await bare.execute("ALTER TABLE ai_audit_engagements ADD COLUMN call_ended_at text");
+    assert.equal(await store.aiAuditTablesInstalled(bare), false, "no brief tables (bravo__241)");
+    for (const t of ["ai_audit_briefs", "ai_audit_sources"]) await bare.execute(`CREATE TABLE ${t} (id text)`);
     assert.equal(await store.aiAuditTablesInstalled(bare), true);
     assert.equal(await store.aiAuditTablesInstalled(db), true);
     bare.close();
