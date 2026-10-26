@@ -36,6 +36,7 @@
  * this mail is to OASIS's founder, never to a customer.
  */
 import "server-only";
+import { createHash } from "node:crypto";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { laneCredentials, sendTelegram } from "@/lib/notify/telegram";
@@ -130,14 +131,9 @@ export function alertPlainText(html: string): string {
     .trim();
 }
 
-/** A short stable fingerprint of an alert's text (FNV-1a), for its idempotency key. */
+/** A short stable fingerprint of an alert's text, for its idempotency key (sha256, as gmailMessageIdForIdempotencyKey hashes). */
 function fingerprint(text: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, "0");
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
 /**

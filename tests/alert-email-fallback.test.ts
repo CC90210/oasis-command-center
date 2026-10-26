@@ -92,7 +92,7 @@ async function main() {
     assert.match(sent[0].body, /^📅 Dana Lead booked an AI audit & paid\nOpen the lead \(https:\/\/oasisai\.work\/pipeline\/1\?x=1&y=2\)\n\n/);
     assert.match(sent[0].body, /This came by email because Telegram refused it \(Telegram said: Unauthorized\)\./);
     assert.doesNotMatch(sent[0].body, /<|&amp;|cc-token/, "no tags, no entities, never the token");
-    assert.match(sent[0].idempotencyKey, /^alert-email:sales:[0-9a-f]{8}:2026-10-26T18$/);
+    assert.match(sent[0].idempotencyKey, /^alert-email:sales:[0-9a-f]{16}:2026-10-26T18$/);
   });
 
   await check("Telegram delivers: no email", async () => {
