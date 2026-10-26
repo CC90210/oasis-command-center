@@ -671,7 +671,7 @@ async function main() {
     try {
       const text = textOf(await resolve(await MarketingPage(), false));
       assert.match(text, /Couldn't read the training material\./);
-      assert.doesNotMatch(text, /Nothing yet\. Add links on the Training tab\./);
+      assert.doesNotMatch(text, /Nothing yet\. Open Training to add links\./);
       // The Library's numbers do not depend on the training material at all.
       assert.doesNotMatch(text, /Couldn't load your queue|Couldn't read the library/, "the queue and the Library are unaffected");
       assert.match(text, /2 assets\s*awaiting your verdict/);
@@ -706,7 +706,7 @@ async function main() {
     assert.doesNotMatch(train, /Nothing in it yet/);
     assert.match(train, /Add examples/, "the add box still renders");
     assert.match(overviewText, /Couldn't read the training material\./);
-    assert.doesNotMatch(overviewText, /Nothing yet\. Add links on the Training tab\./);
+    assert.doesNotMatch(overviewText, /Nothing yet\. Open Training to add links\./);
     assert.match(overviewText, /3 assets stored\./, "the Library card is unaffected");
     assert.match(overviewText, /2 assets\s*awaiting your verdict/, "and so is the queue");
     assert.ok(log.some((l) => l.includes(THROWN)), `the reason is in the server log: ${log.join(" | ")}`);

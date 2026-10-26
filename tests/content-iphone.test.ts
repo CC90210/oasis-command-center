@@ -134,6 +134,8 @@ const CONTENT_FILES = [
     "ContentTabs.tsx",
     "TrainDropzone.tsx",
   ].map((f) => `components/founders/${f}`),
+  // The "Where it went" card's sentences (audit, 2026-10-26: they named the vendor).
+  "lib/founders/post-tracking.ts",
 ];
 
 // -- the render process ------------------------------------------------------

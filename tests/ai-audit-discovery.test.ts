@@ -2,7 +2,7 @@
  * ai-audit-discovery.test.ts — phase 2 of the Free AI Audit: the discovery
  * call's transcripts and notes, and Gate 1 (CC authorizes the client's
  * information for processing), on a real libSQL file with the real migrations
- * (bravo__186, 206, 237, 238, 239).
+ * (bravo__186, 206, 237, 238, 239, 240).
  *
  * Pins:
  *   - a transcript exists only with recording consent; the same text twice is
@@ -81,7 +81,7 @@ async function apply(db: Client, file: string) {
 async function main() {
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
   await db.execute({
     sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
     args: [LEAD, OASIS, JSON.stringify({ stage: "qualified", company: "[TEST] OASIS Audit Fixture Co", name: "Test Owner", email: "owner@fixture.test" })],

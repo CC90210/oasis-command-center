@@ -127,18 +127,17 @@ export default async function OperationsPage({
           null
         )
       : Promise.resolve([] as BridgePair[]),
-    // Activity tape default: most recent N events regardless of age.
-    // Scoped by publisher_agent ∈ agentNamesForOps; operator bypasses.
-    safe(
-      "operations.recent_events",
-      recentEvents(showOlder ? 100 : 30, {
-        sinceDays: 0,
-        tenantId: profile?.tenant_id || null,
-        agentNames: agentNamesForOps,
-        isOperator: false,
-      }),
-      null
-    ),
+    // Activity tape default: most recent N events regardless of age, from EVERY
+    // publisher in this workspace (the dashboard's sends and calls, department
+    // agents, bridge pairings, the house agents), scoped by correlation_id
+    // (lib/queries.ts recentEvents, operator + tenant). Scoping by
+    // publisher_agent ∈ agentNamesForOps dropped everything the dashboard side
+    // published while the empty state promised it (audit, 2026-10-26). The page
+    // is behind requireOperator(), so isOperator is a fact here; the tenantId
+    // guard matters because operator + no tenant is the empire-wide feed.
+    tenantId
+      ? safe("operations.recent_events", recentEvents(showOlder ? 100 : 30, { sinceDays: 0, tenantId, isOperator: true }), null)
+      : Promise.resolve([]),
     // Agent decisions tape — moved here from /reasoning 2026-08-04 when that
     // page was dropped from CC's nav. Scoping is deliberately IDENTICAL to
     // the reasoning page it replaced: recentDecisions() filters

@@ -1,6 +1,8 @@
 /**
- * /founders/marketing/extracted - Content > Extracted videos: every video the
- * Video extractor (Content Tools) saved, kept apart from the Library.
+ * /founders/marketing/extracted - Extracted videos: every video the Video
+ * extractor (Content Tools) saved, kept apart from the Library. Reached from
+ * inside that tool since 2026-10-25 (CC: a tab of its own cluttered Content's
+ * bar); the URL stays valid and lights the Content Tools tab.
  *
  * CC, 2026-10-17: "there needs to be a video extractor - that's perfect - but it
  * should get stored in a separate category, like extracted videos or whatever,
@@ -21,8 +23,8 @@
  * existed shows here with no migration. The Library has no Downloads tab
  * (LIBRARY_BRAND_GROUPS) and sends ?group=downloads here.
  *
- * ?video=<id> (Content Tools' "Open in Extracted videos", the asset page's way
- * back) shows that one video first, even when it sits past page one.
+ * ?video=<id> (the Video extractor's "Open in Extracted videos", the asset
+ * page's way back) shows that one video first, even when it sits past page one.
  *
  * Videos mount lazily (components/founders/LazyVideo.tsx): the server markup
  * holds no <video>, so a page of 24 cards fetches nothing until a card nears
@@ -61,7 +63,7 @@ import {
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Extracted videos \u00B7 Content \u00B7 OASIS" };
 
-const TOOLS_HREF = "/founders/marketing/tools";
+const TOOLS_HREF = "/founders/marketing/tools#video-extractor";
 const DOT = " \u00B7 ";
 const ASSET_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -168,7 +170,7 @@ export default async function ExtractedVideosPage({
       }
       actions={
         <Link href={TOOLS_HREF} className="btn-secondary inline-flex min-h-11 items-center">
-          Extract a video
+          Back to Video extractor
         </Link>
       }
       className="space-y-6"

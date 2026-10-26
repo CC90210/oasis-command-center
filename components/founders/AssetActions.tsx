@@ -54,14 +54,39 @@ const REQUEST_REASON: Record<string, string> = {
   not_found: "This asset could not be found.",
 };
 
+/**
+ * What the [id] route's PATCH and DELETE error codes say to a person. A bare
+ * "update_failed" under the Approve button told the founder nothing about what
+ * to do next (audit, 2026-10-26). status_changed is kept for symmetry with
+ * REQUEST_REASON; this component never sends `from`, so the route cannot answer it here.
+ */
+const VERDICT_REASON: Record<string, string> = {
+  not_found: REQUEST_REASON.not_found,
+  status_changed: REQUEST_REASON.status_changed,
+  read_failed: "Could not read this asset. Try again.",
+  update_failed: "Could not save that. Try again.",
+  not_reviewable: "This video is kept for reference and takes no verdict.",
+  delete_failed: "Could not delete it. Try again.",
+  media_delete_failed: "Could not delete it. Try again.",
+  delete_did_not_take: "The delete did not take. Reload the page to see where it is.",
+};
+
 export function AssetActions({
   id,
   status,
   title,
+  afterDeleteHref,
 }: {
   id: string;
   status: AssetStatus;
   title: string;
+  /**
+   * Where to go once deleted; absent = refresh this page (the grid, which then
+   * draws without the tile). The asset's own page passes its way back to the
+   * Library: a refresh there re-reads a row that is gone and lands on "Page not
+   * found" (audit, 2026-10-26), the dead end that page exists to prevent.
+   */
+  afterDeleteHref?: string;
 }) {
   const router = useRouter();
   const noteId = useId();
@@ -97,7 +122,7 @@ export function AssetActions({
     const body = await res?.json().catch(() => null);
     if (!res?.ok || !body?.ok) {
       setShown(previous);
-      setError(body?.error ? String(body.error) : `Could not mark ${next}.`);
+      setError(VERDICT_REASON[String(body?.error)] ?? `Could not mark ${next}. Try again.`);
       setInflight(false);
       return;
     }
@@ -114,14 +139,15 @@ export function AssetActions({
     );
     const body = await res?.json().catch(() => null);
     if (!res?.ok || !body?.ok) {
-      setError(body?.error ? String(body.error) : "Could not delete.");
+      setError(VERDICT_REASON[String(body?.error)] ?? "Could not delete it. Try again.");
       setConfirming(false);
       setInflight(false);
       return;
     }
     setInflight(false);
     setGone(true);
-    start(() => router.refresh());
+    if (afterDeleteHref) router.push(afterDeleteHref);
+    else start(() => router.refresh());
   }
 
   async function sendBack() {
@@ -252,7 +278,7 @@ export function AssetActions({
             </button>
           </div>
         </div>
-      ) : shown === "archived" ? (
+      ) : shown === "archived" || shown === "rejected" ? (
         /*
          * ARCHIVE HAD NO INVERSE. CC, 2026-08-16: "I just archived a video, and
          * it's completely gone now. I have no idea where it's gone, and I want it
@@ -267,10 +293,14 @@ export function AssetActions({
          * An action that looks destructive, is offered one click from Approve,
          * and has no visible way back is a trapdoor. Restore puts it back where
          * it was: awaiting a verdict.
+         *
+         * A rejected row is filed under the same Archived pill and badge, so it
+         * gets the same way back (audit, 2026-10-26): without it the only routes
+         * out were Approve, skipping review, or Archive then Restore.
          */
         <div className="flex items-center gap-2">
           <span className="flex-1 text-[11px] text-fg-dim">
-            Archived — nothing was deleted.
+            {shown === "rejected" ? "Rejected" : "Archived"} — nothing was deleted.
           </span>
           <button
             type="button"

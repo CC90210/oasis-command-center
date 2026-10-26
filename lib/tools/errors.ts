@@ -68,6 +68,7 @@ export const SWEEP_ERROR_LINES: Readonly<Record<string, string>> = {
   meeting_gone: "The meeting's recording was no longer waiting, so this was not run.",
   meeting_deleted: "The recording was deleted, so this was stopped.",
   relay_expired: "The computer did not take this recording within 30 days, so its audio was deleted.",
+  runner_gone: "The computer that holds this copy has not checked in for 30 days, so its copy was not deleted.",
   // The Free AI Audit (lib/ai-audit/extraction.ts): the transcript may no longer be read.
   ai_audit_not_permitted: "The transcript can no longer be read for the audit (consent changed, or the profile was authorized), so this was not run.",
   ai_audit_gone: "The audit step this belonged to was finished or replaced, so this was not run.",

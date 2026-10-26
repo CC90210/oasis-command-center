@@ -44,6 +44,7 @@ export function CollapsibleSection({
   defaultCollapsed = true,
   collapsedPreview,
   keepMounted = false,
+  openForHash,
   children,
 }: {
   title: string;
@@ -52,6 +53,8 @@ export function CollapsibleSection({
   defaultCollapsed?: boolean;
   collapsedPreview?: ReactNode;
   keepMounted?: boolean;
+  /** A location hash ("#video-extractor") that opens the section on load, over whatever the browser remembered. */
+  openForHash?: string;
   children: ReactNode;
 }) {
   const reactId = useId();
@@ -60,6 +63,12 @@ export function CollapsibleSection({
   const [collapsed, setCollapsed] = useState<boolean | null>(null);
 
   useEffect(() => {
+    // A link into this section (/tools#video-extractor from Extracted videos) must
+    // land on something visible: the hash opens it, whatever was remembered.
+    if (openForHash && window.location.hash === openForHash) {
+      setCollapsed(false);
+      return;
+    }
     if (!storageKey) {
       setCollapsed(defaultCollapsed);
       return;
@@ -72,7 +81,7 @@ export function CollapsibleSection({
     } catch {
       setCollapsed(defaultCollapsed);
     }
-  }, [storageKey, defaultCollapsed]);
+  }, [storageKey, defaultCollapsed, openForHash]);
 
   const isCollapsed = collapsed ?? defaultCollapsed;
 

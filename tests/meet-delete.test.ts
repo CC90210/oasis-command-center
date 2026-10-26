@@ -5,6 +5,8 @@
  * a stand-in recording; this proves the real one keeps it:
  *  - before migration 231, recording is unavailable: the panel is told so, a room never records, and a delete has
  *    nothing to remove;
+ *  - after 231 but before bravo__240 (each computer's copy), a room still records, and its delete keeps the meeting
+ *    (503) rather than delete it with its recording left on a computer;
  *  - only OASIS's own workspaces record;
  *  - deleting a recorded meeting deletes its audio on the relay, calls off its transcription, leaves e9's
  *    tombstone (it refuses a late chunk, and the PC's delete job reports to it) and removes the room's rows.
@@ -16,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { NextRequest } from "next/server";
-import { OASIS, USERS, check, emptyDatabase, finish, scalar, setupToolsDatabase } from "./_tools-harness";
+import { MEET_COPIES_BACKFILL_PATH, OASIS, USERS, applyMigrationFile, check, emptyDatabase, finish, scalar, setupToolsDatabase } from "./_tools-harness";
 import type { MeetDeps, MeetSession } from "../lib/meet/handlers";
 import type { MeetStorage } from "../lib/meet/recording";
 import type { SfuClient } from "../lib/meet/sfu";
@@ -94,10 +96,25 @@ async function main() {
     assert.equal(await readMeetRoomByCode(bare, code.replace(/-/g, "")), null);
   });
 
+  await check("after 231 but before bravo__240: a room still records, and its delete keeps the meeting (503) rather than leave its recording", async () => {
+    const bare = emptyDatabase();
+    for (const f of ["bravo__230_meet_rooms.sql", "bravo__231_meet_recordings.sql", "bravo__233_meet_room_recorder.sql"]) await bare.executeMultiple(migration(f));
+    const deps = depsFor(bare, relay().storage);
+    assert.equal((await json(await handleListRooms(deps(as(CC))))).recordingAvailable, true, "recording waited for bravo__240");
+    const room = await make(deps(as(CC)), { recordAudio: true });
+    assert.equal(room.recordAudio, true);
+    const code = String(room.code);
+    const res = await host(code, "delete", deps(as(CC)));
+    assert.deepEqual([res.status, (await json(res)).error], [503, "meet_not_configured"]);
+    assert.ok(await readMeetRoomByCode(bare, code.replace(/-/g, "")), "the meeting was deleted while its recording could not be");
+  });
+
   const db = await setupToolsDatabase();
   await db.executeMultiple(migration("bravo__230_meet_rooms.sql"));
   await db.executeMultiple(migration("bravo__231_meet_recordings.sql"));
   await db.executeMultiple(migration("bravo__233_meet_room_recorder.sql"));
+  // The copies' backfill reads Meet's own tables, so it comes after them (the harness applied bravo__240).
+  await applyMigrationFile(db, MEET_COPIES_BACKFILL_PATH);
   const { storage, objects } = relay();
   const deps = depsFor(db, storage);
 

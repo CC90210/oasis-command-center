@@ -170,12 +170,17 @@ export function HookCompare({
     });
   }
 
+  // Two greyed Play buttons over a blank line read as the comparison being
+  // broken; when no variant has a render on file yet, the line says so (audit,
+  // 2026-10-26). An empty pack stays silent (every card removed while mounted).
   const status =
-    active === "order"
-      ? `Playing ${cards[playingIndex].variantLabel} (${playingIndex + 1} of ${cards.length}).`
-      : active === "together"
-        ? "Playing all together, muted. Unmute one to hear it."
-        : "";
+    cards.length > 0 && playable === 0
+      ? "No variant has a render on file yet, so there is nothing to play."
+      : active === "order"
+        ? `Playing ${cards[playingIndex].variantLabel} (${playingIndex + 1} of ${cards.length}).`
+        : active === "together"
+          ? "Playing all together, muted. Unmute one to hear it."
+          : "";
 
   const button =
     "inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-semibold transition-colors disabled:opacity-40";

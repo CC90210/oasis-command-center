@@ -45,7 +45,7 @@ export type RecordingView = {
     readyAt: string | null;
     transcribeSeconds: number | null;
   } | null;
-  deviceDelete: { status: "not_needed" | "waiting" | "done" | "failed"; errorCode: string | null; doneAt: string | null } | null;
+  deviceDelete: { status: "not_needed" | "waiting" | "done" | "failed"; errorCode: string | null; doneAt: string | null; devices?: string[] } | null;
 };
 
 export const PC = "OASIS's computer";
@@ -64,7 +64,15 @@ export const FAILED_BECAUSE: Readonly<Record<string, string>> = {
   ffmpeg_missing: "the computer is missing its audio tools",
   meeting_gone: "the recording was no longer waiting",
   unsafe_path: "its folder was not where meetings are kept, so it was left alone",
+  runner_gone: "it hasn't checked in for 30 days, so its copy was not deleted",
 };
+
+/** "CC's Mac", "CC's Mac and CCPC (Windows)". */
+function names(list: readonly string[] | undefined, fallback: string): string {
+  const l = (list ?? []).filter(Boolean);
+  if (!l.length) return fallback;
+  return l.length === 1 ? l[0] : `${l.slice(0, -1).join(", ")} and ${l[l.length - 1]}`;
+}
 
 /** Seconds of audio in one chunk (lib/meet/recorder.ts DEFAULT_TIMESLICE_MS). */
 const CHUNK_SECONDS = 10;
@@ -100,11 +108,16 @@ export function recordingDeletable(v: RecordingView): boolean {
 /** The line about the computer's own copy, once the recording is deleted or expired. */
 function deviceLine(view: RecordingView, fallback: string | null): string | null {
   const device = view.deviceDelete;
-  if (device?.status === "waiting") return `Waiting for ${PC} to delete its copy. It does when it's next on.`;
+  // One computer or several: "its copy" or "their copies", never a plural said of one.
+  const many = (device?.devices?.length ?? 0) > 1;
+  const copies = many ? "their copies" : "its copy";
+  if (device?.status === "waiting") {
+    return `Waiting for ${names(device.devices, PC)} to delete ${copies}. ${many ? "Each does" : "It does"} it when it's next on.`;
+  }
   if (device?.status === "done") return "The computer's copy was deleted too.";
   if (device?.status === "failed") {
     const why = (device.errorCode && FAILED_BECAUSE[device.errorCode]) || "it reported an error";
-    return `${PC} couldn't delete its copy: ${why}. Delete again to retry.`;
+    return `${names(device.devices, PC)} couldn't delete ${copies}: ${why}. Delete again to retry.`;
   }
   return fallback;
 }
