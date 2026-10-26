@@ -22,6 +22,7 @@ import { AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payloa
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
+import { BriefPanel } from "./BriefPanel";
 
 function when(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -178,6 +179,8 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
   return (
     <div className="grid gap-5">
       {message ? <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg">{message}</div> : null}
+
+      <BriefPanel view={view} />
 
       <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">The call</h2>

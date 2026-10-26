@@ -22,7 +22,7 @@ What the call is **not** for: selling, quoting, or diagnosing. You are listening
 
 ## Five minutes before the call
 
-- [ ] Open the lead and its AI audit. Read the pre-call brief: what they wrote on the form, what their website shows, the likely problems (these are guesses until the client confirms them), and the facts to confirm.
+- [ ] Open the lead and its AI audit. Read the pre-call brief (Call and transcripts, at the top): what they wrote on the form, what their website shows, the likely problems (these are guesses until the client confirms them), and the facts to confirm. The live-call screen marks the questions it says to spend time on.
 - [ ] Look at their website on your phone. Can you call them in one tap? Is there a form or a booking button?
 - [ ] Note the two or three figures the brief says are missing. Those are the questions to weight.
 - [ ] Open the live-call screen and start the Oasis Meet room, or have your notes ready if the call is elsewhere.

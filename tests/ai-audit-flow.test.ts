@@ -160,7 +160,7 @@ function fakeStripe() {
 async function main() {
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__241_ai_audit_briefs.sql"]) await apply(db, f);
   await seedLead(db, LEAD, "qualified", "owner@fixture.test");
   await seedLead(db, LEAD_B, "qualified", "second@fixture.test");
   await seedLead(db, LEAD_C, "qualified", "third@fixture.test");
