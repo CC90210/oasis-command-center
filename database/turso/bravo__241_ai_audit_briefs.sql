@@ -1,18 +1,21 @@
 -- 241 - Free AI Audit: the pre-call research brief (2026-10-26, phase 2d).
 --
--- ai_audit_sources  what the brief was built from, one row per item read: a
---                   page of the client's own website (fetched by the Command
---                   Center, never with a login), or the answers the client
---                   gave on the AI-audit form. Only a short excerpt and a hash
---                   of each page are kept, never the whole page. `kind` and
---                   `reliability` are vocabularies kept in lib/ai-audit/briefs.ts.
---                   Phase 3's research adds kinds (search results, PageSpeed).
+-- ai_audit_sources  what the brief was built from, one row per item read: each
+--                   request made to the client's own website (a page, its
+--                   robots.txt, its sitemap, the plain-HTTP check; fetched by
+--                   the Command Center, never with a login), or the answers the
+--                   client gave on the AI-audit form. Only a short excerpt and a
+--                   hash of each response are kept, never the whole page. `kind`
+--                   and `reliability` are vocabularies kept in
+--                   lib/ai-audit/briefs.ts. Phase 3's research adds kinds
+--                   (search results, PageSpeed).
 -- ai_audit_briefs   each version of an engagement's pre-call brief: facts
 --                   with their labels (Verified for our own measurement,
 --                   Client-reported for the form), likely problems as
 --                   hypotheses with how to test them, facts to confirm and the
 --                   questions to weight on the call. Internal only: the client
---                   never sees a brief. A new build is a new version.
+--                   never sees a brief. A new build is a new version. The tick's
+--                   tries are ai_audit_events rows (brief_attempt), not columns.
 --
 -- CONVENTIONS as bravo__237: text ids, ISO-8601 UTC times written by the app,
 -- tenant_id first in every index. Additive only.

@@ -305,7 +305,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }
     case "build_brief": {
       const r = await buildBrief(s.db, { tenantId: s.tenantId, engagementId, actor, now, deps: defaultSiteDeps() });
-      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error === "stage_closed" ? "brief_stage_closed" : r.error === "too_soon" ? "brief_too_soon" : r.error });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "not_installed" ? 503 : 409, { ok: false, error: r.error === "not_found" ? r.error : `brief_${r.error}` });
       return json(200, { ok: true, brief_id: r.brief.id, version_no: r.brief.version_no, status: r.brief.status });
     }
     case "request_authorization": {

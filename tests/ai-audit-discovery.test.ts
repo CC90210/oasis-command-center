@@ -757,8 +757,7 @@ async function main() {
     assert.equal(await store.aiAuditTablesInstalled(bare), false, "the engagement lacks the call clock");
     await bare.execute("ALTER TABLE ai_audit_engagements ADD COLUMN call_started_at text");
     await bare.execute("ALTER TABLE ai_audit_engagements ADD COLUMN call_ended_at text");
-    assert.equal(await store.aiAuditTablesInstalled(bare), false, "no brief tables (bravo__241)");
-    for (const t of ["ai_audit_briefs", "ai_audit_sources"]) await bare.execute(`CREATE TABLE ${t} (id text)`);
+    // bravo__241 (the pre-call brief) is not part of this guard: the brief checks its own tables (review of phase 2d, 8).
     assert.equal(await store.aiAuditTablesInstalled(bare), true);
     assert.equal(await store.aiAuditTablesInstalled(db), true);
     bare.close();

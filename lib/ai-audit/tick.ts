@@ -12,7 +12,9 @@
  *   7. flag stalls (not opened in 3 days, opened but unpaid for 7 days), once;
  *   7b. advance profile drafting from transcripts;
  *   7c. build the first pre-call brief for engagements at Research in Progress
- *       or Discovery Call Scheduled (it reads the client's public website);
+ *       or Discovery Call Scheduled (it reads the client's public website),
+ *       each on its own: a try is marked before it starts, and one that fails
+ *       waits before the next (lib/ai-audit/briefs.ts dueBriefs);
  *   8. repair a lead whose pipeline stage fell behind its engagement.
  * Nothing here contacts a client. Every step is safe to repeat.
  */
@@ -21,7 +23,7 @@ import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WAITING_ON_CLIENT_STAGES, stallReason } from "@/lib/ai-audit/rules";
-import { listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
+import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
@@ -39,7 +41,7 @@ import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type On
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, sweepStaleExtractions, type CloudDeps } from "@/lib/ai-audit/extraction";
 import { getShareLink } from "@/lib/ai-audit/link";
-import { buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
+import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
 import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps };
@@ -96,6 +98,8 @@ export async function runAiAuditTick(
     stoppedForBudget: false,
   };
   if (!(await aiAuditTablesInstalled(db))) return report;
+  // The brief alone needs bravo__241: without it, step 7c reports itself and every other step runs.
+  const briefsInstalled = await briefTablesInstalled(db);
   const over = () => Date.now() - started > budget;
   const tenants = (opts.tenantIds ?? [...OASIS_INTERNAL_TENANT_IDS]).filter((t) => !isRetiredTenant(t));
 
@@ -244,13 +248,31 @@ export async function runAiAuditTick(
     });
 
     // 7c. The first pre-call brief, two per tick at most: each reads a website (up to 25 seconds).
+    // Each engagement is tried on its own, and the try is marked before it starts, so one
+    // that throws (or a run killed mid-build) waits its turn instead of blocking the rest.
+    let dueForBrief: string[] = [];
     await guard("briefs", undefined, async () => {
-      for (const id of await dueBriefs(db, tenantId, 2)) {
-        if (over()) break;
-        const r = await buildBrief(db, { tenantId, engagementId: id, actor: { type: "system", id: null }, now: now(), deps: deps.site ?? defaultSiteDeps() });
-        if (r.ok && r.created) report.briefsBuilt += 1;
-      }
+      if (!briefsInstalled) throw new Error("the brief tables are missing: apply database/turso/bravo__241_ai_audit_briefs.sql");
+      dueForBrief = await dueBriefs(db, tenantId, 2, now());
     });
+    for (const id of dueForBrief) {
+      if (over()) break;
+      await guard("brief", id, async () => {
+        const system = { type: "system" as const, id: null };
+        await db.execute(eventStatement({ tenantId, engagementId: id, event: BRIEF_ATTEMPT_EVENT, actor: system, at: now().toISOString() }));
+        try {
+          const r = await buildBrief(db, { tenantId, engagementId: id, actor: system, now: now(), deps: deps.site ?? defaultSiteDeps() });
+          if (r.ok && r.created) report.briefsBuilt += 1;
+        } catch (err) {
+          // Kept on the engagement too, for whoever looks into why it has no brief.
+          const error = err instanceof Error ? err.message : String(err);
+          await db
+            .execute(eventStatement({ tenantId, engagementId: id, event: "brief_failed", actor: system, at: now().toISOString(), meta: { error: error.slice(0, 300) } }))
+            .catch((e) => console.error("[ai-audit.tick] could not record brief_failed", { tenantId, engagementId: id, error: e instanceof Error ? e.message : String(e) }));
+          throw err;
+        }
+      });
+    }
 
     // 8. Leads that fell behind (recently active engagements only).
     for (const e of open.filter((x) => now().getTime() - Date.parse(x.updated_at) < 14 * DAY)) {

@@ -12,7 +12,10 @@
  *   - Hypothesis: a likely problem, with how to test it on the call. A
  *     hypothesis carries no number of its own (a test pins this).
  * Nothing here is a finding of the audit yet: the audit's findings come from
- * the call and from research after Gate 1.
+ * the call and from research after Gate 1. When nothing on the website was
+ * read (it did not answer, its robots.txt closed it, its home page failed),
+ * the brief says so as a gap, with the time, and holds no fact about the site
+ * and no likely problem drawn from it.
  *
  * Internal only. The client never sees a brief.
  *
@@ -22,6 +25,7 @@ import { AI_AUDIT_STEPS } from "@/lib/forms/oasis-ai-audit-seed";
 import { DISCOVERY_QUESTIONS } from "@/lib/ai-audit/framework";
 import type { BusinessType } from "@/lib/ai-audit/rules";
 import { CHECK_TITLES, type CheckKey, type SiteCheck } from "@/lib/ai-audit/site-checks";
+import type { SiteReport } from "@/lib/ai-audit/site-fetch";
 import type { SiteTarget } from "@/lib/ai-audit/site-url";
 
 export const BRIEF_SCHEMA = "ai_audit_brief/v1" as const;
@@ -189,16 +193,24 @@ export function assembleBrief(input: {
   builtAt: string;
   business: { name: string; type: BusinessType | null };
   form: { answers: Record<string, unknown>; at: string | null } | null;
-  site: { target: SiteTarget; checks: SiteCheck[]; pagesRead: number; notes: string[] } ;
+  site: { target: SiteTarget; checks: SiteCheck[]; pagesRead: number; notes: string[]; unread?: SiteReport["unread"] };
 }): PreCallBrief {
   const facts: BriefFact[] = [];
   const confirm: PreCallBrief["confirm"] = [];
   const gaps: string[] = [];
-  const checks = new Map(input.site.checks.map((c) => [c.key, c]));
 
-  // What the website shows: our own measurement.
+  // What the website shows: our own measurement. Nothing read, nothing said:
+  // no fact about the site and no likely problem from it, only the gap.
   const t = input.site.target;
-  if (t.kind === "site") {
+  // No page read is nothing read, whatever the caller says; only "no_answer" may say the site did not answer.
+  const unread = t.kind === "site" ? (input.site.unread ?? (input.site.pagesRead === 0 ? "nothing_read" : null)) : null;
+  const checks = new Map<CheckKey, SiteCheck>(unread ? [] : input.site.checks.map((c) => [c.key, c]));
+  if (t.kind === "site" && unread) {
+    // A site that did not answer is one line; the requests that failed are in the sources.
+    const at = `${input.builtAt.slice(0, 10)} ${input.builtAt.slice(11, 16)} UTC`;
+    if (unread === "no_answer") gaps.push(`The site did not answer when we checked at ${at}; check it before the call.`);
+    else gaps.push(...input.site.notes, `Nothing on the site was read when we checked at ${at}, for the reason above; look at it by hand before the call.`);
+  } else if (t.kind === "site") {
     for (const c of input.site.checks) {
       if (c.status === "unknown") {
         gaps.push(`${CHECK_TITLES[c.key]}: ${c.detail}`);
@@ -207,7 +219,6 @@ export function assembleBrief(input: {
       facts.push({ id: `site:${c.key}`, statement: c.detail, label: "verified", source: { kind: "site", check: c.key, url: c.evidence?.url ?? t.start } });
     }
     gaps.push(...input.site.notes);
-    if (input.site.pagesRead === 0) gaps.push("The website could not be read, so none of its checks are known.");
   } else if (t.kind === "social") {
     gaps.push(`The website answer is a ${t.platform} profile${t.url ? ` (${t.url})` : ""}, which is not fetched (it needs a login). Look at it by hand before the call.`);
   } else {

@@ -8,7 +8,7 @@ import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { getEngagement } from "@/lib/ai-audit/store";
 import { getProfileVersion, listProfileFields } from "@/lib/ai-audit/versions";
 import { listCallNotes } from "@/lib/ai-audit/call-notes";
-import { latestBrief } from "@/lib/ai-audit/briefs";
+import { briefForPage } from "@/lib/ai-audit/briefs";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LiveCall } from "@/components/ai-audit/call/LiveCall";
@@ -27,7 +27,7 @@ export default async function LiveCallPage({ params }: Props) {
   const [fields, notes, brief] = await Promise.all([
     version ? listProfileFields(session.db, session.tenantId, version.id) : Promise.resolve([]),
     listCallNotes(session.db, session.tenantId, e.id),
-    latestBrief(session.db, session.tenantId, e.id),
+    briefForPage(session.db, session.tenantId, e.id),
   ]);
   return (
     <PageFrame title={`Discovery call: ${e.business_name || "Unnamed business"}`} subtitle="Ask about the business first. Notes save as you type; figures go straight into the profile as Client-reported.">

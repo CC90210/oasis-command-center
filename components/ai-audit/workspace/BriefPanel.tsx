@@ -125,7 +125,7 @@ export function BriefPanel({ view }: { view: EngagementView }) {
                 {siteFacts.map((f) => (
                   <li key={f.id} className="flex items-start gap-2">
                     <Label kind="verified" />
-                    <span className="text-fg">{f.statement}</span>
+                    <span className="min-w-0 break-words text-fg">{f.statement}</span>
                   </li>
                 ))}
               </ul>
@@ -139,7 +139,7 @@ export function BriefPanel({ view }: { view: EngagementView }) {
                 {formFacts.map((f) => (
                   <li key={f.id} className="flex items-start gap-2">
                     <Label kind="client_reported" />
-                    <span className="text-fg">{f.statement}</span>
+                    <span className="min-w-0 break-words text-fg">{f.statement}</span>
                   </li>
                 ))}
               </ul>
@@ -152,7 +152,9 @@ export function BriefPanel({ view }: { view: EngagementView }) {
               <h3 className="text-[13px] font-semibold text-fg">Could not check</h3>
               <ul className="grid list-disc gap-0.5 pl-5 text-fg-muted">
                 {b.gaps.map((g) => (
-                  <li key={g}>{g}</li>
+                  <li key={g} className="min-w-0 break-words">
+                    {g}
+                  </li>
                 ))}
               </ul>
             </div>

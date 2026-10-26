@@ -8,9 +8,12 @@
  * the business's own site (the brief lists them as a gap to look at by hand).
  *
  * Refused outright: IP addresses (v4 in any spelling the URL parser accepts,
- * and v6), single-label and internal names, reserved test domains, ports,
- * and user names or passwords in the address. A business website is a domain
- * name on the default port. Every redirect hop is checked again
+ * and v6), single-label and internal names, reserved test domains, names under
+ * services that answer with the address written in the name or with a private
+ * one (127.0.0.1.nip.io, localtest.me), ports, and user names or passwords in
+ * the address. A business website is a domain name on the default port. The
+ * name check is by spelling only, so these lists are defence in depth, not a
+ * DNS check. Every redirect hop is checked again
  * (lib/ai-audit/site-fetch.ts), so a public site cannot bounce the fetch into
  * a private address. Stricter than the chat tool's lib/cloud-tool-runner.ts
  * assertSafeUrl, which lets some loopback and IPv6 forms through.
@@ -43,7 +46,9 @@ const SOCIAL: ReadonlyArray<readonly [string, RegExp]> = [
 const PATH_SITES: readonly RegExp[] = [/\.wixsite\.com$/, /(^|\.)square\.site$/, /(^|\.)sites\.google\.com$/];
 
 /** Names that are never a business's public website. */
-const BLOCKED_SUFFIXES = ["localhost", "local", "internal", "intranet", "lan", "home", "corp", "home.arpa", "localdomain", "test", "example", "invalid", "onion", "arpa"];
+const BLOCKED_SUFFIXES = ["localhost", "local", "internal", "intranet", "lan", "home", "corp", "home.arpa", "localdomain", "test", "example", "invalid", "onion", "arpa", "svc"];
+/** Services whose every name points at the address written in it (127.0.0.1.nip.io) or at the machine itself (localtest.me). */
+const PRIVATE_DNS = ["nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me", "vcap.me", "traefik.me"];
 
 /** A public DNS name: two or more labels, a letter top-level label, no IP address in any form. */
 export function isPublicHostname(raw: string): boolean {
@@ -58,7 +63,7 @@ export function isPublicHostname(raw: string): boolean {
   if (!labels.every((l) => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/.test(l))) return false;
   const tld = labels[labels.length - 1];
   if (!/^[a-z]{2,63}$/.test(tld) && !/^xn--[a-z0-9-]{2,59}$/.test(tld)) return false;
-  return !BLOCKED_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`));
+  return ![...BLOCKED_SUFFIXES, ...PRIVATE_DNS].some((s) => h === s || h.endsWith(`.${s}`));
 }
 
 /** May this address be fetched (an http(s) URL on a public name, default port, no credentials)? */
@@ -92,7 +97,9 @@ export function siteTarget(raw: string | null | undefined): SiteTarget {
   const platform = socialPlatform(host, u.pathname);
   if (platform) return { kind: "social", platform, url: `${u.protocol}//${u.host}${u.pathname}` };
   if (!isFetchableUrl(u)) return { kind: "none", reason: "not_public" };
-  const origin = `${u.protocol}//${host}`;
+  // Always HTTPS first, whatever the lead typed: the read falls back to plain
+  // HTTP only when the secure address does not answer, and then says so.
+  const origin = `https://${host}`;
   // On a shared builder the business lives in its folder; elsewhere the checks start at the home page.
   if (PATH_SITES.some((re) => re.test(host))) {
     const folder = u.pathname.split("/").filter(Boolean)[0];

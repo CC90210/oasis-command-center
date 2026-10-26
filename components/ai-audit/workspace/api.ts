@@ -41,6 +41,7 @@ const ERROR_WORDS: Record<string, string> = {
   too_many_transcripts: "This engagement already has 20 transcripts. Delete one you no longer need first.",
   brief_stage_closed: "The client's information is authorized, so the pre-call brief is final. Research after Gate 1 takes over from here.",
   brief_too_soon: "The brief was built less than a minute ago. Wait a moment, then build it again.",
+  brief_not_installed: "The pre-call brief is not set up on this server yet: its database migration (bravo__241) has not been applied. The rest of the audit works.",
   details_frozen: "The business's name and type were authorized at Gate 1, so they can no longer change here. The contact can still change. To change the business, move the engagement back to Transcript Awaiting Approval.",
   unknown_question: "That question is not in the discovery framework.",
   business_name_invalid: "The business name is missing or too long (200 characters at most). Fix it under Details, then ask again.",

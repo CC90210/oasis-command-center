@@ -3,7 +3,7 @@
  * read in one place. Plain data: it crosses the server/client boundary.
  */
 import "server-only";
-import { latestBrief, type StoredBrief } from "@/lib/ai-audit/briefs";
+import { briefForPage, type StoredBrief } from "@/lib/ai-audit/briefs";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
@@ -103,7 +103,7 @@ export type EngagementView = {
   gaps: Array<{ key: string; label: string }>;
   authorization: { id: string; status: string; outcome: string | null; message: string | null; engine: AiEngine | null; engine_label: string | null; plan: string[] } | null;
   extraction: ExtractionStatus | null;
-  /** Phase 2d: the latest pre-call brief, or null before the first is built. */
+  /** Phase 2d: the latest pre-call brief, or null before the first is built (or before bravo__241 is applied). */
   brief: StoredBrief | null;
   /** The last finished draft's report, from the profile version (lib/ai-audit/extraction.ts finishExtraction). */
   extractionReport: {
@@ -140,7 +140,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     listTranscripts(db, tenantId, engagement.id),
     listCallNotes(db, tenantId, engagement.id),
     latestExtraction(db, tenantId, engagement.id),
-    latestBrief(db, tenantId, engagement.id),
+    briefForPage(db, tenantId, engagement.id),
   ]);
   const rawReport = profileVersion?.summary && typeof profileVersion.summary === "object" ? (profileVersion.summary as Record<string, unknown>).extraction : null;
   const authApproval = engagement.authorization_approval_id ? await getApprovalInTenant(db, tenantId, engagement.authorization_approval_id) : null;
