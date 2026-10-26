@@ -30,10 +30,13 @@ import type { ToolCatalog } from "@/lib/tools/types";
 
 export async function ToolsSection({
   tenantId,
-  // A finished extract opens Content > Extracted videos with that video first
+  // A finished extract opens Extracted videos with that video first
   // (lib/founders/extracted-videos.ts extractedHref), not the Library.
   assetHrefPrefix = "/founders/marketing/extracted?video=",
   assetDownloadPrefix = "/api/founders/marketing/assets/",
+  // The Video extractor's history drawer leads to the whole list (CC, 2026-10-25:
+  // the list lives inside the tool, not in Content's tab bar).
+  extractedVideosHref = "/founders/marketing/extracted",
   showCodes = false,
   className = "mb-8",
   audience = "client",
@@ -44,6 +47,8 @@ export async function ToolsSection({
   assetHrefPrefix?: string;
   /** Download = this prefix + asset id + "/download" (the founders download route); "" turns it off. */
   assetDownloadPrefix?: string;
+  /** The whole Extracted videos list; "" turns the link off. */
+  extractedVideosHref?: string;
   showCodes?: boolean;
   className?: string;
   audience?: CatalogOptions["audience"];
@@ -69,7 +74,17 @@ export async function ToolsSection({
       </section>
     );
   }
-  return <ToolGrid catalog={withFieldDefaults(catalog, fieldDefaults)} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} showCodes={showCodes} className={className} showHeading={showHeading} />;
+  return (
+    <ToolGrid
+      catalog={withFieldDefaults(catalog, fieldDefaults)}
+      assetHrefPrefix={assetHrefPrefix}
+      assetDownloadPrefix={assetDownloadPrefix}
+      extractedVideosHref={extractedVideosHref}
+      showCodes={showCodes}
+      className={className}
+      showHeading={showHeading}
+    />
+  );
 }
 
 /** The catalog with some fields starting on a value the page chose. A value a select does not offer is ignored. */

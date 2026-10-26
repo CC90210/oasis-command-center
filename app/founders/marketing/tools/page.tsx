@@ -31,7 +31,11 @@
  * Since 2026-10-17 it leads with the Video extractor (CC: "the first tool ... is a
  * video extractor"): paste a TikTok, YouTube or Instagram link, CMO-Agent's
  * scripts/content_tools_runner.py fetches it on OASIS's PC, and the finished run
- * offers Download and Open in Library. Repurpose a post is off this page
+ * offers Download, Open in Extracted videos and Done, which clears the card for
+ * the next link (components/tools/ToolGrid.tsx). The Extracted videos list is
+ * reached from inside that card, not from Content's tab bar (CC, 2026-10-25).
+ * RefreshOnToolRun re-reads this page's server data when a run finishes or an
+ * offline card asks to check its connection. Repurpose a post is off this page
  * (lib/tools/catalog.ts CONTENT_TOOLS_HIDDEN). More runner tools plug in the same
  * way: a registry entry here and a handler in the runner's TOOLS. "Score a hook" was removed from the product on 2026-10-10 (dead
  * code, including its worker and tests); "Learn from a link" moved the same
@@ -47,6 +51,7 @@ import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
 import { OasisWhiteboard } from "@/components/founders/OasisWhiteboard";
+import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import { ToolsSection } from "@/components/tools/ToolsSection";
 
 export const dynamic = "force-dynamic";
@@ -69,6 +74,7 @@ export default async function ContentToolsPage() {
           <OasisWhiteboard />
         </div>
       </CollapsibleSection>
+      <RefreshOnToolRun />
     </PageFrame>
   );
 }

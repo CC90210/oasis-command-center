@@ -12,6 +12,7 @@
     "start": "next start --port 3100",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test:content-tools-browser": "node scripts/test-content-tools-browser.mjs",
     "test:sunbiz": "node tests/_suite.mjs",
     "test:web-leads": "node tests/_suite-web-leads.mjs",
     "test:lead-advancements": "node --conditions=react-server --import tsx tests/lead-declined-transfer.test.ts && node --conditions=react-server --import tsx tests/lead-drawer-layout.test.ts",

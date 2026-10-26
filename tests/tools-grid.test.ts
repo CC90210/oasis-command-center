@@ -21,22 +21,33 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   AI_UNREADABLE,
+  CHECK_CONNECTION,
   CONNECT_AI,
+  HISTORY_LIMIT,
   NOT_SET_UP,
   RUN_STOPPED,
   RUNNER_OFFLINE,
+  cardPhase,
   charsText,
+  doneHint,
+  doneThroughKey,
+  historyLabel,
   isInFlight,
+  isPutAway,
+  liveRuns,
   refusalLine,
+  resultTitle,
+  reviewHeadline,
   runTime,
   runsOnText,
   seenLine,
   statusLabel,
   urlFieldLine,
   variantLines,
+  withRun,
 } from "../components/tools/tool-grid-format";
 import { TOOL_REGISTRY } from "../lib/tools/registry";
-import type { CatalogTool, ToolCatalog } from "../lib/tools/types";
+import type { CatalogTool, JobView, ToolCatalog } from "../lib/tools/types";
 
 const root = join(__dirname, "..");
 
@@ -122,6 +133,65 @@ async function main() {
     assert.equal(refusalLine(0, null), RUN_STOPPED);
   });
 
+  await check("the card's lifecycle (2026-10-26): idle, running or review from the runs; Done puts finished runs away, never one in flight", () => {
+    const job = (id: string, status: JobView["status"], created_at: string, extra: Partial<JobView> = {}): JobView => ({
+      id,
+      tool_key: "video_download",
+      status,
+      stage: null,
+      created_at,
+      updated_at: created_at,
+      finished_at: null,
+      input_summary: `https://www.youtube.com/watch?v=${id}`,
+      result: null,
+      error_code: null,
+      error_message: null,
+      asset_id: null,
+      ...extra,
+    });
+    const older = job("a", "done", "2026-10-25T10:00:00.000Z", { asset_id: "asset-a", result: { asset_id: "asset-a", title: "  The video  ", platform: "youtube" } });
+    const failed = job("b", "failed", "2026-10-25T11:00:00.000Z", { error_code: "download_failed", error_message: "That link couldn't be downloaded." });
+    const running = job("c", "running", "2026-10-25T12:00:00.000Z", { stage: "downloading" });
+    const newest = job("d", "done", "2026-10-25T13:00:00.000Z", { asset_id: "asset-d" });
+
+    // Nothing put away: every run is live, and any run in flight makes the panel running.
+    assert.deepEqual(liveRuns([newest, running, failed, older], null).map((j) => j.id), ["d", "c", "b", "a"]);
+    assert.equal(cardPhase([]), "idle");
+    assert.equal(cardPhase([running]), "running");
+    assert.equal(cardPhase([newest, running]), "running", "a run in flight shows before a finished one waiting for Done");
+    assert.equal(cardPhase([newest]), "review");
+    assert.equal(cardPhase([failed]), "review");
+    // Done on the newest puts every finished run up to it away; the running one stays.
+    assert.deepEqual(liveRuns([newest, running, failed, older], newest.created_at).map((j) => j.id), ["c"]);
+    assert.equal(cardPhase(liveRuns([newest, running, failed, older], newest.created_at)), "running");
+    // Done on an older run leaves the newer finished one in review.
+    assert.deepEqual(liveRuns([newest, failed, older], failed.created_at).map((j) => j.id), ["d"]);
+    assert.equal(cardPhase(liveRuns([newest, failed, older], failed.created_at)), "review");
+    assert.deepEqual(liveRuns([failed, older], failed.created_at), []);
+    assert.equal(cardPhase(liveRuns([failed, older], failed.created_at)), "idle");
+    assert.equal(isPutAway(older, older.created_at), true, "the run Done was pressed on is put away");
+    assert.equal(isPutAway(newest, older.created_at), false, "a run made after Done is not");
+    assert.equal(isPutAway(older, "not a time"), false, "a stored value that does not parse puts nothing away");
+    assert.equal(isPutAway(job("y", "done", "yesterday"), older.created_at), false, "nor does a run whose time does not parse get hidden");
+    assert.equal(isPutAway(job("z", "done", "2026-10-25T10:00:00.000Z"), "2026-10-25T10:00:00Z"), true, "the same instant written two ways");
+    assert.equal(doneThroughKey("video_download"), "oasis:tools:video_download:done-through");
+    assert.equal(withRun([newest, older], running).map((j) => j.id).join(","), "c,d,a", "an accepted run leads, never twice");
+    assert.equal(withRun(Array.from({ length: HISTORY_LIMIT + 3 }, (_, i) => job(`h${i}`, "done", "2026-10-25T09:00:00.000Z")), running).length, HISTORY_LIMIT);
+
+    // The words.
+    assert.equal(reviewHeadline(newest, "video_download"), "Video extracted");
+    assert.equal(reviewHeadline(newest, "learn_from_link"), "Finished");
+    assert.equal(reviewHeadline(failed, "video_download"), "Didn't finish");
+    assert.equal(resultTitle(older), "The video", "the video's own title, trimmed");
+    assert.equal(resultTitle(newest), null, "no title in the result, so the card shows the link");
+    assert.equal(resultTitle(job("e", "done", "2026-10-25T10:00:00.000Z", { result: { title: 7 } })), null);
+    assert.equal(historyLabel("video_download"), "Extracted videos");
+    assert.equal(historyLabel("learn_from_link"), "Recent runs");
+    assert.match(doneHint("video_download", false), /^Done clears this card for the next link\. The video stays in Extracted videos\.$/);
+    assert.match(doneHint("video_download", true), /^Dismiss clears/);
+    assert.match(doneHint("learn_from_link", false), /^Done clears this card for the next run\./);
+  });
+
   const full: ToolCatalog = {
     installed: true,
     tools: [card("repurpose_post"), card("learn_from_link"), card("video_download", "ready", { label: "CC's PC", lastSeenAt: "2026-10-09T01:00:00.000Z" })],
@@ -139,7 +209,10 @@ async function main() {
   await check("every catalog card is drawn, each with its Run button, and nothing else", () => {
     const html = markup.full;
     assert.equal(articles(html), 3);
+    // The first render knows no runs, so every ready card is idle: its form and its Run button, nothing else.
     assert.deepEqual(buttons(html), ["Repurpose", "Learn", "Extract video"]);
+    assert.ok(/<article[^>]*\bdata-phase="idle"/.test(html), "a ready card starts idle");
+    assert.ok(/<article[^>]*\bid="video-extractor"/.test(html), "the Video extractor card carries the anchor the Extracted videos page links back to");
     for (const t of full.installed ? full.tools : []) assert.ok(decode(html).includes(t.title), t.title);
     assert.ok(decode(html).includes("Runs on CC's PC"), "the runner is named");
     assert.ok(html.includes(">Tools<"), "the section heading");
@@ -164,8 +237,10 @@ async function main() {
     assert.equal(articles(markup.offline), 1);
     assert.ok(html.includes("Video extractor"));
     assert.ok(html.includes(RUNNER_OFFLINE), "the offline line");
-    assert.deepEqual(buttons(markup.offline), [], "no button that cannot work");
+    // Check connection asks the page to re-read (a window event, no router in the grid); it is the only button.
+    assert.deepEqual(buttons(markup.offline), [CHECK_CONNECTION], "Check connection and no Run button");
     assert.ok(!/<input[^>]*id="tool-video_download-url"/.test(markup.offline), "no link field while offline");
+    assert.ok(/<article[^>]*\bdata-phase="runner_offline"/.test(markup.offline));
   });
 
   await check("not set up: one line, no cards", () => {

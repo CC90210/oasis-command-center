@@ -1,5 +1,5 @@
 /**
- * extracted-videos - what Content > Extracted videos shows for one video the
+ * extracted-videos - what the Extracted videos page shows for one video the
  * Video extractor (Content Tools) saved.
  *
  * CC, 2026-10-17: "there needs to be a video extractor - that's perfect - but it
@@ -10,7 +10,9 @@
  * `downloads` (lib/tools/runner-handlers.ts), status draft, rights unknown:
  * someone else's work, kept for reference. They used to sit in the Library as a
  * "Downloads" tab. Now they have their own page, app/founders/marketing/extracted,
- * and the Library has no Downloads tab (LIBRARY_BRAND_GROUPS in
+ * reached from inside the Video extractor (its history drawer; the page had a
+ * Content tab of its own from 2026-10-17 to 2026-10-25, which CC found cluttered
+ * the bar), and the Library has no Downloads tab (LIBRARY_BRAND_GROUPS in
  * lib/founders-marketing-core.ts). The rows did not move: the page reads the same
  * `downloads` group through loadLibraryPage, so nothing was migrated and a video
  * extracted before this change shows here too.
@@ -29,7 +31,7 @@ export const EXTRACTED_BRAND_GROUP = "downloads" as const;
 /** The brand_slug on every extracted video's row (lib/tools/runner-handlers.ts). */
 export const EXTRACTED_BRAND_SLUG = "downloads";
 
-/** What the page, its tab and its Overview tile are called. */
+/** What the page, its drawer in the Video extractor and its Overview tile are called. */
 export const EXTRACTED_LABEL = "Extracted videos";
 
 /** The element id of one video's card, so a link can land on it. */

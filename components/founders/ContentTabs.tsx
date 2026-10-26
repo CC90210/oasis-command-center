@@ -1,8 +1,7 @@
 "use client";
 
 /**
- * Content's tab bar: Overview - Library - Extracted videos - Content Tools -
- * Performance. The one
+ * Content's tab bar: Overview - Library - Content Tools - Performance. The one
  * strip that reaches the Library from inside the OS shell (2026-10-01): the
  * rail draws Content as a single row and the breadcrumb knew no sub-pages, so
  * the Library was reachable only through the legacy founders banner, which CC
@@ -19,6 +18,12 @@
  * lights only on its exact path: an asset page (/founders/marketing/asset/<id>)
  * is not the Overview, and longest-prefix alone would underline Overview there.
  * The other tabs light on themselves and their sub-paths, longest prefix wins.
+ *
+ * Extracted videos is NOT a tab (CC, 2026-10-25: it cluttered the bar). The
+ * list lives inside the Video extractor on Content Tools (its history drawer,
+ * components/tools/ToolGrid.tsx) and keeps its URL, /founders/marketing/extracted,
+ * which the asset page and the Overview tile still link to. That page lights
+ * Content Tools, the tab it belongs under.
  *
  * Content Tools replaced the Training tab on 2026-10-06 — the Oasis
  * Whiteboard lives there now. The Training PAGE was not deleted:
@@ -41,15 +46,15 @@ export const CONTENT_ROOT = "/founders/marketing";
 export const CONTENT_TABS = [
   { href: "/founders/marketing", label: "Overview" },
   { href: "/founders/marketing/library", label: "Library" },
-  // CC, 2026-10-17: extracted videos are "a separate category ... rather than
-  // the main library". The Video extractor's saves (brand `downloads`) live here.
-  { href: "/founders/marketing/extracted", label: "Extracted videos" },
   { href: "/founders/marketing/tools", label: "Content Tools" },
   { href: "/founders/marketing/performance", label: "Performance" },
 ] as const;
 
 /** The href of the tab lit on `pathname`, or null when none is. PURE, for the test. */
 export function activeContentTab(pathname: string): string | null {
+  if (pathname === `${CONTENT_ROOT}/extracted` || pathname.startsWith(`${CONTENT_ROOT}/extracted/`)) {
+    return `${CONTENT_ROOT}/tools`;
+  }
   const lit = (href: string) =>
     href === CONTENT_ROOT ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
   return [...CONTENT_TABS].filter((t) => lit(t.href)).sort((a, b) => b.href.length - a.href.length)[0]?.href ?? null;

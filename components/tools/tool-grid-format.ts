@@ -6,6 +6,25 @@
  * Times are formatted HERE, on the client, after mount: a time the server
  * rendered as text would disagree with the browser's clock and redraw the page
  * (React #418). The grid renders no time at all in its first render.
+ *
+ * THE CARD'S LIFECYCLE (2026-10-26) is decided here too, as pure functions over
+ * the runs the server lists. The panel above the form is in one of three states:
+ *
+ *   idle      nothing to show: just the form, ready for the next link
+ *   running   runs in flight: each with its stage, a progress strip, a Refresh
+ *   review    the newest finished run: its result (Download, Open in Extracted
+ *             videos) and a Done button, or the failure with Try again and Dismiss
+ *
+ * The form stays under the panel in every state: a run that stalls on the PC
+ * (a lease is 15 minutes, three attempts) must never lock the card, and the
+ * server takes five runs in flight, so a second link can be queued at once.
+ *
+ * Done puts the finished runs away: the card remembers, per tool in
+ * localStorage, the newest run it put away (doneThroughKey), and liveRuns hides
+ * every finished run from then or before. A run still in flight is never
+ * hidden. CC, 2026-10-25: re-entering the Video extractor showed the previous
+ * run for good, and the "Done" it showed was the run's status word, not a
+ * button. The history drawer under the card keeps listing every run regardless.
  */
 import { timeAgo } from "@/lib/devices/presence";
 import type { ToolField } from "@/lib/tools/registry";
@@ -23,21 +42,49 @@ export const CONNECT_AI = "Connect an AI account in Settings > AI brain to use t
 export const AI_UNREADABLE = "Couldn't read the AI account. Try again.";
 /** A runner tool whose computer has not checked in lately (CatalogToolState runner_offline). */
 export const RUNNER_OFFLINE =
-  "This tool runs on the OASIS PC, which is offline right now. Turn it on, give it a minute, then reload this page. Past runs stay below.";
+  "This tool runs on the OASIS PC, which is offline right now. Turn it on, give it a minute, then press Check connection. Past runs stay below.";
+export const CHECK_CONNECTION = "Check connection";
+export const CHECKING_CONNECTION = "Checking...";
 export const SAVED_TO_TRAINING = "Saved to Training material.";
 export const RUN_STOPPED = "This run stopped before it finished. Run it again.";
+/** The run request got no answer: it may or may not have started. The card keeps the same idempotency key, so a second press is the same run. */
+export const RUN_UNCONFIRMED =
+  "Couldn't confirm whether this run started. Check the runs below, or press the button again with the same link: a retry never starts a second run.";
+export const RUNS_UNREADABLE = "Couldn't read the recent runs.";
+
+export const DONE_LABEL = "Done";
+export const DISMISS_LABEL = "Dismiss";
+export const TRY_AGAIN_LABEL = "Try again";
+export const REFRESH_LABEL = "Refresh";
+export const REFRESHING_LABEL = "Refreshing...";
+export const STARTING_LABEL = "Starting...";
+export const OPEN_EXTRACTED = "Open in Extracted videos";
+export const ALL_EXTRACTED = "All extracted videos";
 
 /** Poll a card's runs every 3 s while one is in flight, for at most 30 minutes. */
 export const POLL_EVERY_MS = 3_000;
 export const POLL_FOR_MS = 30 * 60_000;
 /** How often an open card counts "seen n min ago" again. */
 export const SEEN_REFRESH_MS = 30_000;
+/** How many runs a card reads for its history drawer (GET /api/tools/jobs caps at 20). */
+export const HISTORY_LIMIT = 10;
+/** A read of the runs or a run request waits this long before the card gives up on it. */
+export const READ_TIMEOUT_MS = 15_000;
+export const RUN_TIMEOUT_MS = 45_000;
 /**
  * Dispatched on window when a card's last in-flight run finishes. A page that lists
  * what runs write (Agent training's "What it has learned") listens and re-reads, so
  * a finished run shows up without a manual reload.
  */
 export const TOOL_RUN_FINISHED_EVENT = "oasis:tool-run-finished";
+/**
+ * Dispatched on window when an offline card's Check connection is pressed. The
+ * page's RefreshOnToolRun re-reads the server data (the catalog decides online
+ * or offline there), so the card needs no router of its own.
+ */
+export const TOOL_RECHECK_EVENT = "oasis:tool-recheck";
+
+export const VIDEO_TOOL_KEY = "video_download";
 
 export function isInFlight(job: Pick<JobView, "status">): boolean {
   return job.status === "queued" || job.status === "claimed" || job.status === "running";
@@ -53,9 +100,68 @@ export function nextPollIn(jobs: ReadonlyArray<Pick<JobView, "status">> | null, 
   return POLL_EVERY_MS;
 }
 
-/** A card's runs after the run route answered one: that run first, never twice, five at most. */
+/** A card's runs after the run route answered one: that run first, never twice, HISTORY_LIMIT at most. */
 export function withRun(jobs: readonly JobView[] | null, job: JobView): JobView[] {
-  return [job, ...(jobs ?? []).filter((j) => j.id !== job.id)].slice(0, 5);
+  return [job, ...(jobs ?? []).filter((j) => j.id !== job.id)].slice(0, HISTORY_LIMIT);
+}
+
+/** The localStorage key under which a card remembers the newest run Done put away (its created_at). */
+export function doneThroughKey(toolKey: string): string {
+  return `oasis:tools:${toolKey}:done-through`;
+}
+
+/**
+ * True when `job` was created at or before `through` (the created_at of the newest
+ * run Done put away). Both are the server's ISO times. A value that does not
+ * parse (a hand-edited or corrupt stored one) puts nothing away: showing a run
+ * twice is cheap, hiding one is not.
+ */
+export function isPutAway(job: Pick<JobView, "created_at">, through: string | null): boolean {
+  if (through === null) return false;
+  const a = Date.parse(job.created_at);
+  const b = Date.parse(through);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return a <= b;
+}
+
+/** The runs a card still shows above its form: every run in flight, and every finished run Done has not put away. Newest first, as read. */
+export function liveRuns(jobs: ReadonlyArray<JobView> | null, through: string | null): JobView[] {
+  return (jobs ?? []).filter((j) => isInFlight(j) || !isPutAway(j, through));
+}
+
+export type CardPhase = "idle" | "running" | "review";
+
+/** The panel's state from the live runs: any in flight = running; else a finished one = review; else idle. */
+export function cardPhase(live: ReadonlyArray<Pick<JobView, "status">>): CardPhase {
+  if (live.some(isInFlight)) return "running";
+  return live.length > 0 ? "review" : "idle";
+}
+
+/** The headline over a finished run. */
+export function reviewHeadline(job: Pick<JobView, "status">, toolKey: string): string {
+  if (job.status === "failed") return "Didn't finish";
+  return toolKey === VIDEO_TOOL_KEY ? "Video extracted" : "Finished";
+}
+
+/** The title a finished run reported (the video's own title), or null. */
+export function resultTitle(job: Pick<JobView, "result">): string | null {
+  const r = job.result;
+  if (!r || typeof r !== "object") return null;
+  const title = (r as { title?: unknown }).title;
+  return typeof title === "string" && title.trim() ? title.trim() : null;
+}
+
+/** What the history drawer is called: the Video extractor's is its Extracted videos. */
+export function historyLabel(toolKey: string): string {
+  return toolKey === VIDEO_TOOL_KEY ? "Extracted videos" : "Recent runs";
+}
+
+/** The line under Done / Dismiss: what pressing it does, and that nothing is lost. */
+export function doneHint(toolKey: string, failed: boolean): string {
+  if (failed) return "Dismiss clears this card for the next run. The failed run stays listed below.";
+  return toolKey === VIDEO_TOOL_KEY
+    ? "Done clears this card for the next link. The video stays in Extracted videos."
+    : "Done clears this card for the next run. The result stays listed below.";
 }
 
 /**
@@ -115,7 +221,7 @@ export const OVER_LIMIT = "Over the limit";
 /** The line for a URL field the validator refused, by tool, or null for no line. */
 export function urlFieldLine(toolKey: string, code: string): string | null {
   if (code === "required") return null;
-  if (toolKey === "video_download") return "That link can't be downloaded. Paste the post's own link.";
+  if (toolKey === VIDEO_TOOL_KEY) return "That link can't be downloaded. Paste the post's own link.";
   if (code === "video_link_not_supported") return "Video links can't be read here.";
   return "Couldn't open that link.";
 }
