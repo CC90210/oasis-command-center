@@ -18,7 +18,10 @@
  * read: a page cut off at the size limit, a page with more tags of a kind than
  * are read (MAX_TAGS), or the contact or booking page the home page links to,
  * when that page could not be read. A home page that did not load gives no
- * checks at all: another page never stands in for it.
+ * checks at all: another page never stands in for it. A comment is not part
+ * of a page, nor is a script's text part of its markup: a commented-out form
+ * or phone link, or a form in a script's template, shows nothing (liveViews),
+ * while the tools a page loads are still read from its scripts.
  *
  * These results are the brief's Verified facts: our own measurement, dated.
  *
@@ -173,11 +176,13 @@ const ANALYTICS: readonly Sig[] = [
  * Each platform's signs, each a different kind of evidence. Two different
  * signs, the generator tag counting as one, say the site is built on it; one
  * alone (a single image from another site's /wp-content/, say) says only that
- * it shows signs of it.
+ * it shows signs of it. Files from cdn.shopify.com and a shop's .myshopify.com
+ * address are one sign: a Shopify Buy Button on a site built elsewhere loads
+ * both, and only a Shopify store sets Shopify.theme.
  */
 const PLATFORM: ReadonlyArray<readonly [name: string, signs: readonly RegExp[]]> = [
   ["WordPress", [/\/wp-content\//i, /\/wp-includes\//i, /\/wp-json\/|api\.w\.org/i]],
-  ["Shopify", [/cdn\.shopify\.com/i, /Shopify\.theme/, /\.myshopify\.com/i]],
+  ["Shopify", [/cdn\.shopify\.com|\.myshopify\.com/i, /Shopify\.theme/]],
   ["Wix", [/static\.wixstatic\.com/i, /\bparastorage\.com/i]],
   ["Squarespace", [/static1\.squarespace\.com/i, /squarespace-cdn\.com/i, /<!-- This is Squarespace/i]],
   ["Webflow", [/data-wf-site=/i, /\bwebflow\.js/i, /assets\.website-files\.com/i]],
@@ -215,16 +220,19 @@ const SOCIAL_LINKS: readonly Sig[] = [
   ["Yelp", /^(?:https?:)?\/\/(?:www\.)?yelp\.(?:com|ca)\/biz\/\S+/i],
 ];
 
+/** A form from a form service, named for the service ("a form from HubSpot"). HubSpot's is its link, its frame or the call that draws one, never its script alone (FORM_SCRIPTS). */
 const EMBEDDED_FORMS: readonly Sig[] = [
   ["Typeform", /typeform\.com\/to\/|embed\.typeform\.com/i],
   ["Jotform", /jotform\.com|jotfor\.ms/i],
-  ["HubSpot form", /js\.hsforms\.net|\bhsforms\.com/i],
+  ["HubSpot", /hbspt\.forms\.create|\bhs-form-frame\b|\bshare(?:-[a-z0-9]{1,8})?\.hsforms\.com\//i],
   ["Google Forms", /docs\.google\.com\/forms|forms\.gle\//i],
   ["Formspree", /formspree\.io/i],
   ["Wufoo", /wufoo\.com/i],
   ["Cognito Forms", /cognitoforms\.com/i],
   ["Tally", /tally\.so\//i],
 ];
+/** A form service's script, loaded with no form of its own in the HTML: a form it draws may be on the page, so a "no" cannot be said. */
+const FORM_SCRIPTS: readonly Sig[] = [["HubSpot", /\bjs(?:-[a-z0-9]{1,8})?\.hsforms\.net\//i]];
 
 // ---------------------------------------------------------------------------
 // A linear tag scanner
@@ -380,6 +388,72 @@ function* elementsOf(html: string, lower: string, name: string): Generator<{ tag
   }
 }
 
+/**
+ * A page as a browser reads its markup, in two copies the length of the page,
+ * so an index into either is the same index into the page: `live`, with every
+ * comment blanked out (an IE conditional comment, <!--[if IE]> ... <![endif]-->,
+ * is one), and `markup`, with the text of every script and style blanked out
+ * as well; each with its lowered twin, from the page's. As in a browser, "<!--"
+ * in a script starts no comment and "<script" in a comment starts no script;
+ * a comment ends at the first "-->" or "--!>" ("<!-->" and "<!--->" are empty
+ * ones), or runs to the end of the page. One forward pass: where each kind of
+ * thing next starts is looked up again only once it is passed.
+ */
+export function liveViews(html: string, lower = asciiLower(html)): { live: string; liveLower: string; markup: string; markupLower: string } {
+  // What is blanked out, in order: where, and whether it is a script's or a style's text (blanked in `markup` only).
+  const gaps: Array<readonly [from: number, to: number, text: boolean]> = [];
+  let pos = 0;
+  // Where each next starts: -2 (or undefined) until it is looked up, -1 (or null) when there is none.
+  let comment = -2;
+  let dashes = -2;
+  let bang = -2;
+  const raw: { script?: Tag | null; style?: Tag | null } = {};
+  for (;;) {
+    if (comment !== -1 && comment < pos) comment = lower.indexOf("<!--", pos);
+    let block: Tag | null = null;
+    let name: "script" | "style" = "script";
+    for (const n of ["script", "style"] as const) {
+      const seen = raw[n];
+      if (seen === undefined || (seen !== null && seen.index < pos)) raw[n] = nextTag(html, lower, n, pos);
+      const t = raw[n] ?? null;
+      if (t && (!block || t.index < block.index)) {
+        block = t;
+        name = n;
+      }
+    }
+    if (comment !== -1 && (!block || comment < block.index)) {
+      let end: number;
+      if (lower[comment + 4] === ">") end = comment + 5;
+      else if (lower.startsWith("->", comment + 4)) end = comment + 6;
+      else {
+        if (dashes !== -1 && dashes < comment + 4) dashes = lower.indexOf("-->", comment + 4);
+        if (bang !== -1 && bang < comment + 4) bang = lower.indexOf("--!>", comment + 4);
+        const close = dashes === -1 ? bang : bang === -1 ? dashes : Math.min(dashes, bang);
+        end = close === -1 ? html.length : close + (close === bang ? 4 : 3);
+      }
+      gaps.push([comment, end, false]);
+      pos = end;
+    } else if (block) {
+      // The tag is markup; what is in it, to its closing tag (or the end of the page), is the script's or the style's text.
+      const stop = closeAt(lower, name, block.end);
+      gaps.push([block.end, stop, true]);
+      pos = stop;
+    } else break;
+  }
+  const blankOut = (from: string, scripts: boolean) => {
+    const out: string[] = [];
+    let at = 0;
+    for (const [start, stop, text] of gaps) {
+      if (text && !scripts) continue;
+      out.push(from.slice(at, start), " ".repeat(stop - start));
+      at = stop;
+    }
+    out.push(from.slice(at));
+    return out.join("");
+  };
+  return { live: blankOut(html, false), liveLower: blankOut(lower, false), markup: blankOut(html, true), markupLower: blankOut(lower, true) };
+}
+
 type Link = { href: string; text: string; index: number };
 
 /** Every link on a page (at most MAX_TAGS: `scan` says when there were more): its address and the words it shows. */
@@ -446,16 +520,16 @@ function excerptAt(html: string, index: number, length: number): string {
     .slice(0, 200);
 }
 
-/** Every signature found on any page: names, in order, with the first place each was seen. */
-function findAll(pages: readonly PageSnapshot[], sigs: readonly Sig[]): { found: string[]; evidence: SiteCheck["evidence"] } {
+/** Every signature found on any page, read without its comments (scripts and all): names, in order, with the first place each was seen. */
+function findAll(readings: readonly Reading[], sigs: readonly Sig[]): { found: string[]; evidence: SiteCheck["evidence"] } {
   const found: string[] = [];
   let evidence: SiteCheck["evidence"] = null;
   for (const [name, re] of sigs) {
-    for (const p of pages) {
-      const m = re.exec(p.html);
+    for (const r of readings) {
+      const m = re.exec(r.live);
       if (!m) continue;
       found.push(name);
-      if (!evidence) evidence = { url: p.finalUrl, excerpt: excerptAt(p.html, m.index, m[0].length) };
+      if (!evidence) evidence = { url: r.page.finalUrl, excerpt: excerptAt(r.page.html, m.index, m[0].length) };
       break;
     }
   }
@@ -478,29 +552,46 @@ export function builtInBrowser(page: PageSnapshot): boolean {
 
 /** Pages with less text than this may be one of NOT_THE_SITE; a page with more is taken as the business's own. */
 const NOT_THE_SITE_TEXT = 2_000;
-/** What gives away a page that is not the business's own, tested on the text a visitor reads or on the HTML. */
-const NOT_THE_SITE: ReadonlyArray<readonly [what: string, re: RegExp, on: "text" | "html"]> = [
+/** A placeholder says so in few words: a page with more text that says "coming soon" is a site with something coming. */
+const PLACEHOLDER_TEXT = 500;
+/** What gives away a page that is not the business's own, tested on the text a visitor reads or on the HTML, and the most text such a page has (NOT_THE_SITE_TEXT when not given). */
+const NOT_THE_SITE: ReadonlyArray<readonly [what: string, re: RegExp, on: "text" | "html", most?: number]> = [
   ["a domain parking page", /\b(?:this|the) domain(?: name)? (?:is|may be) for sale\b|\bbuy this domain\b|\bdomain (?:is |has been )?parked\b|\bparked free\b|\bdomain parking\b/i, "text"],
   ["a domain parking page", /\b(?:sedoparking\.com|parkingcrew\.net|bodis\.com|afternic\.com|hugedomains\.com|dan\.com\/|wsimg\.com\/parking-lander)/i, "html"],
   ["a web host's placeholder page", /\bwelcome to nginx!|\bapache2? [a-z]{0,20} ?default page\b|\bapache http server test page\b|^it works!|^index of \//i, "text"],
   ["a notice that the hosting account is suspended", /\baccount (?:has been )?suspended\b/i, "text"],
   ["a bot check that needs a browser", /^just a moment(?:\.\.\.|\u2026)|\bchecking your browser\b|\battention required! \| cloudflare\b/i, "text"],
+  ["a placeholder for a site that is not built yet", /\b(?:coming|launching|opening) soon\b|\bunder construction\b/i, "text", PLACEHOLDER_TEXT],
 ];
 
 /**
  * A page that answered at the business's address but is not the business's
  * own: a domain parking page, a web host's placeholder, a suspended account,
- * a bot check. Said only of a page with very little text (under
- * NOT_THE_SITE_TEXT characters) that shows one of NOT_THE_SITE, with the
- * words that show it; null for any other page.
+ * a bot check, a placeholder for a site not built yet; or a page whose
+ * content is at another address: a refresh that sends the visitor on, a
+ * frameset, or a body that is a frame and next to nothing else (no link,
+ * under 200 characters of text). Said only of a page with very little text
+ * (under NOT_THE_SITE_TEXT characters, its comments aside) that shows one of
+ * these, with the words or the tag that show it; null for any other page.
  */
 export function notTheSite(page: PageSnapshot): { what: string; seen: string } | null {
-  const text = visibleText(page.html);
+  const { live, markup, markupLower: lower } = liveViews(page.html);
+  const text = visibleText(live);
   if (text.length >= NOT_THE_SITE_TEXT) return null;
-  for (const [what, re, on] of NOT_THE_SITE) {
-    const m = re.exec(on === "text" ? text : page.html);
+  for (const [what, re, on, most = NOT_THE_SITE_TEXT] of NOT_THE_SITE) {
+    if (text.length >= most) continue;
+    const m = re.exec(on === "text" ? text : live);
     if (m) return { what, seen: m[0].slice(0, 80) };
   }
+  for (const t of tagsOf(markup, "meta", lower)) {
+    const content = t.attrs.content ?? "";
+    // "0; url=https://..." sends the visitor on; a bare "300" only reloads the page.
+    if ((t.attrs["http-equiv"] ?? "").trim().toLowerCase() === "refresh" && /[;,]\s{0,20}\S/.test(content)) return { what: "a page that sends visitors on to another address", seen: content.slice(0, 80) };
+  }
+  const frameset = nextTag(markup, lower, "frameset", 0);
+  // A page with links or words of its own that also shows a frame (a map, a booking tool) is the site.
+  const frame = frameset ? (nextTag(markup, lower, "frame", frameset.end) ?? frameset) : text.length < 200 && !nextTag(markup, lower, "a", 0) ? nextTag(markup, lower, "iframe", 0) : null;
+  if (frame) return { what: "a page that shows another address in a frame", seen: (frame.attrs.src || frame.raw).slice(0, 80) };
   return null;
 }
 
@@ -511,8 +602,12 @@ function metaContent(metas: readonly Tag[], name: string): { content: string; ta
   return null;
 }
 
-/** A page as the checks read it: its HTML lowered (A to Z only, so indexes match), the name the brief gives it, and its links, read once. */
-type Reading = { page: PageSnapshot; lower: string; name: string; links: Link[]; linksCapped: string | null };
+/**
+ * A page as the checks read it: `live` and `markup` (liveViews), each lowered
+ * (`liveLower`, `lower`: A to Z only, so indexes match), the name the brief
+ * gives it, and its links, read once from its markup.
+ */
+type Reading = { page: PageSnapshot; live: string; liveLower: string; markup: string; lower: string; name: string; links: Link[]; linksCapped: string | null };
 
 /** The first link, on any page, whose address passes `test`. */
 function firstLink(readings: readonly Reading[], test: (href: string) => boolean): { page: PageSnapshot; href: string; index: number } | null {
@@ -527,47 +622,77 @@ function firstLink(readings: readonly Reading[], test: (href: string) => boolean
 const NOT_TYPED_IN = new Set(["hidden", "submit", "button", "search", "image", "reset"]);
 /** A field named for a message: what a contact form asks for and a login or a newsletter sign-up does not. */
 const MESSAGE_FIELD = /message|msg|comment|enquir|inquir|question/i;
+/** A field for a phone number: what a quote or call-back form asks for and a newsletter sign-up does not. */
+const PHONE_FIELD = /phone|mobile|\btel\b|\bcell/i;
+/** A field for a name or an email: what a quote request and a newsletter sign-up both ask for. */
+const DETAILS_FIELD = /name|e-?mail/i;
+/** What a newsletter sign-up's own tag or button calls it. */
+const NEWSLETTER = /subscri|newsletter|mailing[ -]?list/i;
 const fieldWords = (f: Tag) => [f.attrs.name, f.attrs.id, f.attrs.placeholder, f.attrs["aria-label"]].filter(Boolean).join(" ");
+const inputType = (f: Tag) => (f.attrs.type ?? "").trim().toLowerCase();
+
+/** What a form calls itself: its own tag (its action, id and class) and the words on its buttons. */
+function formWords(form: Tag, inner: string, innerLower: string, fields: readonly Tag[]): string {
+  const words = [form.raw];
+  for (const f of fields) if (["submit", "button", "image"].includes(inputType(f))) words.push(`${f.attrs.value ?? ""} ${f.attrs.alt ?? ""}`);
+  for (const { inner: label } of elementsOf(inner, innerLower, "button")) words.push(label.slice(0, 200));
+  return words.join(" ");
+}
 
 type FormFinding = {
   /** The first contact form seen, on the site itself or from a form service. */
   form: { own: boolean; names: string[]; evidence: SiteCheck["evidence"] } | null;
-  /** The page with a form that has a message field but also asks for a password (a sign-up?), when there is one. */
-  withPassword: string | null;
+  /** Why a form seen may be a contact form though it is not known to be one, in a sentence: the first such reason, or null. */
+  unsure: string | null;
   /** Why a form's fields were not all read, when they were not. */
   capped: string | null;
 };
 
 /**
- * Contact forms: a form a visitor writes a message in (a text box, or a field
- * named for a message) with another field to fill in, and no password field.
- * A login, a newsletter sign-up (a name and an email) and a site search are
- * not contact forms. A form from a form service (Typeform, a HubSpot form) is
- * a form whose fields are not in the page's HTML, and is said to be just that.
+ * Contact forms: a form with no password field that a visitor writes a
+ * message in (a text box, or a field named for a message) or leaves a phone
+ * number in (a quote or call-back form), with another field to fill in. A
+ * login, a newsletter sign-up and a site search are not contact forms. One
+ * that asks only for a name or an email, and does not call itself a sign-up,
+ * may be a quote request or may not: whether it is one is not known, and never
+ * said to be "no". A form from a form service (Typeform, a HubSpot form) is a
+ * form whose fields are not in the page's HTML, and is said to be just that;
+ * the service's script alone is not known to draw one.
  */
 function contactForms(readings: readonly Reading[]): FormFinding {
-  let withPassword: string | null = null;
+  let unsure: string | null = null;
   let capped: string | null = null;
   for (const r of readings) {
-    for (const { tag: form, inner, innerLower } of elementsOf(r.page.html, r.lower, "form")) {
+    for (const { tag: form, inner, innerLower } of elementsOf(r.markup, r.lower, "form")) {
       if (/\bsearch/i.test(form.raw)) continue;
       const scan: Scan = { capped: null };
       const boxes = tagsOf(inner, "textarea", innerLower, scan);
       const fields = [...tagsOf(inner, "input", innerLower, scan), ...tagsOf(inner, "select", innerLower, scan)];
       if (scan.capped) capped ??= `${r.name} ${scan.capped}`;
-      const type = (f: Tag) => (f.attrs.type ?? "").trim().toLowerCase();
-      const filledIn = boxes.length + fields.filter((f) => !NOT_TYPED_IN.has(type(f))).length;
-      const message = boxes.length > 0 || fields.some((f) => MESSAGE_FIELD.test(fieldWords(f)));
-      if (filledIn < 2 || !message) continue;
-      if (fields.some((f) => type(f) === "password")) {
-        withPassword ??= r.name;
+      const typedIn = fields.filter((f) => !NOT_TYPED_IN.has(inputType(f)));
+      if (boxes.length + typedIn.length < 2) continue;
+      const password = fields.some((f) => inputType(f) === "password");
+      const ownForm = (names: string): FormFinding => ({ form: { own: true, names: [names], evidence: { url: r.page.finalUrl, excerpt: excerptAt(r.page.html, form.index, form.raw.length) } }, unsure, capped });
+      if (boxes.length > 0 || fields.some((f) => MESSAGE_FIELD.test(fieldWords(f)))) {
+        if (!password) return ownForm("a form with a message field");
+        unsure ??= `A form on ${r.name} has a message field but also asks for a password, so whether it is a contact form is not known.`;
         continue;
       }
-      return { form: { own: true, names: ["a form with a message field"], evidence: { url: r.page.finalUrl, excerpt: excerptAt(r.page.html, form.index, form.raw.length) } }, withPassword, capped };
+      // No message field: a quote or call-back form asks for the visitor's details instead. Not a login, nor a sign-up that says it is one.
+      if (password || NEWSLETTER.test(formWords(form, inner, innerLower, fields))) continue;
+      if (typedIn.some((f) => inputType(f) === "tel" || PHONE_FIELD.test(fieldWords(f)))) return ownForm("a form that asks for a phone number");
+      if (typedIn.some((f) => inputType(f) === "email" || DETAILS_FIELD.test(fieldWords(f)))) {
+        unsure ??= `A form on ${r.name} asks for a name or an email but has no message or phone field, so whether it is a contact form is not known.`;
+      }
     }
   }
-  const embedded = findAll(readings.map((r) => r.page), EMBEDDED_FORMS);
-  return { form: embedded.found.length ? { own: false, names: embedded.found, evidence: embedded.evidence } : null, withPassword, capped };
+  const embedded = findAll(readings, EMBEDDED_FORMS);
+  if (embedded.found.length) return { form: { own: false, names: embedded.found, evidence: embedded.evidence }, unsure, capped };
+  for (const r of readings) {
+    const script = FORM_SCRIPTS.find(([, re]) => re.test(r.live));
+    if (script) unsure ??= `The ${script[0]} forms script is loaded on ${r.name}, but no form from it is in the page's HTML, so whether the site has a contact form is not known.`;
+  }
+  return { form: null, unsure, capped };
 }
 
 /** schema.org types named in microdata (itemtype) and in RDFa (typeof, with the schema: prefix, or bare under a schema.org vocab). */
@@ -595,7 +720,7 @@ function structuredTypes(readings: readonly Reading[]): { types: string[]; evide
   for (const r of readings) {
     const p = r.page;
     // Every JSON-LD block, each read whole: scripts never overlap, so the page is read once however large a block is.
-    for (const { tag, inner } of elementsOf(p.html, r.lower, "script")) {
+    for (const { tag, inner } of elementsOf(r.live, r.liveLower, "script")) {
       if ((tag.attrs.type ?? "").trim().toLowerCase() !== "application/ld+json") continue;
       try {
         visit(JSON.parse(inner), 0);
@@ -604,7 +729,7 @@ function structuredTypes(readings: readonly Reading[]): { types: string[]; evide
         // Broken JSON-LD is what the site serves; it counts as none.
       }
     }
-    const named = [...p.html.matchAll(MICRODATA_TYPE), ...p.html.matchAll(RDFA_PREFIXED_TYPE), ...(RDFA_VOCAB.test(p.html) ? p.html.matchAll(RDFA_BARE_TYPE) : [])];
+    const named = [...r.markup.matchAll(MICRODATA_TYPE), ...r.markup.matchAll(RDFA_PREFIXED_TYPE), ...(RDFA_VOCAB.test(r.markup) ? r.markup.matchAll(RDFA_BARE_TYPE) : [])];
     for (const m of named) {
       types.add(m[1]);
       evidence ??= { url: p.finalUrl, excerpt: excerptAt(p.html, m.index ?? 0, m[0].length) };
@@ -682,14 +807,15 @@ export function runSiteChecks(input: {
   const pages = input.pages.filter(loaded);
   const n = pages.length;
   const read = n === 1 ? "the home page" : `${n} pages`;
-  const js = pages.every(builtInBrowser);
   const readings: Reading[] = pages.map((page) => {
-    const lower = asciiLower(page.html);
+    const { live, liveLower, markup, markupLower } = liveViews(page.html);
     const name = page === home ? "the home page" : page.finalUrl;
     const scan: Scan = { capped: null };
-    const links = linksOf(page.html, lower, scan);
-    return { page, lower, name, links, linksCapped: scan.capped && `${name} ${scan.capped}` };
+    const links = linksOf(markup, markupLower, scan);
+    return { page, live, liveLower, markup, lower: markupLower, name, links, linksCapped: scan.capped && `${name} ${scan.capped}` };
   });
+  // Whether the pages build themselves in the browser is told without their comments.
+  const js = readings.every((r) => builtInBrowser({ ...r.page, html: r.live }));
   const homeReading = readings[0];
   const checks: SiteCheck[] = [];
 
@@ -717,7 +843,7 @@ export function runSiteChecks(input: {
 
   const homeLower = homeReading.lower;
   const metaScan: Scan = { capped: null };
-  const metas = tagsOf(home.html, "meta", homeLower, metaScan);
+  const metas = tagsOf(homeReading.markup, "meta", homeLower, metaScan);
   const metaCapped = metaScan.capped && `the home page ${metaScan.capped}`;
   const viewport = metaContent(metas, "viewport");
   const fits = !!viewport && /width\s{0,20}=\s{0,20}device-width/i.test(viewport.content);
@@ -737,8 +863,8 @@ export function runSiteChecks(input: {
   );
 
   // The title: its first 1,000 characters, wherever it closes (a title is text only, so the start of one is the start of it).
-  const titleTag = nextTag(home.html, homeLower, "title", 0);
-  const titleText = titleTag ? stripTags(home.html.slice(titleTag.end, Math.min(closeAt(homeLower, "title", titleTag.end), titleTag.end + 1_000))).slice(0, 300) : "";
+  const titleTag = nextTag(homeReading.markup, homeLower, "title", 0);
+  const titleText = titleTag ? stripTags(homeReading.markup.slice(titleTag.end, Math.min(closeAt(homeLower, "title", titleTag.end), titleTag.end + 1_000))).slice(0, 300) : "";
   checks.push(yesNo("title", !!titleText, `The home page title is "${titleText.slice(0, 90)}".`, "The home page has no title for browsers and search results.", [], titleText ? { url: home.finalUrl, excerpt: titleText.slice(0, 160) } : null, false, titleTag ? null : homeCut));
 
   const description = metaContent(metas, "description");
@@ -760,18 +886,18 @@ export function runSiteChecks(input: {
           found: forms.form.names,
           evidence: forms.form.evidence,
         }
-      : !js && forms.withPassword
-        ? { key: "contact_form", status: "unknown", detail: `A form on ${forms.withPassword} has a message field but also asks for a password, so whether it is a contact form is not known.`, found: [], evidence: null }
+      : !js && forms.unsure
+        ? { key: "contact_form", status: "unknown", detail: forms.unsure, found: [], evidence: null }
         : yesNo("contact_form", false, "", `None of ${read} has a contact form.`, [], null, js, first(anyCut, forms.capped, homeReading.linksCapped, contactUnread)),
   );
 
-  const booking = findAll(pages, BOOKING);
+  const booking = findAll(readings, BOOKING);
   checks.push(yesNo("online_booking", booking.found.length > 0, `Visitors can book online (${booking.found.join(", ")}).`, `No online booking tool was found on ${read}.`, booking.found, booking.evidence, js, first(anyCut, homeReading.linksCapped, notRead("booking"))));
 
-  const chat = findAll(pages, CHAT);
+  const chat = findAll(readings, CHAT);
   checks.push(yesNo("live_chat", chat.found.length > 0, `The site has live chat (${chat.found.join(", ")}).`, `No live chat tool was found on ${read}.`, chat.found, chat.evidence, js, anyCut));
 
-  const analytics = findAll(pages, ANALYTICS);
+  const analytics = findAll(readings, ANALYTICS);
   checks.push(yesNo("analytics", analytics.found.length > 0, `The site measures its visitors (${analytics.found.join(", ")}).`, `No visitor analytics tag was found on ${read}.`, analytics.found, analytics.evidence, js, anyCut));
 
   const platform = platformsOf(home, metaContent(metas, "generator"));
@@ -890,8 +1016,8 @@ export type RobotsRules = { allow: string[]; disallow: string[]; tooMany: boolea
 const isHexDigit = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
 /** RFC 3986's unreserved characters: A-Z, a-z, 0-9, "-", ".", "_", "~". */
 const isUnreserved = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 46 || c === 95 || c === 126;
-/** Printable ASCII the URL parser still encodes in a path: '"', "<", ">", "`", "{", "}". */
-const ENCODED_IN_PATH = new Set([34, 60, 62, 96, 123, 125]);
+/** Printable ASCII the URL parser still encodes in a path or its query: '"', "'" (in a query), "<", ">", "`", "{", "}". */
+const ENCODED_IN_PATH = new Set([34, 39, 60, 62, 96, 123, 125]);
 const HEX = "0123456789ABCDEF";
 const pct = (b: number) => `%${HEX[b >> 4]}${HEX[b & 15]}`;
 const UTF8 = new TextEncoder();
@@ -900,10 +1026,11 @@ const UTF8 = new TextEncoder();
  * A path, or a robots.txt rule, in the one spelling RFC 9309 (section 2.2.2)
  * compares them in: a character outside ASCII percent-encoded as UTF-8; a
  * percent-encoded unreserved character decoded ("%70rivate" is "private");
- * every other percent-encoding kept, its hex in capitals; and what a URL never
- * carries raw in its path (a control character, a space, '"', "<", ">", "`",
- * "{", "}") encoded as the URL parser encodes it. Case is kept: a path is
- * matched case-sensitively. One forward pass.
+ * every other percent-encoding kept, its hex in capitals; and what the URL
+ * parser encodes in a path (a control character, a space, '"', "<", ">", "`",
+ * "{", "}") or in a query ("'") encoded as it encodes it, wherever it is, so a
+ * rule spelled with "'" matches the "%27" a query is asked with. Case is kept:
+ * a path is matched case-sensitively. One forward pass.
  */
 export function robotsNormal(s: string): string {
   let out = "";
@@ -962,8 +1089,9 @@ export function readRobots(text: string, agent = ROBOTS_AGENT, cut = false): { s
   let agentLines = false;
   const lines = text.replace(/^\uFEFF/, "").split(/\r\n|\r|\n/);
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/#.*$/, "").trim();
-    const m = /^([A-Za-z-]+)\s*:\s*(.*)$/.exec(line);
+    // [^\r\n], never ".": a "." stops at U+2028 and U+2029, which kept such a comment and dropped its rule.
+    const line = lines[i].replace(/#[^\r\n]*$/, "").trim();
+    const m = /^([A-Za-z-]+)\s*:\s*([^\r\n]*)$/.exec(line);
     if (!m) continue;
     const field = m[1].toLowerCase();
     let value = m[2].trim();

@@ -21,11 +21,13 @@
  *     shape that once took seconds is read well under a second;
  *   - a Verified fact is only what our own fetch measured, and says no more
  *     than it showed: nothing about a site that did not answer, whose home page
- *     did not load or is a parked domain (the brief carries one gap, with the
- *     time), no "no" from a page cut off at the size limit, a scan stopped by
- *     its limit, or a contact or booking page that was not read, no sitemap
- *     that was not read, and every fact citing a request that was made and
- *     stored as a source;
+ *     did not load, is a parked domain, sends visitors on or frames another
+ *     address (the brief carries one gap, with the time), nothing from an inner
+ *     page that is not the site (a bot check), nothing from markup in a comment
+ *     or a script's text, no "no" from a page cut off at the size limit, a scan
+ *     stopped by its limit, a contact or booking page that was not read, or a
+ *     form that may be a quote request, no sitemap that was not read, and every
+ *     fact citing a request that was made and stored as a source;
  *   - a form answer is only an answer: "constructor" neither crashes the brief
  *     nor scores the lead;
  *   - the brief labels the site's checks Verified and the form's answers
@@ -291,6 +293,17 @@ async function main() {
       fill('itemtype="https://schema.org/A" typeof="schema:B" vocab="https://schema.org/" typeof="C" '),
       fill("itemtype = ' ".padEnd(40, " ")),
       fill("This domain is parked. "),
+      // Comments and the text of scripts and styles, blanked in one pass (review 3, finding 4), and the stubs and forms read after it (findings 1, 2).
+      fill("<!--"),
+      fill("<!---->"),
+      `<!--${fill("-")}`,
+      fill("<!--<script>"),
+      fill("<script><!--"),
+      fill("<style></style><!-- --!>"),
+      fill("</script><script>"),
+      fill('<meta http-equiv="refresh" content="0;'),
+      fill("<frameset><frame "),
+      fill('<form><input name="name"><input name="email"><button>'),
     ];
     for (const html of shapes) {
       const started = performance.now();
@@ -405,6 +418,56 @@ async function main() {
     const mixed = checksOn('<script src="https://cdn.shopify.com/s/a.js"></script><script>Shopify.theme = {};</script><img src="https://blog.example.org/wp-content/uploads/a.jpg">').get("platform");
     assert.equal(mixed?.detail, "The site is built on Shopify, and shows signs of WordPress.");
   });
+  // Review 3, finding 1: a quote or call-back form read as "None of 3 pages has a contact form", and raised no-way-to-ask.
+  await check("a quote or call-back form is a way to get in touch; a form that may be one is unknown, never a Verified no (review 3, finding 1)", () => {
+    const lead = '<form action="/get-quote" method="post"><input type="text" name="full_name"><input type="tel" name="phone"><input type="email" name="email"><select name="service"><option>Drains</option></select><button type="submit">Get my free quote</button></form>';
+    const quote = checksOn(lead).get("contact_form");
+    assert.deepEqual([quote?.status, quote?.detail], ["yes", "The site has a contact form (a form that asks for a phone number)."]);
+    assert.equal(checksOn('<form action="/call-back"><input name="name"><input name="phone"><button>Call me back</button></form>').get("contact_form")?.status, "yes", "a call-back form");
+    // A name and an email, and nothing that says what for: a quote request, or a sign-up.
+    const maybe = checksOn('<form action="/request"><input name="name"><input type="email" name="email"><input type="date" name="day"><button>Send</button></form>').get("contact_form");
+    assert.deepEqual([maybe?.status, maybe?.detail], ["unknown", "A form on the home page asks for a name or an email but has no message or phone field, so whether it is a contact form is not known."]);
+    assert.equal(checksOn('<form action="/subscribe"><input type="email" name="email"><input type="tel" name="sms"><button>Subscribe</button></form>').get("contact_form")?.status, "no", "a sign-up that says it is one is not a contact form");
+    const b = briefMod.assembleBrief({ builtAt: BUILT, business: { name: "Acme", type: "local_service" }, form: null, site: { target: acme, checks: [...checksOn(lead).values()], pagesRead: 1, notes: [] } });
+    assert.ok(!b.facts.some((f) => f.id === "site:contact_form" && f.statement.startsWith("None of")), "no Verified no");
+    assert.ok(!b.hypotheses.some((h) => h.id === "no-way-to-ask"));
+  });
+  // Review 3, finding 4: a commented-out form, phone link, viewport, booking link or JSON-LD block, and a form in a script's text, each read "yes".
+  await check("markup in a comment, an IE conditional comment or a script's text is not part of the page; the tools its scripts load still are (review 3, finding 4)", () => {
+    const form = '<form action="/send"><input name="name"><input type="email" name="email"><textarea name="message"></textarea></form>';
+    for (const [label, body, key] of [
+      ["a commented-out form", `<!-- ${form} -->`, "contact_form"],
+      ["a form in an IE conditional comment", `<!--[if IE]>${form}<![endif]-->`, "contact_form"],
+      ["a form in a script's template", `<script type="text/template">${form}</script>`, "contact_form"],
+      ["a form in a script's string", `<script>var f = '${form}';</script>`, "contact_form"],
+      ["a commented-out phone link", '<!-- <a href="tel:+14035550199">Call</a> -->', "click_to_call"],
+      ["a commented-out booking link", "<!-- calendly.com/acme -->", "online_booking"],
+      ["a commented-out JSON-LD block", '<!-- <script type="application/ld+json">{"@type":"Plumber"}</script> -->', "structured_data"],
+    ] as const) {
+      assert.equal(checksOn(body).get(key)?.status, "no", label);
+    }
+    assert.equal(checksOn("", '<!-- <meta name="viewport" content="width=device-width"> -->').get("mobile_viewport")?.status, "no", "a commented-out viewport");
+    // What is live is still read: a script's text, one that hides itself in "<!--", and the markup after a comment, an empty one included.
+    const live = checksOn(`<!-- Google tag --><script><!--\ngtag('config', 'G-ABC123');\n//--></script><!-- --><a href="tel:+14035550199">Call</a><!---><a href="mailto:a@acme.ca">Email</a>`);
+    assert.deepEqual([live.get("analytics")?.status, live.get("click_to_call")?.status, live.get("email_link")?.status], ["yes", "yes", "yes"]);
+    assert.equal(checksOn('<script src="https://embed.tawk.to/abc"></script>').get("live_chat")?.status, "yes");
+    assert.equal(checksOn('<script type="application/ld+json">{"@type":"Plumber"}</script>').get("structured_data")?.status, "yes");
+    // Both copies are the page's length, so every index read from them points into the page.
+    const html = '<p>a</p><!-- <a href="tel:1"> --><script>var s = "<!--";</script><a href="tel:2">x</a>';
+    const v = checksMod.liveViews(html);
+    assert.deepEqual([v.live.length, v.markup.length], [html.length, html.length]);
+    assert.ok(!v.live.includes("tel:1") && v.live.includes('var s = "<!--"') && !v.markup.includes("var s") && v.markup.includes("tel:2"));
+  });
+  // Review 3, finding 5: a Buy Button (cdn.shopify.com and a .myshopify.com address) read as "built on Shopify"; HubSpot's forms script alone as a form.
+  await check("a Shopify Buy Button is a sign of Shopify, not a Shopify site; HubSpot's forms script alone is not a form (review 3, finding 5)", () => {
+    const buy = checksOn('<img src="https://cdn.shopify.com/s/files/1/a.png"><script>ShopifyBuy.buildClient({ domain: "acme.myshopify.com" });</script><link rel="stylesheet" href="/wp-content/themes/x/style.css">').get("platform");
+    assert.equal(buy?.detail, "The site shows signs of WordPress and Shopify.");
+    assert.equal(checksOn('<link rel="stylesheet" href="https://cdn.shopify.com/s/files/1/t/1/assets/theme.css"><script>Shopify.theme = {"name":"Dawn"};</script>').get("platform")?.detail, "The site is built on Shopify.");
+    const script = checksOn("", '<script src="https://js.hsforms.net/forms/embed/v2.js"></script>').get("contact_form");
+    assert.deepEqual([script?.status, script?.detail], ["unknown", "The HubSpot forms script is loaded on the home page, but no form from it is in the page's HTML, so whether the site has a contact form is not known."]);
+    const hubspot = checksOn('<script>hbspt.forms.create({ region: "na1", portalId: "1", formId: "a" });</script>', '<script src="https://js.hsforms.net/forms/embed/v2.js"></script>').get("contact_form");
+    assert.deepEqual([hubspot?.status, hubspot?.detail], ["yes", "The site has a form from HubSpot; what it asks for is not in the page's HTML."]);
+  });
   await check("the pages worth reading are the site's own contact, booking, services, pricing and about pages", () => {
     const sameSite = (u: URL) => u.hostname === "fixture-plumbing.ca";
     const picked = checksMod.pagesToRead(page("https://fixture-plumbing.ca/", HOME), sameSite);
@@ -513,6 +576,19 @@ async function main() {
       const took = performance.now() - started;
       assert.ok(took < 500, `took ${took.toFixed(0)} ms on ${JSON.stringify(text.slice(14, 40))}`);
     }
+  });
+  // Review 3, finding 3: "." stops at U+2028 and U+2029, so such a comment was kept and its rule dropped; an apostrophe never matched the %27 asked for.
+  await check("robots.txt: a line with U+2028 or U+2029 in it keeps its rule, and an apostrophe matches the %27 a query is asked with (review 3, finding 3)", () => {
+    const allow = (text: string, path: string) => checksMod.robotsAllow(path, checksMod.readRobots(text));
+    for (const sep of [0x2028, 0x2029]) {
+      const c = String.fromCharCode(sep);
+      assert.equal(allow(`User-agent: *\nDisallow: /contact # keep out${c}\n`, "/contact"), false, `a comment ending in U+${sep.toString(16)}`);
+      assert.equal(allow(`User-agent: *\nDisallow: /contact # a${c}b\n`, "/contact"), false, `U+${sep.toString(16)} inside a comment`);
+    }
+    const q = new URL("https://acme.ca/x?a='b'");
+    assert.equal(q.search, "?a=%27b%27", "the URL parser encodes an apostrophe in a query");
+    assert.equal(allow("User-agent: *\nDisallow: /x?a='b'\n", q.pathname + q.search), false);
+    assert.equal(allow("User-agent: *\nDisallow: /a%27b\n", new URL("https://acme.ca/a'b").pathname), false, "in a path, too, an apostrophe and %27 are one");
   });
 
   console.log("reading a site");
@@ -823,6 +899,42 @@ async function main() {
     // A business's own page that happens to use the words is still its site.
     const shop = `<html><head><title>Acme Plumbing</title></head><body><p>${"We fix pipes and drains across the city. ".repeat(60)}</p><p>Is this domain for sale? No, but our van is.</p></body></html>`;
     assert.equal((await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body: shop } })))).unread, null);
+  });
+  // Review 3, finding 2: these were measured as the business's own site, with Verified facts ("None of 4 pages has a contact form") and likely problems.
+  await check("a page that sends visitors on, frames another address or is a placeholder is not measured; nor is an inner page that is not the site (review 3, finding 2)", async () => {
+    for (const [label, body, what] of [
+      ["meta refresh", '<!doctype html><html><head><title>Acme Plumbing</title><meta http-equiv="refresh" content="0; url=https://acme-plumbing.wixsite.com/acme"></head><body>Redirecting to our new site...</body></html>', "a page that sends visitors on to another address"],
+      ["frameset", '<!doctype html><html><head><title>Acme Plumbing</title></head><frameset rows="100%"><frame src="https://acme-plumbing.weebly.com/"></frameset></html>', "a page that shows another address in a frame"],
+      ["a body that is only a frame", '<!doctype html><html><head><title>Acme Plumbing</title><style>iframe{border:0;width:100%;height:100vh}</style></head><body><iframe src="https://acme-plumbing.godaddysites.com/"></iframe></body></html>', "a page that shows another address in a frame"],
+      ["coming soon", '<!doctype html><html><head><title>Acme Plumbing</title></head><body><h1>Coming soon</h1><p>Our new website is on its way.</p></body></html>', "a placeholder for a site that is not built yet"],
+    ] as const) {
+      const r = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body } })));
+      assert.equal(r.unread, "not_the_site", label);
+      assert.deepEqual(r.checks, [], label);
+      assert.ok(r.notes.some((n) => n.startsWith(`https://acme.ca/ showed what looks like ${what} ("`)), `${label}: ${r.notes.join(" | ")}`);
+      const b = briefOf(acme, r, FORM);
+      assert.ok(!b.facts.some((f) => f.source.kind === "site"), label);
+      assert.ok(!b.hypotheses.some((h) => WEBSITE_RULES.includes(h.id)), label);
+    }
+    // A refresh in a comment sends no one on, a bare "300" only reloads, and a page with a link of its own that shows a map is the site.
+    for (const body of [
+      `<html><head><title>Acme</title><!-- <meta http-equiv="refresh" content="0; url=/new"> --></head><body>${PAD}</body></html>`,
+      `<html><head><title>Acme</title><meta http-equiv="refresh" content="300"></head><body>${PAD}</body></html>`,
+      '<html><head><title>Acme</title></head><body><a href="/">Home</a><iframe src="https://www.google.com/maps/embed?pb=1"></iframe></body></html>',
+    ]) {
+      assert.equal(checksMod.notTheSite(page("https://acme.ca/", body)), null, body);
+    }
+    // Inner pages that answer 200 with a bot check: not read as part of the site, so what they would show is unknown.
+    const challenge = "<html><head><title>Just a moment...</title></head><body><h1>Just a moment...</h1><p>Checking your browser before accessing the site.</p></body></html>";
+    const home = `<html><head><title>Acme Plumbing</title><meta name="viewport" content="width=device-width"></head><body>${PAD}<a href="/contact">Contact</a> <a href="/book">Book</a></body></html>`;
+    const r = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body: home }, "https://acme.ca/contact": { body: challenge }, "https://acme.ca/book": { body: challenge } })));
+    assert.equal(r.unread, null);
+    assert.ok(r.notes.includes('https://acme.ca/contact showed what looks like a bot check that needs a browser ("Just a moment..."), so it was not checked.'), r.notes.join(" | "));
+    const by = new Map(r.checks.map((c) => [c.key, c]));
+    for (const k of ["contact_form", "click_to_call", "email_link", "online_booking"] as const) assert.equal(by.get(k)?.status, "unknown", k);
+    assert.equal(by.get("analytics")?.detail, "No visitor analytics tag was found on the home page.", "only the home page is measured");
+    const b = briefOf(acme, r, FORM);
+    assert.ok(!b.hypotheses.some((h) => ["no-way-to-ask", "booking-by-hand", "no-tap-to-call"].includes(h.id)), b.hypotheses.map((h) => h.id).join(","));
   });
 
   console.log("the brief");

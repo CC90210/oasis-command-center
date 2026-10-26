@@ -26,7 +26,9 @@
  * "no": a read that failed is a gap, not an absence, and a contact or booking
  * page that was not read makes what it would have shown unknown. When the
  * home page was not read, or is not the business's own (a domain parking
- * page, a host's placeholder), there are no checks at all.
+ * page, a host's placeholder, a page that sends visitors on), there are no
+ * checks at all; another page that is not (a bot check) is not checked, and
+ * counts as not read.
  *
  * The fetch itself is passed in, so tests run on fixtures without a network.
  */
@@ -380,23 +382,27 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   // One that was not read is kept with its kind: what the contact or booking
   // page would have shown is then unknown, never "no".
   const wanted = pagesToRead(home.page, sameSite, MAX_EXTRA_PAGES);
-  const extra: Read[] = [];
+  const extra: PageSnapshot[] = [];
   const unread: LinkedPage[] = [];
   for (let i = 0; i < wanted.length; i += 4) {
     const batch = await Promise.all(wanted.slice(i, i + 4).map((w) => readPage(w.url, deps, { accept: "html", deadline, mayRead })));
     batch.forEach((r, j) => {
       const w = wanted[i + j];
       record("site_page", w.url, r);
-      extra.push(r);
+      // Like the home page, a page that is not the business's own (a bot check, a page that sends visitors on) is not measured as part of the site.
+      const other = r.ok && r.page.status >= 200 && r.page.status < 300 ? notTheSite(r.page) : null;
       if (!r.ok) {
         notes.push(describeReadError(w.url, r.error));
         unread.push(w);
       } else if (r.page.status < 200 || r.page.status >= 300) {
         notes.push(`${w.url} answered with HTTP ${r.page.status}, so it was not checked.`);
         unread.push(w);
-      }
+      } else if (other) {
+        notes.push(`${w.url} showed what looks like ${other.what} ("${other.seen.replace(/\s+/g, " ")}"), so it was not checked.`);
+        unread.push(w);
+      } else extra.push(r.page);
     });
   }
-  const snapshots = [home.page, ...extra.flatMap((r) => (r.ok ? [r.page] : []))];
+  const snapshots = [home.page, ...extra];
   return done(runSiteChecks({ pages: snapshots, https: { served, httpRedirects, secureFailure }, sitemap, unread }), null);
 }
