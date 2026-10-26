@@ -5,15 +5,16 @@
  * workspace can use (lib/tools/catalog.ts decides which), each with its fields,
  * a Run button and its runs.
  *
- * THE LIFECYCLE (2026-10-26). Above the form, a card's panel is idle (nothing),
- * running (every run in flight, each with its stage, and a Refresh) or in review
- * (the newest finished run: Download, Open in Extracted videos and Done; or the
- * failure, Try again and Dismiss). Done puts the finished runs away, clears the
- * link and puts the cursor in the field. The card remembers that per tool in
+ * THE LIFECYCLE (2026-10-26). Above the form, a card shows every run in flight
+ * (each with its stage, a progress strip, a Refresh) and, under those, every
+ * finished run not yet put away, newest first, each with its result (Download,
+ * Open in Extracted videos) and its own Done, or its failure with Try again and
+ * Dismiss. Done puts away exactly the run it sits on and puts the cursor in the
+ * field; the card remembers the put-away ids per workspace and tool in
  * localStorage, so leaving the page and coming back never brings back a run
- * already dealt with. The form itself stays in every state: a run that stalls on
- * the PC must never lock the card, and a second link can be queued while the
- * first downloads (the server takes five). Which state the panel is in is a pure
+ * already dealt with. The form itself stays in every state: a run that stalls
+ * on the PC must never lock the card, and a second link can be queued while
+ * the first downloads (the server takes five). Which runs show is a pure
  * function of the runs the server lists (components/tools/tool-grid-format.ts
  * liveRuns / cardPhase), checked without a browser by tests/tools-grid.test.ts;
  * the states themselves are driven in a real browser by tests/tools-grid.browser.py.
@@ -40,12 +41,16 @@
  * The first render shows no time and no run (runs load after mount), so the
  * server's markup and the browser's first paint are the same (React #418).
  * While one of a card's runs is in flight the card polls every 3 s, for at
- * most 30 minutes; it also refreshes when the window regains focus. Each read
- * carries a version and a stale one is dropped, so a read that started before
- * a run was accepted never replaces that run with an older snapshot. A run
- * request that gets no answer is not proof it was refused: the card keeps the
- * same idempotency key for an unchanged input, so pressing the button again is
- * the same run (POST /api/tools/run dedupes on the key).
+ * most 30 minutes; it also refreshes when the window regains focus, which also
+ * restarts that clock. A poll never touches the Refresh button; only a press
+ * does. Each read carries a version and a stale one is dropped, so a read that
+ * started before a run was accepted never replaces that run with an older
+ * snapshot. A run request with no clear answer (no response, or a server error)
+ * is not proof it was refused: the card says so, reads the runs at once, and
+ * keeps the same idempotency key for an unchanged input, so pressing the button
+ * again is the same run (POST /api/tools/run dedupes on the key). Deadlines are
+ * an AbortController and a timer, as lib/meet/room-client.ts makes them:
+ * AbortSignal.timeout is missing in Safari before 16.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -68,29 +73,34 @@ import {
   READ_TIMEOUT_MS,
   REFRESH_LABEL,
   REFRESHING_LABEL,
-  RUN_TIMEOUT_MS,
+  RELOAD_RUNS_LABEL,
   RUN_UNCONFIRMED,
   RUNNER_OFFLINE,
   RUNS_UNREADABLE,
   SAVED_TO_TRAINING,
   SEEN_REFRESH_MS,
   STARTING_LABEL,
+  STILL_OFFLINE,
   TOOL_RECHECK_EVENT,
   TOOL_RUN_FINISHED_EVENT,
   TRY_AGAIN_LABEL,
+  VIDEO_CARD_ID,
   VIDEO_TOOL_KEY,
   cardPhase,
   doneHint,
-  doneThroughKey,
+  doneIdsKey,
   historyLabel,
   isInFlight,
   liveRuns,
   nextPollIn,
+  parseDoneIds,
   refusalLine,
+  rememberDone,
   resultTitle,
   reviewHeadline,
   runInput,
   runTime,
+  runTimeoutMs,
   runsOnText,
   seenLine,
   statusLabel,
@@ -109,6 +119,8 @@ export type ToolGridProps = {
   assetDownloadPrefix?: string;
   /** The whole Extracted videos list, linked from the Video extractor's history drawer; empty = no link. */
   extractedVideosHref?: string;
+  /** What Done remembers is kept under this scope (the workspace's tenant id), so two workspaces on one browser never share it. */
+  storageScope?: string;
   settingsAiHref?: string;
   /** Founders see a failure's code next to its line; a client workspace never does. */
   showCodes?: boolean;
@@ -120,10 +132,24 @@ export type ToolGridProps = {
 
 const HEADING = "px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted";
 const TAP = "min-h-11 min-w-11";
-/** The Video extractor card's element id: the Extracted videos page links back to /tools#video-extractor. */
-export const VIDEO_CARD_ID = "video-extractor";
-/** How long Check connection reads "Checking..." when the page's refresh changes nothing. */
+/** How long Check connection reads "Checking..." before the card concludes the PC is still offline. */
 const CHECKING_FOR_MS = 4_000;
+
+/** A deadline of `ms`: `signal` aborts once it passes, `done` stops the timer when the call is over. */
+function deadline(ms: number): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, done: () => window.clearTimeout(timer) };
+}
+
+/** The put-away ids under `key`, or [] where storage is refused (private mode) or holds junk. */
+function readDoneIds(key: string): string[] {
+  try {
+    return parseDoneIds(window.localStorage.getItem(key));
+  } catch {
+    return [];
+  }
+}
 
 export function ToolGrid({
   catalog,
@@ -132,6 +158,7 @@ export function ToolGrid({
   assetHrefPrefix,
   assetDownloadPrefix = "",
   extractedVideosHref = "",
+  storageScope = "",
   settingsAiHref = setupHref("ai_account"),
   showCodes = false,
   className = "",
@@ -157,6 +184,7 @@ export function ToolGrid({
               assetHrefPrefix={assetHrefPrefix}
               assetDownloadPrefix={assetDownloadPrefix}
               extractedVideosHref={extractedVideosHref}
+              storageScope={storageScope}
               settingsAiHref={settingsAiHref}
               showCodes={showCodes}
             />
@@ -169,9 +197,10 @@ export function ToolGrid({
 
 type CardProps = Required<Omit<ToolGridProps, "catalog" | "className" | "showHeading">> & { tool: CatalogTool };
 
-function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownloadPrefix, extractedVideosHref, settingsAiHref, showCodes }: CardProps) {
+function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownloadPrefix, extractedVideosHref, storageScope, settingsAiHref, showCodes }: CardProps) {
   const def = toolByKey(tool.key);
   const isVideo = tool.key === VIDEO_TOOL_KEY;
+  const storageKey = doneIdsKey(tool.key, storageScope);
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(tool.fields.map((f) => [f.name, f.defaultValue ?? ""])),
   );
@@ -181,9 +210,10 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
   const [refusal, setRefusal] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobView[] | null>(null);
   const [readError, setReadError] = useState(false);
+  /** A read the person asked for (Refresh, Reload runs) is under way. A poll never sets it, so nothing flickers every 3 s. */
   const [reading, setReading] = useState(false);
-  /** The newest run Done put away (its created_at), read from localStorage after mount. */
-  const [doneThrough, setDoneThrough] = useState<string | null>(null);
+  /** The runs Done put away, read from localStorage after mount and again on focus. */
+  const [doneIds, setDoneIds] = useState<readonly string[]>([]);
   const [mounted, setMounted] = useState(false);
   /** The viewer's clock for "seen n min ago", set after mount and every SEEN_REFRESH_MS. */
   const [clock, setClock] = useState<number | null>(null);
@@ -191,6 +221,8 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
   const [reads, setReads] = useState(0);
   /** Check connection was pressed and the page's refresh has not changed this card yet. */
   const [checking, setChecking] = useState(false);
+  /** The refresh came back and the PC had still not checked in. */
+  const [stillOffline, setStillOffline] = useState(false);
   const pollStart = useRef<number | null>(null);
   /** Bumped by every read and by an accepted run: a read that finishes under an older version is dropped. */
   const readVersion = useRef(0);
@@ -203,51 +235,62 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
   const showsRuns = ready || tool.state === "runner_offline";
   const lastSeenAt = tool.runner?.lastSeenAt ?? null;
 
-  const load = useCallback(async () => {
-    const version = ++readVersion.current;
-    setReading(true);
-    try {
-      const res = await fetch(`${jobsEndpoint}?tool=${encodeURIComponent(tool.key)}&limit=${HISTORY_LIMIT}`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
-      });
-      const body = (await res.json().catch(() => null)) as { ok?: boolean; jobs?: JobView[] } | null;
-      if (version !== readVersion.current) return;
-      if (res.ok && body?.ok && Array.isArray(body.jobs)) {
-        setJobs(body.jobs);
-        setReadError(false);
-      } else {
-        setReadError(true);
-        console.warn("[tools.grid] could not read recent runs", { tool: tool.key, status: res.status });
+  const load = useCallback(
+    async (manual = false) => {
+      const version = ++readVersion.current;
+      if (manual) setReading(true);
+      const wait = deadline(READ_TIMEOUT_MS);
+      try {
+        const res = await fetch(`${jobsEndpoint}?tool=${encodeURIComponent(tool.key)}&limit=${HISTORY_LIMIT}`, { cache: "no-store", signal: wait.signal });
+        const body = (await res.json().catch(() => null)) as { ok?: boolean; jobs?: JobView[] } | null;
+        if (version !== readVersion.current) return;
+        if (res.ok && body?.ok && Array.isArray(body.jobs)) {
+          setJobs(body.jobs);
+          setReadError(false);
+        } else {
+          setReadError(true);
+          console.warn("[tools.grid] could not read recent runs", { tool: tool.key, status: res.status });
+        }
+      } catch (err) {
+        // What is on screen stays, and the card says the read failed; the next poll, a focus or Reload runs reads again.
+        if (version === readVersion.current) setReadError(true);
+        console.warn("[tools.grid] could not read recent runs", { tool: tool.key, error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        wait.done();
+        if (version === readVersion.current) {
+          setReading(false);
+          setReads((n) => n + 1);
+        }
       }
-    } catch (err) {
-      // What is on screen stays, and the card says the read failed; the next poll, a focus or Try again reads again.
-      if (version === readVersion.current) setReadError(true);
-      console.warn("[tools.grid] could not read recent runs", { tool: tool.key, error: err instanceof Error ? err.message : String(err) });
-    } finally {
-      if (version === readVersion.current) {
-        setReading(false);
-        setReads((n) => n + 1);
-      }
-    }
-  }, [jobsEndpoint, tool.key]);
+    },
+    [jobsEndpoint, tool.key],
+  );
 
   useEffect(() => {
     setMounted(true);
-    try {
-      setDoneThrough(window.localStorage.getItem(doneThroughKey(tool.key)));
-    } catch {
-      // Storage refused (private mode): Done still works for this visit.
-    }
+    setDoneIds(readDoneIds(storageKey));
     if (!showsRuns) return;
     void load();
-    const onFocus = () => void load();
+    const onFocus = () => {
+      // Another tab may have pressed Done; and a run still in flight after the polling window deserves a fresh one.
+      setDoneIds(readDoneIds(storageKey));
+      pollStart.current = null;
+      void load();
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       readVersion.current += 1;
       window.removeEventListener("focus", onFocus);
     };
-  }, [showsRuns, load, tool.key]);
+  }, [showsRuns, load, storageKey]);
+
+  // /founders/marketing/extracted links back to /tools#video-extractor: once the
+  // card is on the page (and its section open), land on it.
+  useEffect(() => {
+    if (!isVideo || window.location.hash !== `#${VIDEO_CARD_ID}`) return;
+    const frame = window.requestAnimationFrame(() => document.getElementById(VIDEO_CARD_ID)?.scrollIntoView({ block: "start" }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [isVideo]);
 
   useEffect(() => {
     if (!lastSeenAt) return;
@@ -283,22 +326,27 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
   }, [inFlight, tool.key]);
 
   // Check connection: "Checking..." until the page's refresh hands this card new
-  // server data (the state or the last check-in changes), or CHECKING_FOR_MS pass.
+  // server data (the state or the last check-in changes); if CHECKING_FOR_MS pass
+  // without that, the PC is still offline, and the card says so.
   useEffect(() => {
     setChecking(false);
+    setStillOffline(false);
   }, [tool.state, lastSeenAt]);
   useEffect(() => {
     if (!checking) return;
-    const timer = window.setTimeout(() => setChecking(false), CHECKING_FOR_MS);
+    const timer = window.setTimeout(() => {
+      setChecking(false);
+      setStillOffline(true);
+    }, CHECKING_FOR_MS);
     return () => window.clearTimeout(timer);
   }, [checking]);
 
-  const live = liveRuns(jobs, doneThrough);
+  const live = liveRuns(jobs, doneIds);
   const phase = ready ? cardPhase(live) : "idle";
-  /** The runs in flight, newest first, as the running panel lists them. */
+  /** The runs in flight, newest first. */
   const running = live.filter(isInFlight);
-  /** The newest finished run Done has not put away: what the review panel shows. */
-  const finished = live.find((j) => !isInFlight(j)) ?? null;
+  /** The finished runs Done has not put away, newest first, each with its own Done. */
+  const finished = live.filter((j) => !isInFlight(j));
 
   const validation = def ? def.validate(values) : null;
   const canRun = ready && !busy && validation?.ok === true;
@@ -308,16 +356,17 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
     submitting.current = true;
     setBusy(true);
     setRefusal(null);
-    const input = runInput(tool.fields, values, chosen);
-    const fingerprint = JSON.stringify(input);
-    // Same input, same key: a request that got no answer is retried as the same run.
-    if (attempt.current?.input !== fingerprint) attempt.current = { input: fingerprint, key: crypto.randomUUID() };
+    const wait = deadline(runTimeoutMs(tool.runsOn));
     try {
+      const input = runInput(tool.fields, values, chosen);
+      const fingerprint = JSON.stringify(input);
+      // Same input, same key: a request that got no clear answer is retried as the same run.
+      if (attempt.current?.input !== fingerprint) attempt.current = { input: fingerprint, key: crypto.randomUUID() };
       const res = await fetch(runEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tool: tool.key, input, idempotency_key: attempt.current.key }),
-        signal: AbortSignal.timeout(RUN_TIMEOUT_MS),
+        signal: wait.signal,
       });
       const body = (await res.json().catch(() => null)) as { ok?: boolean; job?: JobView } | null;
       if (res.ok && body?.ok && body.job) {
@@ -331,38 +380,48 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
         setJobs((prev) => withRun(prev, job));
         if (tool.runsOn === "runner") setValues((v) => ({ ...v, url: "" }));
         // A worker tool runs inside the request and answers already finished, so
-        // the in-flight watcher below never sees it start: tell the page here.
+        // the in-flight watcher above never sees it start: tell the page here.
         if (!isInFlight(job)) window.dispatchEvent(new CustomEvent(TOOL_RUN_FINISHED_EVENT, { detail: { tool: tool.key } }));
-      } else {
-        setRefusal(refusalLine(res.status, body));
+      } else if (res.status >= 400 && res.status < 500) {
         // The server answered and refused: no run exists, so the next press is a new request.
-        // A server error or an unreadable answer keeps the key: the run may exist.
-        if (res.status >= 400 && res.status < 500) attempt.current = null;
+        setRefusal(refusalLine(res.status, body));
+        attempt.current = null;
+      } else {
+        // A server error or an unreadable answer: the run may exist. Say so, keep the key, and look.
+        setRefusal(RUN_UNCONFIRMED);
+        void load();
       }
-    } catch {
+    } catch (err) {
+      console.warn("[tools.grid] the run request got no answer", { tool: tool.key, error: err instanceof Error ? err.message : String(err) });
       setRefusal(RUN_UNCONFIRMED);
+      void load();
     } finally {
+      wait.done();
       submitting.current = false;
       setBusy(false);
     }
   }
 
-  /** Done / Dismiss / Try again: put every finished run up to `job` away; the link is restored or cleared, and the cursor goes to the first field. */
+  /** Done / Dismiss / Try again on one run: put that run away; restore its link if asked, never touch what was typed since; cursor to the first field. */
   function putAway(job: JobView, restoreInput: boolean) {
-    const through = job.created_at;
-    setDoneThrough(through);
+    // Merge with what is stored: another tab may have put runs away since this one mounted.
+    const next = rememberDone([...readDoneIds(storageKey), ...doneIds], job.id);
+    setDoneIds(next);
     try {
-      window.localStorage.setItem(doneThroughKey(tool.key), through);
+      window.localStorage.setItem(storageKey, JSON.stringify(next));
     } catch {
       // Storage refused: the card forgets on the next visit, which only shows the run again.
     }
     setRefusal(null);
-    const urlField = tool.fields.find((f) => f.kind === "url");
-    if (urlField) setValues((v) => ({ ...v, [urlField.name]: restoreInput ? job.input_summary : "" }));
+    if (restoreInput) {
+      const urlField = tool.fields.find((f) => f.kind === "url");
+      if (urlField) setValues((v) => ({ ...v, [urlField.name]: job.input_summary }));
+    }
     formRef.current?.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")?.focus();
   }
 
   function recheck() {
+    setStillOffline(false);
     setChecking(true);
     window.dispatchEvent(new CustomEvent(TOOL_RECHECK_EVENT, { detail: { tool: tool.key } }));
   }
@@ -409,61 +468,45 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
           <button type="button" className={`btn-secondary ${TAP}`} disabled={checking} onClick={recheck}>
             {checking ? CHECKING_CONNECTION : CHECK_CONNECTION}
           </button>
+          {stillOffline && (
+            <p className="text-[11px] text-fg-dim" role="status">
+              {STILL_OFFLINE}
+            </p>
+          )}
         </div>
       )}
 
-      {ready && phase === "running" && (
-        <div aria-live="polite" className="space-y-2" data-testid={`tool-${tool.key}-running`}>
-          <ul className="space-y-1">
-            {running.map((j) => (
-              <li key={j.id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
-                <span className="font-medium text-fg-muted">{statusLabel(j, tool.runsOn)}</span>
-                <span className="min-w-0 max-w-full truncate text-fg-dim">{j.input_summary}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="h-1 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
-            <div className="h-full w-1/3 animate-pulse rounded-full bg-accent" />
-          </div>
+      {/* One live region, always in the tree, so what lands in it is announced; empty, it takes no room. */}
+      {ready && (
+        <div role="status" aria-live="polite" className="space-y-3 empty:hidden" data-testid={`tool-${tool.key}-panel`}>
+          {running.length > 0 && <RunningList runs={running} tool={tool} />}
+          {finished.map((job) => (
+            <ReviewBlock
+              key={job.id}
+              job={job}
+              tool={tool}
+              assetHrefPrefix={assetHrefPrefix}
+              assetDownloadPrefix={assetDownloadPrefix}
+              showCodes={showCodes}
+              onDone={() => putAway(job, false)}
+              onRetry={canRetry ? () => putAway(job, true) : undefined}
+            />
+          ))}
+        </div>
+      )}
+      {ready && running.length > 0 && (
+        <div>
           <button
             type="button"
             className={`btn-secondary ${TAP}`}
             disabled={reading}
             onClick={() => {
               pollStart.current = null;
-              void load();
+              void load(true);
             }}
           >
             {reading ? REFRESHING_LABEL : REFRESH_LABEL}
           </button>
-        </div>
-      )}
-
-      {ready && phase === "review" && finished && (
-        <div aria-live="polite" className="space-y-3" data-testid={`tool-${tool.key}-review`}>
-          <div className="space-y-1">
-            <p className={`text-sm font-semibold ${finished.status === "failed" ? "text-status-hot" : "text-fg"}`}>{reviewHeadline(finished, tool.key)}</p>
-            <p className="break-all text-xs text-fg-muted">{resultTitle(finished) ?? finished.input_summary}</p>
-          </div>
-          {finished.status === "failed" ? (
-            <p className="text-xs text-status-hot">
-              {finished.error_message}
-              {showCodes && finished.error_code ? <span className="ml-2 font-mono text-[10px] text-fg-dim">{finished.error_code}</span> : null}
-            </p>
-          ) : (
-            <RunResult job={finished} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} />
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            {finished.status === "failed" && canRetry && (
-              <button type="button" className={`btn-primary ${TAP}`} onClick={() => putAway(finished, true)}>
-                {TRY_AGAIN_LABEL}
-              </button>
-            )}
-            <button type="button" className={`btn-secondary ${TAP}`} data-testid={`tool-${tool.key}-done`} onClick={() => putAway(finished, false)}>
-              {finished.status === "failed" ? DISMISS_LABEL : DONE_LABEL}
-            </button>
-          </div>
-          <p className="text-[11px] text-fg-dim">{doneHint(tool.key, finished.status === "failed")}</p>
         </div>
       )}
 
@@ -564,49 +607,140 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
       {showsRuns && readError && (
         <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-status-hot">
           <span>{RUNS_UNREADABLE}</span>
-          <button type="button" className={`btn-secondary ${TAP}`} disabled={reading} onClick={() => void load()}>
-            {reading ? REFRESHING_LABEL : TRY_AGAIN_LABEL}
+          <button type="button" className={`btn-secondary ${TAP}`} disabled={reading} onClick={() => void load(true)}>
+            {reading ? REFRESHING_LABEL : RELOAD_RUNS_LABEL}
           </button>
         </p>
       )}
 
       {showsRuns && history.length > 0 && (
-        <details className="group border-t border-bg-border pt-3" data-testid={`tool-${tool.key}-history`}>
-          <summary className={`flex cursor-pointer items-center text-xs font-medium text-fg-muted ${TAP}`}>{historyLabel(tool.key)}</summary>
-          <ul className="mt-1 divide-y divide-bg-border">
-            {history.map((j) => (
-              <li key={j.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-2 text-[11px] text-fg-dim">
-                {/* A finished row needs no status word: "Done" in a list is the word CC read as a
-                    locked button. Failed and in-flight rows still say what they are. */}
-                {j.status !== "done" && <span className="font-medium text-fg-muted">{statusLabel(j, tool.runsOn)}</span>}
-                {mounted && <span>{runTime(j.created_at)}</span>}
-                <span className="min-w-0 max-w-full truncate">{resultTitle(j) ?? j.input_summary}</span>
-                {j.status === "done" && j.asset_id && assetDownloadPrefix && (
-                  <a className="text-accent hover:underline" href={`${assetDownloadPrefix}${j.asset_id}/download`}>
-                    Download
-                  </a>
-                )}
-                {j.status === "done" && j.asset_id && (
-                  <a className="text-accent hover:underline" href={`${assetHrefPrefix}${j.asset_id}`}>
-                    {OPEN_EXTRACTED}
-                  </a>
-                )}
-                {j.status === "failed" && j.error_message && <span className="w-full">{j.error_message}</span>}
-              </li>
-            ))}
-          </ul>
-          {isVideo && extractedVideosHref && (
-            <a href={extractedVideosHref} className={`mt-1 inline-flex items-center text-xs font-medium text-accent hover:underline ${TAP}`}>
-              {ALL_EXTRACTED}
-            </a>
-          )}
-        </details>
+        <RunHistory jobs={history} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} extractedVideosHref={extractedVideosHref} showTimes={mounted} />
       )}
     </article>
   );
 }
 
-/** A finished run's result, as the review state shows it. Exported so a test can render every result with real payloads. */
+/** The runs in flight, each at its stage, over a progress strip. Exported so a test can render it with real runs. */
+export function RunningList({ runs, tool }: { runs: readonly JobView[]; tool: Pick<CatalogTool, "key" | "runsOn"> }) {
+  return (
+    <div className="space-y-2" data-testid={`tool-${tool.key}-running`}>
+      <ul className="space-y-1">
+        {runs.map((j) => (
+          <li key={j.id} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+            <span className="font-medium text-fg-muted">{statusLabel(j, tool.runsOn)}</span>
+            <span className="min-w-0 max-w-full truncate text-fg-dim">{j.input_summary}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="h-1 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+        <div className="h-full w-1/3 animate-pulse rounded-full bg-accent" />
+      </div>
+    </div>
+  );
+}
+
+/** One finished run waiting for Done: its headline, its result or failure, and its buttons. Exported so a test can render every result with real payloads. */
+export function ReviewBlock({
+  job,
+  tool,
+  assetHrefPrefix,
+  assetDownloadPrefix = "",
+  showCodes,
+  onDone,
+  onRetry,
+}: {
+  job: JobView;
+  tool: Pick<CatalogTool, "key" | "runsOn">;
+  assetHrefPrefix: string;
+  assetDownloadPrefix?: string;
+  showCodes: boolean;
+  onDone: () => void;
+  /** Absent when the input cannot be restored whole (a long text), so no Try again is offered. */
+  onRetry?: () => void;
+}) {
+  const failed = job.status !== "done";
+  return (
+    <div className="space-y-3" data-testid={`tool-${tool.key}-review`} data-job={job.id}>
+      <div className="space-y-1">
+        <p className={`text-sm font-semibold ${failed ? "text-status-hot" : "text-fg"}`}>{reviewHeadline(job, tool.key)}</p>
+        <p className="break-all text-xs text-fg-muted">{resultTitle(job) ?? job.input_summary}</p>
+      </div>
+      {failed ? (
+        <p className="text-xs text-status-hot">
+          {job.error_message}
+          {showCodes && job.error_code ? <span className="ml-2 font-mono text-[10px] text-fg-dim">{job.error_code}</span> : null}
+        </p>
+      ) : (
+        <RunResult job={job} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} />
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {failed && onRetry && (
+          <button type="button" className={`btn-primary ${TAP}`} onClick={onRetry}>
+            {TRY_AGAIN_LABEL}
+          </button>
+        )}
+        <button type="button" className={`btn-secondary ${TAP}`} data-testid={`tool-${tool.key}-done`} onClick={onDone}>
+          {failed ? DISMISS_LABEL : DONE_LABEL}
+        </button>
+      </div>
+      <p className="text-[11px] text-fg-dim">{doneHint(tool.key, failed)}</p>
+    </div>
+  );
+}
+
+/** The history drawer: the newest runs whatever Done put away, each with its links. Exported so a test can render it with real runs. */
+export function RunHistory({
+  jobs,
+  tool,
+  assetHrefPrefix,
+  assetDownloadPrefix = "",
+  extractedVideosHref = "",
+  showTimes,
+}: {
+  jobs: readonly JobView[];
+  tool: Pick<CatalogTool, "key" | "runsOn">;
+  assetHrefPrefix: string;
+  assetDownloadPrefix?: string;
+  extractedVideosHref?: string;
+  /** False in the first render: a time is the viewer's clock, drawn after mount. */
+  showTimes: boolean;
+}) {
+  const isVideo = tool.key === VIDEO_TOOL_KEY;
+  return (
+    <details className="group border-t border-bg-border pt-3" data-testid={`tool-${tool.key}-history`}>
+      <summary className={`flex cursor-pointer items-center text-xs font-medium text-fg-muted ${TAP}`}>{historyLabel(tool.key)}</summary>
+      <ul className="mt-1 divide-y divide-bg-border">
+        {jobs.map((j) => (
+          <li key={j.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-1 text-[11px] text-fg-dim">
+            {/* A finished row needs no status word: "Done" in a list is the word CC read as a
+                locked button. Failed and in-flight rows still say what they are. */}
+            {j.status !== "done" && <span className="font-medium text-fg-muted">{statusLabel(j, tool.runsOn)}</span>}
+            {showTimes && <span>{runTime(j.created_at)}</span>}
+            <span className="min-w-0 max-w-full truncate">{resultTitle(j) ?? j.input_summary}</span>
+            {j.status === "done" && j.asset_id && assetDownloadPrefix && (
+              <a className={`inline-flex items-center text-accent hover:underline ${TAP}`} href={`${assetDownloadPrefix}${j.asset_id}/download`}>
+                Download
+              </a>
+            )}
+            {j.status === "done" && j.asset_id && (
+              <a className={`inline-flex items-center text-accent hover:underline ${TAP}`} href={`${assetHrefPrefix}${j.asset_id}`}>
+                {OPEN_EXTRACTED}
+              </a>
+            )}
+            {j.status === "failed" && j.error_message && <span className="w-full">{j.error_message}</span>}
+          </li>
+        ))}
+      </ul>
+      {isVideo && extractedVideosHref && (
+        <a href={extractedVideosHref} className={`mt-1 inline-flex items-center text-xs font-medium text-accent hover:underline ${TAP}`}>
+          {ALL_EXTRACTED}
+        </a>
+      )}
+    </details>
+  );
+}
+
+/** A finished run's result, as its review block shows it. */
 export function RunResult({ job, tool, assetHrefPrefix, assetDownloadPrefix = "" }: { job: JobView; tool: Pick<CatalogTool, "key" | "runsOn">; assetHrefPrefix: string; assetDownloadPrefix?: string }) {
   const r = job.result as Record<string, unknown> | null;
   switch (tool.key) {

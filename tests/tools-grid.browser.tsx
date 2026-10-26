@@ -43,13 +43,17 @@ const tool: CatalogTool = {
 createRoot(document.getElementById("root")!).render(
   <main style={{ maxWidth: 1000, margin: "auto", padding: 16 }}>
     <ContentTabs />
-    <ToolGrid
-      catalog={{ installed: true, tools: [tool] }}
-      assetHrefPrefix="/founders/marketing/extracted?video="
-      assetDownloadPrefix="/api/founders/marketing/assets/"
-      extractedVideosHref="/founders/marketing/extracted"
-      showCodes
-    />
+    {/* The page wraps the grid in a CollapsibleSection panel (p-5): the same 20 px, so a 360 px check is honest. */}
+    <div style={{ padding: 20, border: "1px solid transparent" }}>
+      <ToolGrid
+        catalog={{ installed: true, tools: [tool] }}
+        assetHrefPrefix="/founders/marketing/extracted?video="
+        assetDownloadPrefix="/api/founders/marketing/assets/"
+        extractedVideosHref="/founders/marketing/extracted"
+        storageScope="fixture-tenant"
+        showCodes
+      />
+    </div>
     <RefreshOnToolRun />
   </main>,
 );

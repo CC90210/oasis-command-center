@@ -280,7 +280,9 @@ async function main() {
     // CC, 2026-10-25: Extracted videos is no longer a tab; the page leads back into the tool.
     assert.match(code("lib/tools/registry.ts"), /Extracted videos, inside this tool/);
     assert.match(code("app/founders/marketing/extracted/page.tsx"), /tools#video-extractor/, "the list links back to the Video extractor card");
-    assert.match(grid, /VIDEO_CARD_ID = "video-extractor"/);
+    assert.match(format, /VIDEO_CARD_ID = "video-extractor"/);
+    assert.match(grid, /id=\{isVideo \? VIDEO_CARD_ID : undefined\}/, "the card carries that id");
+    assert.match(code("app/founders/marketing/tools/page.tsx"), /openForHash=\{`#\$\{VIDEO_CARD_ID\}`\}/, "the hash opens the Tools section even when it was left collapsed");
     const overview = code("app/founders/marketing/page.tsx");
     assert.match(overview, /href=\{extracted \? EXTRACTED_ROOT : `\/founders\/marketing\/library\?group=\$\{g\.key\}`\}/);
     assert.match(overview, /label=\{extracted \? EXTRACTED_LABEL : g\.label\}/);

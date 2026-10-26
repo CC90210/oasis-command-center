@@ -80,6 +80,8 @@ export async function ToolsSection({
       assetHrefPrefix={assetHrefPrefix}
       assetDownloadPrefix={assetDownloadPrefix}
       extractedVideosHref={extractedVideosHref}
+      // What Done remembers in the browser is kept per workspace, never shared across them.
+      storageScope={tenantId}
       showCodes={showCodes}
       className={className}
       showHeading={showHeading}
