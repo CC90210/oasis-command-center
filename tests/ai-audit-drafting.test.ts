@@ -2,7 +2,7 @@
  * ai-audit-drafting.test.ts — phase 4a of the Free AI Audit: the first drafts
  * of the audit and its proposal, built by code from the stored research, on a
  * real libSQL file with the real migrations (bravo__186, 206, 237, 238, 239,
- * 241, 243).
+ * 240, 241, 243).
  *
  * Pins:
  *   - the drafted audit validates and has nothing blocking; it keeps nothing
@@ -422,7 +422,7 @@ async function main() {
   console.log("drafting after research, on the database");
   const db = await setupDatabase();
   await setupProjectCustomers(db);
-  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__241_ai_audit_briefs.sql", "bravo__243_ai_audit_research.sql"]) await apply(db, f);
+  for (const f of ["bravo__186_os_approvals.sql", "bravo__206_tool_jobs.sql", "bravo__240_meet_local_copies.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__241_ai_audit_briefs.sql", "bravo__243_ai_audit_research.sql"]) await apply(db, f);
   const store = await import("../lib/ai-audit/store");
   const lifecycle = await import("../lib/ai-audit/lifecycle");
   const versions = await import("../lib/ai-audit/versions");

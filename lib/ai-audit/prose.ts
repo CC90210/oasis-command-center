@@ -131,6 +131,8 @@ const RANGE_GAP = /^\s*(?:[a-z%$]+\s+)?(?:to|-|\u2013|\u2014|or|and)\s*\$?\s*$/i
 const CLAUSE_END = /[,;:.!?]|\b(?:and|but|which|while|so|because|whereas)\b/i;
 /** "one" that counts nothing: "each one", "no one", "one of them". */
 const NOT_A_COUNT = /\b(?:each|every|no|any|some|the|this|that|which)\s+one\b|\bone\s+(?:of|another|by one)\b|\bsomeone\b|\banyone\b/gi;
+/** "Within a minute", "an hour": a time frame (inventsFacts checks those against the draft), not a count. */
+const A_TIME = /\b(?:a|an)\s+(?:second|minute|hour|day|week|month|quarter|year)s?\b/gi;
 /** A share said in words: "half of", "two thirds of", "one in four". */
 const SHARE_WORDS = /\b(?:half|(?:a|one|two|three|four)\s+(?:quarters?|thirds?|fifths?|tenths?))\s+(?:of|the)\b|\bone\s+in\s+(?:two|three|four|five|six|seven|eight|nine|ten)\b/i;
 const NUMBER_WORD = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|couple)\b/gi;
@@ -349,8 +351,8 @@ function sentenceWhy(sentence: string, cites: readonly string[], doc: AuditDoc, 
   const unnamed = withoutNames(rest, w.names).replace(GLUED, " ");
   // A number word the draft says the same way ("in one tap") is the draft's, not a new figure.
   const lowerAll = w.all.toLowerCase();
-  const wordFigures = unnamed.replace(NOT_A_COUNT, " ").replace(NUMBER_WORD, (m, i: number) => {
-    const phrase = unnamed.slice(i, i + m.length + 12).toLowerCase().match(/^[a-z]+\s+[a-z]+/)?.[0] ?? m.toLowerCase();
+  const wordFigures = unnamed.replace(NOT_A_COUNT, " ").replace(A_TIME, " ").replace(NUMBER_WORD, (m: string, i: number, whole: string) => {
+    const phrase = whole.slice(i, i + m.length + 12).toLowerCase().match(/^[a-z]+\s+[a-z]+/)?.[0] ?? m.toLowerCase();
     return lowerAll.includes(phrase) ? " " : m;
   });
   if (statesFigure(unnamed) || numbersIn(wordFigures).length || SHARE_WORDS.test(unnamed)) return "it writes a figure in a form the check cannot match to a source: use the figure as the facts state it";
