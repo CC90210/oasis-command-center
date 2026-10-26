@@ -34,9 +34,9 @@ import {
 } from "@/lib/os/agent-access";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { deleteTenantIntegrationValue, setTenantIntegrationValue } from "@/lib/tenant-integration-store";
+import { AGENT_ACCESS_SERVICE, deleteTenantIntegrationValue, setTenantIntegrationValue } from "@/lib/tenant-integration-store";
 
-export const AGENT_ACCESS_SERVICE = "agent_access";
+export { AGENT_ACCESS_SERVICE };
 
 /** The row's field for a target: "custom:<key in lower case>" or "connector:<slug>". */
 export function accessField(target: AccessTarget): string {

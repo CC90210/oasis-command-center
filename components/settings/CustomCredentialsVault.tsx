@@ -214,7 +214,9 @@ export function CustomCredentialsVault() {
 
   function startEditingAgents(row: CustomCredentialRow) {
     setEditingKey(row.key);
-    setEditAgents(row.agents ?? "all");
+    // An unreadable choice starts from No agents: saving "All agents" unchanged would
+    // widen a key that may have been narrow (review of OCC #743).
+    setEditAgents(row.agents_unreadable ? [] : row.agents ?? "all");
     setErr(null);
     setMsg(null);
   }

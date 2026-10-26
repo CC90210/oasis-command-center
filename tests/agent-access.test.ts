@@ -280,6 +280,20 @@ async function main() {
     assert.deepEqual(await store.agentMayUse(OASIS, { kind: "custom", key: "BROKEN" }, "sdr"), { allowed: true }, "repaired");
   });
 
+  await check("a garbled choice row never reaches the credential status list, and the editor starts it from no agents", async () => {
+    const { listTenantIntegrationStatus } = await import("../lib/tenant-integration-store");
+    await db.execute({
+      sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'agent_access', 'connector:slack', 'not-ciphertext')",
+      args: [OASIS],
+    });
+    const rows = await listTenantIntegrationStatus(OASIS);
+    assert.ok(rows.length > 0, "the vault's own rows are still listed");
+    assert.ok(rows.every((r) => r.service !== "agent_access"), "agent choices are not credentials");
+    await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE field_key = 'connector:slack'", args: [] });
+    const vault = read("components/settings/CustomCredentialsVault.tsx");
+    assert.match(vault, /setEditAgents\(row\.agents_unreadable \? \[\] : row\.agents \?\? "all"\)/, "saving it unchanged must not widen it");
+  });
+
   await check("APP_TOOLS is whole: every credential read in the runner belongs to a mapped tool", () => {
     const src = read("lib/cloud-tool-runner.ts");
     const reads = (src.match(/get(Kixie|TextTorrent)Credentials\(ctx\.tenantId\)/g) || []).length;
