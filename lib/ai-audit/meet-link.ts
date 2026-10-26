@@ -39,7 +39,7 @@ import { listProfileFields } from "@/lib/ai-audit/versions";
 import { withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
 import { PROFILE_EDIT_STAGES, shortName } from "@/lib/ai-audit/rules";
 import { dbBool } from "@/lib/db-bool";
-import { eventStatement, getEngagement, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
+import { eventStatement, getEngagement, requireTenant, text, type Actor, type Engagement } from "@/lib/ai-audit/store";
 
 export type AuditRoomGuest = { name: string; consented: boolean; removed: boolean };
 export type AuditRoom = {
@@ -71,7 +71,6 @@ const CHUNK_SECONDS = 10;
 const ROOM_LIST_LIMIT = 10;
 
 const present = (v: unknown): boolean => v !== null && v !== undefined && String(v) !== "";
-const textOrNull = (v: unknown): string | null => (present(v) ? String(v) : null);
 /** A JSON column's array length in SQL: 0 for NULL or text that is not JSON, never an error that stops the query. */
 const linesCount = (column: string) => `CASE WHEN json_valid(${column}) THEN json_array_length(${column}) ELSE 0 END`;
 
@@ -160,13 +159,13 @@ export async function roomsForEngagement(db: Client, tenantId: string, engagemen
   return rooms.rows.map((r) => {
     const id = String(r.id);
     const roomGuests = guestsOf.get(id) ?? [];
-    const attachedTranscriptId = textOrNull(r.attached_id);
-    const status = textOrNull(r.t_status);
+    const attachedTranscriptId = text(r.attached_id);
+    const status = text(r.t_status);
     const lines = Number(r.t_lines) || 0;
     const holds =
       status === "ready" && lines > 0 && !attachedTranscriptId
         ? holdsOf({
-            roomEndedAt: textOrNull(r.ended_at),
+            roomEndedAt: text(r.ended_at),
             roomCreatedAt: String(r.created_at),
             engagementCreatedAt: engagement.created_at,
             attachedBefore: dbBool(r.attached_before),
@@ -183,9 +182,9 @@ export async function roomsForEngagement(db: Client, tenantId: string, engagemen
       title: String(r.title),
       status: String(r.status),
       recordAudio: Number(r.record_audio) === 1,
-      startsAt: textOrNull(r.starts_at),
+      startsAt: text(r.starts_at),
       createdAt: String(r.created_at),
-      endedAt: textOrNull(r.ended_at),
+      endedAt: text(r.ended_at),
       transcript: status ? { status, lines } : null,
       guests: roomGuests,
       attachedTranscriptId,
@@ -266,7 +265,8 @@ export type AttachResult =
   | { ok: true; transcriptId: string; duplicate: boolean }
   | { ok: false; error: AttachError; holds?: Array<{ hold: MeetHold; words: string }> };
 
-async function isWorkspaceOwner(db: Client, t: string, userId: string): Promise<boolean> {
+/** The workspace owner (user_profiles.is_owner)? The query access.ts runs, inline as authorize.ts and delivery.ts have it: lib code stays off the session layer. */
+async function userIsOwner(db: Client, t: string, userId: string): Promise<boolean> {
   const row = (await db.execute({ sql: "SELECT is_owner FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? LIMIT 1", args: [t, userId] })).rows[0];
   return !!row && dbBool(row.is_owner);
 }
@@ -281,7 +281,7 @@ async function ownersAiAnswer(db: Client, t: string, e: Engagement): Promise<{ o
   const answer = fields.find((f) => f.field_key === AI_ANSWER_KEY);
   if (!answer || typeof answer.value !== "boolean") return { ok: false, error: "ai_answer_needed" };
   const said = answer.label === "client_reported" || answer.label === "verified";
-  if (!said || !answer.updated_by || !(await isWorkspaceOwner(db, t, answer.updated_by))) return { ok: false, error: "ai_answer_unconfirmed" };
+  if (!said || !answer.updated_by || !(await userIsOwner(db, t, answer.updated_by))) return { ok: false, error: "ai_answer_unconfirmed" };
   return { ok: true, value: answer.value, by: answer.updated_by };
 }
 
@@ -331,7 +331,7 @@ export async function attachMeetTranscript(
   if (guests.some((g) => !present(g.consent_at))) return { ok: false, error: "no_recording_consent" };
   const guestIds = new Set(guests.map((g) => String(g.id)));
   const holds = holdsOf({
-    roomEndedAt: textOrNull(room.ended_at),
+    roomEndedAt: text(room.ended_at),
     roomCreatedAt: String(room.created_at),
     engagementCreatedAt: e.created_at,
     attachedBefore: made.length > 0,
@@ -352,7 +352,7 @@ export async function attachMeetTranscript(
     // The AI answer is the owner's word; the recording consent is the guests' own (basis meet_guests).
     by = answer.by;
   }
-  const parsed = parseMeetLines(onCallClock(meet.lines, textOrNull(room.started_at)));
+  const parsed = parseMeetLines(onCallClock(meet.lines, text(room.started_at)));
   if (!parsed.ok) return { ok: false, error: `meet_transcript_${parsed.error}` };
   const r = await addTranscript(db, {
     tenantId: t,
