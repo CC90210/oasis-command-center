@@ -575,6 +575,9 @@ async function main() {
 
   console.log("a revision after delivery (phase 5)");
   await check("a delivered, unpaid audit is revised: drafts open, Pay closes, and the new delivery replaces the client's link", async () => {
+    // A long or two-line business name still makes a one-line subject the revision can be saved with (self-review of phase 5).
+    const long = delivery.revisionEmail({ contactName: "Dana Smith", businessName: `${"Fixture ".repeat(30)}\nPlumbing` });
+    assert.ok(!/[\r\n]/.test(long.subject) && long.subject.length <= 200, long.subject);
     let e = (await store.getEngagement(db, OASIS, engagementId))!;
     const oldAudit = e.current_audit_version_id!;
     const oldProposal = e.current_proposal_version_id!;

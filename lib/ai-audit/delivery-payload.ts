@@ -34,7 +34,7 @@ type Valid<T> = { ok: true; value: T } | { ok: false; error: string; field?: str
 
 const ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
-/** An email address as an approval may carry it. Shared with the follow-up's payload. */
+/** An email address as an approval or a proposal may carry it. Shared with the follow-up's payload and the proposal. */
 export const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 
 export function validateDeliverAiAuditPayload(raw: unknown): Valid<DeliverAiAuditPayload> {

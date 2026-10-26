@@ -31,7 +31,7 @@ import {
 import { DELIVER_AI_AUDIT_KIND, validateDeliverAiAuditPayload } from "@/lib/ai-audit/delivery-payload";
 import { mintLinkToken, tokenHash, type ShareLink } from "@/lib/ai-audit/link";
 import { EMAIL_PROVIDER, defaultAiAuditExecutorDeps, failed } from "@/lib/ai-audit/delivery";
-import { WAITING_ON_CLIENT_STAGES, shortName } from "@/lib/ai-audit/rules";
+import { WAITING_ON_CLIENT_STAGES, oneLineName } from "@/lib/ai-audit/rules";
 import { eventStatement, getEngagement, requireTenant, type Engagement } from "@/lib/ai-audit/store";
 import { cancelPendingApproval, createApproval, getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
@@ -41,7 +41,7 @@ import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approv
 const FOLLOW_UP_TTL_DAYS = 7;
 
 /** The business's name as a follow-up says it: one line and short, so a long name never refuses the card (review of phase 5). */
-const nameOf = (name: string | null | undefined) => shortName((name ?? "").replace(/\s+/g, " "), "your business", 80);
+const nameOf = (name: string | null | undefined) => oneLineName(name, "your business");
 
 /** The address the audit itself went to, and the delivery's key (the link is derived from it): follow-ups go there only. */
 async function deliveredTo(db: Client, t: string, approvalId: string): Promise<{ to: string; idempotencyKey: string } | null> {

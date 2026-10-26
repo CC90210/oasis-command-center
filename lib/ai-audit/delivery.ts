@@ -26,7 +26,7 @@ import { aiAuditBaseUrl, aiAuditLinkSecret } from "@/lib/ai-audit/env";
 import { queuePdfJob, r2PdfStorage } from "@/lib/ai-audit/pdf";
 import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
-import { AUTHORIZATION_VOIDED_REASONS, WAITING_ON_CLIENT_STAGES, shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { AUTHORIZATION_VOIDED_REASONS, WAITING_ON_CLIENT_STAGES, oneLineName, shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { defaultPaymentDeps, expireOpenCheckouts, type PaymentDeps } from "@/lib/ai-audit/payment";
 import { getSettings } from "@/lib/ai-audit/store";
 import {
@@ -178,7 +178,8 @@ const CHECKOUT_OPENING_MS = 120_000;
 /** The email for a revised audit: the same private-link placeholder, saying it replaces the last one. */
 export function revisionEmail(input: { contactName: string | null; businessName: string }): { subject: string; body: string } {
   const greeting = input.contactName ? `Hi ${input.contactName.trim().split(/\s+/)[0]},` : "Hi,";
-  const name = input.businessName || "your business";
+  // One line, and short: a long or two-line name would make the subject invalid, and the revision could not be saved.
+  const name = oneLineName(input.businessName, "your business");
   return {
     subject: `Your updated AI audit for ${name}`,
     body: [

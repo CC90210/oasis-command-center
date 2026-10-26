@@ -335,3 +335,8 @@ export function shortName(name: string | null | undefined, fallback: string, max
   if (!n) return fallback;
   return n.length > max ? `${n.slice(0, max - 3).trimEnd()}...` : n;
 }
+
+/** A business name as an email to the client says it: on one line, and short enough for any subject line. */
+export function oneLineName(name: string | null | undefined, fallback: string, max = 80): string {
+  return shortName((name ?? "").replace(/\s+/g, " "), fallback, max);
+}

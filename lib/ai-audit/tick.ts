@@ -213,7 +213,8 @@ export async function runAiAuditTick(
       }
     });
 
-    // 3b. Verified payments whose engagement has not caught up, and sessions still open on closed engagements.
+    // 3b. Verified payments whose engagement has not caught up, and sessions still open that the client must not pay
+    // (closed, being revised, past payment, or for a replaced proposal: closedEngagementsWithOpenCheckouts).
     await guard("settle", undefined, async () => {
       report.paymentsSettled += await settleVerifiedReceipts(db, tenantId, now(), deps.payment, 10);
     });
