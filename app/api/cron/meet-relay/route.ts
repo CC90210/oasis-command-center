@@ -17,8 +17,9 @@
  * (tests/cron-driver-coverage.test.ts holds them together). The answer carries
  * counts and stable codes only: no ids, no paths. The work is
  * lib/meet/recording-routes.ts handleMeetRelayCron: a run with no relay storage,
- * a relay delete R2 refused, or an ended room's media session it could not cut
- * (the SFU refused, or no SFU app is set) answers 503, so the driver reports it.
+ * a relay delete R2 refused, an ended room's media session it could not cut
+ * (the SFU refused, or no SFU app is set), or a step that threw (the steps
+ * after it still run) answers 503, so the driver reports it.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";

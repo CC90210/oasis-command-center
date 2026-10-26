@@ -144,12 +144,30 @@ export function meetRecordingServed(tenantId: string): boolean {
   return OASIS_INTERNAL_TENANT_IDS.has(tenantId);
 }
 
+const RECORDING_TABLES =
+  "(SELECT COUNT(*) FROM meet_rooms WHERE 0) AS r, (SELECT COUNT(*) FROM meet_recording_chunks WHERE 0) AS c, (SELECT COUNT(*) FROM meet_transcripts WHERE 0) AS t";
+
 /** All three Meet tables present (bravo__230 and bravo__231)? False = not installed; any other error throws. */
 export async function meetRecordingTablesInstalled(db: Client): Promise<boolean> {
+  return tablesAnswer(db, `SELECT ${RECORDING_TABLES}`);
+}
+
+/**
+ * Those three and bravo__240's (meet_local_copies, tool_jobs.target_runner)? Only what tracks each computer's copy
+ * needs them: Delete, a meeting computer's claim and report, the sweeps of the copies' deletes. Recording, the
+ * hand-over and the panel need only the three, so a deploy that lands before bravo__240 never stops a live
+ * meeting's uploads (review of the two-computer change). One query: a meeting computer's every claim asks it.
+ */
+export async function meetLocalCopiesInstalled(db: Client): Promise<boolean> {
+  return tablesAnswer(
+    db,
+    `SELECT ${RECORDING_TABLES}, (SELECT COUNT(*) FROM meet_local_copies WHERE 0) AS l, (SELECT target_runner FROM tool_jobs WHERE 0) AS j`,
+  );
+}
+
+async function tablesAnswer(db: Client, sql: string): Promise<boolean> {
   try {
-    await db.execute(
-      "SELECT (SELECT COUNT(*) FROM meet_rooms WHERE 0) AS r, (SELECT COUNT(*) FROM meet_recording_chunks WHERE 0) AS c, (SELECT COUNT(*) FROM meet_transcripts WHERE 0) AS t",
-    );
+    await db.execute(sql);
     return true;
   } catch (err) {
     if (/no such table|no such column/i.test(err instanceof Error ? err.message : String(err))) return false;
@@ -623,6 +641,7 @@ export async function meetTranscribeClaim(
   job: { id: string; tenantId: string; input: Record<string, unknown> },
   tenantIds: readonly string[],
   now: Date,
+  runnerKey: string,
 ): Promise<MeetClaim | null> {
   const roomId = typeof job.input.room_id === "string" ? job.input.room_id : "";
   const room = roomId ? await readMeetRoom(db, { tenantId: job.tenantId, roomId }) : null;
@@ -640,14 +659,28 @@ export async function meetTranscribeClaim(
   });
   if (closed.rowsAffected !== 1) return null;
   const declared = declareSegments(await chunkRows(db, room.tenantId, room.id));
-  const up = await db.execute({
-    sql: `UPDATE meet_transcripts SET segments_json = ?, chunk_count = ?, audio_bytes = ?, missing_chunks = ?, updated_at = ?
-           WHERE ${where} AND status = 'transcribing'`,
-    args: [
-      JSON.stringify(declared.segments), declared.chunkCount, declared.audioBytes, declared.missingChunks, at,
-      room.tenantId, room.id, job.id,
+  // The segments, and this runner's copy (it may now hold the audio: "Delete
+  // meeting" must reach it, bravo__240), in one write, so a failure between
+  // them cannot leave a claim with no copy on record.
+  const [up] = await db.batch(
+    [
+      {
+        sql: `UPDATE meet_transcripts SET segments_json = ?, chunk_count = ?, audio_bytes = ?, missing_chunks = ?, updated_at = ?
+               WHERE ${where} AND status = 'transcribing'`,
+        args: [
+          JSON.stringify(declared.segments), declared.chunkCount, declared.audioBytes, declared.missingChunks, at,
+          room.tenantId, room.id, job.id,
+        ],
+      },
+      {
+        sql: `INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at)
+              SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM meet_transcripts WHERE ${where} AND status = 'transcribing')
+              ON CONFLICT (tenant_id, room_id, runner_key) DO NOTHING`,
+        args: [room.tenantId, room.id, runnerKey, at, room.tenantId, room.id, job.id],
+      },
     ],
-  });
+    "write",
+  );
   if (up.rowsAffected !== 1) return null;
   const queued = await db.execute({
     sql: `SELECT COUNT(*) AS n FROM tool_jobs
@@ -788,6 +821,13 @@ export function meetTranscribeCompleteStatements(
       args: [r.text, JSON.stringify(r.lines), r.model, r.transcribeSeconds, r.deviceLabel, r.localFolder, at, at, job.tenantId, roomId, job.id, ...holds.args],
     },
     {
+      // This computer's own folder, on its own copy: a delete sends each computer only its folder (bravo__240).
+      sql: `INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at, local_folder, device_label)
+            SELECT ?, ?, ?, ?, ?, ? WHERE ${holds.sql}
+            ON CONFLICT (tenant_id, room_id, runner_key) DO UPDATE SET local_folder = excluded.local_folder, device_label = excluded.device_label`,
+      args: [job.tenantId, roomId, lease.runnerKey, at, r.localFolder, r.deviceLabel, ...holds.args],
+    },
+    {
       sql: `UPDATE tool_jobs
                SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
              WHERE ${LEASE_GUARD} AND tenant_id IN (${tin})
@@ -817,7 +857,15 @@ export function parseDeleteLocalReport(b: Record<string, unknown>): Parsed<Delet
   return { ok: true, value: { removed, alreadyGone: b.already_gone, deviceLabel: device } };
 }
 
-/** The device's deletion stamped on the transcript row, and the job's "done" (the commit signal, last). */
+/**
+ * This device's copy marked deleted; the transcript row stamped deleted on the
+ * device side only once EVERY tracked copy is gone, and only by a delete
+ * addressed to this computer (bravo__240); then the job's "done" (the commit
+ * signal, last). A delete queued before bravo__240 went to whichever computer
+ * asked first, so its "done" says nothing about the others: it never stamps
+ * the room. The host's next Delete reaches each computer that claimed the
+ * transcription (ensureCopiesKnown), and the last of those stamps it.
+ */
 export function meetDeleteLocalCompleteStatements(
   job: { id: string; tenantId: string },
   roomId: string,
@@ -829,9 +877,16 @@ export function meetDeleteLocalCompleteStatements(
   const holds = leaseHolds(job.id, lease);
   return [
     {
+      sql: `UPDATE meet_local_copies SET deleted_at = ?, device_label = ?
+             WHERE tenant_id = ? AND room_id = ? AND runner_key = ? AND deleted_at IS NULL AND ${holds.sql}`,
+      args: [at, r.deviceLabel, job.tenantId, roomId, lease.runnerKey, ...holds.args],
+    },
+    {
       sql: `UPDATE meet_transcripts SET local_deleted_at = ?, device_label = ?, updated_at = ?
-             WHERE tenant_id = ? AND room_id = ? AND ${holds.sql}`,
-      args: [at, r.deviceLabel, at, job.tenantId, roomId, ...holds.args],
+             WHERE tenant_id = ? AND room_id = ? AND ${holds.sql}
+               AND EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND id = ? AND target_runner IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM meet_local_copies c WHERE c.tenant_id = ? AND c.room_id = ? AND c.deleted_at IS NULL)`,
+      args: [at, r.deviceLabel, at, job.tenantId, roomId, ...holds.args, job.tenantId, job.id, job.tenantId, roomId],
     },
     {
       sql: `UPDATE tool_jobs
@@ -977,11 +1032,14 @@ export async function expireRelay(db: Client, tenantIds: readonly string[], now:
   );
   const rows = results[1].rows;
   // A PC that claimed one of these and then vanished may hold a partial copy: tell it to delete that too
-  // (only where a transcription was ever claimed; deviceDeleteStatement checks).
+  // (only where a transcription was ever claimed; deviceDeleteStatements checks).
   for (const r of rows) {
-    await db.execute(
-      deviceDeleteStatement({ tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null, localFolder: str(r.local_folder) }, null, now),
-    );
+    try {
+      await db.batch(await deviceDeleteStatements(db, { tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null }, null, now), "write");
+    } catch (err) {
+      // One room's trouble never abandons the rest; the sweep queues what is still missing (queueMissingLocalDeletes).
+      console.error("[meet.relay] could not queue a computer's delete for an expired recording", { roomId: String(r.room_id), error: err instanceof Error ? err.message : String(err) });
+    }
   }
   if (rows.length) console.warn("[meet.relay] recordings expired before the PC took them", { count: rows.length });
   return rows.length;
@@ -1161,12 +1219,45 @@ async function cutEndedRoomSessions(
   return { cut, failed: results.length - cut };
 }
 
+/** One sweep on its own: one that throws is logged by its name and never keeps the sweeps after it from running. */
+async function sweep(name: string, run: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await run();
+    return true;
+  } catch (err) {
+    console.error(`[meet.relay] the ${name} sweep failed`, err instanceof Error ? (err.stack ?? err.message) : String(err));
+    return false;
+  }
+}
+
+/** How the sweeps of the computers' own copies went: ran, could not run (no bravo__240), or one of them threw. */
+export type LocalDeleteSweeps = "ok" | "not_installed" | "failed";
+
+/**
+ * The sweeps of the computers' own copies (bravo__240): a delete is queued for each copy of a deleted or expired
+ * recording that has none, and one whose computer has been gone 30 days is given up. Only these need bravo__240's
+ * tables, so without them they cannot run, and every run says so: never a silent skip. `tenantIds` null: every
+ * workspace with a copy on record (the relay cron, with every meeting computer off).
+ */
+async function localDeleteSweeps(db: Client, tenantIds: readonly string[] | null, now: Date): Promise<LocalDeleteSweeps> {
+  if (!(await meetLocalCopiesInstalled(db))) {
+    console.error("[meet.relay] the computers' deletes cannot be queued or given up: bravo__240 (meet_local_copies, tool_jobs.target_runner) is not applied");
+    return "not_installed";
+  }
+  // The workspaces with a copy on record number in the tens: no cap, so none is ever left out.
+  const scope = tenantIds ?? (await db.execute("SELECT DISTINCT tenant_id FROM meet_local_copies")).rows.map((r) => String(r.tenant_id));
+  const queued = await sweep("queueMissingLocalDeletes", () => queueMissingLocalDeletes(db, scope, now));
+  const givenUp = await sweep("failStrandedLocalDeletes", () => failStrandedLocalDeletes(db, scope, now));
+  return queued && givenUp ? "ok" : "failed";
+}
+
 /**
  * The sweeps, in the order they feed each other. The runner's claim runs them while it serves meetings. A call
  * left with no host and nobody polling (every tab closed without End) is ended first (lib/meet/participants.ts
  * endAbandonedRooms), so finalizeDueRooms hands its recording over 10 minutes later. Without it such a room stayed
  * live, was never handed over, and its audio expired untranscribed after 30 days (#687 review, Codex P1). The media
- * sessions of ended rooms are cut next (cutEndedRoomSessions), since no request will.
+ * sessions of ended rooms are cut next (cutEndedRoomSessions), since no request will. Each runs on its own: one that
+ * throws is logged by name, and the rest still run (review of the two-computer change).
  */
 export async function meetRelaySweeps(
   db: Client,
@@ -1175,12 +1266,13 @@ export async function meetRelaySweeps(
   now: Date,
   sfu: SfuClient | null = null,
 ): Promise<void> {
-  await endAbandonedRooms(db, tenantIds, now);
-  await cutEndedRoomSessions(db, sfu, tenantIds, now);
-  await expireUnfinalized(db, tenantIds, now);
-  await expireRelay(db, tenantIds, now);
-  await finalizeDueRooms(db, tenantIds, now);
-  await removeRelayChunks(db, storage, { tenantIds }, RELAY_CLEANUP_BATCH, now);
+  await sweep("endAbandonedRooms", () => endAbandonedRooms(db, tenantIds, now));
+  await sweep("cutEndedRoomSessions", () => cutEndedRoomSessions(db, sfu, tenantIds, now));
+  await sweep("expireUnfinalized", () => expireUnfinalized(db, tenantIds, now));
+  await sweep("expireRelay", () => expireRelay(db, tenantIds, now));
+  await sweep("finalizeDueRooms", () => finalizeDueRooms(db, tenantIds, now));
+  await sweep("removeRelayChunks", () => removeRelayChunks(db, storage, { tenantIds }, RELAY_CLEANUP_BATCH, now));
+  await localDeleteSweeps(db, tenantIds, now);
 }
 
 /**
@@ -1192,37 +1284,67 @@ export async function meetRelaySweeps(
  * claim (finalizeDueRooms): it only means something where a PC takes it. A
  * call every tab left without End is ended here too (endAbandonedRooms), and
  * the media sessions ended rooms still hold are cut, for every workspace:
- * neither may wait for the PC.
+ * neither may wait for the PC. So do the computers' own deletes
+ * (localDeleteSweeps): a copy left without one gets one, and one claimed by a
+ * computer that then vanished is given up after 30 days, with every meeting
+ * computer off (review of the two-computer change). Each step runs on its own,
+ * as in meetRelaySweeps: one that throws is logged by name and named in
+ * `failedSweeps` (the run then answers 503), and the steps after it still run,
+ * so one that keeps failing never stops the computers' deletes.
  */
 export async function meetRelayCron(
   db: Client,
   storage: MeetStorage | null,
   now: Date,
   sfu: SfuClient | null = null,
-): Promise<{ tenants: number; expired: number; removed: number; deleteFailed: boolean; mediaCut: number; mediaCutFailed: number }> {
+): Promise<{
+  tenants: number;
+  expired: number;
+  removed: number;
+  deleteFailed: boolean;
+  mediaCut: number;
+  mediaCutFailed: number;
+  localDeletes: LocalDeleteSweeps;
+  failedSweeps: string[];
+}> {
   const at = now.toISOString();
+  const failedSweeps: string[] = [];
+  /** One step (sweep): its answer, or `none` when it threw. */
+  const step = async <T>(name: string, none: T, run: () => Promise<T>): Promise<T> => {
+    let out = none;
+    if (!(await sweep(name, async () => { out = await run(); }))) failedSweeps.push(name);
+    return out;
+  };
   // A call every tab left without End is ended here too, in every workspace with a live room, so the cut below
   // reaches its media with the PC off (Codex on #688, fourth pass). Handing its recording over stays the PC's claim.
   // Every workspace with a live room, no cap: a capped, unordered list could return the same ones each run and never
   // reach a later workspace's abandoned call (Codex on #688, fifth pass). The workspaces number in the tens.
-  const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live'", args: [] });
-  if (live.rows.length) await endAbandonedRooms(db, live.rows.map((r) => String(r.tenant_id)), now);
-  const media = await cutEndedRoomSessions(db, sfu, null, now);
+  await step("endAbandonedRooms", undefined, async () => {
+    const live = await db.execute({ sql: "SELECT DISTINCT tenant_id FROM meet_rooms WHERE status = 'live'", args: [] });
+    if (live.rows.length) await endAbandonedRooms(db, live.rows.map((r) => String(r.tenant_id)), now);
+  });
+  const media = await step("cutEndedRoomSessions", { cut: 0, failed: 0 }, () => cutEndedRoomSessions(db, sfu, null, now));
   const cuts = { mediaCut: media.cut, mediaCutFailed: media.failed };
   // First, give a row to every recording nobody handed over that is past its 30 days, so the reads below find it.
-  const abandoned = await expireUnfinalized(db, null, now);
-  const rs = await db.execute({
-    sql: `SELECT DISTINCT tenant_id FROM meet_transcripts
-           WHERE (status IN ('ready', 'expired', 'deleted') AND relay_cleared_at IS NULL)
-              OR (status IN ('queued', 'transcribing') AND relay_expires_at < ?)
-          LIMIT 50`,
-    args: [at],
+  const abandoned = await step("expireUnfinalized", 0, () => expireUnfinalized(db, null, now));
+  const tenantIds = await step("relayTenants", [] as string[], async () => {
+    const rs = await db.execute({
+      sql: `SELECT DISTINCT tenant_id FROM meet_transcripts
+             WHERE (status IN ('ready', 'expired', 'deleted') AND relay_cleared_at IS NULL)
+                OR (status IN ('queued', 'transcribing') AND relay_expires_at < ?)
+            LIMIT 50`,
+      args: [at],
+    });
+    return rs.rows.map((r) => String(r.tenant_id));
   });
-  const tenantIds = rs.rows.map((r) => String(r.tenant_id));
-  if (!tenantIds.length) return { tenants: 0, expired: abandoned, removed: 0, deleteFailed: false, ...cuts };
-  const expired = abandoned + (await expireRelay(db, tenantIds, now));
-  const cleanup = await removeRelayChunksReport(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now);
-  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed, ...cuts };
+  const expired = abandoned + (tenantIds.length ? await step("expireRelay", 0, () => expireRelay(db, tenantIds, now)) : 0);
+  const nothingRemoved = { removed: 0, failed: false };
+  const cleanup = tenantIds.length
+    ? await step("removeRelayChunks", nothingRemoved, () => removeRelayChunksReport(db, storage, { tenantIds }, RELAY_DELETE_BATCH, now))
+    : nothingRemoved;
+  // Last, after the expiry above has queued the deletes it could, so the sweep adds only what is still missing.
+  const localDeletes = await localDeleteSweeps(db, null, now);
+  return { tenants: tenantIds.length, expired, removed: cleanup.removed, deleteFailed: cleanup.failed, localDeletes, failedSweeps, ...cuts };
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,35 +1353,192 @@ export async function meetRelayCron(
 
 export type DeleteOutcome = { relayRemaining: number; deviceDeleteQueued: boolean };
 
+/** One computer's "delete your copy" job: its dedupe key, and the same key in SQL over a meet_local_copies row `c`. */
+export function deleteLocalKey(roomId: string, runnerKey: string): string {
+  return `meet_delete_local:${roomId}:${runnerKey}`;
+}
+const DELETE_LOCAL_KEY_SQL = "'meet_delete_local:' || c.room_id || ':' || c.runner_key";
+/** A targeted delete whose computer has not checked in for this long is failed as runner_gone, never left waiting for good. */
+export const LOCAL_DELETE_GIVE_UP_MS = 30 * 86_400_000;
+/** A copy's delete that failed (any code but runner_gone) is queued again by the sweep once it has been failed this long... */
+export const LOCAL_DELETE_RETRY_MS = 24 * 3_600_000;
+/** ...while the copy has failed fewer deletes than this. After that only the host's Delete tries it again. */
+export const LOCAL_DELETE_MAX_FAILED = 5;
+
+/** A copy `c` still on its computer, with no delete of it queued or under way: never two at once. */
+const COPY_IDLE = `c.deleted_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM tool_jobs j WHERE j.tenant_id = c.tenant_id AND j.dedupe_key = ${DELETE_LOCAL_KEY_SQL} AND j.status IN ('queued', 'claimed', 'running'))`;
+
+/** Which copies a delete is queued for: `every` open one (the host's Delete, an expiry), or those `missing` one (the sweep). */
+type CopiesToTell = "every" | "missing";
+
 /**
- * Tell the PC to delete its copy of a meeting (a meet_delete_local job), but
- * only if it may have one: a transcription of this room was ever claimed. Not
- * twice at once, and not again once it has confirmed. Used when the host
- * deletes a recording, and when a recording the PC had claimed expires (its PC
- * vanished mid-way, so a partial copy may sit in its Meetings folder: Codex on
- * #685, fourth pass). The PC finds the folder by `local_folder`, else by room.
+ * The copies `c` that get a delete job, as one SQL condition: the one definition the sweep's read and each insert's
+ * guard share, so the sweep never queues more than it read (review of the two-computer change).
+ *   every    each copy still on its computer with no delete queued or under way: Delete again tells a computer whose
+ *            delete failed again at once.
+ *   missing  of those, the ones the sweep queues by itself: a copy that never had a delete (a claim that landed in the
+ *            same moment as Delete, a computer bravo__242 recorded), or whose LATEST delete failed in a way worth
+ *            trying again, since "Delete meeting" removes the room and its panel with it, so a failure that stayed
+ *            final would leave the audio with nobody told:
+ *              runner_gone, once that computer has checked in since (it came back);
+ *              any other code (a file the PC had open, leases that ran out) once it has been failed for
+ *              LOCAL_DELETE_RETRY_MS, while the copy has failed fewer than LOCAL_DELETE_MAX_FAILED deletes.
+ *            A fresh failure is not queued again: it stays on the panel for a day (re-queuing it on every poll hid
+ *            the error and piled up failed rows).
+ * It only decides which computers are told again: a copy is counted deleted only when its computer reports it gone.
  */
-function deviceDeleteStatement(
-  rec: { tenantId: string; roomId: string; title: string | null; localFolder: string | null },
+function copiesToTell(which: CopiesToTell, now: Date): { sql: string; args: InValue[] } {
+  if (which === "every") return { sql: COPY_IDLE, args: [] };
+  const deletes = `FROM tool_jobs j WHERE j.tenant_id = c.tenant_id AND j.tool_key = 'meet_delete_local' AND j.dedupe_key = ${DELETE_LOCAL_KEY_SQL}`;
+  return {
+    sql: `${COPY_IDLE}
+  AND (NOT EXISTS (SELECT 1 ${deletes})
+    OR EXISTS (SELECT 1 FROM tool_jobs l
+                WHERE l.tenant_id = c.tenant_id AND l.id = (SELECT j.id ${deletes} ORDER BY j.created_at DESC, j.id DESC LIMIT 1)
+                  AND l.status = 'failed'
+                  AND ((l.error_code = 'runner_gone'
+                        AND EXISTS (SELECT 1 FROM tool_runners r WHERE r.tenant_id = c.tenant_id AND r.runner_key = c.runner_key AND r.last_seen_at > l.finished_at))
+                    OR (l.error_code IS NOT 'runner_gone' AND l.finished_at < ?
+                        AND (SELECT COUNT(*) ${deletes} AND j.status = 'failed') < ${LOCAL_DELETE_MAX_FAILED}))))`,
+    args: [new Date(now.getTime() - LOCAL_DELETE_RETRY_MS).toISOString()],
+  };
+}
+
+/**
+ * Every computer that claimed a recording's transcription, recorded as its copy: one row per (room, computer)
+ * over ALL of the room's transcription jobs, never just the newest (a PC whose attempt failed before the Mac took
+ * the retry holds audio too), first_claimed_at its earliest claim, its folder when one of its jobs finished, and
+ * the delete already done where the room was stamped. A copy already on record is never changed. Split so the
+ * one-room form below is this same statement; LOCAL_COPIES_BACKFILL_SQL is bravo__242's, word for word
+ * (tests/meet-copies-backfill.test.ts).
+ */
+const COPIES_FROM_JOBS = `INSERT OR IGNORE INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at, local_folder, deleted_at, device_label)
+SELECT j.tenant_id, substr(j.dedupe_key, length('meet_transcribe:') + 1), j.claimed_by, MIN(COALESCE(j.claimed_at, j.created_at)),
+       MAX(CASE WHEN j.status = 'done' THEN t.local_folder END), t.local_deleted_at, NULL
+  FROM tool_jobs j
+  LEFT JOIN meet_transcripts t ON t.tenant_id = j.tenant_id AND t.room_id = substr(j.dedupe_key, length('meet_transcribe:') + 1)
+ WHERE j.tool_key = 'meet_transcribe' AND j.dedupe_key LIKE 'meet_transcribe:%' AND j.claimed_by IS NOT NULL AND j.attempts > 0`;
+const COPIES_GROUPED = "GROUP BY j.tenant_id, j.dedupe_key, j.claimed_by";
+export const LOCAL_COPIES_BACKFILL_SQL = `${COPIES_FROM_JOBS}\n ${COPIES_GROUPED}`;
+
+/**
+ * The backfill for one room, run each time a delete reads the room's copies (deviceDeleteStatements: the host's
+ * Delete, an expiry, the sweep): a claim made by older code after bravo__242 ran, or one whose row is missing for
+ * any reason, is recorded now. Never "whichever computer polls first", and never only the computers already on
+ * record (a room with the Mac's row still had the PC's audio).
+ */
+export async function ensureCopiesKnown(db: Client, tenantId: string, roomId: string): Promise<void> {
+  await db.execute({
+    sql: `${COPIES_FROM_JOBS}\n   AND j.tenant_id = ? AND j.dedupe_key = ?\n ${COPIES_GROUPED}`,
+    args: [tenantId, `meet_transcribe:${roomId}`],
+  });
+}
+
+/**
+ * Tell each computer that may hold a copy of a meeting to delete it: one
+ * meet_delete_local job per copy still open, claimable only by that computer
+ * (bravo__240), carrying only THAT computer's folder (or none: it then finds
+ * the meeting by its room). Not twice at once. A room no computer ever claimed
+ * needs no delete. Used when the host deletes a recording and when a recording
+ * a computer had claimed expires (`every` open copy), and by the sweep (only
+ * the copies `missing` one): copiesToTell is the rule, read here and checked
+ * again by each insert.
+ */
+async function deviceDeleteStatements(
+  db: Client,
+  rec: { tenantId: string; roomId: string; title: string | null },
   actorUserId: string | null,
   now: Date,
-): InStatement {
+  which: CopiesToTell = "every",
+): Promise<InStatement[]> {
   const at = now.toISOString();
-  const transcribeKey = `meet_transcribe:${rec.roomId}`;
-  const deleteKey = `meet_delete_local:${rec.roomId}`;
-  const input = { room_id: rec.roomId, title: rec.title, local_folder: rec.localFolder };
-  return {
-    sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
-                                 dedupe_key, created_by, created_by_email, created_at, updated_at)
-          SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, NULL, ?, ?
-          WHERE EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND attempts > 0)
-            AND NOT EXISTS (SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running'))
-            AND NOT EXISTS (SELECT 1 FROM meet_transcripts WHERE tenant_id = ? AND room_id = ? AND local_deleted_at IS NOT NULL)`,
-    args: [
-      randomUUID(), rec.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), deleteKey, actorUserId, at, at,
-      rec.tenantId, transcribeKey, rec.tenantId, deleteKey, rec.tenantId, rec.roomId,
-    ],
-  };
+  await ensureCopiesKnown(db, rec.tenantId, rec.roomId);
+  const told = copiesToTell(which, now);
+  const copies = await db.execute({
+    sql: `SELECT c.runner_key, c.local_folder FROM meet_local_copies c WHERE c.tenant_id = ? AND c.room_id = ? AND ${told.sql}`,
+    args: [rec.tenantId, rec.roomId, ...told.args],
+  });
+  return copies.rows.map((row) => {
+    const runner = String(row.runner_key);
+    const key = deleteLocalKey(rec.roomId, runner);
+    const input = { room_id: rec.roomId, title: rec.title, local_folder: str(row.local_folder) };
+    return {
+      sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, idempotency_key,
+                                   dedupe_key, target_runner, created_by, created_by_email, created_at, updated_at)
+            SELECT ?, ?, 'meet_delete_local', 'runner', 'queued', ?, ?, NULL, ?, ?, ?, NULL, ?, ?
+            WHERE EXISTS (SELECT 1 FROM meet_local_copies c WHERE c.tenant_id = ? AND c.room_id = ? AND c.runner_key = ? AND ${told.sql})`,
+      args: [
+        randomUUID(), rec.tenantId, JSON.stringify(input), inputHashOf("meet_delete_local", input), key, runner, actorUserId, at, at,
+        rec.tenantId, rec.roomId, runner, ...told.args,
+      ],
+    };
+  });
+}
+
+/**
+ * Copies of deleted or expired recordings that are missing a delete job
+ * (copiesToTell "missing"): one that never had one (a claim landed in the same
+ * moment as "Delete meeting", or bravo__242 recorded a computer an older,
+ * unaddressed delete never reached), or whose last delete failed and is due to
+ * be tried again (its computer came back after runner_gone, or another failure
+ * a day old, up to LOCAL_DELETE_MAX_FAILED). Only those copies are queued, never
+ * a sibling's fresh failure in the same meeting: that stays on the panel until
+ * the host presses Delete again or its day is up. `roomId` limits it to one
+ * meeting. Run with the relay sweeps, the meeting computers' claims and the
+ * relay cron (localDeleteSweeps).
+ */
+export async function queueMissingLocalDeletes(db: Client, tenantIds: readonly string[], now: Date, limit = 10, roomId?: string): Promise<number> {
+  if (!tenantIds.length) return 0;
+  const tin = sqlPlaceholders(tenantIds.length);
+  const missing = copiesToTell("missing", now);
+  const rs = await db.execute({
+    sql: `SELECT DISTINCT c.tenant_id, c.room_id FROM meet_local_copies c
+          JOIN meet_transcripts t ON t.tenant_id = c.tenant_id AND t.room_id = c.room_id
+          WHERE c.tenant_id IN (${tin}) AND t.status IN ('deleted', 'expired')${roomId ? " AND c.room_id = ?" : ""}
+            AND ${missing.sql}
+          LIMIT ?`,
+    args: [...tenantIds, ...(roomId ? [roomId] : []), ...missing.args, limit],
+  });
+  let queued = 0;
+  for (const r of rs.rows) {
+    try {
+      const statements = await deviceDeleteStatements(db, { tenantId: String(r.tenant_id), roomId: String(r.room_id), title: null }, null, now, "missing");
+      const results = await db.batch(statements, "write");
+      queued += results.reduce((n, x) => n + x.rowsAffected, 0);
+    } catch (err) {
+      // One meeting's trouble never stops the others: logged, and the next sweep tries it again.
+      console.error("[meet.relay] could not queue a computer's delete", { roomId: String(r.room_id), error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (queued) console.warn("[meet.relay] queued deletes for copies missing one", { queued });
+  return queued;
+}
+
+/**
+ * A computer that has not checked in for LOCAL_DELETE_GIVE_UP_MS while its
+ * delete waited (wiped, uninstalled, renamed): the delete is failed as
+ * runner_gone, so the panel says so instead of "waiting" for good. That holds
+ * for a delete it claimed and never finished too, once that lease lapsed as
+ * long ago (wiped mid-delete): such a job is claimable again only by the
+ * computer that is gone, so it would wait as long. Its copy is NOT counted as
+ * deleted: once that computer checks in again the sweep queues its delete again
+ * (copiesToTell), and the host can press Delete again at any time.
+ */
+export async function failStrandedLocalDeletes(db: Client, tenantIds: readonly string[], now: Date): Promise<number> {
+  if (!tenantIds.length) return 0;
+  const at = now.toISOString();
+  const cutoff = new Date(now.getTime() - LOCAL_DELETE_GIVE_UP_MS).toISOString();
+  const r = await db.execute({
+    sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'runner_gone', error_message = ?, finished_at = ?, updated_at = ?
+           WHERE tenant_id IN (${sqlPlaceholders(tenantIds.length)}) AND tool_key = 'meet_delete_local'
+             AND (status = 'queued' OR (status IN ('claimed', 'running') AND lease_expires_at < ?))
+             AND target_runner IS NOT NULL AND created_at < ?
+             AND NOT EXISTS (SELECT 1 FROM tool_runners r WHERE r.tenant_id = tool_jobs.tenant_id AND r.runner_key = tool_jobs.target_runner AND r.last_seen_at >= ?)`,
+    args: [toolErrorLine("runner_gone", "runner"), at, at, ...tenantIds, cutoff, cutoff, cutoff],
+  });
+  if (r.rowsAffected) console.warn("[meet.relay] deletes given up: their computers never came back", { count: r.rowsAffected });
+  return r.rowsAffected;
 }
 
 /**
@@ -1278,7 +1557,6 @@ export async function deleteMeetRecording(
   now: Date,
 ): Promise<DeleteOutcome> {
   const at = now.toISOString();
-  const t = await readTranscript(db, room.tenantId, room.id);
   const transcribeKey = `meet_transcribe:${room.id}`;
   const deleteKey = `meet_delete_local:${room.id}`;
   await db.batch(
@@ -1296,17 +1574,19 @@ export async function deleteMeetRecording(
                WHERE tenant_id = ? AND tool_key = 'meet_transcribe' AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running')`,
         args: [toolErrorLine("meeting_deleted", "runner"), at, at, room.tenantId, transcribeKey],
       },
-      deviceDeleteStatement({ tenantId: room.tenantId, roomId: room.id, title: room.title, localFolder: t?.localFolder ?? null }, actorUserId, now),
+      ...(await deviceDeleteStatements(db, { tenantId: room.tenantId, roomId: room.id, title: room.title }, actorUserId, now)),
     ],
     "write",
   );
+  // A transcription claimed between the copies' read above and this write has its copy now: queue its delete too.
+  await queueMissingLocalDeletes(db, [room.tenantId], now, 1, room.id);
   // The first RELAY_DELETE_BATCH go now; the panel asks again while any are left, and the relay cron
   // (every 5 minutes) finishes the rest whether or not anyone is watching.
   await removeRelayChunks(db, storage, { tenantIds: [room.tenantId], roomId: room.id }, RELAY_DELETE_BATCH, now);
   const left = await relayTotals(db, room.tenantId, room.id);
   const queued = await db.execute({
-    sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? AND status IN ('queued', 'claimed', 'running') LIMIT 1",
-    args: [room.tenantId, deleteKey],
+    sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND (dedupe_key = ? OR dedupe_key LIKE ?) AND status IN ('queued', 'claimed', 'running') LIMIT 1",
+    args: [room.tenantId, deleteKey, `${deleteKey}:%`],
   });
   return { relayRemaining: left.chunks, deviceDeleteQueued: queued.rows.length > 0 };
 }
@@ -1362,10 +1642,12 @@ export type MeetRecordingView = {
   /**
    * After a delete, the PC's own copy: not_needed (the PC never took this
    * recording), waiting (told, not done yet: it does it when it is next on),
-   * done, or failed (errorCode says why; Delete again tells it again). Null
-   * until the recording is deleted. The panel says "deleted" only for what is.
+   * done, or failed (errorCode says why; Delete again tells it again, and so
+   * does the sweep a day on, copiesToTell). Null until the recording is
+   * deleted. The panel says "deleted" only for what is.
    */
-  deviceDelete: { status: "not_needed" | "waiting" | "done" | "failed"; errorCode: string | null; doneAt: string | null } | null;
+  /** `devices`: the computers still holding a copy (waiting) or that could not delete theirs (failed), by name. */
+  deviceDelete: { status: "not_needed" | "waiting" | "done" | "failed"; errorCode: string | null; doneAt: string | null; devices: string[] } | null;
 };
 
 /** The recording of one room, as its host sees it. Expires an overdue recording first, so the panel never shows a stale wait. */
@@ -1378,6 +1660,10 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
   const relay = await relayTotals(db, room.tenantId, room.id);
   const job = t?.jobId ? await jobState(db, room.tenantId, t.jobId) : null;
   const live = await liveRunnerForTool(db, room.tenantId, "meet_transcribe", now);
+  // "Transcribing on ..." names the computer that holds the job, not whichever polled last (two computers).
+  const holder = t?.jobId
+    ? (await db.execute({ sql: "SELECT r.label, r.last_seen_at FROM tool_jobs j JOIN tool_runners r ON r.tenant_id = j.tenant_id AND r.runner_key = j.claimed_by WHERE j.tenant_id = ? AND j.id = ? AND j.status IN ('claimed', 'running') LIMIT 1", args: [room.tenantId, t.jobId] })).rows[0]
+    : undefined;
 
   let state: MeetRecordingState;
   if (!t && relay.chunks === 0 && !meetRecordingServed(room.tenantId)) state = "unavailable";
@@ -1398,7 +1684,7 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
     recorderErrored: t?.recorderErrored ?? 0,
     relayExpiresAt: t?.relayExpiresAt ?? null,
     job,
-    runner: live ? { label: live.label, lastSeenAt: live.lastSeenAt } : null,
+    runner: state === "transcribing" && holder ? { label: String(holder.label), lastSeenAt: String(holder.last_seen_at) } : live ? { label: live.label, lastSeenAt: live.lastSeenAt } : null,
     transcript:
       t && t.status === "ready"
         ? {
@@ -1418,17 +1704,22 @@ export async function meetRecordingView(db: Client, room: MeetRoom, now: Date): 
 }
 
 async function deviceDeleteState(db: Client, room: MeetRoom, t: MeetTranscript): Promise<NonNullable<MeetRecordingView["deviceDelete"]>> {
-  if (t.localDeletedAt) return { status: "done", errorCode: null, doneAt: t.localDeletedAt };
+  if (t.localDeletedAt) return { status: "done", errorCode: null, doneAt: t.localDeletedAt, devices: [] };
+  // Each computer that may hold the audio (bravo__240), by name, and the latest delete job for it.
   const rs = await db.execute({
-    sql: `SELECT status, error_code FROM tool_jobs
-          WHERE tenant_id = ? AND tool_key = 'meet_delete_local' AND dedupe_key = ?
-          ORDER BY created_at DESC, id DESC LIMIT 1`,
-    args: [room.tenantId, `meet_delete_local:${room.id}`],
+    sql: `SELECT c.runner_key, c.deleted_at, COALESCE(c.device_label, r.label, c.runner_key) AS label,
+                 (SELECT j.status FROM tool_jobs j WHERE j.tenant_id = c.tenant_id AND j.tool_key = 'meet_delete_local' AND j.dedupe_key = ${DELETE_LOCAL_KEY_SQL}
+                   ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS job_status,
+                 (SELECT j.error_code FROM tool_jobs j WHERE j.tenant_id = c.tenant_id AND j.tool_key = 'meet_delete_local' AND j.dedupe_key = ${DELETE_LOCAL_KEY_SQL}
+                   ORDER BY j.created_at DESC, j.id DESC LIMIT 1) AS job_error
+            FROM meet_local_copies c LEFT JOIN tool_runners r ON r.tenant_id = c.tenant_id AND r.runner_key = c.runner_key
+           WHERE c.tenant_id = ? AND c.room_id = ?`,
+    args: [room.tenantId, room.id],
   });
-  const job = rs.rows[0];
-  if (!job) return { status: "not_needed", errorCode: null, doneAt: null };
-  const status = String(job.status);
-  if (status === "failed") return { status: "failed", errorCode: str(job.error_code), doneAt: null };
-  // "done" with no stamp cannot happen (the stamp and the done commit together); read it as still waiting.
-  return { status: "waiting", errorCode: null, doneAt: null };
+  if (!rs.rows.length) return { status: "not_needed", errorCode: null, doneAt: null, devices: [] };
+  const open = rs.rows.filter((r) => !str(r.deleted_at));
+  if (!open.length) return { status: "done", errorCode: null, doneAt: rs.rows.map((r) => String(r.deleted_at)).sort().pop() ?? null, devices: [] };
+  const failed = open.filter((r) => String(r.job_status) === "failed");
+  if (failed.length) return { status: "failed", errorCode: str(failed[0].job_error), doneAt: null, devices: failed.map((r) => String(r.label)) };
+  return { status: "waiting", errorCode: null, doneAt: null, devices: open.map((r) => String(r.label)) };
 }

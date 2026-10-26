@@ -2,8 +2,9 @@
  * tests/meet-recording.test.ts - Oasis Meet's recording relay end to end
  * (migration bravo__231, lib/meet/recording.ts, lib/meet/recording-routes.ts,
  * and the runner channel's meeting jobs in lib/tools/runner-handlers.ts),
- * against the REAL migrations bravo__206, bravo__230 and bravo__231 in a local
- * libSQL file, with a fake relay store that records every call.
+ * against the REAL migrations bravo__206, bravo__230, bravo__231 and the
+ * per-computer copies' bravo__240 and bravo__242 in a local libSQL file, with a
+ * fake relay store that records every call.
  *
  * Pins:
  *   - a chunk is the host's only, same-origin only, from one of the room's own
@@ -25,6 +26,10 @@
  *     the five downloads; it expires after 30 days on the relay instead;
  *   - delete calls off a transcription, tells the PC to delete its copy only
  *     if it may have one, and closes the room to stragglers;
+ *   - a computer's delete that failed is told again by the sweep (a day on, up
+ *     to five failures; runner_gone once that computer checks in), even after
+ *     "Delete meeting" took the room's panel away, and only that copy is;
+ *   - a relay cron step that throws never keeps the steps after it from running;
  *   - a video runner never takes a meeting job, and the reverse.
  *
  * Run: node --conditions=react-server --import tsx tests/meet-recording.test.ts
@@ -35,10 +40,13 @@ import { join } from "node:path";
 import {
   CLIENT_A,
   ENV,
+  MEET_COPIES_BACKFILL_PATH,
   OASIS,
   USERS,
   answerOf,
+  applyMigrationFile,
   check,
+  emptyDatabase,
   fakeStorage,
   finish,
   later,
@@ -124,10 +132,13 @@ async function main() {
   await db.executeMultiple(migration230);
   await db.executeMultiple(migration231);
   await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__233_meet_room_recorder.sql"), "utf8"));
+  // The copies' backfill reads Meet's own tables, so it comes after them (the harness applied bravo__240).
+  await applyMigrationFile(db, MEET_COPIES_BACKFILL_PATH);
   const { createMeetRoom, displayMeetCode } = await import("../lib/meet/rooms");
   const { MEET_TOKEN_SECRET_ENV, signMeetToken } = await import("../lib/meet/access");
   const { MEET_PRESENCE_MS, claimRecorder } = await import("../lib/meet/participants");
   const rec = await import("../lib/meet/recording");
+  const toolsStore = await import("../lib/tools/store");
   const routes = await import("../lib/meet/recording-routes");
   const h = await import("../lib/tools/runner-handlers");
   const { insertJob, sweepToolJobs, getJob } = await import("../lib/tools/store");
@@ -769,9 +780,9 @@ async function main() {
       deviceDelete: { status: string } | null;
     };
     assert.equal(confirmed.deviceDelete?.status, "done");
-    // A second delete does not tell the PC again.
+    // A second delete does not tell the PC again (its one delete, addressed to it: bravo__240).
     await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(now, 3000)));
-    assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key = ?", [`meet_delete_local:${roomId}`]), 1);
+    assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ?", [`meet_delete_local:${roomId}%`]), 1);
   });
 
   await check("delete of a recording the PC never took: no job for the PC, and the room can never be handed over again", async () => {
@@ -806,9 +817,16 @@ async function main() {
     await h.handleToolsFail(signedRequest("fail", { ...ref(del), error_code: "unsafe_path" }, later(at, minutes(6))), runnerDeps(later(at, minutes(6))));
     const view = async (m: number) =>
       ((await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(at, minutes(m)))))).recording as {
-        deviceDelete: { status: string; errorCode: string | null } | null;
+        deviceDelete: { status: string; errorCode: string | null; doneAt: string | null; devices: string[] } | null;
       }).deviceDelete;
-    assert.deepEqual(await view(7), { status: "failed", errorCode: "unsafe_path", doneAt: null });
+    const failed = await view(7);
+    assert.deepEqual([failed?.status, failed?.errorCode, failed?.doneAt, failed?.devices.length], ["failed", "unsafe_path", null, 1]);
+    // The PC polls again: a fresh failed delete is NOT handed out again (it stays failed until the host presses Delete
+    // again, or the sweep tries it a day on: see "told again a day later" below).
+    const poll = (await claim(later(at, minutes(7)))).body.job as Claimed | null;
+    assert.ok(!poll || poll.tool_key !== "meet_delete_local", "a failed delete came back on the next poll");
+    assert.equal((await view(7))?.status, "failed", "the panel still shows the failure");
+    assert.equal(await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ?", [`meet_delete_local:${r.id}:%`]), 1);
     const again = await body(await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(8)))));
     assert.equal(again.device_delete_queued, true, "Delete again did not tell the PC again");
     assert.equal((await view(9))?.status, "waiting");
@@ -969,6 +987,15 @@ async function main() {
     assert.deepEqual([v.recordingBusy(done), v.recordingDeletable(done)], [false, false]);
     const failedDevice = { ...base, deviceDelete: device("failed", "unsafe_path") };
     assert.match(v.describeRecording(failedDevice).detail ?? "", /couldn't delete its copy: its folder was not where meetings are kept/);
+    // One computer is "its copy" and "it does"; two are "their copies" and "each does", waiting or failed alike.
+    const on = (status: "waiting" | "failed", devices: string[]) => ({ ...base, deviceDelete: { ...device(status, status === "failed" ? "runner_gone" : null), devices } });
+    assert.equal(v.describeRecording(on("waiting", ["CC's Mac"])).detail, "Waiting for CC's Mac to delete its copy. It does it when it's next on.");
+    assert.equal(
+      v.describeRecording(on("waiting", ["CC's Mac", "CCPC (Windows)"])).detail,
+      "Waiting for CC's Mac and CCPC (Windows) to delete their copies. Each does it when it's next on.",
+    );
+    assert.match(v.describeRecording(on("failed", ["CC's Mac"])).detail ?? "", /^CC's Mac couldn't delete its copy: it hasn't checked in/);
+    assert.match(v.describeRecording(on("failed", ["CC's Mac", "CCPC (Windows)"])).detail ?? "", /^CC's Mac and CCPC \(Windows\) couldn't delete their copies: /);
     assert.equal(v.recordingDeletable(failedDevice), true, "no way to tell the PC again after it failed");
     assert.equal(v.describeRecording({ ...base, state: "unavailable", deviceDelete: null }).headline, "Meetings in this workspace aren't recorded.");
 
@@ -1039,6 +1066,172 @@ async function main() {
     assert.equal((await body(await routes.handleMeetFinalize(hostReq(code, "POST", "/finalize"), code, rdeps(later(at, minutes(2)))))).state, "queued");
     return { room: r, participant: p, code };
   }
+
+  await check("two computers took the audio: Delete reaches each one, only it can take its delete, and done means both (bravo__240)", async () => {
+    const MAC_SECRET = "mac-meet-runner-test-secret-0123456789abcdefgh";
+    const at = later(T0, minutes(104_000));
+    const { room, code } = await endedRecording(at, "Two computers");
+    const pc = await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal(pc.input.room_id, room.id);
+    // The PC goes quiet; its lease lapses, and the Mac takes the transcription over.
+    await db.execute({ sql: "UPDATE tool_jobs SET lease_expires_at = ? WHERE id = ?", args: [later(at, minutes(4)).toISOString(), pc.job_id] });
+    const macAt = later(at, minutes(30));
+    const macDeps = { ...runnerDeps(macAt), env: { ...ENV, TOOLS_RUNNER_SECRET_MAC: MAC_SECRET } };
+    const macClaim = async (when: Date) =>
+      (await answerOf(await h.handleToolsClaim(signedRequest("claim", { runner_id: "oasis-mac-meet", label: "CC's Mac", version: "1.0.0", tools: MEET_TOOLS }, when, { producer: "mac", secret: MAC_SECRET }), { ...macDeps, now: when }))).body.job as Claimed | null;
+    let macJob: Claimed | null = null;
+    for (let i = 0; i < 10 && !(macJob && macJob.tool_key === "meet_transcribe" && macJob.input.room_id === room.id); i += 1) macJob = await macClaim(macAt);
+    assert.ok(macJob && macJob.tool_key === "meet_transcribe" && macJob.input.room_id === room.id, "the Mac took the transcription over");
+    assert.equal(await count("SELECT COUNT(*) FROM meet_local_copies WHERE tenant_id = ? AND room_id = ?", [OASIS, room.id]), 2, "both computers may hold the audio");
+
+    const delAt = later(macAt, minutes(1));
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(delAt));
+    const targets = (await db.execute({ sql: "SELECT target_runner FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ? AND status = 'queued' ORDER BY target_runner", args: [`meet_delete_local:${room.id}:%`] })).rows.map((r) => String(r.target_runner));
+    assert.deepEqual(targets, [`bea:${RUNNER}`, "mac:oasis-mac-meet"], "one delete for each computer");
+
+    // The Mac takes its own delete, never the PC's, and deleting only its copy is not "deleted".
+    const macDelete = await macClaim(later(delAt, 1000));
+    assert.ok(macDelete && macDelete.tool_key === "meet_delete_local" && macDelete.input.room_id === room.id);
+    const macDone = await answerOf(
+      await h.handleToolsComplete(
+        signedRequest("complete", { runner_id: "oasis-mac-meet", job_id: macDelete!.job_id, lease_id: macDelete!.lease_id, tool_key: "meet_delete_local", removed: ["/Users/x"], already_gone: false, device_label: "CC's Mac" }, later(delAt, 2000), { producer: "mac", secret: MAC_SECRET }),
+        { ...macDeps, now: later(delAt, 2000) },
+      ),
+    );
+    assert.equal(macDone.status, 200, JSON.stringify(macDone.body));
+    assert.equal(await macClaim(later(delAt, 2500)), null, "the PC's delete is not the Mac's to take");
+    assert.equal((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, null, "the PC still holds its copy");
+    const half = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(delAt, 3000))))).recording as { deviceDelete: { status: string } | null };
+    assert.equal(half.deviceDelete?.status, "waiting");
+
+    // The PC deletes its copy: now it is done.
+    const pcDelete = (await claim(later(delAt, 4000))).body.job as Claimed;
+    assert.deepEqual([pcDelete.tool_key, pcDelete.input.room_id], ["meet_delete_local", room.id]);
+    const pcDone = await answerOf(
+      await h.handleToolsComplete(
+        signedRequest("complete", { ...ref(pcDelete), tool_key: "meet_delete_local", removed: ["C:\\x"], already_gone: false, device_label: "CCPC (Windows)" }, later(delAt, 5000)),
+        runnerDeps(later(delAt, 5000)),
+      ),
+    );
+    assert.equal(pcDone.status, 200, JSON.stringify(pcDone.body));
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "every copy is gone");
+    const all = (await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(delAt, 6000))))).recording as { deviceDelete: { status: string } | null };
+    assert.equal(all.deviceDelete?.status, "done");
+  });
+
+  // ---------------------------------------------------------------------
+  // The two-computer review (bravo__240, revised before it was applied)
+  // ---------------------------------------------------------------------
+  const MAC_SECRET2 = "mac-meet-runner-test-secret-0123456789abcdefgh";
+  const macDepsAt = (when: Date) => ({ ...runnerDeps(when), env: { ...ENV, TOOLS_RUNNER_SECRET_MAC: MAC_SECRET2 }, now: when });
+  const macAsk = async (when: Date) =>
+    (await answerOf(await h.handleToolsClaim(signedRequest("claim", { runner_id: "oasis-mac-meet", label: "CC's Mac", version: "1.0.0", tools: MEET_TOOLS }, when, { producer: "mac", secret: MAC_SECRET2 }), macDepsAt(when)))).body.job as Claimed | null;
+  const macRef = (j: Claimed) => ({ runner_id: "oasis-mac-meet", job_id: j.job_id, lease_id: j.lease_id });
+  const macTakes = async (when: Date, roomId: string) => {
+    for (let i = 0; i < 12; i += 1) {
+      const j = await macAsk(when);
+      if (!j) continue;
+      if (j.tool_key === "meet_transcribe" && j.input.room_id === roomId) return j;
+      if (j.tool_key === "meet_delete_local") {
+        await h.handleToolsComplete(signedRequest("complete", { ...macRef(j), tool_key: "meet_delete_local", removed: [], already_gone: true, device_label: "CC's Mac" }, when, { producer: "mac", secret: MAC_SECRET2 }), macDepsAt(when));
+        continue;
+      }
+      await h.handleToolsFail(signedRequest("fail", { ...macRef(j), error_code: "transcribe_failed" }, when, { producer: "mac", secret: MAC_SECRET2 }), macDepsAt(when));
+    }
+    throw new Error("the Mac never got this room's transcription");
+  };
+
+  await check("each computer's delete carries only ITS OWN folder: the Mac never gets the PC's path, nor the PC the Mac's", async () => {
+    const at = later(T0, minutes(130_000));
+    const { room, code } = await endedRecording(at, "Folders");
+    const pc = await claimTranscription(later(at, minutes(3)), room.id);
+    // The PC's lease lapses; the Mac takes over and finishes the transcript, in its own folder.
+    await db.execute({ sql: "UPDATE tool_jobs SET lease_expires_at = ? WHERE id = ?", args: [later(at, minutes(4)).toISOString(), pc.job_id] });
+    const macAt = later(at, minutes(30));
+    const mj = await macTakes(macAt, room.id);
+    const macFolder = "/Users/conaugh/OASIS/Meetings/2026-10-26 Folders (abcd1234)";
+    const done = await answerOf(
+      await h.handleToolsComplete(
+        signedRequest("complete", { ...transcriptReport(mj), ...macRef(mj), device_label: "CC's Mac", local_folder: macFolder }, later(macAt, 1000), { producer: "mac", secret: MAC_SECRET2 }),
+        macDepsAt(later(macAt, 1000)),
+      ),
+    );
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(macAt, minutes(1))));
+    const jobs = (await db.execute({ sql: "SELECT target_runner, input_json FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ? ORDER BY target_runner", args: [`meet_delete_local:${room.id}:%`] })).rows.map((r) => [String(r.target_runner), (JSON.parse(String(r.input_json)) as { local_folder: string | null }).local_folder]);
+    assert.deepEqual(jobs, [[`bea:${RUNNER}`, null], ["mac:oasis-mac-meet", macFolder]], "each computer is sent its own folder, or none to find it by room");
+  });
+
+  await check("a meeting claimed before copies were tracked: Delete goes to the computer that claimed it, never to whichever asks first", async () => {
+    const at = later(T0, minutes(140_000));
+    const { room, code } = await endedRecording(at, "Old meeting");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    // As if the claim had been made by code older than bravo__240: no copy on record.
+    await db.execute({ sql: "DELETE FROM meet_local_copies WHERE tenant_id = ? AND room_id = ?", args: [OASIS, room.id] });
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))));
+    const targets = (await db.execute({ sql: "SELECT target_runner FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ?", args: [`meet_delete_local:${room.id}%`] })).rows.map((r) => r.target_runner === null ? null : String(r.target_runner));
+    assert.deepEqual(targets, [`bea:${RUNNER}`], "one delete, addressed to the PC that claimed it");
+    const mac = await macAsk(later(at, minutes(6)));
+    assert.ok(!mac || mac.input.room_id !== room.id, "the Mac is never handed the PC's delete");
+  });
+
+  await check("a computer that never comes back: after 30 days its delete is failed as runner_gone, not left waiting for good", async () => {
+    const at = later(T0, minutes(150_000));
+    const { room, code } = await endedRecording(at, "Gone computer");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))));
+    const view = async (when: Date) =>
+      ((await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(when)))).recording as { deviceDelete: { status: string; errorCode: string | null; devices: string[] } | null }).deviceDelete;
+    assert.equal((await view(later(at, minutes(6))))?.status, "waiting");
+    // The PC never polls again: its runner row goes stale, then the sweep gives up on it.
+    await db.execute({ sql: "UPDATE tool_runners SET last_seen_at = ? WHERE runner_key = ?", args: [later(at, minutes(6)).toISOString(), `bea:${RUNNER}`] });
+    const month = later(at, 31 * 86_400_000);
+    // This room's delete, and any other that waits on a computer gone as long (an earlier check's Mac left one claimed).
+    assert.ok((await rec.failStrandedLocalDeletes(db, [OASIS], month)) >= 1);
+    const v = await view(month);
+    assert.deepEqual([v?.status, v?.errorCode], ["failed", "runner_gone"]);
+    assert.equal((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, null, "a computer that never answered is not counted as deleted");
+  });
+
+  await check("a delete its computer claimed and then vanished with is given up after 30 days too, never left claimed for good", async () => {
+    const at = later(T0, minutes(160_000));
+    const { room, code } = await endedRecording(at, "Wiped mid-delete");
+    // A computer whose copy is on record takes its delete and is wiped before it reports: the job stays claimed, and
+    // only that computer could ever take it again (claimNextJob's target_runner).
+    const gone = "bea:wiped-pc";
+    await db.execute({ sql: "INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at) VALUES (?, ?, ?, ?)", args: [OASIS, room.id, gone, later(at, minutes(3)).toISOString()] });
+    await db.execute({
+      sql: "INSERT INTO tool_runners (tenant_id, runner_key, label, tools_json, version, last_seen_at) VALUES (?, ?, 'Wiped PC', ?, '1.0.0', ?)",
+      args: [OASIS, gone, JSON.stringify(MEET_TOOLS), later(at, minutes(6)).toISOString()],
+    });
+    await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))));
+    const jobId = String(await scalar(db, "SELECT id FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ?", [OASIS, rec.deleteLocalKey(room.id, gone)]));
+    await db.execute({
+      sql: "UPDATE tool_jobs SET status = 'claimed', claimed_by = ?, lease_id = ?, claimed_at = ?, lease_expires_at = ?, attempts = 1 WHERE tenant_id = ? AND id = ?",
+      args: [gone, "f".repeat(32), later(at, minutes(6)).toISOString(), later(at, minutes(21)).toISOString(), OASIS, jobId],
+    });
+    const state = async () => {
+      const r = (await db.execute({ sql: "SELECT status, error_code FROM tool_jobs WHERE tenant_id = ? AND id = ?", args: [OASIS, jobId] })).rows[0];
+      return [String(r.status), r.error_code === null ? null : String(r.error_code)];
+    };
+    await rec.failStrandedLocalDeletes(db, [OASIS], later(at, 29 * 86_400_000));
+    assert.deepEqual(await state(), ["claimed", null], "given up inside its 30 days");
+    await rec.failStrandedLocalDeletes(db, [OASIS], later(at, 31 * 86_400_000));
+    assert.deepEqual(await state(), ["failed", "runner_gone"], "a claimed delete whose computer vanished waited for good");
+    const v = ((await body(await routes.handleMeetRecordingGet(hostReq(code, "GET"), code, rdeps(later(at, 31 * 86_400_000))))).recording as {
+      deviceDelete: { status: string; errorCode: string | null; devices: string[] } | null;
+    }).deviceDelete;
+    assert.deepEqual([v?.status, v?.errorCode, v?.devices], ["failed", "runner_gone", ["Wiped PC"]]);
+  });
+
+  await check("a database without bravo__240 is 'not set up', never a 500 for every claim", async () => {
+    const bare = emptyDatabase();
+    await bare.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql"), "utf8"));
+    assert.equal(await toolsStore.toolTablesInstalled(bare), false, "no target_runner column");
+    await bare.execute("ALTER TABLE tool_jobs ADD COLUMN target_runner TEXT");
+    assert.equal(await toolsStore.toolTablesInstalled(bare), true);
+    bare.close();
+  });
 
   await check("a chunk that lands while the PC's claim reads the recording is either declared to the PC or refused, never kept and lost", async () => {
     const at = later(T0, minutes(95_000));
@@ -1170,8 +1363,9 @@ async function main() {
     assert.equal(await rec.removeRelayChunks(db, store.storage, { tenantIds: [OASIS], roomId: room.id }, 300, late), 1);
     // That PC took the audio before it vanished, so it may hold a copy: it is told to delete it, and the panel
     // says it is waiting for that, never that the audio is simply gone (Codex on #685, fourth pass).
+    // The delete goes to THAT computer: claimable only by the runner that took the audio (bravo__240).
     assert.equal(
-      await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key = ? AND status = 'queued'", [`meet_delete_local:${room.id}`]),
+      await count("SELECT COUNT(*) FROM tool_jobs WHERE tool_key = 'meet_delete_local' AND dedupe_key LIKE ? AND target_runner IS NOT NULL AND status = 'queued'", [`meet_delete_local:${room.id}:%`]),
       1,
       "an expired recording the PC had claimed left its copy on the PC",
     );
@@ -1385,6 +1579,203 @@ async function main() {
     for (const m of [13, 24, 60]) await rec.meetRelaySweeps(db, store.storage, [OASIS], later(today, minutes(m)));
     const row = (await db.execute({ sql: "SELECT status FROM meet_rooms WHERE id = ?", args: [r.id] })).rows[0];
     assert.equal(String(row.status), "live", "a try-out ended tomorrow's meeting");
+  });
+
+  await check("one sweep that throws never keeps the next ones from running, and is logged by its name; the relay cron says so (503)", async () => {
+    const now = later(T0, minutes(400_000));
+    // A delete waiting 31 days on a computer never seen: the last sweep of a run gives it up.
+    const stranded = async () => {
+      const id = crypto.randomUUID();
+      const made = later(now, -31 * 86_400_000).toISOString();
+      await db.execute({
+        sql: `INSERT INTO tool_jobs (id, tenant_id, tool_key, runs_on, status, input_json, input_hash, dedupe_key, target_runner, created_at, updated_at)
+              VALUES (?, ?, 'meet_delete_local', 'runner', 'queued', '{}', 'stranded', ?, 'bea:never-seen', ?, ?)`,
+        args: [id, OASIS, `meet_delete_local:${id}:bea:never-seen`, made, made],
+      });
+      return async () => String(await scalar(db, "SELECT error_code FROM tool_jobs WHERE tenant_id = ? AND id = ?", [OASIS, id]));
+    };
+    const failing = (pattern: RegExp) =>
+      new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop === "execute") {
+            return async (stmt: InStatement) => {
+              if (pattern.test(typeof stmt === "string" ? stmt : stmt.sql)) throw new Error("the database refused this sweep");
+              return target.execute(stmt);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const logged = async (run: () => Promise<unknown>) => {
+      const lines: string[] = [];
+      const original = console.error;
+      console.error = (...parts: unknown[]) => {
+        lines.push(parts.map(String).join(" "));
+      };
+      try {
+        await run();
+      } finally {
+        console.error = original;
+      }
+      return lines;
+    };
+    // The first sweep of a claim's run throws: the rest still run, down to the last.
+    const first = await stranded();
+    const claimRun = await logged(() => rec.meetRelaySweeps(failing(/UPDATE meet_rooms AS r SET status = 'ended'/), store.storage, [OASIS], now));
+    assert.ok(claimRun.some((l) => l.includes("the endAbandonedRooms sweep failed")), claimRun.join("\n"));
+    assert.equal(await first(), "runner_gone", "a sweep that threw starved the ones after it");
+    // The relay cron: one of the computers' sweeps throws; the other still runs, and the run is a failed one.
+    const second = await stranded();
+    const cronRun = await logged(async () => {
+      const res = await routes.handleMeetRelayCron({ db: failing(/SELECT DISTINCT c\.tenant_id, c\.room_id FROM meet_local_copies c/), storage: store.storage, now: () => now });
+      assert.deepEqual([res.status, (await body(res)).error], [503, "local_delete_sweep_failed"]);
+    });
+    assert.ok(cronRun.some((l) => l.includes("the queueMissingLocalDeletes sweep failed")), cronRun.join("\n"));
+    assert.equal(await second(), "runner_gone", "the give-up waited on the sweep that threw");
+    // The relay cron, an EARLIER step throwing (expireUnfinalized, its only INSERT OR IGNORE INTO meet_transcripts):
+    // logged by its name, the steps after it and the computers' sweeps still run, and the run says so by name (503).
+    const third = await stranded();
+    const earlyRun = await logged(async () => {
+      const res = await routes.handleMeetRelayCron({ db: failing(/INSERT OR IGNORE INTO meet_transcripts/), storage: store.storage, now: () => now });
+      const out = await body(res);
+      assert.deepEqual([res.status, out.error, out.failedSweeps, out.localDeletes], [503, "relay_sweep_failed", ["expireUnfinalized"], "ok"]);
+    });
+    assert.ok(earlyRun.some((l) => l.includes("the expireUnfinalized sweep failed")), earlyRun.join("\n"));
+    assert.equal(await third(), "runner_gone", "an earlier step that threw kept the computers' sweeps from running");
+  });
+
+  // ---------------------------------------------------------------------
+  // A computer's delete that failed is told again (third review of the two-computer change)
+  // ---------------------------------------------------------------------
+  const { deleteMeetRoomRows } = await import("../lib/meet/participants");
+  const PC_KEY = `bea:${RUNNER}`;
+  /** The PC's claims until this room's delete comes up (null: nothing left), finishing any other meeting job on the way. */
+  async function claimDeleteOf(at: Date, roomId: string): Promise<Claimed | null> {
+    for (let i = 0; i < 12; i += 1) {
+      const answer = (await claim(at)).body;
+      const got = answer.job as Claimed | null;
+      if (!got) {
+        if (answer.poll_after_seconds !== 0) return null;
+        continue;
+      }
+      if (got.tool_key === "meet_delete_local" && got.input.room_id === roomId) return got;
+      if (got.tool_key === "meet_transcribe") {
+        await h.handleToolsFail(signedRequest("fail", { ...ref(got), error_code: "transcribe_failed" }, at), runnerDeps(at));
+      } else {
+        await h.handleToolsComplete(
+          signedRequest("complete", { ...ref(got), tool_key: "meet_delete_local", removed: [], already_gone: true, device_label: "CCPC (Windows)" }, at),
+          runnerDeps(at),
+        );
+      }
+    }
+    throw new Error("the PC was handed a dozen other jobs first");
+  }
+  const failDelete = async (job: Claimed, code: string, at: Date) =>
+    assert.equal((await answerOf(await h.handleToolsFail(signedRequest("fail", { ...ref(job), error_code: code }, at), runnerDeps(at)))).status, 200);
+  const deletedHere = async (job: Claimed, at: Date) =>
+    assert.equal(
+      (await answerOf(
+        await h.handleToolsComplete(
+          signedRequest("complete", { ...ref(job), tool_key: "meet_delete_local", removed: ["C:\\x"], already_gone: false, device_label: "CCPC (Windows)" }, at),
+          runnerDeps(at),
+        ),
+      )).status,
+      200,
+    );
+  /** One computer's deletes of one room, oldest first: [status, error code]. */
+  const deletesOf = async (roomId: string, runner = PC_KEY) =>
+    (await db.execute({
+      sql: "SELECT status, error_code FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? ORDER BY created_at, id",
+      args: [OASIS, rec.deleteLocalKey(roomId, runner)],
+    })).rows.map((r) => [String(r.status), r.error_code === null ? null : String(r.error_code)]);
+  const relayCron = (at: Date) => routes.handleMeetRelayCron({ db, storage: store.storage, now: () => at });
+  /** "Delete meeting": the recording, then the room's own rows (lib/meet/handlers.ts deleteMeetRoom), so no panel is left. */
+  async function deleteMeeting(room: { id: string; tenantId: string }, code: string, at: Date) {
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(at))).status, 200);
+    await deleteMeetRoomRows(db, room);
+  }
+
+  await check("a computer's delete that failed is told again a day later, though Delete meeting took the room and its panel away", async () => {
+    const at = later(T0, minutes(500_000));
+    const { room, code } = await endedRecording(at, "Locked folder");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    await deleteMeeting(room, code, later(at, minutes(5)));
+    // The PC cannot remove its folder (a file open on Windows) and says so. No panel is left to show it.
+    const first = await claimDeleteOf(later(at, minutes(6)), room.id);
+    assert.ok(first, "the PC was never told to delete its copy");
+    await failDelete(first!, "runner_error", later(at, minutes(7)));
+    // Inside its day the failure stands: neither the cron nor the PC's own claims queue it again.
+    await relayCron(later(at, minutes(7 + 23 * 60)));
+    assert.equal(await claimDeleteOf(later(at, minutes(8 + 23 * 60)), room.id), null, "a fresh failure was queued again");
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"]]);
+    // A day on, the cron queues it again with every meeting computer off, and the PC's next claim takes it.
+    await relayCron(later(at, minutes(8 + 24 * 60)));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"], ["queued", null]], "the failed delete was never tried again");
+    const again = await claimDeleteOf(later(at, minutes(9 + 24 * 60)), room.id);
+    assert.ok(again, "the PC was not told again");
+    await deletedHere(again!, later(at, minutes(10 + 24 * 60)));
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "its copy is gone, yet the recording is not stamped");
+  });
+
+  await check("a copy whose delete keeps failing is told again until five have failed, then only the host's Delete tries again", async () => {
+    const at = later(T0, minutes(510_000));
+    const { room, code } = await endedRecording(at, "Always locked");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))))).status, 200);
+    let when = later(at, minutes(6));
+    for (let n = 1; n <= rec.LOCAL_DELETE_MAX_FAILED; n += 1) {
+      const job = await claimDeleteOf(when, room.id);
+      assert.ok(job, `delete ${n} never reached the PC`);
+      await failDelete(job!, n % 2 ? "runner_error" : "unsafe_path", later(when, minutes(1)));
+      when = later(when, rec.LOCAL_DELETE_RETRY_MS + minutes(2));
+      await rec.queueMissingLocalDeletes(db, [OASIS], when);
+    }
+    const all = await deletesOf(room.id);
+    assert.equal(all.length, rec.LOCAL_DELETE_MAX_FAILED, `a delete past the fifth failure was queued: ${JSON.stringify(all)}`);
+    assert.ok(all.every(([status]) => status === "failed"));
+    assert.equal(await claimDeleteOf(when, room.id), null);
+    // The room is still here, and its panel says so; Delete again still tells the PC at once.
+    const again = await body(await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(when, minutes(1)))));
+    assert.equal(again.device_delete_queued, true, "the host's Delete no longer reached the PC");
+  });
+
+  await check("a delete given up as runner_gone is told again as soon as its computer checks in, never before", async () => {
+    const at = later(T0, minutes(520_000));
+    const { room, code } = await endedRecording(at, "Back after a month");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    await deleteMeeting(room, code, later(at, minutes(5)));
+    // The PC is off for a month: the cron gives its delete up...
+    const month = later(at, 31 * 86_400_000);
+    await relayCron(month);
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"]]);
+    // ...and while the PC stays away, never queues it again.
+    await relayCron(later(month, 2 * 86_400_000));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"]], "a delete was queued for a computer still gone");
+    // The PC comes back: its first claim queues its delete again and hands it over, and its report stamps the room.
+    const back = await claimDeleteOf(later(month, 3 * 86_400_000), room.id);
+    assert.ok(back, "the PC came back and was told nothing");
+    await deletedHere(back!, later(month, 3 * 86_400_000 + minutes(1)));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"], ["done", null]]);
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "its copy is gone, yet the recording is not stamped");
+  });
+
+  await check("the sweep queues only the copy that is missing a delete, never its sibling's fresh failure", async () => {
+    const at = later(T0, minutes(600_000));
+    const { room, code } = await endedRecording(at, "Sibling");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))))).status, 200);
+    const pcJob = await claimDeleteOf(later(at, minutes(6)), room.id);
+    await failDelete(pcJob!, "runner_error", later(at, minutes(7)));
+    // A second computer whose claim landed in the same moment as Delete: on record, with no delete of its own.
+    const MAC_KEY = "mac:oasis-mac-meet";
+    await db.execute({
+      sql: "INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at) VALUES (?, ?, ?, ?)",
+      args: [OASIS, room.id, MAC_KEY, later(at, minutes(5)).toISOString()],
+    });
+    await rec.queueMissingLocalDeletes(db, [OASIS], later(at, minutes(10)));
+    assert.deepEqual(await deletesOf(room.id, MAC_KEY), [["queued", null]], "the copy with no delete was not queued one");
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"]], "the sibling's fresh failure was queued again");
   });
 
   finish("meet recording");

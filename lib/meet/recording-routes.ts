@@ -31,6 +31,7 @@ import {
   acceptChunk,
   deleteMeetRecording,
   ensureTranscriptJob,
+  meetLocalCopiesInstalled,
   meetRecordingServed,
   meetRecordingTablesInstalled,
   meetRecordingView,
@@ -117,11 +118,22 @@ async function sendingBrowser(db: Client, req: Request, room: MeetRoom, userId: 
   return row && row.role === "host" && row.userId === userId ? row.id : null;
 }
 
-async function host(req: Request, rawCode: string, deps: RecordingDeps, write: boolean) {
+/**
+ * The host, and the tables the route needs: the three recording tables for recording, the hand-over and the
+ * panel; with bravo__240's for Delete only, which tells each computer that holds a copy (meetLocalCopiesInstalled).
+ * A deploy that lands before bravo__240 therefore never stops a live meeting's uploads.
+ */
+async function host(
+  req: Request,
+  rawCode: string,
+  deps: RecordingDeps,
+  write: boolean,
+  installed: (db: Client) => Promise<boolean> = meetRecordingTablesInstalled,
+) {
   if (write && !sameOrigin(req)) return { ok: false as const, response: refuse(403, "cross_origin") };
   const h = await requireMeetHost(deps.db, rawCode, deps.resolveSession);
   if (!h.ok) return h;
-  if (!(await meetRecordingTablesInstalled(deps.db))) return { ok: false as const, response: notInstalled("tables_missing") };
+  if (!(await installed(deps.db))) return { ok: false as const, response: notInstalled("tables_missing") };
   return h;
 }
 
@@ -246,6 +258,12 @@ function recorderReportOf(raw: Uint8Array | null): RecorderReport {
  * deleted, so the 30-day promise cannot be kept: that is a failed run the cron
  * driver reports (503), never a quiet 200 (Codex on #685, third pass). Expiry
  * still runs first, so recordings are marked even while storage is missing.
+ * A step of the run that threw (relay_sweep_failed, named in failedSweeps;
+ * the steps after it still ran) or a sweep of the computers' deletes that
+ * threw is a failed run too; one that could not run because bravo__240 is not
+ * applied is logged on every run and named in the answer (localDeletes:
+ * "not_installed"), not failed, like bravo__231 missing below: before it no
+ * copy is tracked, so none can wait.
  */
 export async function handleMeetRelayCron(deps: {
   db: Client;
@@ -264,6 +282,11 @@ export async function handleMeetRelayCron(deps: {
   // An ended room's media the SFU would not cut is still flowing: a failed run too, so the driver reports it while
   // the next runs retry it (Codex on #688).
   if (result.mediaCutFailed > 0) return json(503, { ok: false, error: "media_cut_failed", ...result });
+  // A step of the run threw (logged and named in failedSweeps; the steps after it still ran): a failed run too.
+  if (result.failedSweeps.length) return json(503, { ok: false, error: "relay_sweep_failed", ...result });
+  // A copy of a deleted meeting left without its delete, or a gone computer's delete never given up: a failed run,
+  // so the driver reports it while the next runs retry it.
+  if (result.localDeletes === "failed") return json(503, { ok: false, error: "local_delete_sweep_failed", ...result });
   return json(200, { ok: true, ...result });
 }
 
@@ -274,11 +297,18 @@ export async function handleMeetRelayCron(deps: {
 export async function handleMeetRecordingGet(req: Request, rawCode: string, deps: RecordingDeps): Promise<Response> {
   const h = await host(req, rawCode, deps, false);
   if (!h.ok) return h.response;
-  return json(200, { ok: true, recording: await meetRecordingView(deps.db, h.room, deps.now()) });
+  try {
+    return json(200, { ok: true, recording: await meetRecordingView(deps.db, h.room, deps.now()) });
+  } catch (err) {
+    // A deleted or expired recording's panel reads each computer's copy (bravo__240): before that migration it is
+    // "not set up", like Delete, never a 500. Every other failure is still thrown.
+    if (!(await meetLocalCopiesInstalled(deps.db))) return notInstalled("tables_missing");
+    throw err;
+  }
 }
 
 export async function handleMeetRecordingDelete(req: Request, rawCode: string, deps: RecordingDeps): Promise<Response> {
-  const h = await host(req, rawCode, deps, true);
+  const h = await host(req, rawCode, deps, true, meetLocalCopiesInstalled);
   if (!h.ok) return h.response;
   const out = await deleteMeetRecording(deps.db, deps.storage, h.room, h.userId, deps.now());
   return json(200, { ok: true, relay_remaining: out.relayRemaining, device_delete_queued: out.deviceDeleteQueued });

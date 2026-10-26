@@ -56,6 +56,7 @@ import {
   DOWNLOAD_URL_TTL_SECONDS,
   meetDeleteLocalCompleteStatements,
   meetDownloadFiles,
+  meetLocalCopiesInstalled,
   meetRecordingTablesInstalled,
   meetRelaySweeps,
   meetTranscribeClaim,
@@ -225,12 +226,16 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   // recordings expire, ended ones nobody handed over are handed over, and the
   // next batch of relay copies the PC already has is deleted. Logged, never the
   // answer: a sweep that fails must not stop the claim (it runs again next minute).
-  if (tools.some((k) => k === "meet_transcribe" || k === "meet_delete_local")) {
+  const servesMeetings = tools.some((k) => k === "meet_transcribe" || k === "meet_delete_local");
+  if (servesMeetings) {
     try {
       if (await meetRecordingTablesInstalled(deps.db)) await meetRelaySweeps(deps.db, deps.meetStorage ?? null, ident.tenantIds, deps.now, deps.meetSfu ?? null);
     } catch (err) {
       console.error("[tools.claim] the meeting relay sweeps failed", err instanceof Error ? (err.stack ?? err.message) : String(err));
     }
+    // A meeting job's claim and report record this computer's copy (bravo__240): without those tables the computer
+    // is told "not set up" before it takes a job, never handed one its claim would then fail on (and spend an attempt).
+    if (!(await meetLocalCopiesInstalled(deps.db))) return notInstalled("tables_missing");
   }
 
   const leaseId = newLeaseId();
@@ -278,7 +283,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
       );
     }
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
-    const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now);
+    const meet = await meetTranscribeClaim(deps.db, job, ident.tenantIds, deps.now, ident.runnerKey);
     if (meet) return answer(meet.input, { ...hold, queue_depth: meet.queueDepth });
     // The recording is no longer waiting on this job (deleted, or replaced by a newer one): end it. The runner
     // takes the next job on its next run.
@@ -607,6 +612,8 @@ async function completeSystemJob(
   if (transcript && !transcript.ok) return invalid(transcript.field);
   if (deleted && !deleted.ok) return invalid(deleted.field);
   if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  // Both reports write this computer's copy (bravo__240's meet_local_copies).
+  if (!(await meetLocalCopiesInstalled(deps.db))) return notInstalled("tables_missing");
 
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return systemRepeatOrLost(deps.db, ref, toolKey);
