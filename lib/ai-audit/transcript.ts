@@ -1087,9 +1087,17 @@ export function parseTranscriptText(text: string, filename?: string | null): { o
   return finish(format, raw);
 }
 
-/** An Oasis Meet transcript's stored lines (for attaching a Meet call, phase 2c). */
+/**
+ * An Oasis Meet transcript's stored lines (for attaching a Meet call, phase 2c). The same cap as a pasted
+ * transcript: its names and words as "Speaker: words" lines are at most TRANSCRIPT_MAX_BYTES, or it is refused
+ * whole ("too_large"), never cut (review of phase 2c: Meet keeps up to a million characters).
+ */
 export function parseMeetLines(rows: unknown): { ok: true; value: ParsedTranscript } | { ok: false; error: ParseError } {
-  return finish("meet", parseMeet(rows));
+  const raw = parseMeet(rows);
+  let bytes = 0;
+  for (const l of raw) bytes += utf8Bytes(l.text) + (l.speaker ? utf8Bytes(l.speaker) + 2 : 0) + 1;
+  if (bytes > TRANSCRIPT_MAX_BYTES) return { ok: false, error: "too_large" };
+  return finish("meet", raw);
 }
 
 // ---------------------------------------------------------------------------

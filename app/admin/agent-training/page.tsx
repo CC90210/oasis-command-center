@@ -32,7 +32,7 @@ import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { ToolsSection } from "@/components/tools/ToolsSection";
-import { LearnedNotes } from "@/components/tools/LearnedNotes";
+import { LEARNED_NOTES_READ, LearnedNotes } from "@/components/tools/LearnedNotes";
 import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import {
   EMPTY_CORPUS_STATS,
@@ -52,7 +52,8 @@ export const metadata = { title: "Agent training · Admin" };
  * an agent's tab when Turso is not the active backend (trainingRowsFor answers null; LearnedNotes then
  * filters these rows by the same rule).
  */
-const ITEMS_READ = 200;
+/** One cap for both reads, the one the list counts against (components/tools/LearnedNotes.tsx). */
+const ITEMS_READ = LEARNED_NOTES_READ;
 
 /**
  * The reads never throw (marketing-queries.ts), but a rejected promise must not
@@ -81,7 +82,7 @@ async function LearnedNotesLoader({ tenantId, agent }: { tenantId: string; agent
     safely("stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
     // One agent's tab: filtered in the database by the rule the agent's own read uses (null off Turso).
     agent
-      ? safely("agent_items", trainingRowsFor(tenantId, agent), { rows: [], degraded: true })
+      ? safely("agent_items", trainingRowsFor(tenantId, agent, ITEMS_READ), { rows: [], degraded: true })
       : safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }),
   ]);
   const items = read ?? (await safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }));

@@ -339,7 +339,7 @@ export const NO_CONNECTION = "No connection. Check it and try again.";
 
 // Deleting a meeting (POST /api/meet/<code>/host { action: "delete" })
 
-const DELETE_RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+const DELETE_RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone.";
 const DELETE_UNRECORDED = "This deletes the meeting, and its link stops working. It cannot be undone.";
 const DELETE_LIVE = "The meeting is on now: this ends it for everyone in it. ";
 

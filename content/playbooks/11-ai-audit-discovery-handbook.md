@@ -25,7 +25,7 @@ What the call is **not** for: selling, quoting, or diagnosing. You are listening
 - [ ] Open the lead and its AI audit. Read the pre-call brief (Call and transcripts, at the top): what they wrote on the form, what their website shows, the likely problems (these are guesses until the client confirms them), and the facts to confirm. The live-call screen marks the questions it says to spend time on.
 - [ ] Look at their website on your phone. Can you call them in one tap? Is there a form or a booking button?
 - [ ] Note the two or three figures the brief says are missing. Those are the questions to weight.
-- [ ] Open the live-call screen and start the Oasis Meet room, or have your notes ready if the call is elsewhere.
+- [ ] Open the live-call screen. Its Call room box opens the lead's Oasis Meet room (made when the call was booked, or with Make a call room). If the call is elsewhere, have your notes ready.
 - [ ] Remind yourself of the rules below. Especially: no prices on this call.
 
 ---
@@ -187,6 +187,6 @@ What the audit can then do: estimate the value of missed calls as a range, from 
 
 ## Right after the call
 
-- Mark the call completed. Paste or upload the transcript (for an Oasis Meet call, open the meeting's Transcript in Meet and press Copy transcript), or work from your notes. Attaching Meet transcripts by themselves comes in a later phase.
+- Mark the call completed. A call held in the lead's Oasis Meet room attaches its own transcript when Meet has it ready, if every guest agreed to the recording on joining and the workspace owner recorded the client's answer about AI analysis on the opening question. Anything else waits under Transcripts, with the reason and an alert, for the owner to attach by hand, saying what the client agreed to: no answer recorded (or one another founder recorded), part of the audio lost, or a guest removed or no guest heard. A call that ended before the engagement was opened is listed under Transcripts for the owner to attach by hand, without an alert. If the client said no to the recording, the transcript cannot be used at all. For a call held elsewhere, paste or upload the transcript, or work from your notes.
 - Check the discovery profile. Every field shows its label and where it came from. Correct anything the transcript got wrong.
 - Then authorize processing (Gate 1). Nothing is researched or written before you do. The operating handbook covers everything after this point.

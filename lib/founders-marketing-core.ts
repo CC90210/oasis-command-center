@@ -719,12 +719,17 @@ export function lifecycleOf(asset: {
  * Returns null rather than a guessed URL when the id shape cannot produce one —
  * a dead link on a metrics page is worse than plain text, because it looks like
  * accounting that works.
+ *
+ * WHERE IT REACHES (2026-10-26). Some links can only reach the ACCOUNT, not the
+ * post (an Instagram numeric media id, every Threads row): postLinkTarget says
+ * which, so the page can say "opens the account" instead of a hover that
+ * promises the post. postPermalink is its href, so the two can never disagree.
  */
-export function postPermalink(
+export function postLinkTarget(
   platform: string,
   platformPostId: string | null | undefined,
   accountUsername?: string | null,
-): string | null {
+): { href: string; reaches: "post" | "account" } | null {
   const id = (platformPostId || "").trim();
   if (!id) return null;
   switch (platform) {
@@ -732,27 +737,31 @@ export function postPermalink(
       // Numeric media ids are NOT addressable as /p/<id> — that path needs the
       // base64 shortcode, which the analytics row does not carry. Link the
       // account instead of inventing a URL that 404s.
-      return /^\d+$/.test(id)
-        ? accountUsername
-          ? `https://www.instagram.com/${accountUsername}/`
-          : null
-        : `https://www.instagram.com/p/${id}/`;
+      if (/^\d+$/.test(id)) return accountUsername ? { href: `https://www.instagram.com/${accountUsername}/`, reaches: "account" } : null;
+      return { href: `https://www.instagram.com/p/${id}/`, reaches: "post" };
     case "tiktok":
-      return accountUsername
-        ? `https://www.tiktok.com/@${accountUsername}/video/${id}`
-        : `https://www.tiktok.com/video/${id}`;
+      return {
+        href: accountUsername ? `https://www.tiktok.com/@${accountUsername}/video/${id}` : `https://www.tiktok.com/video/${id}`,
+        reaches: "post",
+      };
     case "youtube":
-      return `https://www.youtube.com/watch?v=${id}`;
+      return { href: `https://www.youtube.com/watch?v=${id}`, reaches: "post" };
     case "linkedin":
       // "urn:li:ugcPost:74871..." — the feed permalink takes the whole urn.
-      return id.startsWith("urn:li:")
-        ? `https://www.linkedin.com/feed/update/${id}/`
-        : null;
+      return id.startsWith("urn:li:") ? { href: `https://www.linkedin.com/feed/update/${id}/`, reaches: "post" } : null;
     case "threads":
-      return accountUsername ? `https://www.threads.net/@${accountUsername}` : null;
+      return accountUsername ? { href: `https://www.threads.net/@${accountUsername}`, reaches: "account" } : null;
     default:
       return null;
   }
+}
+
+export function postPermalink(
+  platform: string,
+  platformPostId: string | null | undefined,
+  accountUsername?: string | null,
+): string | null {
+  return postLinkTarget(platform, platformPostId, accountUsername)?.href ?? null;
 }
 
 /**

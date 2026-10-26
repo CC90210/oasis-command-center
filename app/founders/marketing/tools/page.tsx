@@ -51,6 +51,7 @@ import { notFound } from "next/navigation";
 import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { PageFrame } from "@/components/os/PageFrame";
 import { resolveFounder } from "@/lib/founders/gate";
+import { DownloadFailureNotice } from "@/components/founders/DownloadFailureNotice";
 import { OasisWhiteboard } from "@/components/founders/OasisWhiteboard";
 import { RefreshOnToolRun } from "@/components/tools/RefreshOnToolRun";
 import { ToolsSection } from "@/components/tools/ToolsSection";
@@ -59,12 +60,15 @@ import { VIDEO_CARD_ID } from "@/components/tools/tool-grid-format";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Content Tools · Content · OASIS" };
 
-export default async function ContentToolsPage() {
+export default async function ContentToolsPage({ searchParams }: { searchParams: Promise<{ download?: string }> }) {
   const founder = await resolveFounder();
   if (!founder) notFound();
+  // The Video extractor's Download links come back here when a download fails.
+  const download = (await searchParams)?.download;
 
   return (
     <PageFrame title="Content Tools" className="space-y-6">
+      <DownloadFailureNotice code={download} />
       {/* Extracted videos links back to #video-extractor: the hash opens this section even if it was left collapsed. */}
       <CollapsibleSection title="Tools" storageKey="content-tools:tools" defaultCollapsed={false} keepMounted openForHash={`#${VIDEO_CARD_ID}`}>
         <ToolsSection tenantId={founder.tenantId} showCodes showHeading={false} className="" />

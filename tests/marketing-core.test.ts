@@ -21,6 +21,7 @@ import {
   lifecycleHint,
   lifecycleLabel,
   lifecycleOf,
+  postLinkTarget,
   postPermalink,
   DEFAULT_BRAND_GROUP,
   FOUNDERS_OWN_BRAND,
@@ -460,6 +461,24 @@ assert.ok(!isOwnBrand(null) && !isOwnBrand(undefined) && !isOwnBrand(""),
   assert.equal(postPermalink("youtube", ""), null);
   assert.equal(postPermalink("threads", "123"), null, "no account, no link");
   assert.equal(postPermalink("some-new-network", "abc"), null);
+
+  // WHERE IT REACHES (2026-10-26): a link that can only reach the account says
+  // so, so the page never titles a profile link "Open on Instagram".
+  assert.deepEqual(postLinkTarget("instagram", "17874750624553086", "oasisaisolutions"), {
+    href: "https://www.instagram.com/oasisaisolutions/",
+    reaches: "account",
+  });
+  assert.deepEqual(postLinkTarget("instagram", "C43j_8NJFfP"), { href: "https://www.instagram.com/p/C43j_8NJFfP/", reaches: "post" });
+  assert.deepEqual(postLinkTarget("threads", "123", "oasisaisolutions"), { href: "https://www.threads.net/@oasisaisolutions", reaches: "account" });
+  assert.equal(postLinkTarget("youtube", "-5huRgnq-Qk")?.reaches, "post");
+  assert.equal(postLinkTarget("tiktok", "1")?.reaches, "post");
+  assert.equal(postLinkTarget("linkedin", "urn:li:ugcPost:1")?.reaches, "post");
+  for (const [p, id, u] of [["instagram", "17874750624553086", "x"], ["instagram", "C43j", null], ["threads", "1", "x"], ["youtube", "a", null], ["linkedin", "nope", null]] as const) {
+    assert.equal(postPermalink(p, id, u), postLinkTarget(p, id, u)?.href ?? null, `one source of truth: ${p} ${id}`);
+  }
+  const perf = readFileSync(join(process.cwd(), "app/founders/marketing/performance/page.tsx"), "utf8");
+  assert.match(perf, /target\.reaches === "account"\s*\?\s*`Opens the account on/, "the hover names where an account link goes");
+  assert.match(perf, /\(account\)<\/span>/, "and the caption carries a mark");
 }
 
 // ── a publish request nothing ever collected ─────────────────────────────────

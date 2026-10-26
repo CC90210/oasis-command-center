@@ -52,18 +52,17 @@ import { Library, GraduationCap, BarChart3 } from "lucide-react";
 import { safe } from "@/lib/api-helpers";
 import { resolveFounder, type FounderContext } from "@/lib/founders/gate";
 import {
-  DEGRADED_MARKETING_FACETS,
   DEGRADED_MARKETING_SUMMARY,
   EMPTY_CORPUS_STATS,
+  getBrandTabCounts,
   getCorpusStats,
+  getExtractedVideoCount,
   getLifecycleCounts,
-  getMarketingFacets,
   getMarketingSummary,
 } from "@/lib/founders/marketing-queries";
 import {
   BRAND_GROUPS,
   DEFAULT_BRAND_GROUP,
-  brandGroupFor,
   type BrandGroupKey,
 } from "@/lib/founders-marketing-core";
 import { MarketingEmpty } from "@/components/founders/marketing-shared";
@@ -138,11 +137,20 @@ async function OverviewSubtitle({ tenantId }: { tenantId: string }) {
 
 /** Needs you, the pipeline, the brand tiles and the channel line: the Library's numbers. */
 async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
-  // `facets` deliberately spans every brand, because the whole point of the
-  // tab counts is to show what is behind the tabs he is NOT on.
-  const [summary, facets, lifecycle] = await Promise.all([
+  // The tiles count what each one opens: a Library tab's own number
+  // (getBrandTabCounts: what its All grid shows, archived and rejected behind
+  // the Archived pill), and every extracted video for the Extracted videos tile
+  // (that page lists every status). They used to sum every status of every
+  // brand, so a tile read 103 above a tab reading 100 (audit, 2026-10-26).
+  // Both span every brand: the point is to show what is behind the tabs he is
+  // NOT on. COUNTs only, no page-through of the asset table.
+  const [summary, tabs, extracted, lifecycle] = await Promise.all([
     readSummary(founder.tenantId),
-    safe("marketing.facets", getMarketingFacets(founder.tenantId), DEGRADED_MARKETING_FACETS),
+    safe("marketing.brand_tabs", getBrandTabCounts(founder.tenantId), {
+      counts: { "oasis-ai": 0, conaugh: 0, downloads: 0, clients: 0 },
+      degraded: true,
+    }),
+    safe("marketing.extracted_count", getExtractedVideoCount(founder.tenantId), { count: 0, degraded: true }),
     // The Library's lifecycle pills for the OASIS tab: the SAME call, the same
     // COUNT, that draws "Needs review N" on the page the line below links to.
     safe("marketing.lifecycle", getLifecycleCounts(founder.tenantId, DEFAULT_BRAND_GROUP), {
@@ -155,11 +163,13 @@ async function QueueAndPipeline({ founder }: { founder: FounderContext }) {
   // nothing"; the em dash says "I could not find out". They are different facts
   // and only one of them stops CC opening the tab.
   const brandCount = (key: BrandGroupKey): number | string =>
-    facets.degraded
-      ? "—"
-      : facets.brands
-          .filter((b) => brandGroupFor(b.slug) === key)
-          .reduce((n, b) => n + b.count, 0);
+    key === EXTRACTED_BRAND_GROUP
+      ? extracted.degraded
+        ? "—"
+        : extracted.count
+      : tabs.degraded
+        ? "—"
+        : tabs.counts[key];
 
   // An asset sitting at status `in_review` IS waiting on a verdict. The page
   // previously counted only rows in the marketing_review TABLE, which the review

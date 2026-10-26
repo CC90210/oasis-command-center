@@ -176,6 +176,27 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
     router.refresh();
   }
 
+  /** The owner attaches a Meet call by hand, saying what the client agreed to. The message says only what happened. */
+  async function attachMeet(roomId: string, agreed: boolean) {
+    setBusy(true);
+    setMessage(null);
+    const r = await postAction(e.id, "attach_meet_transcript", { room_id: roomId, ai: agreed });
+    setBusy(false);
+    // Refreshed either way: the tick may have attached it while this page was open.
+    router.refresh();
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    setMessage(
+      r.duplicate
+        ? "That call was already attached, with the same answer about AI analysis. Nothing changed."
+        : agreed
+          ? "Attached. The client agreed to AI analysis."
+          : "Attached. Nothing will be sent to a model; fill the profile by hand.",
+    );
+  }
+
   return (
     <div className="grid gap-5">
       {message ? <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg">{message}</div> : null}
@@ -204,6 +225,43 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
       <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">Transcripts</h2>
         {view.transcripts.length === 0 ? <div className="text-fg-muted">No transcript yet. Paste or upload the call&apos;s transcript below.</div> : null}
+        {open
+          ? view.meetRooms
+              .filter((r) => r.transcript?.status === "ready" && !r.attachedTranscriptId)
+              .map((r) => (
+                <div key={r.id} className="grid gap-2 rounded-lg border border-hairline px-3 py-2">
+                  <div className="text-fg">
+                    Oasis Meet: {r.title}, {r.transcript?.lines ?? 0} lines ready
+                  </div>
+                  {!r.transcript?.lines ? (
+                    <div className="text-[12px] text-fg-muted">Meet&apos;s transcript of this call has no words, so there is nothing to attach.</div>
+                  ) : r.guests.length && r.guests.every((g) => g.consented) ? (
+                    <>
+                      {/* What the tick will not judge for itself: shown before the owner decides it is this audit's call anyway. */}
+                      {r.holds.length ? (
+                        <div className="text-[12px] text-status-warm">Not attached by itself: {r.holds.join("; ")}. Attach it only if it is the client&apos;s call for this audit.</div>
+                      ) : null}
+                      {/* The client's AI answer said by hand is the owner's word, as every gate is. */}
+                      {isOwner ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[12px] text-fg-muted">Every guest agreed to the recording. What did the client say about AI analysis?</span>
+                          <button type="button" className="btn-secondary" disabled={busy} onClick={() => void attachMeet(r.id, true)}>
+                            Attach: agreed to AI analysis
+                          </button>
+                          <button type="button" className="btn-secondary" disabled={busy} onClick={() => void attachMeet(r.id, false)}>
+                            Attach: declined AI analysis
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[12px] text-fg-muted">Every guest agreed to the recording. Only the workspace owner can attach it, saying what the client agreed to about AI analysis.</div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-[12px] text-status-warm">{r.guests.length ? "A guest did not agree to the recording in Meet, so this transcript cannot be used." : "No guest joined this room, so it is not the client's call."}</div>
+                  )}
+                </div>
+              ))
+          : null}
         <ul className="grid gap-2">
           {view.transcripts.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline px-3 py-2">

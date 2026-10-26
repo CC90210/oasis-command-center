@@ -21,6 +21,13 @@ import type { DepartmentKey } from "@/lib/os/types";
 
 const SHOWN = 15;
 export const TRAINING_HREF = "/founders/marketing/train";
+/**
+ * How many notes the page reads for the list, on every tab (the All read and an
+ * agent's). When a read comes back this full there may be more, so the count
+ * says "N+" rather than presenting the cap as a total (audit, 2026-10-26: an
+ * agent tab read 40 and said "Showing the newest 15 of 40" whatever it held).
+ */
+export const LEARNED_NOTES_READ = 200;
 
 /** "Oct 14". Stable for a given instant, so server and client agree. */
 function shortDate(iso: string): string {
@@ -52,6 +59,15 @@ export function rowsFor(rows: CorpusItems["rows"], agent: DepartmentKey | null):
 export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStats; items: CorpusItems; agent?: DepartmentKey | null }) {
   const rows = rowsFor(items.rows, agent);
   const who = agent ? trainsLabel(agent) : null;
+  // The All tab knows its true total (stats counts every row); an agent's tab
+  // knows only what its read returned, and a full read may have stopped short.
+  const readFull = items.rows.length >= LEARNED_NOTES_READ;
+  const agentCount = readFull ? `${rows.length}+` : `${rows.length}`;
+  const total = who ? agentCount : `${stats.total}`;
+  // The footer says the list is partial whenever it is: more rows than shown, or
+  // a full read that may have stopped short of older notes (off Turso, an
+  // agent's tab filters the All read, so 15 matches can still be "15+").
+  const partial = rows.length > SHOWN || (who !== null && readFull) || (who === null && stats.total > rows.length);
   return (
     <section aria-labelledby="learned-notes-title" className="space-y-3" data-testid="learned-notes">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -59,7 +75,7 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
           {who ? `What the ${who} agent has learned` : "What your agents have learned"}
         </h2>
         {!stats.degraded && stats.total > 0 && (
-          <span className="text-xs text-fg-muted">{who && !items.degraded ? `${rows.length} for ${who} · ` : ""}{learnedSummary(stats)} in all</span>
+          <span className="text-xs text-fg-muted">{who && !items.degraded ? `${agentCount} for ${who} · ` : ""}{learnedSummary(stats)} in all</span>
         )}
       </div>
 
@@ -113,11 +129,12 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
         </ul>
       )}
 
-      {rows.length > SHOWN && (
+      {partial && rows.length > 0 && !items.degraded && !stats.degraded && (
         <p className="text-xs text-fg-dim">
-          Showing the newest {SHOWN} of {rows.length}.{" "}
+          Showing the newest {Math.min(SHOWN, rows.length)} of {total}.{" "}
+          {/* Training lists every agent's notes, newest first, and says how many it shows; it is not this tab's full list. */}
           <a href={TRAINING_HREF} className="underline underline-offset-2 hover:text-fg-muted">
-            See all on Training
+            {who ? "Every agent's notes are on Training" : "Open Training"}
           </a>
         </p>
       )}

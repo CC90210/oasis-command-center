@@ -24,6 +24,9 @@
  *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
  *   build_brief                                           build a new version of the pre-call brief (reads the client's public website)
  *   extract_profile    { engine? }                         draft profile facts from the consented transcripts (before Gate 1)
+ *   create_meet_room                                      the lead's Oasis Meet call room: the open one, or a new one
+ *   attach_meet_transcript { room_id, ai? }               attach a room's ready Meet transcript; `ai` (the client's answer
+ *                                                         about AI analysis, said by hand) is the owner's only
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -53,6 +56,9 @@ import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
 import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
 import { buildBrief, defaultSiteDeps } from "@/lib/ai-audit/briefs";
+import { attachMeetTranscript, createAuditRoom } from "@/lib/ai-audit/meet-link";
+import { meetMediaReady } from "@/lib/meet/handlers";
+import { liveMeetDeps } from "@/lib/meet/live-deps";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -307,6 +313,33 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const r = await buildBrief(s.db, { tenantId: s.tenantId, engagementId, actor, now, deps: defaultSiteDeps() });
       if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "not_installed" ? 503 : 409, { ok: false, error: r.error === "not_found" ? r.error : `brief_${r.error}` });
       return json(200, { ok: true, brief_id: r.brief.id, version_no: r.brief.version_no, status: r.brief.status });
+    }
+    case "create_meet_room": {
+      // The lead's call room: the one already booked or made, or a new one, made only where a call can connect and
+      // recorded only where Meet records (the checks Meet's own room route makes).
+      const meet = liveMeetDeps();
+      const r = await createAuditRoom(s.db, {
+        tenantId: s.tenantId,
+        engagementId,
+        hostUserId: actor.id ?? "",
+        now,
+        meet: { mediaReady: () => meetMediaReady(meet), recordingAvailable: (tenantId) => meet.recording.available(tenantId) },
+      });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "meet_not_configured" ? 503 : 409, { ok: false, error: r.error });
+      return json(200, { ok: true, room_id: r.roomId, code: r.code, created: r.created });
+    }
+    case "attach_meet_transcript": {
+      const roomId = typeof body.room_id === "string" ? body.room_id : "";
+      // The client's answer about AI analysis, said by hand: the workspace owner's word, as every gate is (review of phase 2c, F2).
+      const ai = typeof body.ai === "boolean" ? body.ai : undefined;
+      if (ai !== undefined && !s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await attachMeetTranscript(s.db, { tenantId: s.tenantId, engagementId, roomId, actor, now, ai, byOwner: s.isOwner });
+      if (!r.ok) {
+        const status = r.error === "not_found" ? 404 : r.error === "owner_only" ? 403 : 409;
+        return json(status, { ok: false, error: r.error, ...(r.holds?.length ? { detail: r.holds.map((h) => h.words).join("; ") } : {}) });
+      }
+      if (!r.duplicate) await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+      return json(200, { ok: true, transcript_id: r.transcriptId, duplicate: r.duplicate });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

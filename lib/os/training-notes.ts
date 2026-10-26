@@ -58,6 +58,14 @@ const NOTE_FIELD_CHARS = 280;
 const BLOCK_CHARS = 3_000;
 /** How far back the read looks for usable notes: newer rows with nothing usable must not hide older ones. */
 const SCAN_ROWS_MAX = 100;
+/**
+ * The most rows trainingRowsFor returns in one read. The Agent training page
+ * reads LEARNED_NOTES_READ (components/tools/LearnedNotes.tsx), which must not
+ * exceed this: a read clamped below what the page asked for would come back
+ * short, and the page would present the clamp as an agent's whole total
+ * (tests/learned-notes.test.ts pins it).
+ */
+export const TRAINING_ROWS_MAX = 200;
 
 export type TrainingNote = {
   title: string;
@@ -209,7 +217,7 @@ export async function trainingRowsFor(
   try {
     const rs = await (deps.db ?? getTursoClient()).execute({
       sql: `SELECT ${CORPUS_ROW_COLUMNS} FROM marketing_corpus WHERE tenant_id = ? AND ${where.sql} ORDER BY created_at DESC, id DESC LIMIT ?`,
-      args: [tenantId, ...where.args, Math.max(1, Math.min(limit, 200))],
+      args: [tenantId, ...where.args, Math.max(1, Math.min(limit, TRAINING_ROWS_MAX))],
     });
     const str = (v: unknown) => (v === null || v === undefined ? null : String(v));
     const rows: CorpusRow[] = rs.rows.map((raw) => {

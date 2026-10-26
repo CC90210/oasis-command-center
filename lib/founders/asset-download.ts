@@ -10,7 +10,7 @@
  * (app/api/founders/marketing/assets/[id]/download) signs whatever this picks with
  * `Content-Disposition: attachment`, which is what makes the browser save it.
  */
-import { parseSlideUrls } from "@/lib/founders-marketing-core";
+import { libraryReturnPath, parseSlideUrls } from "@/lib/founders-marketing-core";
 
 /** The one place the download URL is spelled, for every button that offers it. */
 export function assetDownloadHref(assetId: string, slide?: number | null): string {
@@ -76,3 +76,61 @@ export function downloadFilename(
       .replace(/-$/, "") || "oasis-asset";
   return `${base}${slide ? `-slide-${slide}` : ""}.${ext}`;
 }
+
+/**
+ * What a failed Download says on the page it was pressed on (?download=<code>,
+ * set by the download route), or null for anything else. The route's codes are
+ * the keys; a code nobody wrote a line for shows nothing rather than a raw code.
+ */
+const DOWNLOAD_FAILURE_LINES: Readonly<Record<string, string>> = {
+  no_media_attached: "That asset has no file attached, so there is nothing to download.",
+  no_such_slide: "That slide is no longer there. Reload the page and try again.",
+  sign_failed: "Couldn't prepare the download. Try again in a minute.",
+  read_failed: "Couldn't read that asset. Try again in a minute.",
+  not_found: "That asset is gone, so there is nothing to download.",
+};
+
+export function downloadFailureLine(code: unknown): string | null {
+  return typeof code === "string" && Object.prototype.hasOwnProperty.call(DOWNLOAD_FAILURE_LINES, code)
+    ? DOWNLOAD_FAILURE_LINES[code]
+    : null;
+}
+
+/**
+ * Where a failed Download sends the browser (2026-10-26): back to the Content
+ * page it was pressed on, its own path and query with download=<code>, so the
+ * page says what went wrong. Download is a plain link, so an error answered as
+ * JSON used to REPLACE the page with {"ok":false,...}, and Back was the only way out.
+ *
+ * Only a Referer on this same origin and under /founders/marketing qualifies,
+ * and only its path and query are used, so this can never send anyone off-site;
+ * anything else is null and the route answers JSON as before.
+ *
+ * AN ASSET THAT IS GONE (not_found) pressed on its own detail page cannot go
+ * back there: that page 404s for a missing asset before it could say why
+ * (review of #739). It goes to the Library view the page came from (its own
+ * `from`, validated by libraryReturnPath) instead, which can.
+ */
+export function downloadFailureHref(referer: string | null | undefined, requestUrl: string, code: string): string | null {
+  if (!referer) return null;
+  let from: URL;
+  let req: URL;
+  try {
+    from = new URL(referer);
+    req = new URL(requestUrl);
+  } catch {
+    return null;
+  }
+  if (from.origin !== req.origin) return null;
+  if (from.pathname !== "/founders/marketing" && !from.pathname.startsWith("/founders/marketing/")) return null;
+  if (code === "not_found" && from.pathname.startsWith(ASSET_PAGE_PREFIX)) {
+    const back = new URL(libraryReturnPath(from.searchParams.get("from")), from.origin);
+    back.searchParams.set("download", code);
+    return `${back.pathname}?${back.searchParams.toString()}`;
+  }
+  from.searchParams.set("download", code);
+  return `${from.pathname}?${from.searchParams.toString()}`;
+}
+
+/** An asset's own detail page (app/founders/marketing/asset/[id]). */
+const ASSET_PAGE_PREFIX = "/founders/marketing/asset/";

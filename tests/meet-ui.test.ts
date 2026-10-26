@@ -1413,7 +1413,7 @@ async function main() {
       assert.ok(!text(markup[id]).includes("This deletes the meeting"), `${id}: no question yet`);
     }
     const html = markup["panel.deleteAsk"];
-    assert.ok(text(html).includes("This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."));
+    assert.ok(text(html).includes("This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone."));
     assert.match(html, /<div role="group" aria-label="Delete Mine \(ended, audio\)"/, "a named group");
     assert.equal(count(html, />Delete for good</g), 1, "one question, on one meeting");
     assert.equal(count(html, /data-cancel-delete/g), 1);
@@ -1431,16 +1431,16 @@ async function main() {
   });
 
   await check("the Delete question says what goes with that meeting: a recording only if it recorded, and a meeting that is on now is ended for everyone", () => {
-    const RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone.";
+    const RECORDED = "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone.";
     const UNRECORDED = "This deletes the meeting, and its link stops working. It cannot be undone.";
     const LIVE = "The meeting is on now: this ends it for everyone in it. ";
     // Every status and every recording choice, spelled out in full.
     for (const [status, recordAudio, expected] of [
-      ["scheduled", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
-      ["ended", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
+      ["scheduled", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone."],
+      ["ended", true, "This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone."],
       ["scheduled", false, "This deletes the meeting, and its link stops working. It cannot be undone."],
       ["ended", false, "This deletes the meeting, and its link stops working. It cannot be undone."],
-      ["live", true, "The meeting is on now: this ends it for everyone in it. This deletes the meeting, its recording and its transcript, here and on OASIS's computer. It cannot be undone."],
+      ["live", true, "The meeting is on now: this ends it for everyone in it. This deletes the meeting, its recording and its transcript, here and on OASIS's computer. A copy attached to a Free AI Audit stays on the audit until you delete it there. It cannot be undone."],
       ["live", false, "The meeting is on now: this ends it for everyone in it. This deletes the meeting, and its link stops working. It cannot be undone."],
     ] as const) {
       assert.equal(deleteConfirm({ status, recordAudio }), expected, `${status}, recordAudio ${recordAudio}`);
