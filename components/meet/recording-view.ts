@@ -108,14 +108,16 @@ export function recordingDeletable(v: RecordingView): boolean {
 /** The line about the computer's own copy, once the recording is deleted or expired. */
 function deviceLine(view: RecordingView, fallback: string | null): string | null {
   const device = view.deviceDelete;
+  // One computer or several: "its copy" or "their copies", never a plural said of one.
+  const many = (device?.devices?.length ?? 0) > 1;
+  const copies = many ? "their copies" : "its copy";
   if (device?.status === "waiting") {
-    const who = names(device.devices, PC);
-    return `Waiting for ${who} to delete ${(device.devices?.length ?? 0) > 1 ? "their copies" : "its copy"}. Each does it when it's next on.`;
+    return `Waiting for ${names(device.devices, PC)} to delete ${copies}. ${many ? "Each does" : "It does"} it when it's next on.`;
   }
   if (device?.status === "done") return "The computer's copy was deleted too.";
   if (device?.status === "failed") {
     const why = (device.errorCode && FAILED_BECAUSE[device.errorCode]) || "it reported an error";
-    return `${names(device.devices, PC)} couldn't delete its copy: ${why}. Delete again to retry.`;
+    return `${names(device.devices, PC)} couldn't delete ${copies}: ${why}. Delete again to retry.`;
   }
   return fallback;
 }

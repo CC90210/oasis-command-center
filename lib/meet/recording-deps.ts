@@ -6,8 +6,9 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
+import { MeetNotConfiguredError } from "./access";
 import type { MeetDeps } from "./handlers";
-import { deleteMeetRecording, meetRecordingServed, meetRecordingTablesInstalled, type MeetStorage } from "./recording";
+import { deleteMeetRecording, meetLocalCopiesInstalled, meetRecordingServed, meetRecordingTablesInstalled, type MeetStorage } from "./recording";
 
 export function meetRecordingDeps(db: Client, storage: () => MeetStorage | null): MeetDeps["recording"] {
   return {
@@ -16,6 +17,11 @@ export function meetRecordingDeps(db: Client, storage: () => MeetStorage | null)
     served: meetRecordingServed,
     remove: async (room, userId, now) => {
       if (!(await meetRecordingTablesInstalled(db))) return null;
+      // A recording is deleted from each computer that holds it through bravo__240's tables. Without them it cannot
+      // be deleted whole, so it is not deleted at all: deleteMeetRoom keeps the meeting when this throws (503).
+      if (!(await meetLocalCopiesInstalled(db))) {
+        throw new MeetNotConfiguredError("migration bravo__240 is not applied, so a recording cannot be deleted from its computers");
+      }
       const out = await deleteMeetRecording(db, storage(), room, userId, now);
       return { relayRemaining: out.relayRemaining };
     },

@@ -7,6 +7,11 @@
  * client owners), plus:
  *   - the REAL migration under test, bravo__206_tool_jobs.sql, whole
  *     (executeMultiple: its triggers carry their own ";");
+ *   - bravo__240 (targeted jobs, Meet's per-computer copies), statement by
+ *     statement as the migration tool runs it, unless a test asks for the
+ *     database as it was before (meetCopies: false). Its backfill, bravo__242,
+ *     reads Meet's own tables, so a test applies it after bravo__231
+ *     (applyMigrationFile with MEET_COPIES_BACKFILL_PATH);
  *   - the REAL AI usage ledger, bravo__192, so a model call's row is checked;
  *   - the Library and training tables a tool writes, in their live shapes
  *     (read from sqlite_master on 2026-10-09: the CHECKs, the generated track,
@@ -46,6 +51,14 @@ export const ENV = { TOOLS_RUNNER_SECRET_BEA: `  ${SECRET}\n` };
 const ROOT = join(__dirname, "..");
 export const TOOLS_MIGRATION_PATH = join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql");
 const AI_USAGE_MIGRATION = join(ROOT, "database", "turso", "bravo__192_ai_usage.sql");
+/** Targeted jobs and Meet's per-computer copies, then the backfill of the copies made before them. */
+export const MEET_COPIES_MIGRATION_PATH = join(ROOT, "database", "turso", "bravo__240_meet_local_copies.sql");
+export const MEET_COPIES_BACKFILL_PATH = join(ROOT, "database", "turso", "bravo__242_meet_local_copies_backfill.sql");
+
+/** One migration file, a statement at a time and in order, as the migration tool applies it. */
+export async function applyMigrationFile(db: Client, path: string): Promise<void> {
+  for (const stmt of splitSql(readFileSync(path, "utf8"))) await db.execute(stmt);
+}
 
 const NOW_SQL = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 const UUID_SQL =
@@ -96,20 +109,17 @@ const LIBRARY_TABLES = `
     WHERE ((source_url IS NOT NULL) AND (state IN ('queued', 'extracting')));
 `;
 
-/** The delivery harness's database, plus the Library, the training corpus, the AI ledger and (unless told not to) bravo__206. */
-export async function setupToolsDatabase(): Promise<Client> {
+/**
+ * The delivery harness's database, plus the Library, the training corpus, the AI ledger, bravo__206 and bravo__240
+ * (which every claim reads). `meetCopies: false` leaves bravo__240 out: the schema as it was before it.
+ */
+export async function setupToolsDatabase(o: { meetCopies?: boolean } = {}): Promise<Client> {
   const db = await setupDatabase();
   await db.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-webdev', 'OASIS Web Dev')", args: [WEBDEV] });
   await db.executeMultiple(LIBRARY_TABLES);
   await db.executeMultiple(readFileSync(AI_USAGE_MIGRATION, "utf8"));
   await db.executeMultiple(readFileSync(TOOLS_MIGRATION_PATH, "utf8"));
-  // Targeted jobs and Meet's per-computer copies (bravo__240), which the claim reads. Its backfill
-  // reads Meet's own tables (bravo__231); a database without them has nothing to backfill.
-  const hasMeet = (await db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meet_transcripts'")).rows.length > 0;
-  for (const stmt of splitSql(readFileSync(join(ROOT, "database", "turso", "bravo__240_meet_local_copies.sql"), "utf8"))) {
-    if (!hasMeet && /\bmeet_transcripts\b/.test(stmt)) continue;
-    await db.execute(stmt);
-  }
+  if (o.meetCopies !== false) await applyMigrationFile(db, MEET_COPIES_MIGRATION_PATH);
   return db;
 }
 
