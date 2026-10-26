@@ -168,3 +168,18 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 - The permanent test prospect is "[TEST] OASIS Audit Fixture Co", priced with a fixture-only catalogue item that never appears on a real proposal.
 - Automated tests never send email or create Stripe sessions.
 - The one live check (an email to your own inbox and one real but unpaid Stripe session, expired at once) runs only when you say go.
+
+### The acceptance run, step by step
+
+Each step is one of the ten acceptance checks (docs/BUILD_ACCEPTANCE_STANDARD.md). Every step but the last runs with live sending off, so nothing leaves the building.
+
+1. **The fixture exists and stays apart.** Open the engagement for "[TEST] OASIS Audit Fixture Co" on the AI audits board. Its email is an inbox you own, it is marked as a fixture, and its only catalogue item is the fixture item.
+2. **Only the owner passes a gate.** An admin who is not the owner presses approve on its Gate 1 card: the card waits for you.
+3. **The settings resolve without showing a key.** The engagement page shows the AI engine, Stripe and the private-link setting as ready, never their values.
+4. **The inputs hold.** Paste the fixture transcript, with its traps: two different lead counts, an offered password and an instruction to the AI. The password is taken out, the two counts are flagged, and the instruction stays text.
+5. **The work is right.** After you approve Gate 1, research runs, the audit and proposal are drafted, and every figure cites a source.
+6. **It reads right.** Open Preview on a phone and on a desktop, then the PDF.
+7. **The guards hold.** No transcript quote, line number or note of yours appears on the client page; every finding carries a label.
+8. **Failures are handled.** Press Retry PDF with the Mac asleep: it waits, then asks you. Approving Gate 2 twice sends one email.
+9. **The live canary (only when you say go).** With live sending on for this one run, approve Gate 2 for the fixture. One email reaches your own inbox. Pressing Pay opens one real Stripe page, which is expired at once. Nothing is paid.
+10. **The receipt and the clean-up.** The board shows Audit Delivered with the email's message id, the Stripe session shows expired, and live sending is switched off again.
