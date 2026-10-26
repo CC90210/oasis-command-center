@@ -77,10 +77,13 @@ export async function startWriting(db: Client, input: { tenantId: string; engage
     } catch {
       ref = {};
     }
-    if (ref.audit_version_id === audit.id && ref.content_sha256 === audit.content_sha256) {
+    // A Mac pass whose job failed (the model call, or every attempt) is dead too, whatever its step says (review of
+    // phase 4, third round, N3): this press starts a fresh one instead of waiting a day.
+    const dead = String(now.runs_on) === "mac" && !(await macJobLive(db, t, String(now.id)));
+    if (!dead && ref.audit_version_id === audit.id && ref.content_sha256 === audit.content_sha256) {
       return { ok: true, stepId: String(now.id), created: false, runsOn: String(now.runs_on) === "mac" ? "mac" : "cloud" };
     }
-    await cancelWriting(db, t, String(now.id), "draft_changed", input.now);
+    await cancelWriting(db, t, String(now.id), dead ? "write_failed" : "draft_changed", input.now);
   }
   const mac = auth.engine === "mac_claude";
   const runNo = int((await db.execute({ sql: "SELECT COUNT(1) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ?", args: [t, e.id, WRITE_STEP] })).rows[0]?.n) + 1;
@@ -162,6 +165,14 @@ async function endStep(db: Client, t: string, stepId: string, status: "done" | "
   return r.rowsAffected === 1;
 }
 
+/** Whether a Mac pass still has a job the Mac can take or is running. */
+async function macJobLive(db: Client, t: string, stepId: string): Promise<boolean> {
+  const job = (
+    await db.execute({ sql: "SELECT status FROM tool_jobs WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ? ORDER BY created_at DESC LIMIT 1", args: [t, MODEL_TOOL_KEY, stepId] })
+  ).rows[0];
+  return !!job && ["queued", "claimed", "running"].includes(String(job.status));
+}
+
 /** A pass ended before it could write (the draft changed, the authorization ended): its Mac job goes with it. */
 export async function cancelWriting(db: Client, tenantId: string, stepId: string, code: "draft_changed" | "not_authorized" | "write_failed", now: Date): Promise<boolean> {
   const t = requireTenant(tenantId);
@@ -236,8 +247,9 @@ export async function advanceCloudWriting(db: Client, input: { tenantId: string;
   if (!row || String(row.runs_on) !== "cloud" || !["queued", "running"].includes(String(row.status))) return "idle";
   // Claimed first, by compare-and-set: an overlapping tick finds it taken and makes no second metered call.
   const claimed = await db.execute({
-    sql: "UPDATE ai_audit_steps SET status = 'running', updated_at = ? WHERE tenant_id = ? AND id = ? AND step_key = ? AND runs_on = 'cloud' AND (status = 'queued' OR (status = 'running' AND updated_at < ?))",
-    args: [input.now.toISOString(), t, input.stepId, WRITE_STEP, new Date(input.now.getTime() - CLOUD_CLAIM_MS).toISOString()],
+    sql: `UPDATE ai_audit_steps SET status = 'running', updated_at = ? WHERE tenant_id = ? AND id = ? AND step_key = ? AND runs_on = 'cloud'
+            AND ((status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (status = 'running' AND updated_at < ?))`,
+    args: [input.now.toISOString(), t, input.stepId, WRITE_STEP, input.now.toISOString(), new Date(input.now.getTime() - CLOUD_CLAIM_MS).toISOString()],
   });
   if (claimed.rowsAffected !== 1) return "idle";
   const jobInput = { step_id: input.stepId, engagement_id: String(row.engagement_id), purpose: "write" };
@@ -271,8 +283,21 @@ export async function advanceCloudWriting(db: Client, input: { tenantId: string;
     }
     return "retry";
   }
-  const done = await finishWriting(db, { tenantId: t, jobInput, text: answer.text, now: input.now, alert: input.deps.alert });
-  return done.ok ? "finished" : "failed";
+  try {
+    const done = await finishWriting(db, { tenantId: t, jobInput, text: answer.text, now: input.now, alert: input.deps.alert });
+    return done.ok ? "finished" : "failed";
+  } catch (err) {
+    // Counted and backed off like a failed call, so a pass that cannot finish is not paid for on every tick (review of phase 4, N4).
+    console.error("[ai-audit.writing] the cloud pass could not be finished", err instanceof Error ? (err.stack ?? err.message) : String(err));
+    const attempts = int(row.attempts) + 1;
+    const giveUp = attempts >= int(row.max_attempts, 3);
+    const at = input.now.toISOString();
+    await db.execute({
+      sql: "UPDATE ai_audit_steps SET status = ?, attempts = ?, error_code = 'write_failed', next_attempt_at = ?, finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running')",
+      args: [giveUp ? "failed" : "queued", attempts, giveUp ? null : new Date(input.now.getTime() + [60_000, 300_000, 1_800_000][Math.min(attempts - 1, 2)]).toISOString(), giveUp ? at : null, at, t, input.stepId],
+    });
+    return giveUp ? "failed" : "retry";
+  }
 }
 
 /** Cloud passes due now, and Mac passes no computer has run for a day (to call off). */
@@ -284,17 +309,30 @@ export async function dueWriting(db: Client, tenantId: string, now: Date): Promi
           ORDER BY updated_at LIMIT 2`,
     args: [t, WRITE_STEP, now.toISOString(), new Date(now.getTime() - CLOUD_CLAIM_MS).toISOString()],
   });
+  // A Mac pass nobody ran for a day, or whose job has failed (the model call, or every attempt).
   const stale = await db.execute({
-    sql: "SELECT id FROM ai_audit_steps WHERE tenant_id = ? AND step_key = ? AND runs_on = 'mac' AND status = 'waiting_runner' AND updated_at < ? LIMIT 5",
-    args: [t, WRITE_STEP, new Date(now.getTime() - MAC_WRITE_WAIT_MS).toISOString()],
+    sql: `SELECT s.id FROM ai_audit_steps s
+           WHERE s.tenant_id = ? AND s.step_key = ? AND s.runs_on = 'mac' AND s.status = 'waiting_runner'
+             AND (s.updated_at < ? OR NOT EXISTS (
+               SELECT 1 FROM tool_jobs j WHERE j.tenant_id = s.tenant_id AND j.tool_key = ? AND json_extract(j.input_json, '$.step_id') = s.id
+                  AND j.status IN ('queued', 'claimed', 'running')))
+           LIMIT 5`,
+    args: [t, WRITE_STEP, new Date(now.getTime() - MAC_WRITE_WAIT_MS).toISOString(), MODEL_TOOL_KEY],
   });
   return { cloud: cloud.rows.map((r) => String(r.id)), stale: stale.rows.map((r) => String(r.id)) };
 }
 
-/** A Mac pass nobody ran for a day: called off (its job too), and CC told. */
+/** A Mac pass nobody ran for a day, or whose job failed: called off (its job too), and CC told which. */
 export async function callOffStaleWriting(db: Client, tenantId: string, stepId: string, now: Date, alert: WriteDeps["alert"]): Promise<void> {
   const t = requireTenant(tenantId);
   const row = (await db.execute({ sql: "SELECT engagement_id FROM ai_audit_steps WHERE tenant_id = ? AND id = ? LIMIT 1", args: [t, stepId] })).rows[0];
+  const failed = !(await macJobLive(db, t, stepId)) && (await db.execute({ sql: "SELECT 1 FROM tool_jobs WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ? AND status = 'failed' LIMIT 1", args: [t, MODEL_TOOL_KEY, stepId] })).rows.length > 0;
+  if (failed) {
+    if (!(await endStep(db, t, stepId, "failed", "write_failed", null, now))) return;
+    const e = row ? await getEngagement(db, t, String(row.engagement_id)) : null;
+    if (e) await alert({ tenantId: t, alertType: "ai_audit_writing_failed", severity: "warn", title: `Prose not written: ${shortNameOf(e)}`, body: "The Mac's model call failed, so the draft stays as it was. Write it again, or edit it yourself.", subjectType: "ai_audit_engagement", subjectId: e.id });
+    return;
+  }
   if (!(await endStep(db, t, stepId, "cancelled", "runner_offline", null, now))) return;
   const at = now.toISOString();
   await db.execute({

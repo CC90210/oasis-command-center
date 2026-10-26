@@ -157,12 +157,29 @@ function clientSource(s: ResearchPack["sources"][number]): DocSource {
 }
 
 const lower = (s: string) => (s ? s.charAt(0).toLowerCase() + s.slice(1) : s);
-/** A finding's figure as a phrase: "missed calls per week: 10". */
+/** The client's own figures as they would say them; a Map, never an object lookup (review of phase 2b). */
+const FIGURE_PHRASES = new Map<string, (v: string) => string>([
+  ["f-sales-missed-calls-per-week", (v) => `you miss about ${v} calls a week`],
+  ["f-sales-close-rate-pct", (v) => `about ${v}% of your leads become customers`],
+  ["f-sales-avg-job-value", (v) => `an average job or order is worth about ${v}`],
+  ["f-sales-leads-per-month", (v) => `about ${v} new leads come in each month`],
+  ["f-sales-response-time-hours", (v) => `a new lead waits about ${v} hours for a reply`],
+  ["f-ops-admin-hours-per-week", (v) => `admin takes about ${v} hours a week`],
+  ["f-finance-staff-hourly-cost", (v) => `an hour of staff time costs about ${v}`],
+]);
+
+/** A finding's figure as a phrase: "you miss about 10 calls a week", or "missed calls per week: 10" for any other. */
 function figurePhrase(f: DocFinding): string | null {
   if (!f.metric) return null;
-  const v = f.metric.unit === "$" ? `$${f.metric.value.toLocaleString("en-CA")}` : `${f.metric.value.toLocaleString("en-CA")}${f.metric.unit && f.metric.unit !== "$" ? ` ${f.metric.unit}` : ""}`;
+  const number = f.metric.value.toLocaleString("en-CA");
+  const said = FIGURE_PHRASES.get(f.id);
+  if (said) return said(f.metric.unit === "$" ? `$${number}` : number);
+  const v = f.metric.unit === "$" ? `$${number}` : `${number}${f.metric.unit ? ` ${f.metric.unit}` : ""}`;
   return `${lower(f.title)}: ${v}`;
 }
+
+/** A site check's words as the client reads them: our checks, never the Command Center (review of phase 4, N5). */
+const clientWording = (text: string) => text.replace(/the Command Center's servers/gi, "our servers").replace(/the Command Center/gi, "our checks");
 const joinList = (xs: readonly string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join("; ")}; and ${xs[xs.length - 1]}`);
 
 /**
@@ -186,6 +203,8 @@ function clientGaps(gaps: ResearchPack["gaps"]): Array<{ topic: string; why: str
       once("Website speed", "We could not measure how fast your website loads on a phone.");
     } else if (g.topic === "Web search") {
       once("Public listings", "We could not check every public listing and review page for the business.");
+    } else if (g.topic === "Website" && /no website is known|not a website/i.test(g.why)) {
+      once("Website", "We did not find a website for the business, so none was reviewed.");
     } else if (g.topic === "Website" && !/form answers/i.test(g.why)) {
       once("Website", "Some of your website could not be read, so what those pages show is not in this audit.");
     }
@@ -224,7 +243,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
     if (f.label === "hypothesis" && (f.id.startsWith("h-") ? !copy : !fromProfile)) continue;
     findings.push({
       ...f,
-      ...(f.label === "hypothesis" && copy ? { statement: copy.statement } : {}),
+      statement: f.label === "hypothesis" && copy ? copy.statement : clientWording(f.statement),
       source_ids: cite(f.source_ids),
       ...(f.label === "hypothesis" ? { how_to_test: copy?.test ?? "We would confirm this with you before any work starts." } : {}),
     });
@@ -257,7 +276,8 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
       cites: [],
     });
   }
-  if (pack.gaps.length) overview.push({ text: "Some things could not be checked. They are listed at the end, under what we could not verify, rather than guessed.", cites: [] });
+  const shownGaps = clientGaps(pack.gaps).filter((g) => !statesFigure(g.topic) && !statesFigure(g.why)).slice(0, 15);
+  if (shownGaps.length) overview.push({ text: "Some things could not be checked. They are listed at the end, under what we could not verify, rather than guessed.", cites: [] });
 
   const assessment: DocParagraph[] = [];
   const said = clientFigures.map(figurePhrase).filter((x): x is string => !!x);
@@ -286,7 +306,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
     .map((f) => f.id);
 
   // A gap the client reads names what is unknown, in words written for the client, never a figure.
-  const gaps = clientGaps(pack.gaps).filter((g) => !statesFigure(g.topic) && !statesFigure(g.why)).slice(0, 15);
+  const gaps = shownGaps;
 
   const doc: AuditDoc = {
     schema: AUDIT_DOC_SCHEMA,
