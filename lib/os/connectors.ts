@@ -375,6 +375,33 @@ function webhookTestStates(appName: string): Readonly<Record<string, TestState>>
 }
 
 /**
+ * Quo's Test (lib/integrations/key-probes.ts probeQuo): the shared key words,
+ * plus the answers about the number texts leave from. Quo's 402 is a
+ * subscription that ended, so plan_required says that.
+ */
+const QUO_TEST_STATES: Readonly<Record<string, TestState>> = {
+  ...keyTestStates("Quo", {
+    notFound:
+      "The From number saved here is not one of this Quo workspace's numbers. Copy the number from Quo, save it, then run Test.",
+  }),
+  plan_required: {
+    kind: "attention",
+    label: "Quo subscription is not active",
+    detail: "Quo says this workspace's subscription has ended, so it sends no texts. Renew it in Quo, then run Test.",
+  },
+  needs_number: {
+    kind: "attention",
+    label: "Choose the number to text from",
+    detail: "This Quo workspace has more than one number. Save the one texts leave from as the From number, then run Test.",
+  },
+  no_number: {
+    kind: "attention",
+    label: "No Quo number to text from",
+    detail: "This Quo workspace has no phone number yet. Add one in Quo, then run Test.",
+  },
+};
+
+/**
  * A self-hosted mail server that OASIS's
  * servers cannot connect to safely: they cannot lock the connection to the
  * address they checked (lib/integrations/host-safety.ts), so nothing was sent.
@@ -835,6 +862,43 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
       connect: { kind: "keys", label: "Add your Twilio keys", service: "twilio" },
     },
     docs: { href: "https://www.twilio.com/docs/messaging", label: "Twilio's messaging docs" },
+  },
+  {
+    slug: "quo",
+    name: "Quo",
+    summary: "Business texting from your Quo number",
+    category: "messaging",
+    departments: ["sales", "client_success"],
+    brandColor: null,
+    icon: { kind: "monogram", letters: "Qu", reason: "Not in Simple Icons" },
+    reads: ["Your Quo numbers, and where each one may text (Canada, the US, other countries), when you run Test"],
+    does: [
+      "Checks the key with Quo when you press Test, and sends nothing",
+      "In OASIS's own workspaces, texts you write in Conversations or in a lead's SMS box go out through Quo once the key is saved here, from the From number or the workspace's only Quo number",
+      "Not offered to client workspaces yet: they keep the texting provider they use today",
+      "Sends only while live texting is switched on, and checks the workspace's STOP list before each text",
+      "Replies to your Quo number, STOP included, are not read by OASIS yet: that is not built. Until it is, a STOP someone texts to the Quo number does not reach the STOP list OASIS checks",
+      "When Quo refuses a text (US carrier registration not approved, an ended subscription, a daily limit), the send fails with Quo's reason",
+      "Scheduled texts do not go out through Quo yet: that is not built",
+    ],
+    keywords: ["openphone", "sms", "text"],
+    live: {
+      // Proven only by its own Test: GET /v1/phone-numbers with the saved key.
+      source: {
+        kind: "tenant_keys",
+        service: "quo",
+        requireAll: ["api_key"],
+        failureStates: QUO_TEST_STATES,
+        verifiable: true,
+      },
+      connect: { kind: "keys", label: "Connect Quo", service: "quo" },
+    },
+    // Only OASIS's own workspaces send through Quo (chooseSmsProvider), and no
+    // Conversations picker offers it, so a client workspace that has not
+    // connected is told it is not available here instead of a key form that
+    // would turn green and do nothing.
+    clientsUnavailable: true,
+    docs: { href: "https://www.quo.com/docs/mdx/api-reference/messages/send-a-text-message", label: "Quo's guide to sending a text" },
   },
   {
     slug: "whatsapp",

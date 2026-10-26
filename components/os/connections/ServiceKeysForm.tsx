@@ -136,6 +136,10 @@ export function ServiceKeysForm({
   }, [reload]);
 
   if (!schema) return null;
+  // A card this workspace cannot connect ("Not available on this workspace yet":
+  // ConnectorDef.clientsUnavailable, Quo for a client) draws no form. The status
+  // above says why, and a working form under it would say the opposite.
+  if (status?.kind === "coming_soon") return null;
 
   const row = (key: string) => rows?.find((r) => r.field_key === key) ?? null;
   const has = (key: string) => !!row(key)?.has_value;
