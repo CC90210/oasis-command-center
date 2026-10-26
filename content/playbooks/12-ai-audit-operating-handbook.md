@@ -1,6 +1,6 @@
 ---
 tags: [playbook, sales, ai-audit, runbook, founders]
-updated: 2026-10-25
+updated: 2026-10-26
 ---
 
 # Free AI Audit: operating handbook
@@ -13,7 +13,7 @@ updated: 2026-10-25
 
 1. A lead asks for the free audit, or you start one from their lead page (**Start AI audit**).
 2. You run the discovery call and capture what the client tells you.
-3. **Gate 1: you authorize** the client's information for processing: an approval card, in Needs you, that names the exact profile, transcripts and call notes. Nothing is researched or written, and nothing can be submitted, before you approve it. (The automated research and writing arrive in later phases. Today you write the audit yourself.)
+3. **Gate 1: you authorize** the client's information for processing: an approval card, in Needs you, that names the exact profile, transcripts and call notes. Nothing is researched or written, and nothing can be submitted, before you approve it. Research then runs by itself (see Research, below). Automated writing arrives in a later phase; until then you write the audit yourself, from the research.
 4. The audit is drafted: nine sections, every finding labelled.
 5. You price it from the confirmed catalogue, or type a price for custom work.
 6. You submit it. The Mac prints the PDF.
@@ -73,6 +73,24 @@ Run it from the **live-call screen** (Call and transcripts, Open the live-call s
 - Press **Ask for authorization**. The card lists what will be frozen, who processes it (Claude on your Mac, the cloud account, or no AI if the client said no), and what is still missing. Approve it in **Needs you**. Only the owner can.
 - Any change to the profile or the transcripts afterwards withdraws the card; ask again. Once approved, the profile is frozen. To correct it, move the engagement back to **Transcript Awaiting Approval** and authorize again.
 
+## Research
+
+Research starts by itself within a few minutes of your approval at Gate 1, on the engagement's **Research** tab, and moves one step a minute:
+
+1. It reads the client's website again, obeying its robots.txt, and checks it. That is our own measurement, so it is Verified.
+2. It runs Google PageSpeed for the home page, as a phone sees it. Also our own measurement.
+3. Your Mac searches the web with the business's public facts only: its name, website, city and kind of business. Nothing the client said on the call goes into the search.
+4. The Command Center reads each page the search found itself, under that site's own robots.txt, and stores the text around each claim. A page behind a login (Instagram, Facebook, LinkedIn) is listed as a gap and never read.
+5. The evidence rules decide every label. A page's claim counts as Verified only when the stored text states it: every figure in it, and most of its words. A published benchmark needs a reliable source dated in the last three years. Anything that fails is downgraded or dropped, never upgraded, and the panel lists what was taken out and why.
+
+The tab then shows what was measured and confirmed, what the client said (from the profile you authorized), the likely problems to test, the estimates with their inputs and assumptions, every gap, and every source with what was stored from it.
+
+- **Estimates are ranges.** Each rests on the client's own figures and on assumptions shown as ranges. If you know better for this business, change a range under **Assumptions**: the estimates on the page follow at once, and the stored run keeps the ranges it was built with. Only the owner changes them.
+- **The web search waits for your Mac.** If no Mac runs it within six hours, research carries on without it and says so under Gaps. Turn the Mac on and press **Research again** for a full run.
+- **Research again** builds a new version. Earlier versions stay exactly as they were.
+- Research stops by itself when the authorization stops holding (a transcript deleted, or the engagement moved back). Authorize again to run it.
+- A stored run never holds the call's own words, so deleting a transcript still removes them everywhere.
+
 ## Writing the audit
 
 - **Sources first**, then **findings** (each with a label), then **estimates** (each with inputs, assumptions and a range).
@@ -125,6 +143,8 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 | "Audit sent, but not yet recorded" | The client has the email. Do **not** retry: that would send a second one. The next tick finishes the record within five minutes. |
 | "Audit email may have been sent" | The mail server stopped answering after taking the email. Look in the Sent folder. If it is there, press **It was sent**. If not, press **It was not sent: send again**, which stops the old link first. |
 | "Payment received for a declined (or cancelled) audit" | The money is real and nothing was onboarded. Refund it in Stripe, or talk to the client and start a new engagement. |
+| "Research stopped" on the Research tab | The authorization no longer holds: a transcript was deleted, or the engagement moved back. Authorize again, then press **Research again**. |
+| Research is waiting on the web search | The Mac is off or offline. After six hours research carries on without the search, with a gap. Turn the Mac on and press **Research again** for a full run. |
 | "PDF not printed" | The Mac failed three times. Check that it is on and online, then press **Retry PDF**. |
 | The PDF never arrives | The Mac runner is off or offline. Turn the Mac on; the job is picked up within a minute. |
 | The client asks for changes before paying | Reopen is only possible before delivery. After delivery, a revision is a new version and a new link (coming in a later phase; until then, answer by email). |

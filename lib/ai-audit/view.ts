@@ -39,6 +39,9 @@ import { aiConsent } from "@/lib/ai-audit/authorize";
 import { essentialGaps } from "@/lib/ai-audit/framework";
 import { profileFieldDef } from "@/lib/ai-audit/profile";
 import { AI_ENGINE_LABELS, validateAuthorizeAiAuditPayload, type AiEngine } from "@/lib/ai-audit/authorize-payload";
+import { assumptionOverrides, latestResearch, latestResearchStep, researchTablesInstalled, type StoredResearch } from "@/lib/ai-audit/research";
+import { estimateImpact, type AssumptionOverrides } from "@/lib/ai-audit/impact";
+import type { DocEstimate } from "@/lib/ai-audit/doc";
 
 export type BoardRow = {
   id: string;
@@ -108,6 +111,16 @@ export type EngagementView = {
   brief: StoredBrief | null;
   /** The lead's Oasis Meet rooms and what each holds for the audit (lib/ai-audit/meet-link.ts). */
   meetRooms: AuditRoom[];
+  /**
+   * Phase 3: the latest stored research run, the last run's status, CC's own assumption ranges, and the
+   * estimates recomputed with them from the run's stored inputs. Null before bravo__243 is applied.
+   */
+  research: {
+    latest: StoredResearch | null;
+    step: { id: string; status: string; phase: string | null; error: string | null; created_at: string } | null;
+    assumptions: AssumptionOverrides;
+    estimates: DocEstimate[];
+  } | null;
   /** The last finished draft's report, from the profile version (lib/ai-audit/extraction.ts finishExtraction). */
   extractionReport: {
     written: string[];
@@ -164,6 +177,15 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     !TERMINAL_STAGES.includes(engagement.stage) &&
     !(await authorizedProfile(db, tenantId, engagement));
   const link = engagement.share_link_id ? await getShareLink(db, tenantId, engagement.share_link_id) : null;
+  let research: EngagementView["research"] = null;
+  if (await researchTablesInstalled(db)) {
+    const [latest, step, assumptions] = await Promise.all([
+      latestResearch(db, tenantId, engagement.id),
+      latestResearchStep(db, tenantId, engagement.id),
+      assumptionOverrides(db, tenantId, engagement.id),
+    ]);
+    research = { latest, step, assumptions, estimates: latest ? estimateImpact(latest.content.impact_inputs, assumptions).estimates : [] };
+  }
   return {
     engagement,
     row: boardRow(engagement),
@@ -196,6 +218,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     extraction,
     brief,
     meetRooms,
+    research,
     extractionReport: rawReport && typeof rawReport === "object" ? (rawReport as EngagementView["extractionReport"]) : null,
     consentAi: aiConsent(transcripts, fields),
     gaps: essentialGaps(captured, engagement.business_type).map((key) => ({ key, label: profileFieldDef(key)?.label ?? key })),

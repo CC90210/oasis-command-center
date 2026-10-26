@@ -241,6 +241,27 @@ function robotsFrom(url: string, read: Read): Robots {
   return { ...closed, open: true, rules: { allow: parsed.allow, disallow: parsed.disallow, tooMany: parsed.tooMany }, sitemaps };
 }
 
+/**
+ * robots.txt for pages on any site (the research reads pages web search found):
+ * each origin's robots.txt read once, and obeyed for every page and every
+ * redirect hop, as readSite obeys it (RFC 9309). Answers why a page may not be
+ * read, or null when it may.
+ */
+export function robotsGate(deps: SiteReadDeps, deadline: number): (u: URL) => Promise<string | null> {
+  const byOrigin = new Map<string, Promise<Robots>>();
+  return async (u: URL) => {
+    let robots = byOrigin.get(u.origin);
+    if (!robots) {
+      const url = `${u.origin}/robots.txt`;
+      robots = readPage(url, deps, { accept: "text", deadline }).then((r) => robotsFrom(url, r));
+      byOrigin.set(u.origin, robots);
+    }
+    const r = await robots;
+    if (!r.open) return "robots_unreadable";
+    return robotsAllow(`${u.pathname}${u.search}`, r.rules) ? null : "robots_closed";
+  };
+}
+
 /** The errors that mean the site did not answer at all. */
 const NO_ANSWER = /^(unreachable|timed_out)/;
 

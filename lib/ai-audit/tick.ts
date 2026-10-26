@@ -15,6 +15,9 @@
  *       or Discovery Call Scheduled (it reads the client's public website),
  *       each on its own: a try is marked before it starts, and one that fails
  *       waits before the next (lib/ai-audit/briefs.ts dueBriefs);
+ *   7d. research after Gate 1: start a run for an engagement in Research &
+ *       Audit Generation that has none, and move each run one phase
+ *       (lib/ai-audit/research.ts);
  *   8. repair a lead whose pipeline stage fell behind its engagement.
  * Nothing here contacts a client. Every step is safe to repeat.
  */
@@ -44,8 +47,9 @@ import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
 import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
+import { advanceResearch, defaultPageSpeedDeps, dueResearch, researchTablesInstalled, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
 
-export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps };
+export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps };
 
 export type TickReport = {
   tenants: number;
@@ -67,6 +71,9 @@ export type TickReport = {
   /** Oasis Meet transcripts attached to their engagement; and those listed for CC (no AI answer, a guest who did not agree, a call held for his hand). */
   meetTranscriptsAttached: number;
   meetTranscriptsWaiting: number;
+  /** Research runs started after Gate 1, and phases moved. */
+  researchStarted: number;
+  researchAdvanced: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
   stoppedForBudget: boolean;
 };
@@ -100,12 +107,16 @@ export async function runAiAuditTick(
     briefsBuilt: 0,
     meetTranscriptsAttached: 0,
     meetTranscriptsWaiting: 0,
+    researchStarted: 0,
+    researchAdvanced: 0,
     errors: [],
     stoppedForBudget: false,
   };
   if (!(await aiAuditTablesInstalled(db))) return report;
   // The brief alone needs bravo__241: without it, step 7c reports itself and every other step runs.
   const briefsInstalled = await briefTablesInstalled(db);
+  // Research alone needs bravo__243: without it, step 7d reports itself (once something waits on it) and every other step runs.
+  const researchInstalled = await researchTablesInstalled(db);
   const over = () => Date.now() - started > budget;
   const tenants = (opts.tenantIds ?? [...OASIS_INTERNAL_TENANT_IDS]).filter((t) => !isRetiredTenant(t));
 
@@ -286,6 +297,32 @@ export async function runAiAuditTick(
             .catch((e) => console.error("[ai-audit.tick] could not record brief_failed", { tenantId, engagementId: id, error: e instanceof Error ? e.message : String(e) }));
           throw err;
         }
+      });
+    }
+
+    // 7d. Research after Gate 1: two starts and three phases a tick at most (a phase reads a website or
+    // the pages the search found, up to 25 seconds each, or runs PageSpeed, up to a minute).
+    let research: { start: string[]; advance: string[] } = { start: [], advance: [] };
+    await guard("research", undefined, async () => {
+      if (!researchInstalled) {
+        if (open.some((x) => x.stage === "generating")) throw new Error("the research tables are missing: apply database/turso/bravo__243_ai_audit_research.sql");
+        return;
+      }
+      research = await dueResearch(db, tenantId);
+    });
+    const researchDeps: ResearchDeps = deps.research ?? { site: deps.site ?? defaultSiteDeps(), pagespeed: defaultPageSpeedDeps(), alert: deps.payment.alert };
+    for (const id of research.start) {
+      if (over()) break;
+      await guard("research_start", id, async () => {
+        const r = await startResearch(db, { tenantId, engagementId: id, actor: { type: "system", id: null }, now: now() });
+        if (r.ok && r.created) report.researchStarted += 1;
+      });
+    }
+    for (const stepId of research.advance) {
+      if (over()) break;
+      await guard("research", undefined, async () => {
+        const r = await advanceResearch(db, { tenantId, stepId, now: now(), deps: researchDeps });
+        if (r === "advanced" || r === "finished") report.researchAdvanced += 1;
       });
     }
 

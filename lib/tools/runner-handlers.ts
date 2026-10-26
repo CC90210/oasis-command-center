@@ -89,6 +89,7 @@ import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } 
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
+import { checkSearchAnswer, searchJobInput } from "@/lib/ai-audit/research";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import {
   LEASE_GUARD,
@@ -300,6 +301,20 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
       });
       const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
       if (stepId) await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
+      return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
+    }
+    if (job.toolKey === "ai_audit_search") {
+      // The research's web search: the prompt (public facts only) is built now, from the database; the job
+      // row holds ids only. The stage and the authorization are checked again here.
+      const built = await searchJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
+      if (built.ok) return answer(built.input, hold);
+      const at = deps.now.toISOString();
+      const code = built.code === "not_permitted" ? "ai_audit_research_not_permitted" : "ai_audit_gone";
+      await deps.db.execute({
+        sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = ?, error_message = ?, finished_at = ?, updated_at = ?
+              WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ident.tenantIds.length)})`,
+        args: [code, toolErrorLine(code, "runner"), at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
+      });
       return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
     }
     // meet_transcribe: the segments are fixed now, at the claim (lib/meet/recording.ts).
@@ -628,6 +643,7 @@ async function completeSystemJob(
   if ("field" in ref) return invalid(ref.field);
   if (toolKey === "ai_audit_pdf") return completeAuditPdf(ref, b, deps);
   if (toolKey === "ai_audit_model") return completeAuditModel(ref, b, deps);
+  if (toolKey === "ai_audit_search") return completeAuditSearch(ref, b, deps);
   const transcript = toolKey === "meet_transcribe" ? parseTranscriptReport(b) : null;
   const deleted = toolKey === "meet_delete_local" ? parseDeleteLocalReport(b) : null;
   if (transcript && !transcript.ok) return invalid(transcript.field);
@@ -728,6 +744,28 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
     }
   }
   return toolsJson(200, { ok: true, duplicate: false, kept: checked.ok ? checked.result.kept.length : 0 });
+}
+
+/**
+ * The Mac's web search for an audit's research: checked (public web addresses only, at most twelve
+ * pages), and kept on the job as that list only, never the model's own text. The research's next
+ * phase reads each page itself (lib/ai-audit/research.ts).
+ */
+async function completeAuditSearch(ref: LeaseRef, b: Record<string, unknown>, deps: RunnerDeps): Promise<Response> {
+  if (typeof b.text !== "string" || b.text.length > MODEL_TEXT_MAX_CHARS) return invalid("text");
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
+  if (job.toolKey !== "ai_audit_search") return invalid("tool_key");
+  const checked = checkSearchAnswer(b.text);
+  const at = deps.now.toISOString();
+  const rs = await deps.db.execute({
+    sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+    args: [JSON.stringify({ search: checked }), at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+  });
+  if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
+  return toolsJson(200, { ok: true, duplicate: false, results: checked.results.length, unreadable: checked.unreadable });
 }
 
 async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {
