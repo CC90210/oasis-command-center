@@ -92,7 +92,17 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
   const [recording, setRecording] = useState(false);
   const [ai, setAi] = useState<"" | "yes" | "no">("");
   const [engine, setEngine] = useState<AiEngine>(view.settings.engine);
+  // Who reads the call for the draft, apart from Gate 1's engine (review of phase 2b: one state served both selects).
+  const [readBy, setReadBy] = useState<"mac_claude" | "cloud_workspace">(view.settings.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude");
   const [busy, setBusy] = useState(false);
+  // While a draft is reading the call, the page looks again every 15 seconds, so its status, report and
+  // facts appear when it ends (Codex review of phase 2b: one refresh at the start showed "queued" for good).
+  const drafting = !!view.extraction && ["queued", "running", "waiting_runner"].includes(view.extraction.status);
+  useEffect(() => {
+    if (!drafting) return;
+    const id = setInterval(() => router.refresh(), 15_000);
+    return () => clearInterval(id);
+  }, [drafting, router]);
   const [message, setMessage] = useState<string | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
   const open = PROFILE_EDIT_STAGES.includes(e.stage);
@@ -278,6 +288,91 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           <div className="text-[12px] text-fg-dim">The profile is authorized, so transcripts can no longer be added. Move the engagement back to Transcript Awaiting Approval to change them.</div>
         )}
       </section>
+
+      {open && view.transcripts.length ? (
+        <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
+          <h2 className="text-sm font-semibold text-fg">Draft the profile from the transcript</h2>
+          <p className="text-fg-muted">
+            A model reads the transcript and proposes facts for the profile. A fact is kept only when its quote is on the lines it names, the client said it, and a figure is the one quoted, for the right period; the rest is listed below with why. Check every fact before you authorize: the checks catch much, not everything. Your own entries, and anything you verified or corrected, are never overwritten.
+          </p>
+          {view.consentAi ? (
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <div className="label">Read by</div>
+                <select className="select" value={readBy} onChange={(ev) => setReadBy(ev.target.value as "mac_claude" | "cloud_workspace")}>
+                  {(["mac_claude", "cloud_workspace"] as const).map((k) => (
+                    <option key={k} value={k}>
+                      {AI_ENGINE_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {isOwner ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={busy || (view.extraction ? ["queued", "running", "waiting_runner"].includes(view.extraction.status) : false)}
+                  onClick={() => act("extract_profile", { engine: readBy }, readBy === "mac_claude" ? "Queued for the Mac. It reads the call within a few minutes if the Mac is on." : "Queued. The cloud model reads one part of the call every few minutes.")}
+                >
+                  Draft the profile
+                </button>
+              ) : (
+                <span className="text-[13px] text-fg-muted">Only the workspace owner can have the call read.</span>
+              )}
+              {isOwner && view.extraction && ["queued", "running", "waiting_runner"].includes(view.extraction.status) ? (
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("cancel_extraction", {}, "Called off. Nothing it read was kept.")}>
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <div className="text-fg-muted">The client did not agree to AI analysis, so the profile is filled by hand.</div>
+          )}
+          {view.extraction ? (
+            <div className="text-fg-muted">
+              Last run: <span className="text-fg">{view.extraction.status.replace(/_/g, " ")}</span>
+              {view.extraction.windows ? `, ${view.extraction.done} of ${view.extraction.windows} part${view.extraction.windows === 1 ? "" : "s"} read` : ""}
+              {view.extraction.failed ? <span className="text-status-warm">, {view.extraction.failed} failed</span> : null}
+              {view.extraction.status === "waiting_runner" ? ", waiting for the Mac" : ""}.
+            </div>
+          ) : null}
+          {view.extractionReport ? (
+            <div className="grid gap-2">
+              <div className="text-fg">
+                {view.extractionReport.written.length} fact{view.extractionReport.written.length === 1 ? "" : "s"} added to the profile
+                {view.extractionReport.failed_windows ? <span className="text-status-warm">; {view.extractionReport.failed_windows} part{view.extractionReport.failed_windows === 1 ? "" : "s"} of the call not read</span> : null}.
+              </div>
+              {view.extractionReport.contradictions.length ? (
+                <div>
+                  <div className="text-status-warm">These disagree; settle them in the profile:</div>
+                  <ul className="mt-1 grid gap-0.5 text-[13px] text-fg-muted">
+                    {view.extractionReport.contradictions.map((c) => (
+                      <li key={c.key}>
+                        {c.key}: {c.values.map((v) => `${JSON.stringify(v.value)} (${v.source === "profile" ? "in the profile now" : `lines ${v.from}-${v.to}${v.quote ? `: "${v.quote}"` : ""}`})`).join(" vs ")}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {view.extractionReport.dropped.length ? (
+                <details className="text-[13px] text-fg-muted">
+                  <summary>{view.extractionReport.dropped_total ?? view.extractionReport.dropped.length} not kept, and why{(view.extractionReport.dropped_total ?? 0) > view.extractionReport.dropped.length ? ` (the first ${view.extractionReport.dropped.length})` : ""}</summary>
+                  <ul className="mt-1 grid gap-0.5">
+                    {view.extractionReport.dropped.slice(0, 30).map((d, i) => (
+                      <li key={`${d.key}-${i}`}>
+                        {d.key}: {d.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+              {view.extractionReport.summary.open_questions.length ? (
+                <div className="text-[13px] text-fg-muted">Still unclear from the call: {view.extractionReport.summary.open_questions.join("; ")}</div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">Gate 1: authorize the client&apos;s information</h2>
