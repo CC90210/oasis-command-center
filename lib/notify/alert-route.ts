@@ -22,11 +22,25 @@
  * THE OUTCOME IS WORDS. What the push did is returned in the words an alert
  * card shows its owner ("Sent to Telegram", "Not sent: no Telegram bot
  * connected"), one wording for every caller.
+ *
+ * EMAIL WHEN TELEGRAM REFUSES (2026-10-26). OASIS's bot token was revoked and
+ * every booking and AI-audit alert since at least 2026-10-19 died as
+ * "Telegram said: Unauthorized": CC never heard about the calls people booked,
+ * and missed them. So when OASIS's own lane refuses an alert, it goes to CC's
+ * own inbox instead (founderAlertEmail): only OASIS's workspaces, only the team
+ * address, never a client's audience. The same alert text within the same hour
+ * carries one idempotency key, which is one Message-ID, so a retry or a
+ * repeating signal is one email, not a stream. The global kill switch
+ * BRAVO_FORCE_DRY_RUN=1 stops it; the dashboard's customer send mode does not,
+ * as it does not stop the support desk's founder alerts (lib/delivery/notify.ts):
+ * this mail is to OASIS's founder, never to a customer.
  */
 import "server-only";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
+import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { laneCredentials, sendTelegram } from "@/lib/notify/telegram";
 import { sendWorkspaceTelegram, workspaceTelegramOutcome } from "@/lib/notify/workspace-telegram";
+import { OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
 /** Who a workspace's alerts reach outside the app. */
@@ -73,14 +87,95 @@ export function oasisLaneOutcome(sent: LaneResult, token?: string | null): strin
  */
 export type AlertDesk = "sales";
 
+/** One alert email to OASIS's founder. `ok: false` carries why, in a short line. */
+export type FounderAlertEmail = (m: {
+  tenantId: string;
+  to: string;
+  subject: string;
+  body: string;
+  idempotencyKey: string;
+}) => Promise<{ ok: boolean; error?: string }>;
+
+/** The real one: OASIS's shared mailbox, as an internal alert to the team (past the opt-out list, to the team list only). */
+const sendFounderAlertEmail: FounderAlertEmail = async (m) => {
+  const r = await sendOasisSharedGmail({
+    tenantId: m.tenantId,
+    to: m.to,
+    subject: m.subject,
+    body: m.body,
+    idempotencyKey: m.idempotencyKey,
+    purpose: "support",
+    internalAlert: true,
+  });
+  return r.ok ? { ok: true } : { ok: false, error: `${r.reason}: ${r.error}` };
+};
+
+/**
+ * An alert's Telegram HTML as plain text: tags dropped (a link keeps its
+ * address), the entities escapeTelegramHtml wrote decoded once. Exported for tests.
+ */
+export function alertPlainText(html: string): string {
+  return html
+    .replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, label: string) => {
+      const words = label.replace(/<[^>]+>/g, "").trim();
+      return words && words !== href ? `${words} (${href})` : href;
+    })
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+/** A short stable fingerprint of an alert's text (FNV-1a), for its idempotency key. */
+function fingerprint(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/**
+ * The email that stands in for a Telegram alert OASIS's lane refused: to the
+ * first address on the team list, subject from the alert's first line. Its key
+ * is the lane, the text and the hour, so the same alert is one email an hour.
+ * Exported for tests.
+ */
+export function founderAlertMessage(
+  text: string,
+  lane: string,
+  telegramOutcome: string,
+  now: Date,
+): { to: string; subject: string; body: string; idempotencyKey: string } {
+  const plain = alertPlainText(text);
+  const firstLine = plain.split("\n").find((l) => l.trim())?.trim() || "An alert";
+  const reason = telegramOutcome.replace(/^Not sent:\s*/, "");
+  return {
+    to: OASIS_PIPELINE_ASSIGNMENT_EMAILS[0],
+    subject: `OASIS alert: ${firstLine}`.slice(0, 140),
+    body:
+      `${plain}\n\n` +
+      `This came by email because Telegram refused it (${reason}). ` +
+      "Alerts will keep arriving here until the OASIS Telegram bot token is replaced.",
+    idempotencyKey: `alert-email:${lane}:${fingerprint(text)}:${now.toISOString().slice(0, 13)}`,
+  };
+}
+
 /**
  * Push one alert (Telegram HTML, already escaped) to this workspace's own
- * audience. Never throws, never reaches another workspace's chat.
+ * audience. Never throws, never reaches another workspace's chat. For OASIS's
+ * own workspaces a refused Telegram push is emailed to the founder instead
+ * (see the header); `email` replaces that sender in tests.
  */
 export async function pushWorkspaceAlert(
   tenantId: string,
   text: string,
-  opts?: { desk?: AlertDesk },
+  opts?: { desk?: AlertDesk; email?: FounderAlertEmail; now?: Date },
 ): Promise<AlertPush> {
   const audience = alertAudienceFor(tenantId);
   if (audience === "card_only") return { delivered: false, outcome: "Not sent: this workspace is retired" };
@@ -90,7 +185,24 @@ export async function pushWorkspaceAlert(
       ok: false,
       reason: err instanceof Error ? err.message : "telegram_error",
     }));
-    return { delivered: sent.ok, outcome: oasisLaneOutcome(sent, laneCredentials(lane)?.token) };
+    const outcome = oasisLaneOutcome(sent, laneCredentials(lane)?.token);
+    if (sent.ok) return { delivered: true, outcome };
+    if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") {
+      return { delivered: false, outcome: `${outcome}. Not emailed either: sending is switched off (dry run)` };
+    }
+    const message = founderAlertMessage(text, lane, outcome, opts?.now ?? new Date());
+    const mailed = await (opts?.email ?? sendFounderAlertEmail)({ tenantId, ...message }).catch((err: unknown) => ({
+      ok: false,
+      error: err instanceof Error ? err.message : "email_error",
+    }));
+    if (mailed.ok) return { delivered: true, outcome: `${outcome}. Emailed to ${message.to} instead` };
+    console.error("[alert-route] Telegram refused an OASIS alert and the email fallback failed too", {
+      tenantId,
+      lane,
+      telegram: outcome,
+      email: (mailed.error || "unknown").slice(0, 200),
+    });
+    return { delivered: false, outcome: `${outcome}. The email fallback failed too (${(mailed.error || "unknown").slice(0, 120)})` };
   }
   const result = await sendWorkspaceTelegram(tenantId, text);
   return { delivered: result.ok, outcome: workspaceTelegramOutcome(result) };

@@ -444,14 +444,30 @@ async function sendAfterOptOutGate(args: OasisSharedSendArgs): Promise<OasisShar
       : await getTenantIntegrationBundle(args.tenantId, OASIS_MAIL_SERVICE).catch(
           () => ({}) as Record<string, string>,
         );
-  const fromAddress = (bundle.from_address || "").trim();
+  let fromAddress = (bundle.from_address || "").trim();
   // Strip ALL whitespace, not just the ends. Google displays an app password as
   // four spaced groups, and a value pasted that way is 19 characters for a
   // 16-character secret — which authenticates against IMAP in some clients and
   // returns 535 on SMTP, so the channel looks half-alive and the failure reads
   // as a wrong password when it is really a formatting one. The SunBiz path
   // learned this on 2026-07-02; inherited here rather than re-learned.
-  const appPassword = (bundle.app_password || "").replace(/\s+/g, "");
+  let appPassword = (bundle.app_password || "").replace(/\s+/g, "");
+  // AN ALERT TO OASIS'S OWN TEAM, LAST RESORT (2026-10-26): the Worker's own
+  // Gmail login (GMAIL_USER + GMAIL_APP_PASSWORD, the pair the "gws" service
+  // reads), the same last resort account-security mail already uses
+  // (lib/auth-email.ts). Production had neither support@ nor an oasis_gmail
+  // mailbox, so every alert that fell back to email went nowhere, the desk's
+  // founder alerts included. Only for isInternalTeamAlert (every recipient on
+  // the team list), and the brand guard below still refuses a mailbox outside
+  // oasisai.work, so this can only ever be OASIS mail to OASIS's own team.
+  if ((!fromAddress || !appPassword) && isInternalTeamAlert(args)) {
+    const gwsFrom = (process.env.GMAIL_USER || "").trim();
+    const gwsPassword = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+    if (gwsFrom && gwsPassword) {
+      fromAddress = gwsFrom;
+      appPassword = gwsPassword;
+    }
+  }
   // Support mail that cannot leave from support@ says so, once, whether it
   // goes out from the shared mailbox instead or not at all. The idempotency
   // key's prefix names the surface (support-ack, support-reply, client-email).
