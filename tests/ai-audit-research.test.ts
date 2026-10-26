@@ -1,7 +1,7 @@
 /**
  * ai-audit-research.test.ts — phase 3 of the Free AI Audit: the research behind
  * an audit, after Gate 1, on a real libSQL file with the real migrations
- * (bravo__186, 206, 237, 238, 239, 241, 243).
+ * (bravo__186, 206, 237, 238, 239, 240, 241, 243).
  *
  * Pins:
  *   - the evidence rules: a Verified fact needs our own measurement, a stored
@@ -158,6 +158,8 @@ async function main() {
   for (const f of [
     "bravo__186_os_approvals.sql",
     "bravo__206_tool_jobs.sql",
+    // Every runner claim reads tool_jobs.target_runner (bravo__240, Meet's per-computer copies).
+    "bravo__240_meet_local_copies.sql",
     "bravo__237_ai_audit_core.sql",
     "bravo__238_ai_audit_delivery.sql",
     "bravo__239_ai_audit_discovery.sql",
