@@ -51,6 +51,8 @@ import {
   type ApprovalScope,
 } from "./os/approvals/rules";
 import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
+import { agentMayUse, judgeAccess, readAgentAccessOverrides } from "./os/agent-access-store";
+import { APP_TOOLS, appForTool, refusalSentence } from "./os/agent-access";
 import { openDepartmentsFor } from "./os/approvals/scope";
 import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
@@ -85,6 +87,7 @@ import {
   getTenantIntegrationValue,
   setTenantIntegrationValue,
   VAULT_CUSTOM_SERVICE,
+  VAULT_KEY_PATTERN,
 } from "./tenant-integration-store";
 import { isDryRun } from "./integrations/send-mode";
 import { normalizePhoneE164, isPhoneOptedOut } from "./lead-interactions-queries";
@@ -896,6 +899,23 @@ export function stripModelSuppliedTenant(input: Record<string, unknown>): Record
   return out;
 }
 
+/**
+ * The tools this agent may not be offered this turn, because the owner has not
+ * given it the app they use. One read for the whole turn. A read that fails
+ * withholds every app tool: the default can be wider than what was saved.
+ */
+export async function toolsWithheldFromAgent(tenantId: string, agentKey: string | null | undefined): Promise<ReadonlySet<string>> {
+  const overrides = await readAgentAccessOverrides(tenantId);
+  if (!overrides.ok) {
+    console.error("[cloud-tool-runner] could not read agent access; app tools withheld this turn", { tenantId, error: overrides.error });
+  }
+  const withheld = new Set<string>();
+  for (const [tool, slug] of Object.entries(APP_TOOLS)) {
+    if (!judgeAccess(overrides, { kind: "connector", slug }, agentKey).allowed) withheld.add(tool);
+  }
+  return withheld;
+}
+
 function refusedToolResult(name: string, error: string): ToolResultBlock {
   return {
     content: JSON.stringify({ error, tool: name }),
@@ -931,6 +951,14 @@ export async function executeTool(
     console.warn("[cloud-tool-runner] ignored a tenant the model put in a tool input; the session tenant applies", {
       tool: name,
     });
+  }
+  const connector = appForTool(name);
+  if (connector) {
+    const verdict = await agentMayUse(ctx.tenantId, { kind: "connector", slug: connector }, ctx.agentKey);
+    if (!verdict.allowed) {
+      console.warn("[cloud-tool-runner] refused an app tool the agent was not given", { tool: name, connector, agentKey: ctx.agentKey, code: verdict.code });
+      return refusedToolResult(name, `app_not_given_to_this_agent: ${refusalSentence(verdict.code, connector, verdict.access, "Settings > Connections")}`);
+    }
   }
   const safeInput = stripModelSuppliedTenant(input);
   try {
@@ -1368,7 +1396,7 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
   }
   // Same regex as the upload route — refuses anything that wouldn't
   // round-trip with the stored field_key.
-  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(raw.toUpperCase())) {
+  if (!VAULT_KEY_PATTERN.test(raw.toUpperCase())) {
     auditCredentialAccess({
       action: "get_credential",
       tenantId: ctx.tenantId,
@@ -1379,6 +1407,26 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
       errorMessage: "invalid_credential_name_format",
     });
     throw new Error("invalid_credential_name_format");
+  }
+  // The agents the owner picked for this key (lib/os/agent-access.ts); with
+  // nothing saved, every agent, as before.
+  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.agentKey);
+  if (!access.allowed) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "forbidden",
+      errorMessage: `agent_access: ${access.code}`,
+    });
+    return {
+      found: false,
+      forbidden: true,
+      name: raw.toUpperCase(),
+      hint: refusalSentence(access.code, raw.toUpperCase(), access.access, "Settings > Connections > Custom keys"),
+    };
   }
   const fieldKey = raw.toLowerCase();
   const value = await getTenantIntegrationValue(
@@ -1446,7 +1494,7 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
   if (!rawName) throw new Error("name_required");
   if (!rawValue) throw new Error("value_required");
   const upperName = rawName.toUpperCase();
-  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(upperName)) {
+  if (!VAULT_KEY_PATTERN.test(upperName)) {
     auditCredentialAccess({
       action: "add_credential",
       tenantId: ctx.tenantId,
@@ -1457,6 +1505,24 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
       errorMessage: "invalid_credential_name_format",
     });
     throw new Error("invalid_credential_name_format");
+  }
+  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: upperName }, ctx.agentKey);
+  if (!access.allowed) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "forbidden",
+      errorMessage: `agent_access: ${access.code}`,
+    });
+    return {
+      ok: false,
+      forbidden: true,
+      name: upperName,
+      hint: refusalSentence(access.code, upperName, access.access, "Settings > Connections > Custom keys"),
+    };
   }
   if (rawValue.length > 8192) {
     auditCredentialAccess({
@@ -2810,9 +2876,11 @@ export async function* streamOpenAICompatibleWithTools(
     .map((m) => ({ role: m.role, content: m.content }) as OpenAICompatibleMessage);
   const mode = normalizeMode(req.chatMode);
   const system = composePlanSystemPrompt(req.system, mode);
+  // An app's tools reach only the agents its owner gave the app (APP_TOOLS).
+  const withheldTools = await toolsWithheldFromAgent(ctx.tenantId, ctx.agentKey);
   const activeTools: ReadonlyArray<{ name: string; description: string; input_schema: Record<string, unknown> }> =
     req.toolset
-      ? req.toolset.tools
+      ? req.toolset.tools.filter((t) => !withheldTools.has(t.name))
       : resolveActiveTools({
           tenantId: ctx.tenantId,
           toolPalette: req.toolPalette,
@@ -2820,6 +2888,7 @@ export async function* streamOpenAICompatibleWithTools(
           // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
           // Keep this path cloud-safe instead of advertising tools it cannot resume.
           forceExcludeDeferred: true,
+          withheldTools,
         });
   // The turn's tokens: the SUM of every step's own report. Each step is its
   // own provider request (its own ai_usage_events row), and each reports only
@@ -3114,6 +3183,8 @@ export function resolveActiveTools(args: {
   toolPalette?: string[];
   chatMode?: ChatPlanMode;
   forceExcludeDeferred?: boolean;
+  /** Tools whose app this agent was not given (toolsWithheldFromAgent). */
+  withheldTools?: ReadonlySet<string>;
 }): ToolDef[] {
   let activeTools: ToolDef[] = isOasisInternalTenant(args.tenantId)
     ? TOOL_DEFINITIONS
@@ -3131,6 +3202,10 @@ export function resolveActiveTools(args: {
   }
   if (args.chatMode === "plan") {
     activeTools = filterToolsForMode(activeTools, "plan");
+  }
+  const withheld = args.withheldTools;
+  if (withheld && withheld.size > 0) {
+    activeTools = activeTools.filter((t) => !withheld.has(t.name));
   }
   return activeTools;
 }
@@ -3190,14 +3265,17 @@ async function* runIterationLoop(
   //      applied where `system` is composed by streamAnthropicWithTools
   //      before this loop runs.
   //   A caller's toolset (ToolLoopRequest.toolset) replaces all of the above.
+  // An app's tools reach only the agents its owner gave the app (APP_TOOLS).
+  const withheldTools = enableTools ? await toolsWithheldFromAgent(ctx.tenantId, ctx.agentKey) : new Set<string>();
   const activeTools: ReadonlyArray<Pick<ToolDef, "name" | "description" | "input_schema" | "defer">> = args.toolset
-    ? args.toolset.tools
+    ? args.toolset.tools.filter((t) => !withheldTools.has(t.name))
     : resolveActiveTools({
         tenantId: ctx.tenantId,
         excludeDeferredTools: args.excludeDeferredTools,
         bridgeAdvertisedTools: args.bridgeAdvertisedTools,
         toolPalette: args.toolPalette,
         chatMode: args.chatMode,
+        withheldTools,
       });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;

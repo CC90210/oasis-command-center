@@ -7,11 +7,18 @@
  * CRM API key, an internal service token, a per-client webhook secret —
  * without the empire operator having to pre-register the schema.
  *
- *   GET     — list every (key, last_updated) — NEVER returns the value.
- *   POST    — upsert one entry. Body: { key, value }.
+ *   GET     — list every (key, last_updated, agents) — NEVER returns the value.
+ *   POST    — upsert one entry. Body: { key, value, agents? }.
  *   POST (bulk) — upsert many entries. Body: { entries: [{key, value}, ...] }
- *                 OR { dotenv: "KEY1=value1\nKEY2=value2" } for raw paste.
- *   DELETE  — remove one entry. Body: { key }.
+ *                 OR { dotenv: "KEY1=value1\nKEY2=value2" } for raw paste,
+ *                 with an optional `agents` for every entry in the request.
+ *   DELETE  — remove one entry (and its agent choice). Body: { key }.
+ *
+ * Agents (CC, 2026-10-26): `agents` is "all" or a list of departments
+ * (lib/os/agent-access.ts). A key with no choice saved is for every agent. A
+ * request without `agents` leaves an existing key's choice as it was. The
+ * choice is saved BEFORE the value, so a key is never readable by more agents
+ * than the owner picked, even for the moment between the two writes.
  *
  * Storage: reuses `tenant_integration_credentials` with `service="custom"`
  * and `field_key=<user-provided name, normalized>`. Same AES-256-GCM
@@ -35,7 +42,10 @@ import {
   setTenantIntegrationValue,
   deleteTenantIntegrationValue,
   VAULT_CUSTOM_SERVICE,
+  VAULT_KEY_PATTERN,
 } from "@/lib/tenant-integration-store";
+import { normalizeAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
+import { clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,13 +54,11 @@ const MAX_KEY_LEN = 64;
 const MAX_VALUE_LEN = 8192; // 8 KB per value — enough for private keys
 const MAX_BULK_ENTRIES = 100;
 
-/** Same UPPER_SNAKE_CASE rule as Node's `process.env` keys. */
-const KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 function normalizeKey(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const k = raw.trim().toUpperCase();
-  if (!KEY_PATTERN.test(k)) return null;
+  if (!VAULT_KEY_PATTERN.test(k)) return null;
   return k;
 }
 
@@ -58,6 +66,12 @@ type CustomCredentialRow = {
   key: string;
   has_value: boolean;
   updated_at: string | null;
+  /** The agents that may use it; null when its choice (or every choice) could not be read. */
+  agents: AgentAccess | null;
+  /** True when the owner picked the agents; false for the default (every agent). */
+  agents_saved: boolean;
+  /** True when this key's saved choice cannot be read: no agent may use it until it is saved again. */
+  agents_unreadable: boolean;
 };
 
 export async function GET() {
@@ -75,19 +89,35 @@ export async function GET() {
     .eq("tenant_id", sess.tenantId)
     .eq("service", VAULT_CUSTOM_SERVICE)
     .order("field_key", { ascending: true });
+  const overrides = await readAgentAccessOverrides(sess.tenantId);
+  if (!overrides.ok) {
+    console.error("[credentials.custom] agent choices unreadable", { tenantId: sess.tenantId, error: overrides.error });
+  }
   const rows: CustomCredentialRow[] = (
     (r.data || []) as { field_key: string; encrypted_value: string; updated_at: string | null }[]
-  ).map((row) => ({
-    key: row.field_key.toUpperCase(),
-    has_value: !!row.encrypted_value,
-    updated_at: row.updated_at,
-  }));
-  return NextResponse.json({ ok: true, entries: rows });
+  ).map((row) => {
+    const key = row.field_key.toUpperCase();
+    const choice = overrides.ok ? effectiveAccess(overrides, { kind: "custom", key }) : null;
+    return {
+      key,
+      has_value: !!row.encrypted_value,
+      updated_at: row.updated_at,
+      agents: choice ? choice.access : null,
+      agents_saved: choice ? choice.saved : false,
+      agents_unreadable: !!choice && choice.access === null,
+    };
+  });
+  return NextResponse.json({
+    ok: true,
+    entries: rows,
+    ...(overrides.ok ? {} : { agents_error: "Could not read which agents may use these keys." }),
+  });
 }
 
 type SingleUpsertBody = { key: string; value: string };
 type BulkUpsertBody = { entries: SingleUpsertBody[] };
 type DotenvUpsertBody = { dotenv: string };
+type AgentsBody = { agents: unknown };
 
 function parseDotenv(text: string): SingleUpsertBody[] {
   const out: SingleUpsertBody[] = [];
@@ -121,11 +151,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
-  let body: Partial<SingleUpsertBody & BulkUpsertBody & DotenvUpsertBody>;
+  let body: Partial<SingleUpsertBody & BulkUpsertBody & DotenvUpsertBody & AgentsBody>;
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  // Optional: who may use every key in this request. Absent leaves each key's choice as it is.
+  let agents: AgentAccess | undefined;
+  if (body.agents !== undefined) {
+    const parsed = normalizeAgentAccess(body.agents);
+    if (parsed === null) {
+      return NextResponse.json({ ok: false, error: "invalid_agents" }, { status: 400 });
+    }
+    agents = parsed;
   }
 
   // Normalize all three input shapes (single, bulk, dotenv) into one
@@ -183,6 +222,19 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
+    if (agents !== undefined) {
+      const a = await saveAgentAccess({
+        tenantId: sess.tenantId,
+        target: { kind: "custom", key: normalizedKey },
+        access: agents,
+        createdBy: sess.profileId,
+      });
+      if (!a.ok) {
+        // The value is not saved without its agents: saved alone, every agent could read it.
+        results.push({ key: normalizedKey, ok: false, error: `agents_not_saved: ${a.error}` });
+        continue;
+      }
+    }
     const r = await setTenantIntegrationValue({
       tenantId: sess.tenantId,
       service: VAULT_CUSTOM_SERVICE,
@@ -231,6 +283,12 @@ export async function DELETE(req: NextRequest) {
   });
   if (!r.ok) {
     return NextResponse.json({ ok: false, error: r.error }, { status: 500 });
+  }
+  // Its agent choice goes with it, so a new key of the same name starts from the default.
+  const cleared = await clearAgentAccess({ tenantId: sess.tenantId, target: { kind: "custom", key: normalizedKey } });
+  if (!cleared.ok) {
+    console.error("[credentials.custom] agent choice not removed with its key", { tenantId: sess.tenantId, key: normalizedKey, error: cleared.error });
+    return NextResponse.json({ ok: true, warning: "The key is removed, but its agent choice is still saved." });
   }
   return NextResponse.json({ ok: true });
 }

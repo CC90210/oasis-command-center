@@ -43,11 +43,7 @@ import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegra
 import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
 import { glyphColor, type ConnectorDef, type ConnectorStatus } from "@/lib/os/connectors";
 import { providerById } from "@/lib/connections/registry";
-import { OS_DEPARTMENTS } from "@/lib/os/departments";
-
-function departmentLabel(key: string): string {
-  return OS_DEPARTMENTS.find((d) => d.key === key)?.label ?? key;
-}
+import { ConnectorAgentAccess } from "@/components/os/connections/ConnectorAgentAccess";
 
 export function DrawerSheet({
   open,
@@ -395,13 +391,7 @@ export function ConnectorDrawer({
 
           <section>
             <h3 className="mb-2 text-xs font-medium text-fg-dim">Used by</h3>
-            <ul className="flex flex-wrap gap-1.5">
-              {def.departments.map((d) => (
-                <li key={d} className="rounded-md border border-hairline bg-bg-raised px-2 py-0.5 text-[12px] text-fg-muted">
-                  {departmentLabel(d)}
-                </li>
-              ))}
-            </ul>
+            <ConnectorAgentAccess key={def.slug} slug={def.slug} departments={def.departments} />
           </section>
 
           <p className="text-[11.5px] leading-4 text-fg-dim">

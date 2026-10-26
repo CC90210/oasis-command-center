@@ -40,6 +40,20 @@ import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integrati
  */
 export const VAULT_CUSTOM_SERVICE = "custom";
 
+/**
+ * A custom vault key's name: UPPER_SNAKE_CASE, a letter first, at most 64
+ * characters (the .env convention). One rule for the vault route, the agent
+ * choices route and the credential tools, as VAULT_CUSTOM_SERVICE is one name.
+ */
+export const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * The service under which an owner's agent choices are kept
+ * (lib/os/agent-access-store.ts). They are not credentials, so
+ * listTenantIntegrationStatus never lists or decrypts them.
+ */
+export const AGENT_ACCESS_SERVICE = "agent_access";
+
 type StoreRow = {
   id: string;
   tenant_id: string;
@@ -592,6 +606,9 @@ export async function listTenantIntegrationStatus(
   const envAllowed = tenantMayUseEnvFallback(tenantId);
   const rows = new Map<string, IntegrationStatusRow>();
   for (const row of (r.data || []) as StoreRow[]) {
+    // An owner's agent choices are not credentials: one that will not decrypt
+    // must not blank every card's status (review of OCC #743).
+    if (row.service === AGENT_ACCESS_SERVICE) continue;
     const envPresent = envAllowed && envKeysFor(row.service, row.field_key).some((envKey) =>
       Boolean(process.env[envKey]?.trim()),
     );
