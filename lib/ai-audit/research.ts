@@ -42,7 +42,7 @@ import { CHECK_TITLES, visibleText, type CheckKey, type SiteCheck } from "@/lib/
 import { siteTarget, type SiteTarget } from "@/lib/ai-audit/site-url";
 import { runPageSpeed, type PageSpeedFetch, type PageSpeedResult } from "@/lib/ai-audit/pagespeed";
 import { loginWalled, parseSearchAnswer, searchPrompt, type SearchResult } from "@/lib/ai-audit/search";
-import { enforceEvidence, namesBusiness, sentenceStating, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
+import { enforceEvidence, identifiesBusiness, sentenceStating, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
 import { researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 import { estimateImpact, validateOverrides, type AssumptionOverrides, type ImpactInputs } from "@/lib/ai-audit/impact";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
@@ -121,7 +121,7 @@ type State = {
 export type ResearchDeps = {
   site: SiteReadDeps;
   pagespeed: { fetch: PageSpeedFetch; key: string | null };
-  alert: (input: { tenantId: string; alertType: string; severity: "info" | "warn" | "urgent"; title: string; body: string; subjectType: string; subjectId: string }) => Promise<unknown>;
+  alert: (input: { tenantId: string; alertType: string; severity: "info" | "warn" | "urgent"; title: string; body: string; subjectType: string; subjectId: string; telegramOncePerOpen?: boolean }) => Promise<unknown>;
 };
 
 export function defaultPageSpeedDeps(): ResearchDeps["pagespeed"] {
@@ -241,7 +241,7 @@ export async function searchJobInput(db: Client, job: { tenantId: string; input:
   // The search runs on Claude on CC's Mac: only when that is the engine CC authorized at Gate 1.
   if (!e || !auth || auth.engine !== "mac_claude") return { ok: false, code: "not_permitted" };
   const lead = await readLead(db, t, e.lead_id);
-  const p = searchPrompt({ businessName: e.business_name || lead?.businessName || "", ...publicFacts(lead), businessType: e.business_type });
+  const p = searchPrompt({ businessName: publicName(e.business_name || lead?.businessName || ""), ...publicFacts(lead), businessType: e.business_type });
   return { ok: true, input: { purpose: "search", system: p.system, prompt: p.prompt, model: "sonnet", max_turns: 12 } };
 }
 
@@ -254,9 +254,41 @@ export async function searchJobInput(db: Client, job: { tenantId: string; input:
  */
 export function publicFacts(lead: { website: string | null; city: string | null } | null): { website: string | null; city: string | null } {
   const target = siteTarget(lead?.website ?? null);
-  const website = target.kind === "site" ? target.start : target.kind === "social" ? target.url : null;
+  // A folder or a handle that reads as a sentence ("we-miss-about-20-calls") is the lead's words, not an address (re-review of phase 3, finding 5).
+  const website =
+    target.kind === "site" ? (target.pathPrefix === "/" || readsAsHandle(target.pathPrefix.slice(1)) ? target.start : null) : target.kind === "social" ? socialProfile(target.url) : null;
   const city = (lead?.city ?? "").replace(/\s+/g, " ").trim();
-  return { website, city: /^\p{L}[\p{L}\p{M} .,'-]{0,58}$/u.test(city) && !/[.,'-]{2}/.test(city) ? city : null };
+  const words = city.split(/[\s,]+/).filter(Boolean);
+  const place = /^\p{L}[\p{L}\p{M} .,'-]{0,38}$/u.test(city) && !/[.,'-]{2}/.test(city) && words.length <= 3 && !words.some((w) => NOT_A_PLACE.has(w.toLowerCase()));
+  return { website, city: place ? city : null };
+}
+
+/** Words no place name has: a city field that holds them holds the lead's own sentence. */
+const NOT_A_PLACE = new Set("we our us you your they i my me lose losing lost miss missed missing call calls about percent per week weeks month months year years leads customers clients please email phone text".split(" "));
+
+/** A handle or folder name: one word, or at most three plain words joined by hyphens. */
+const readsAsHandle = (h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) || /^[A-Za-z]+(?:-[A-Za-z]+){0,2}$/.test(h);
+
+/** A social profile's address, cut to its handle; none when the handle reads as a sentence. */
+function socialProfile(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const handle = u.pathname.split("/").filter(Boolean)[0] ?? "";
+    return readsAsHandle(handle) ? `${u.protocol}//${u.host}/${handle}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The business's name as the search may be given it: no email address or phone number a lead typed into it. */
+export function publicName(name: string): string {
+  return name
+    .replace(/\S+@\S+/g, " ")
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 100);
 }
 
 /** The Mac's answer, checked: what the job keeps (public pages and claims only). */
@@ -289,14 +321,26 @@ function publishedAt(html: string): string | null {
   return Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
-/** The page's first lines, and the one sentence that states each claim: what the evidence rules check claims against. */
-function excerptFor(text: string, claims: SearchResult["claims"]): string {
-  const parts: string[] = [text.replace(/\s+/g, " ").slice(0, 400)];
-  for (const c of claims) {
-    const sentence = sentenceStating(c.text, text);
-    if (sentence && !parts.includes(sentence)) parts.push(sentence);
-  }
-  return parts.join(" ... ").replace(/\s+/g, " ").slice(0, EXCERPT_MAX_CHARS);
+/**
+ * The passage that states each claim, then the page's first lines: what the
+ * evidence rules check claims against. `subject` is the business's name on its
+ * own listing. The first lines are kept only when they prove no claim the
+ * whole page does not (a sentence cut at the end can lose its "not").
+ */
+function excerptFor(text: string, claims: SearchResult["claims"], subject: string | null): string {
+  const stated = claims.map((c) => sentenceStating(c.text, text, subject));
+  const passages = [...new Set(stated.filter((x): x is string => !!x))];
+  const fit = (parts: string[]) => parts.join(" ... ").replace(/\s+/g, " ").slice(0, EXCERPT_MAX_CHARS);
+  const misleads = (excerpt: string) => claims.some((c, i) => !stated[i] && sentenceStating(c.text, excerpt, subject) !== null);
+  for (const excerpt of [fit([...passages, text.replace(/\s+/g, " ").slice(0, 400)]), fit(passages)]) if (!misleads(excerpt)) return excerpt;
+  return "";
+}
+
+/** What tells the business's own listing from a namesake's: its name, and its city, own web address and phone when known. */
+function identityOf(e: Engagement, lead: Awaited<ReturnType<typeof readLead>>): { name: string; city: string | null; host: string | null; phone: string | null } {
+  const target = siteTarget(lead?.website ?? null);
+  const phone = lead && typeof lead.data.phone === "string" ? lead.data.phone : null;
+  return { name: e.business_name || "", city: publicFacts(lead).city, host: target.kind === "site" && target.pathPrefix === "/" ? target.host : null, phone };
 }
 
 async function failStep(db: Client, t: string, stepId: string, code: string, now: Date) {
@@ -500,12 +544,13 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
           retrieved_at: at,
           http_status: read.page.status,
           content_sha256: contentHash(read.page.html),
-          excerpt: excerptFor(text, r.claims),
+          excerpt: excerptFor(text, r.claims, r.kind === "listing" || r.kind === "review" ? e.business_name || "" : null),
           reliability: r.kind === "industry" ? reliabilityOf(new URL(read.page.finalUrl)) : "low",
           published_at: publishedAt(read.page.html),
           confirmed_note: null,
-          // The business's own listing or reviews must name it; a competitor's page speaks for the competitor (its title says so).
-          about_business: r.kind === "listing" || r.kind === "review" ? namesBusiness(text, e.business_name || "") : null,
+          // The business's own listing or reviews must be its own (its name, and its city, address or phone when known);
+          // a competitor's page speaks for the competitor (its title says so).
+          about_business: r.kind === "listing" || r.kind === "review" ? identifiesBusiness(text, identityOf(e, lead)) : null,
         },
       });
     }
@@ -530,7 +575,9 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
       args: [id, t, e.id, versionNo, partial ? "partial" : "ready", JSON.stringify(pack), contentHash(pack), at],
     });
   } catch (err) {
-    if (err instanceof Error && /UNIQUE|constraint/i.test(err.message)) return "idle";
+    // Only another advance storing this very version is a race; any other error is counted and backed off
+    // (noteResearchFailure), never retried for ever in a slot (re-review of phase 3, finding 6).
+    if (err instanceof Error && /UNIQUE constraint failed:[^\n]*ai_audit_research\.version_no/i.test(err.message)) return "idle";
     throw err;
   }
   const done = await db.execute({
@@ -540,6 +587,17 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   if (done.rowsAffected !== 1) {
     await db.execute({ sql: "DELETE FROM ai_audit_research WHERE tenant_id = ? AND id = ?", args: [t, id] });
     return "idle";
+  }
+  // A transcript deleted while this run was being stored voided its authorization: the delete's own purge may
+  // have run before this row existed, so the run is taken back here (re-review of phase 3, finding 2).
+  const still = await getEngagement(db, t, e.id);
+  if (!still || !(await authorizedProfile(db, t, still))) {
+    await db.execute({ sql: "DELETE FROM ai_audit_research WHERE tenant_id = ? AND id = ?", args: [t, id] });
+    await db.execute({
+      sql: "UPDATE ai_audit_steps SET status = 'cancelled', error_code = 'not_authorized', result_ref = NULL, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'done'",
+      args: [at, t, input.stepId],
+    });
+    return "failed";
   }
   await db.execute(eventStatement({ tenantId: t, engagementId: e.id, event: "research_done", actor: system, at, refType: "research", refId: id, meta: { version_no: versionNo, findings: pack.findings.length, gaps: pack.gaps.length } }));
   await input.deps.alert({
@@ -705,7 +763,17 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
   // 5. The evidence rules decide every label; then the estimates.
   const evidence = enforceEvidence(
     findings,
-    sources.map((s) => ({ id: s.id, kind: s.kind, text: s.excerpt, reliability: s.reliability, published_at: s.published_at, confirmed_note: s.confirmed_note, http_status: s.http_status, about_business: s.about_business ?? null })),
+    sources.map((s) => ({
+      id: s.id,
+      kind: s.kind,
+      text: s.excerpt,
+      reliability: s.reliability,
+      published_at: s.published_at,
+      confirmed_note: s.confirmed_note,
+      http_status: s.http_status,
+      about_business: s.about_business ?? null,
+      subject_name: s.about_business ? e.business_name || "" : null,
+    })),
     now,
   );
   const overrides = await assumptionOverrides(db, t, e.id);
@@ -834,7 +902,34 @@ export async function noteResearchFailure(db: Client, input: { tenantId: string;
     body: "A step of the research failed three times, so the run was stopped. Press Research again on the engagement to start a new run.",
     subjectType: "ai_audit_engagement",
     subjectId: String(row.engagement_id),
+    // One page per open problem, not one per failing tick (re-review of phase 3, finding 6).
+    telegramOncePerOpen: true,
   });
+}
+
+/**
+ * Runs whose engagement is still in Research & Audit Generation but whose
+ * authorization no longer holds (a transcript deleted after Gate 1): deleted.
+ * The delete's own purge covers nearly every case; this is the backstop the
+ * tick runs (re-review of phase 3, finding 2). Answers how many runs went.
+ */
+export async function purgeUnauthorizedResearch(db: Client, tenantId: string): Promise<number> {
+  const t = requireTenant(tenantId);
+  if (!(await researchTablesInstalled(db))) return 0;
+  const rows = await db.execute({
+    // The newest runs first, so a void that landed during a run is found on the next tick.
+    sql: `SELECT r.engagement_id AS id, MAX(r.created_at) AS at FROM ai_audit_research r JOIN ai_audit_engagements e ON e.tenant_id = r.tenant_id AND e.id = r.engagement_id
+           WHERE r.tenant_id = ? AND e.stage IN (${RESEARCH_STAGES.map(() => "?").join(", ")}) GROUP BY r.engagement_id ORDER BY at DESC LIMIT 100`,
+    args: [t, ...RESEARCH_STAGES],
+  });
+  let purged = 0;
+  for (const r of rows.rows) {
+    const e = await getEngagement(db, t, String(r.id));
+    if (!e || (await authorizedProfile(db, t, e))) continue;
+    const done = await db.execute({ sql: "DELETE FROM ai_audit_research WHERE tenant_id = ? AND engagement_id = ?", args: [t, e.id] });
+    purged += done.rowsAffected;
+  }
+  return purged;
 }
 
 /** The latest run's status, for the engagement page. */

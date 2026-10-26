@@ -47,7 +47,7 @@ import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
 import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
-import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
+import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, purgeUnauthorizedResearch, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps };
@@ -312,6 +312,7 @@ export async function runAiAuditTick(
       }
       // Runs whose authorization ended (moved back, declined, cancelled) go first (review of phase 3, F4).
       await purgeVoidedResearch(db, tenantId);
+      await purgeUnauthorizedResearch(db, tenantId);
       research = await dueResearch(db, tenantId, now());
     });
     const researchDeps: ResearchDeps = deps.research ?? { site: deps.site ?? defaultSiteDeps(), pagespeed: defaultPageSpeedDeps(), alert: deps.payment.alert };

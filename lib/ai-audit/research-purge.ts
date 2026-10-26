@@ -9,7 +9,10 @@
  *   - a transcript deleted after Gate 1: in the same transaction as the delete
  *     (lib/ai-audit/transcripts.ts deleteTranscript);
  *   - the engagement moved back to correct the profile, declined or
- *     cancelled: by the tick (lib/ai-audit/tick.ts).
+ *     cancelled: in the same write as the move (lib/ai-audit/store.ts
+ *     moveStage), with the tick's sweep as the backstop (lib/ai-audit/tick.ts);
+ *   - a run stored while its authorization was being voided: taken back by
+ *     the run itself (lib/ai-audit/research.ts), and by the tick's sweep.
  * Research runs again after CC authorizes again. A run is never edited (its
  * trigger refuses UPDATE); it is only ever deleted whole.
  *
