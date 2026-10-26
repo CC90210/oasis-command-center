@@ -191,12 +191,23 @@ export async function finishExtraction(
   const engagementId = String(step.engagement_id);
   const engagement = await getEngagement(db, t, engagementId);
   const at = input.now.toISOString();
-  if (!engagement || !PROFILE_EDIT_STAGES.includes(engagement.stage)) {
+  // CC authorized in the meantime: nothing more is written into the profile he froze.
+  const closeStep = async () => {
     await db.execute({ sql: "UPDATE ai_audit_steps SET status = 'cancelled', error_code = 'stage_closed', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running', 'waiting_runner')", args: [at, at, t, input.stepId] });
-    return { ok: false, error: "stage_closed" };
-  }
+    return { ok: false as const, error: "stage_closed" };
+  };
+  if (!engagement || !PROFILE_EDIT_STAGES.includes(engagement.stage)) return closeStep();
   const actor: Actor = { type: "system", id: null };
-  const { version } = await ensureDraftProfile(db, t, engagementId, actor, input.now);
+  // Gate 1 can land between that check and these writes. ensureDraftProfile
+  // refuses a new draft after it, and the database refuses a field on a frozen
+  // profile (bravo__237): either way the run ends as stage_closed, nothing written.
+  let version: Awaited<ReturnType<typeof ensureDraftProfile>>["version"];
+  try {
+    ({ version } = await ensureDraftProfile(db, t, engagementId, actor, input.now));
+  } catch (err) {
+    if (err instanceof Error && /frozen/.test(err.message)) return closeStep();
+    throw err;
+  }
   const fields = await listProfileFields(db, t, version.id);
   const existing = new Map(fields.map((f) => [f.field_key, { value: f.value, source_type: f.source_type }]));
   const merged = mergeFacts(input.results.map((r) => r.kept), existing);
@@ -236,7 +247,12 @@ export async function finishExtraction(
     { sql: "UPDATE tool_jobs SET result_json = '{\"stored\":true}' WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ?", args: [t, MODEL_TOOL_KEY, input.stepId] },
     eventStatement({ tenantId: t, engagementId, event: "extraction_done", actor, at, refType: "step", refId: input.stepId, meta: { written: merged.write.length, contradictions: merged.contradictions.length, dropped: dropped.length, failed_windows: input.failedWindows } }),
   );
-  await db.batch(stmts, "write");
+  try {
+    await db.batch(stmts, "write");
+  } catch (err) {
+    if (err instanceof Error && /frozen/.test(err.message)) return closeStep();
+    throw err;
+  }
   // New facts change the profile: a pending Gate 1 card no longer shows it.
   const after = await getEngagement(db, t, engagementId);
   if (after && merged.write.length) await withdrawAuthorization(db, t, after, actor, input.now);
