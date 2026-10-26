@@ -27,6 +27,7 @@ import {
   type PaymentStatus,
 } from "@/lib/ai-audit/rules";
 import { validateTaxRule, type TaxRule } from "@/lib/ai-audit/proposal";
+import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 
 export type Engagement = {
   id: string;
@@ -538,7 +539,9 @@ export async function moveStage(
     toStage: input.to,
     meta: input.meta,
   });
-  const applied = await casWrite(db, update, [ev, ...(input.extra ?? [])]);
+  // A declined or cancelled engagement stops any profile draft still running, in the same write (review of phase 2b, F5).
+  const stops = input.to === "declined" || input.to === "cancelled" ? stopEngagementRunsStatements(tenantId, current.id, "stage_closed", at) : [];
+  const applied = await casWrite(db, update, [ev, ...stops, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
   if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
     return { ok: false, error: "delivery_in_progress", engagement: after };
@@ -641,6 +644,9 @@ export async function aiAuditTablesInstalled(db: Client): Promise<boolean> {
   // bravo__237, 238 and 239 must all be in: this code reads 239's two tables
   // and the two columns it adds to the engagement (review of phase 2, F6). A
   // column added by ALTER TABLE shows in the table's stored CREATE statement.
+  // 241 (the pre-call brief) is not checked here: the brief checks its own
+  // tables (lib/ai-audit/briefs.ts briefTablesInstalled), so the rest of the
+  // audit keeps running if code reaches a database before that migration.
   const rs = await db.execute({
     sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN ('ai_audit_engagements', 'ai_audit_share_links', 'ai_audit_transcripts', 'ai_audit_call_notes')",
     args: [],

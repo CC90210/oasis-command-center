@@ -87,8 +87,11 @@ const TEAM_POINTS: Record<string, number> = {
   "100_plus": 5,
 };
 
+// The answer is whatever the visitor sent (the submit route checks the keys,
+// not the values): only the table's own options score. A plain lookup would
+// give "constructor" a function and the whole score NaN.
 function pts(table: Record<string, number>, value: unknown): number {
-  return typeof value === "string" ? (table[value] ?? 0) : 0;
+  return typeof value === "string" && Object.hasOwn(table, value) ? table[value] : 0;
 }
 
 export type ScoreBreakdown = {
