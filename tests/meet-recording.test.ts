@@ -26,6 +26,10 @@
  *     the five downloads; it expires after 30 days on the relay instead;
  *   - delete calls off a transcription, tells the PC to delete its copy only
  *     if it may have one, and closes the room to stragglers;
+ *   - a computer's delete that failed is told again by the sweep (a day on, up
+ *     to five failures; runner_gone once that computer checks in), even after
+ *     "Delete meeting" took the room's panel away, and only that copy is;
+ *   - a relay cron step that throws never keeps the steps after it from running;
  *   - a video runner never takes a meeting job, and the reverse.
  *
  * Run: node --conditions=react-server --import tsx tests/meet-recording.test.ts
@@ -817,7 +821,8 @@ async function main() {
       }).deviceDelete;
     const failed = await view(7);
     assert.deepEqual([failed?.status, failed?.errorCode, failed?.doneAt, failed?.devices.length], ["failed", "unsafe_path", null, 1]);
-    // The PC polls again: a failed delete is NOT handed out again by itself (it stays failed until the host presses Delete again).
+    // The PC polls again: a fresh failed delete is NOT handed out again (it stays failed until the host presses Delete
+    // again, or the sweep tries it a day on: see "told again a day later" below).
     const poll = (await claim(later(at, minutes(7)))).body.job as Claimed | null;
     assert.ok(!poll || poll.tool_key !== "meet_delete_local", "a failed delete came back on the next poll");
     assert.equal((await view(7))?.status, "failed", "the panel still shows the failure");
@@ -1628,6 +1633,149 @@ async function main() {
     });
     assert.ok(cronRun.some((l) => l.includes("the queueMissingLocalDeletes sweep failed")), cronRun.join("\n"));
     assert.equal(await second(), "runner_gone", "the give-up waited on the sweep that threw");
+    // The relay cron, an EARLIER step throwing (expireUnfinalized, its only INSERT OR IGNORE INTO meet_transcripts):
+    // logged by its name, the steps after it and the computers' sweeps still run, and the run says so by name (503).
+    const third = await stranded();
+    const earlyRun = await logged(async () => {
+      const res = await routes.handleMeetRelayCron({ db: failing(/INSERT OR IGNORE INTO meet_transcripts/), storage: store.storage, now: () => now });
+      const out = await body(res);
+      assert.deepEqual([res.status, out.error, out.failedSweeps, out.localDeletes], [503, "relay_sweep_failed", ["expireUnfinalized"], "ok"]);
+    });
+    assert.ok(earlyRun.some((l) => l.includes("the expireUnfinalized sweep failed")), earlyRun.join("\n"));
+    assert.equal(await third(), "runner_gone", "an earlier step that threw kept the computers' sweeps from running");
+  });
+
+  // ---------------------------------------------------------------------
+  // A computer's delete that failed is told again (third review of the two-computer change)
+  // ---------------------------------------------------------------------
+  const { deleteMeetRoomRows } = await import("../lib/meet/participants");
+  const PC_KEY = `bea:${RUNNER}`;
+  /** The PC's claims until this room's delete comes up (null: nothing left), finishing any other meeting job on the way. */
+  async function claimDeleteOf(at: Date, roomId: string): Promise<Claimed | null> {
+    for (let i = 0; i < 12; i += 1) {
+      const answer = (await claim(at)).body;
+      const got = answer.job as Claimed | null;
+      if (!got) {
+        if (answer.poll_after_seconds !== 0) return null;
+        continue;
+      }
+      if (got.tool_key === "meet_delete_local" && got.input.room_id === roomId) return got;
+      if (got.tool_key === "meet_transcribe") {
+        await h.handleToolsFail(signedRequest("fail", { ...ref(got), error_code: "transcribe_failed" }, at), runnerDeps(at));
+      } else {
+        await h.handleToolsComplete(
+          signedRequest("complete", { ...ref(got), tool_key: "meet_delete_local", removed: [], already_gone: true, device_label: "CCPC (Windows)" }, at),
+          runnerDeps(at),
+        );
+      }
+    }
+    throw new Error("the PC was handed a dozen other jobs first");
+  }
+  const failDelete = async (job: Claimed, code: string, at: Date) =>
+    assert.equal((await answerOf(await h.handleToolsFail(signedRequest("fail", { ...ref(job), error_code: code }, at), runnerDeps(at)))).status, 200);
+  const deletedHere = async (job: Claimed, at: Date) =>
+    assert.equal(
+      (await answerOf(
+        await h.handleToolsComplete(
+          signedRequest("complete", { ...ref(job), tool_key: "meet_delete_local", removed: ["C:\\x"], already_gone: false, device_label: "CCPC (Windows)" }, at),
+          runnerDeps(at),
+        ),
+      )).status,
+      200,
+    );
+  /** One computer's deletes of one room, oldest first: [status, error code]. */
+  const deletesOf = async (roomId: string, runner = PC_KEY) =>
+    (await db.execute({
+      sql: "SELECT status, error_code FROM tool_jobs WHERE tenant_id = ? AND dedupe_key = ? ORDER BY created_at, id",
+      args: [OASIS, rec.deleteLocalKey(roomId, runner)],
+    })).rows.map((r) => [String(r.status), r.error_code === null ? null : String(r.error_code)]);
+  const relayCron = (at: Date) => routes.handleMeetRelayCron({ db, storage: store.storage, now: () => at });
+  /** "Delete meeting": the recording, then the room's own rows (lib/meet/handlers.ts deleteMeetRoom), so no panel is left. */
+  async function deleteMeeting(room: { id: string; tenantId: string }, code: string, at: Date) {
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(at))).status, 200);
+    await deleteMeetRoomRows(db, room);
+  }
+
+  await check("a computer's delete that failed is told again a day later, though Delete meeting took the room and its panel away", async () => {
+    const at = later(T0, minutes(500_000));
+    const { room, code } = await endedRecording(at, "Locked folder");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    await deleteMeeting(room, code, later(at, minutes(5)));
+    // The PC cannot remove its folder (a file open on Windows) and says so. No panel is left to show it.
+    const first = await claimDeleteOf(later(at, minutes(6)), room.id);
+    assert.ok(first, "the PC was never told to delete its copy");
+    await failDelete(first!, "runner_error", later(at, minutes(7)));
+    // Inside its day the failure stands: neither the cron nor the PC's own claims queue it again.
+    await relayCron(later(at, minutes(7 + 23 * 60)));
+    assert.equal(await claimDeleteOf(later(at, minutes(8 + 23 * 60)), room.id), null, "a fresh failure was queued again");
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"]]);
+    // A day on, the cron queues it again with every meeting computer off, and the PC's next claim takes it.
+    await relayCron(later(at, minutes(8 + 24 * 60)));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"], ["queued", null]], "the failed delete was never tried again");
+    const again = await claimDeleteOf(later(at, minutes(9 + 24 * 60)), room.id);
+    assert.ok(again, "the PC was not told again");
+    await deletedHere(again!, later(at, minutes(10 + 24 * 60)));
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "its copy is gone, yet the recording is not stamped");
+  });
+
+  await check("a copy whose delete keeps failing is told again until five have failed, then only the host's Delete tries again", async () => {
+    const at = later(T0, minutes(510_000));
+    const { room, code } = await endedRecording(at, "Always locked");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))))).status, 200);
+    let when = later(at, minutes(6));
+    for (let n = 1; n <= rec.LOCAL_DELETE_MAX_FAILED; n += 1) {
+      const job = await claimDeleteOf(when, room.id);
+      assert.ok(job, `delete ${n} never reached the PC`);
+      await failDelete(job!, n % 2 ? "runner_error" : "unsafe_path", later(when, minutes(1)));
+      when = later(when, rec.LOCAL_DELETE_RETRY_MS + minutes(2));
+      await rec.queueMissingLocalDeletes(db, [OASIS], when);
+    }
+    const all = await deletesOf(room.id);
+    assert.equal(all.length, rec.LOCAL_DELETE_MAX_FAILED, `a delete past the fifth failure was queued: ${JSON.stringify(all)}`);
+    assert.ok(all.every(([status]) => status === "failed"));
+    assert.equal(await claimDeleteOf(when, room.id), null);
+    // The room is still here, and its panel says so; Delete again still tells the PC at once.
+    const again = await body(await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(when, minutes(1)))));
+    assert.equal(again.device_delete_queued, true, "the host's Delete no longer reached the PC");
+  });
+
+  await check("a delete given up as runner_gone is told again as soon as its computer checks in, never before", async () => {
+    const at = later(T0, minutes(520_000));
+    const { room, code } = await endedRecording(at, "Back after a month");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    await deleteMeeting(room, code, later(at, minutes(5)));
+    // The PC is off for a month: the cron gives its delete up...
+    const month = later(at, 31 * 86_400_000);
+    await relayCron(month);
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"]]);
+    // ...and while the PC stays away, never queues it again.
+    await relayCron(later(month, 2 * 86_400_000));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"]], "a delete was queued for a computer still gone");
+    // The PC comes back: its first claim queues its delete again and hands it over, and its report stamps the room.
+    const back = await claimDeleteOf(later(month, 3 * 86_400_000), room.id);
+    assert.ok(back, "the PC came back and was told nothing");
+    await deletedHere(back!, later(month, 3 * 86_400_000 + minutes(1)));
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_gone"], ["done", null]]);
+    assert.ok((await rec.readTranscript(db, OASIS, room.id))?.localDeletedAt, "its copy is gone, yet the recording is not stamped");
+  });
+
+  await check("the sweep queues only the copy that is missing a delete, never its sibling's fresh failure", async () => {
+    const at = later(T0, minutes(600_000));
+    const { room, code } = await endedRecording(at, "Sibling");
+    await claimTranscription(later(at, minutes(3)), room.id);
+    assert.equal((await routes.handleMeetRecordingDelete(hostReq(code, "DELETE"), code, rdeps(later(at, minutes(5))))).status, 200);
+    const pcJob = await claimDeleteOf(later(at, minutes(6)), room.id);
+    await failDelete(pcJob!, "runner_error", later(at, minutes(7)));
+    // A second computer whose claim landed in the same moment as Delete: on record, with no delete of its own.
+    const MAC_KEY = "mac:oasis-mac-meet";
+    await db.execute({
+      sql: "INSERT INTO meet_local_copies (tenant_id, room_id, runner_key, first_claimed_at) VALUES (?, ?, ?, ?)",
+      args: [OASIS, room.id, MAC_KEY, later(at, minutes(5)).toISOString()],
+    });
+    await rec.queueMissingLocalDeletes(db, [OASIS], later(at, minutes(10)));
+    assert.deepEqual(await deletesOf(room.id, MAC_KEY), [["queued", null]], "the copy with no delete was not queued one");
+    assert.deepEqual(await deletesOf(room.id), [["failed", "runner_error"]], "the sibling's fresh failure was queued again");
   });
 
   finish("meet recording");

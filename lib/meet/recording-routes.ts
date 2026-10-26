@@ -258,10 +258,12 @@ function recorderReportOf(raw: Uint8Array | null): RecorderReport {
  * deleted, so the 30-day promise cannot be kept: that is a failed run the cron
  * driver reports (503), never a quiet 200 (Codex on #685, third pass). Expiry
  * still runs first, so recordings are marked even while storage is missing.
- * A sweep of the computers' deletes that threw is a failed run too; one that
- * could not run because bravo__240 is not applied is logged on every run and
- * named in the answer (localDeletes: "not_installed"), not failed, like
- * bravo__231 missing below: before it no copy is tracked, so none can wait.
+ * A step of the run that threw (relay_sweep_failed, named in failedSweeps;
+ * the steps after it still ran) or a sweep of the computers' deletes that
+ * threw is a failed run too; one that could not run because bravo__240 is not
+ * applied is logged on every run and named in the answer (localDeletes:
+ * "not_installed"), not failed, like bravo__231 missing below: before it no
+ * copy is tracked, so none can wait.
  */
 export async function handleMeetRelayCron(deps: {
   db: Client;
@@ -280,6 +282,8 @@ export async function handleMeetRelayCron(deps: {
   // An ended room's media the SFU would not cut is still flowing: a failed run too, so the driver reports it while
   // the next runs retry it (Codex on #688).
   if (result.mediaCutFailed > 0) return json(503, { ok: false, error: "media_cut_failed", ...result });
+  // A step of the run threw (logged and named in failedSweeps; the steps after it still ran): a failed run too.
+  if (result.failedSweeps.length) return json(503, { ok: false, error: "relay_sweep_failed", ...result });
   // A copy of a deleted meeting left without its delete, or a gone computer's delete never given up: a failed run,
   // so the driver reports it while the next runs retry it.
   if (result.localDeletes === "failed") return json(503, { ok: false, error: "local_delete_sweep_failed", ...result });
