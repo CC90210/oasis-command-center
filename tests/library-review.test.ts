@@ -484,6 +484,59 @@ async function main() {
       "without a view it still spans every status (no caller is left relying on that but the shape stays); the default view hides archived and rejected",
     );
 
+    // Cross-filtered (review of #739): a pill's link keeps every other filter, so
+    // its count must too. Two client brands, two authors, two channels, live and
+    // archived rows, in one tab.
+    const mixDb = createClient({ url: ":memory:" });
+    await mixDb.executeMultiple(DDL);
+    const combos: Array<[string, string, string, string]> = [];
+    let n = 0;
+    for (const brand of ["warner", "arthrisil"]) {
+      for (const author of ["conaugh@oasisai.work", "editor@oasisai.work"]) {
+        for (const channel of ["paid-meta", "organic-instagram"]) {
+          for (const status of ["in_review", "approved", "archived"]) {
+            // A different number per combination, so a count that ignores a filter cannot match by luck.
+            const copies = 1 + ((n += 1) % 3);
+            for (let c = 0; c < copies; c++) combos.push([`mx-${brand}-${author[0]}-${channel[0]}-${status}-${c}`, brand, author, `${channel}|${status}`]);
+          }
+        }
+      }
+    }
+    for (const [rowId, brand, author, cs] of combos) {
+      const [channel, status] = cs.split("|");
+      await mixDb.execute({
+        sql: `INSERT INTO marketing_asset (id, tenant_id, title, channel, status, created_at, updated_at, brand_slug, brand_name, author_email)
+              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        args: [rowId, T, rowId, channel, status, day(1), day(1), brand, brand, author],
+      });
+    }
+    const mix = createTursoPostgrest(mixDb) as never;
+    type MixView = { channel?: "paid-meta" | "organic-instagram"; track?: "paid" | "organic"; lifecycle?: "approved" | "archived"; brand?: string; author?: string };
+    const mixViews: MixView[] = [
+      {},
+      { channel: "paid-meta" },
+      { track: "organic" },
+      { author: "editor@oasisai.work" },
+      { brand: "warner" },
+      { channel: "organic-instagram", author: "conaugh@oasisai.work" },
+      { lifecycle: "approved", brand: "arthrisil", channel: "paid-meta" },
+      { lifecycle: "archived", author: "editor@oasisai.work" },
+    ];
+    for (const v of mixViews) {
+      const label = JSON.stringify(v);
+      const f = await getMarketingFacets(T, { group: "clients", ...v }, mix);
+      assert.equal(f.degraded, false, label);
+      assert.ok(f.brands.length === 2 && f.authors.length === 2, `${label}: a facet never narrows its own options`);
+      for (const b of f.brands) {
+        const grid = await getMarketingAssets(T, { group: "clients", ...v, brand: b.slug, pageSize: 500 }, mix);
+        assert.equal(grid.total, b.count, `${label}: the ${b.slug} pill says ${b.count} and its link opens ${grid.total}`);
+      }
+      for (const a of f.authors) {
+        const grid = await getMarketingAssets(T, { group: "clients", ...v, author: a.email, pageSize: 500 }, mix);
+        assert.equal(grid.total, a.count, `${label}: the ${a.email} pill says ${a.count} and its link opens ${grid.total}`);
+      }
+    }
+
     // Absolute, as well as in agreement: the grid and the options could drift TOGETHER.
     const at = (s: (typeof STATUSES)[number]) => STATUSES.indexOf(s);
     const approved = await getMetaFacets(T, { group: "oasis-ai", status: "approved" }, db);

@@ -195,9 +195,14 @@ export default async function MarketingLibraryPage({
           }),
       null,
     ),
-    // The brand sub-pills and the By row count THIS view (tab and stage), so a pill
-    // never promises more than the grid it opens (audit, 2026-10-26).
-    safe("marketing.library.facets", getMarketingFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_MARKETING_FACETS),
+    // The brand sub-pills and the By row count what each pill's link opens: this
+    // view with every filter it keeps, the pill's own facet left out (audit and
+    // review of #739, 2026-10-26).
+    safe(
+      "marketing.library.facets",
+      getMarketingFacets(founder.tenantId, { group, lifecycle, status, track, channel, icp, pack, brand, author }),
+      DEGRADED_MARKETING_FACETS,
+    ),
     safe("marketing.library.meta", getMetaFacets(founder.tenantId, { group, lifecycle, status }), DEGRADED_META_FACETS),
     safe("marketing.library.lifecycle", getLifecycleCounts(founder.tenantId, group), {
       counts: { needs_review: 0, approved: 0, scheduled: 0, live: 0, archived: 0 },

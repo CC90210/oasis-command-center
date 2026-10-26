@@ -61,8 +61,13 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
   const who = agent ? trainsLabel(agent) : null;
   // The All tab knows its true total (stats counts every row); an agent's tab
   // knows only what its read returned, and a full read may have stopped short.
-  const agentCount = items.rows.length >= LEARNED_NOTES_READ ? `${rows.length}+` : `${rows.length}`;
+  const readFull = items.rows.length >= LEARNED_NOTES_READ;
+  const agentCount = readFull ? `${rows.length}+` : `${rows.length}`;
   const total = who ? agentCount : `${stats.total}`;
+  // The footer says the list is partial whenever it is: more rows than shown, or
+  // a full read that may have stopped short of older notes (off Turso, an
+  // agent's tab filters the All read, so 15 matches can still be "15+").
+  const partial = rows.length > SHOWN || (who !== null && readFull) || (who === null && stats.total > rows.length);
   return (
     <section aria-labelledby="learned-notes-title" className="space-y-3" data-testid="learned-notes">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -124,9 +129,9 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
         </ul>
       )}
 
-      {rows.length > SHOWN && (
+      {partial && rows.length > 0 && !items.degraded && !stats.degraded && (
         <p className="text-xs text-fg-dim">
-          Showing the newest {SHOWN} of {total}.{" "}
+          Showing the newest {Math.min(SHOWN, rows.length)} of {total}.{" "}
           {/* Training lists every agent's notes, newest first, and says how many it shows; it is not this tab's full list. */}
           <a href={TRAINING_HREF} className="underline underline-offset-2 hover:text-fg-muted">
             {who ? "Every agent's notes are on Training" : "Open Training"}

@@ -173,6 +173,22 @@ async function main() {
       "an older reason is replaced, and the hash is dropped",
     );
     assert.equal(downloadFailureHref("https://oasisai.work/founders/marketing", route, "read_failed"), "/founders/marketing?download=read_failed");
+    // A gone asset's own page 404s before it can say why, so it goes to the Library view it came from.
+    assert.equal(
+      downloadFailureHref("https://oasisai.work/founders/marketing/asset/abc?from=%2Ffounders%2Fmarketing%2Flibrary%3Fgroup%3Dclients", route, "not_found"),
+      "/founders/marketing/library?group=clients&download=not_found",
+    );
+    assert.equal(downloadFailureHref("https://oasisai.work/founders/marketing/asset/abc", route, "not_found"), "/founders/marketing/library?download=not_found");
+    assert.equal(
+      downloadFailureHref("https://oasisai.work/founders/marketing/asset/abc?from=https%3A%2F%2Fevil.example%2F", route, "not_found"),
+      "/founders/marketing/library?download=not_found",
+      "a hostile `from` falls back to the Library's front page",
+    );
+    assert.equal(
+      downloadFailureHref("https://oasisai.work/founders/marketing/asset/abc", route, "sign_failed"),
+      "/founders/marketing/asset/abc?download=sign_failed",
+      "any other reason stays on the asset page, which can show it",
+    );
     assert.equal(downloadFailureHref(null, route, "sign_failed"), null, "no Referer: JSON, as before");
     assert.equal(downloadFailureHref("https://evil.example/founders/marketing/library", route, "sign_failed"), null, "another site: never");
     assert.equal(downloadFailureHref("https://oasisai.work/pipeline", route, "sign_failed"), null, "not a Content page");

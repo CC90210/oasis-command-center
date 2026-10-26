@@ -1189,22 +1189,39 @@ export async function getExtractedVideoCount(
  * The Library's tab counts now come from getBrandTabCounts (one COUNT per tab);
  * it still reads this for the brand sub-filter inside a tab and the author facet.
  *
- * SCOPED TO A VIEW (2026-10-26), when the Library passes one: its tab and its
- * stage, by the grid's own rules (scopeToBrandGroup; a lifecycle, else an
- * explicit ?status=, else archived and rejected hidden), exactly as
- * getMetaFacets narrows. Unscoped, a sub-pill counted archived rows the grid
- * behind it hides, so the row read "All 3 · Warner 5" (audit, 2026-10-26).
- * Without a view it still spans every brand, as before.
+ * SCOPED TO A VIEW (2026-10-26), when the Library passes one, so every pill
+ * counts what its link opens. A pill's link keeps every other filter
+ * (libraryHref), so each count applies the grid's own rules for all of them
+ * (getMarketingAssets): the tab (scopeToBrandGroup), the stage (a lifecycle,
+ * else an explicit ?status=, else archived and rejected hidden), the channel
+ * or track, the audience and the pack, and the OTHER facet: brand pills count
+ * within the chosen author, author pills within the chosen brand. A facet never
+ * narrows its own options, so its alternatives stay visible. Unscoped, a
+ * sub-pill counted archived rows and other channels the grid hides, so the row
+ * read "All 3 · Warner 5" (audit and review of #739, 2026-10-26). Without a
+ * view it still spans every brand, as before.
  */
 export async function getMarketingFacets(
   tenantId: string,
-  view?: { group: BrandGroupKey; lifecycle?: Lifecycle; status?: AssetStatus },
+  view?: {
+    group: BrandGroupKey;
+    lifecycle?: Lifecycle;
+    status?: AssetStatus;
+    track?: Track;
+    channel?: Channel;
+    icp?: string;
+    pack?: string;
+    brand?: string;
+    author?: string;
+  },
   db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
 ): Promise<MarketingFacets> {
   if (!tenantId) return EMPTY_MARKETING_FACETS;
   try {
     const brands = new Map<string, BrandFacet>();
     const authors = new Map<string, number>();
+    // The brand the grid would apply: one from another tab is dropped there, so here too.
+    const appliedBrand = view?.brand && brandFilterAllowed(view.brand, view.group) ? view.brand : undefined;
 
     const outcome = await pageAll<{
       brand_slug: string;
@@ -1218,16 +1235,24 @@ export async function getMarketingFacets(
           .select("brand_slug, brand_name, author_email")
           .eq("tenant_id", tenantId);
         if (!view) return base as unknown as PagedQuery<{ brand_slug: string; brand_name: string; author_email: string | null }>;
-        // The grid's own stage rule (getMarketingAssets, getMetaFacets), branch for branch.
-        let q = scopeToBrandGroup(base as unknown as BrandFilterable, view.group) as unknown as LifecycleFilterable;
+        // The grid's own filters (getMarketingAssets), line for line, except brand
+        // and author, which each apply only to the OTHER facet's counts (below).
+        let q = base as unknown as LifecycleFilterable;
+        if (view.track) q = q.eq("track", view.track);
+        if (view.channel) q = q.eq("channel", view.channel);
+        if (view.icp) q = q.eq("meta->>icp_segment", view.icp);
+        if (view.pack) q = q.eq("meta->>pack_id", view.pack);
         if (view.lifecycle) q = scopeToLifecycle(q, view.lifecycle);
         else if (view.status) q = q.eq("status", view.status);
         else q = hideArchived(q);
+        q = scopeToBrandGroup(q as unknown as BrandFilterable, view.group) as unknown as LifecycleFilterable;
         return q as unknown as PagedQuery<{ brand_slug: string; brand_name: string; author_email: string | null }>;
       },
       (rows) => {
       for (const row of rows) {
-        if (row.brand_slug) {
+        const inAuthor = !view?.author || row.author_email === view.author;
+        const inBrand = !appliedBrand || row.brand_slug === appliedBrand;
+        if (row.brand_slug && inAuthor) {
           const prev = brands.get(row.brand_slug);
           if (prev) prev.count += 1;
           // Fall back to the slug rather than rendering an unnamed tab: a brand
@@ -1241,7 +1266,7 @@ export async function getMarketingFacets(
         // An extracted video is not Library work (Content > Extracted videos), so
         // its creator is no Library author: counted, the Library would offer a
         // "By <email>" pill whose grid is empty on every tab.
-        if (row.author_email && brandGroupFor(row.brand_slug) !== "downloads") {
+        if (row.author_email && inBrand && brandGroupFor(row.brand_slug) !== "downloads") {
           authors.set(row.author_email, (authors.get(row.author_email) || 0) + 1);
         }
       }
