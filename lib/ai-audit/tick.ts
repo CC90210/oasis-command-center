@@ -53,6 +53,7 @@ import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
+import { fileFollowUp } from "@/lib/ai-audit/follow-up";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps; writing?: WriteDeps };
 
@@ -70,6 +71,8 @@ export type TickReport = {
   deliveriesRepaired: number;
   pdfsGivenUp: number;
   stallsFlagged: number;
+  /** Follow-up emails filed for CC's approval when a stall was flagged. */
+  followUpsFiled: number;
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
@@ -113,6 +116,7 @@ export async function runAiAuditTick(
     deliveriesRepaired: 0,
     pdfsGivenUp: 0,
     stallsFlagged: 0,
+    followUpsFiled: 0,
     leadsRepaired: 0,
     extractionsAdvanced: 0,
     briefsBuilt: 0,
@@ -248,12 +252,15 @@ export async function runAiAuditTick(
         const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "stalled", health_reason: reason }, event: "stalled", actor: { type: "system", id: null }, now: now() });
         if (!r.ok) return;
         report.stallsFlagged += 1;
+        // A follow-up email waits for CC's one tap (phase 5): never sent from here.
+        const filed = await fileFollowUp(db, { tenantId, engagement: e, link, reason: link.first_viewed_at ? "not_paid" : "not_opened", base: deps.onboarding.baseUrl(), now: now() });
+        if (filed) report.followUpsFiled += 1;
         await deps.payment.alert({
           tenantId,
           alertType: "ai_audit_stalled",
           severity: "info",
           title: `Stalled: ${e.business_name || "an AI audit"}`,
-          body: `${reason} A follow-up is your call.`,
+          body: filed ? `${reason} A follow-up email is waiting for your approval in Needs you.` : `${reason} A follow-up is your call.`,
           subjectType: "ai_audit_engagement",
           subjectId: e.id,
           telegramOncePerOpen: true,
