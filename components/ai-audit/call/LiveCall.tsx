@@ -34,8 +34,12 @@ export type CallBrief = {
   weight: Array<{ question_id: string; why: string }>;
 };
 
+/** The lead's Oasis Meet room for the call (lib/ai-audit/meet-link.ts), if there is one. */
+export type CallRoom = { code: string; title: string; status: string; recordAudio: boolean; guests: Array<{ name: string; consented: boolean }> };
+
 type Props = {
   brief: CallBrief | null;
+  room: CallRoom | null;
   engagementId: string;
   businessType: BusinessType | null;
   callStartedAt: string | null;
@@ -243,7 +247,7 @@ function ConsentChoice({ engagementId, fieldKey, label, initial, disabled, onSav
   );
 }
 
-export function LiveCall({ brief, engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
+export function LiveCall({ brief, room, engagementId, businessType, callStartedAt, callEndedAt, notes, fields, editable }: Props) {
   const weighted = useMemo(() => new Map((brief?.weight ?? []).map((w) => [w.question_id, w.why])), [brief]);
   const toConfirm = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -294,6 +298,18 @@ export function LiveCall({ brief, engagementId, businessType, callStartedAt, cal
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [active, go]);
+
+  async function makeRoom() {
+    setBusy(true);
+    setMessage(null);
+    const r = await postAction(engagementId, "create_meet_room");
+    setBusy(false);
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    router.refresh();
+  }
 
   async function act(action: "start_call" | "end_call") {
     setBusy(true);
@@ -431,6 +447,37 @@ export function LiveCall({ brief, engagementId, businessType, callStartedAt, cal
         <section className="hidden gap-3 rounded-xl border border-hairline bg-bg-panel p-4 lg:grid">
           <h2 className="text-sm font-semibold text-fg">The call</h2>
           {controls}
+        </section>
+        <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
+          <h2 className="text-sm font-semibold text-fg">Call room</h2>
+          {room ? (
+            <>
+              <a className="btn-secondary justify-self-start" href={`/meet/${room.code}`} target="_blank" rel="noopener noreferrer">
+                Open {room.title}
+              </a>
+              <div className="text-[12px] text-fg-muted">
+                {room.status === "live" ? "Live now" : room.status === "ended" ? "Ended" : "Not started yet"}. {room.recordAudio ? "Recorded and transcribed: the transcript joins this engagement when it is ready, if every guest agreed and the client's AI answer is recorded above." : "Not recorded: paste the transcript after the call."}
+              </div>
+              {room.guests.length ? (
+                <ul className="grid gap-0.5 text-[12px]">
+                  {room.guests.map((g, i) => (
+                    <li key={`${g.name}-${i}`} className={g.consented ? "text-fg-muted" : "text-status-warm"}>
+                      {g.name}: {g.consented ? "agreed to the recording" : "did not agree to the recording"}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="text-[12px] text-fg-muted">No Oasis Meet room for this lead yet. One is made when the call is booked, or here.</div>
+              {editable ? (
+                <button type="button" className="btn-secondary justify-self-start" disabled={busy} onClick={() => void makeRoom()}>
+                  Make a call room
+                </button>
+              ) : null}
+            </>
+          )}
         </section>
         {brief && brief.hypotheses.length ? (
           <section className="grid gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">

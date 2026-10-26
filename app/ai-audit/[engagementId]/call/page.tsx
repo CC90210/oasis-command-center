@@ -9,6 +9,7 @@ import { getEngagement } from "@/lib/ai-audit/store";
 import { getProfileVersion, listProfileFields } from "@/lib/ai-audit/versions";
 import { listCallNotes } from "@/lib/ai-audit/call-notes";
 import { briefForPage } from "@/lib/ai-audit/briefs";
+import { roomsForEngagement } from "@/lib/ai-audit/meet-link";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LiveCall } from "@/components/ai-audit/call/LiveCall";
@@ -24,15 +25,20 @@ export default async function LiveCallPage({ params }: Props) {
   const e = await getEngagement(session.db, session.tenantId, engagementId);
   if (!e) notFound();
   const version = e.current_profile_version_id ? await getProfileVersion(session.db, session.tenantId, e.current_profile_version_id) : null;
-  const [fields, notes, brief] = await Promise.all([
+  const [fields, notes, brief, rooms] = await Promise.all([
     version ? listProfileFields(session.db, session.tenantId, version.id) : Promise.resolve([]),
     listCallNotes(session.db, session.tenantId, e.id),
     briefForPage(session.db, session.tenantId, e.id),
+    roomsForEngagement(session.db, session.tenantId, e),
   ]);
   return (
     <PageFrame title={`Discovery call: ${e.business_name || "Unnamed business"}`} subtitle="Ask about the business first. Notes save as you type; figures go straight into the profile as Client-reported.">
       <LiveCall
         brief={brief ? { hypotheses: brief.content.hypotheses, confirm: brief.content.confirm, weight: brief.content.weight } : null}
+        room={(() => {
+          const open = rooms.find((r) => r.status !== "ended") ?? rooms[0] ?? null;
+          return open ? { code: open.code, title: open.title, status: open.status, recordAudio: open.recordAudio, guests: open.guests } : null;
+        })()}
         engagementId={e.id}
         businessType={e.business_type}
         callStartedAt={e.call_started_at}

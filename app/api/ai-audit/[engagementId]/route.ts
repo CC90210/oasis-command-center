@@ -53,6 +53,7 @@ import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
 import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
 import { buildBrief, defaultSiteDeps } from "@/lib/ai-audit/briefs";
+import { attachMeetTranscript, createAuditRoom } from "@/lib/ai-audit/meet-link";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
@@ -307,6 +308,21 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const r = await buildBrief(s.db, { tenantId: s.tenantId, engagementId, actor, now, deps: defaultSiteDeps() });
       if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "not_installed" ? 503 : 409, { ok: false, error: r.error === "not_found" ? r.error : `brief_${r.error}` });
       return json(200, { ok: true, brief_id: r.brief.id, version_no: r.brief.version_no, status: r.brief.status });
+    }
+    case "create_meet_room": {
+      // The lead's call room: the one already booked or made, or a new recorded one.
+      const r = await createAuditRoom(s.db, { tenantId: s.tenantId, engagementId, hostUserId: actor.id ?? "", now });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
+      return json(200, { ok: true, room_id: r.roomId, code: r.code, created: r.created });
+    }
+    case "attach_meet_transcript": {
+      const roomId = typeof body.room_id === "string" ? body.room_id : "";
+      // CC's word on the client's AI answer, when the profile does not have it yet.
+      const ai = typeof body.ai === "boolean" ? body.ai : undefined;
+      const r = await attachMeetTranscript(s.db, { tenantId: s.tenantId, engagementId, roomId, actor, now, ai });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
+      await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
+      return json(200, { ok: true, transcript_id: r.transcriptId, duplicate: r.duplicate });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

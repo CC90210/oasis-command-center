@@ -204,6 +204,30 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
       <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">Transcripts</h2>
         {view.transcripts.length === 0 ? <div className="text-fg-muted">No transcript yet. Paste or upload the call&apos;s transcript below.</div> : null}
+        {open
+          ? view.meetRooms
+              .filter((r) => r.transcript?.status === "ready" && !r.attachedTranscriptId)
+              .map((r) => (
+                <div key={r.id} className="grid gap-2 rounded-lg border border-hairline px-3 py-2">
+                  <div className="text-fg">
+                    Oasis Meet: {r.title}, {r.transcript?.lines ?? 0} lines ready
+                  </div>
+                  {r.guests.length && r.guests.every((g) => g.consented) ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[12px] text-fg-muted">Every guest agreed to the recording. What did the client say about AI analysis?</span>
+                      <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("attach_meet_transcript", { room_id: r.id, ai: true }, "Attached. The client agreed to AI analysis.")}>
+                        Attach: agreed to AI analysis
+                      </button>
+                      <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("attach_meet_transcript", { room_id: r.id, ai: false }, "Attached. Nothing will be sent to a model; fill the profile by hand.")}>
+                        Attach: declined AI analysis
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-[12px] text-status-warm">{r.guests.length ? "A guest did not agree to the recording in Meet, so this transcript cannot be used." : "No guest joined this room, so it is not the client's call."}</div>
+                  )}
+                </div>
+              ))
+          : null}
         <ul className="grid gap-2">
           {view.transcripts.map((t) => (
             <li key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline px-3 py-2">

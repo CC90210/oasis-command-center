@@ -43,6 +43,7 @@ import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExt
 import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
 import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
+import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps };
 
@@ -63,6 +64,9 @@ export type TickReport = {
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
+  /** Oasis Meet transcripts attached to their engagement; and those left for CC (no AI answer, or a guest who did not agree). */
+  meetTranscriptsAttached: number;
+  meetTranscriptsWaiting: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
   stoppedForBudget: boolean;
 };
@@ -94,6 +98,8 @@ export async function runAiAuditTick(
     leadsRepaired: 0,
     extractionsAdvanced: 0,
     briefsBuilt: 0,
+    meetTranscriptsAttached: 0,
+    meetTranscriptsWaiting: 0,
     errors: [],
     stoppedForBudget: false,
   };
@@ -245,6 +251,14 @@ export async function runAiAuditTick(
         if (await finishMacExtractionIfComplete(db, tenantId, stepId, now(), extraction)) report.extractionsAdvanced += 1;
       }
       if (!over()) await sweepStaleExtractions(db, tenantId, now(), extraction);
+    });
+
+    // 7b2. A discovery call held in Oasis Meet: its transcript, once ready, joins the engagement when
+    // every guest agreed to the recording and the client's AI answer is known (lib/ai-audit/meet-link.ts).
+    await guard("meet_transcripts", undefined, async () => {
+      const r = await autoAttachMeetTranscripts(db, tenantId, now(), deps.payment.alert);
+      report.meetTranscriptsAttached += r.attached;
+      report.meetTranscriptsWaiting += r.waiting;
     });
 
     // 7c. The first pre-call brief, two per tick at most: each reads a website (up to 25 seconds).
