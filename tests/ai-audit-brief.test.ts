@@ -9,18 +9,25 @@
  *     (nip.io and the like), ports and credentials are refused, social
  *     profiles are recorded and never fetched, and a redirect into a private
  *     address is not followed;
- *   - fetching is GET only, over HTTPS first whatever the lead typed, with an
- *     honest user agent, manual redirects (at most five), a size cap and a time
- *     budget; robots.txt is read first and obeyed for every request, the home
+ *   - fetching is GET only, over HTTPS first whatever the lead typed (asked
+ *     twice before plain HTTP), with an honest user agent, manual redirects (at
+ *     most five, a malformed one said as such), a size cap and a time budget;
+ *     robots.txt is read whole first and obeyed for every request, the home
  *     page and the sitemap included, as RFC 9309 reads it (shared user-agent
- *     lines, our own group, Allow, the query; one that cannot be read closes
- *     the site);
+ *     lines, our own group, Allow, the query, paths compared percent-encoded
+ *     as the standard spells them; one that cannot be read, or has too many
+ *     rules, closes the site);
  *   - the checks and the robots.txt matcher run in linear time: 600 KB of each
  *     shape that once took seconds is read well under a second;
- *   - a Verified fact is only what our own fetch measured: nothing about a site
- *     that did not answer or whose home page did not load (the brief carries one
- *     gap, with the time), no "no" from a page cut off at the size limit, no
- *     sitemap that was not read, and every request stored as a source;
+ *   - a Verified fact is only what our own fetch measured, and says no more
+ *     than it showed: nothing about a site that did not answer, whose home page
+ *     did not load or is a parked domain (the brief carries one gap, with the
+ *     time), no "no" from a page cut off at the size limit, a scan stopped by
+ *     its limit, or a contact or booking page that was not read, no sitemap
+ *     that was not read, and every fact citing a request that was made and
+ *     stored as a source;
+ *   - a form answer is only an answer: "constructor" neither crashes the brief
+ *     nor scores the lead;
  *   - the brief labels the site's checks Verified and the form's answers
  *     Client-reported; its likely problems carry no number, in what they say or
  *     in how to test them; what could not be checked is listed, never guessed;
@@ -166,7 +173,7 @@ async function main() {
       builtAt: BUILT,
       business: { name: "Acme", type: "local_service" },
       form: form ? { answers: form, at: null } : null,
-      site: { target, checks: r.checks, pagesRead: r.pages.filter((p) => p.kind === "site_page" && !p.error && (p.status ?? 0) >= 200 && (p.status ?? 0) < 300).length, notes: r.notes, unread: r.unread },
+      site: { target, start: r.start, checks: r.checks, pagesRead: r.pages.filter((p) => p.kind === "site_page" && !p.error && (p.status ?? 0) >= 200 && (p.status ?? 0) < 300).length, notes: r.notes, unread: r.unread },
     });
   /** A likely problem says no number: neither in what it says nor in how to test it. */
   const noDigits = (b: Brief) => {
@@ -201,6 +208,8 @@ async function main() {
     for (const bad of [
       "127.0.0.1.nip.io", "http://169.254.169.254.nip.io/latest/meta-data", "10.0.0.1.sslip.io", "app.xip.io", "localtest.me", "shop.lvh.me", "vcap.me",
       "a.traefik.me", "kubernetes.default.svc", "api.cluster.local", "nas.home.arpa", "printer.lan",
+      // review 2, finding 8a
+      "127.0.0.1.xip.name", "shop.lacolhost.com", "localho.st", "app.local.gd", "fuf.me", "make-1.2.3.4-rebind-127.0.0.1-rr.1u.ms", "10.0.0.1.ip.mrtn.dk",
     ]) {
       assert.equal(url.siteTarget(bad).kind, "none", bad);
     }
@@ -272,12 +281,23 @@ async function main() {
       fill(`GTM-${"A".repeat(100)}_`),
       fill(`cdn${"1".repeat(200)}`),
       fill('<script type="application/ld+json">'), // structured-data blocks never closed
+      // Each element is read whole now (review 2, finding 1): forms, scripts and tags of any length, never overlapping.
+      fill('<form><textarea></textarea><input type="password" name="p"><input name="message"></form>'),
+      fill('<form action="/x"><input name="a">'), // forms inside forms, never closed
+      `<form>${fill("</formx")}`, // close tags that are not one
+      fill('<script type="application/ld+json">{"@type":"LocalBusiness","a":[1,2]}</script>'),
+      `<script type="application/ld+json">${fill("[")}`, // one block, nested as deep as the page
+      fill(`<a href="tel:1" data-x="${"y".repeat(5_000)}">`), // tags longer than the old limit
+      fill('itemtype="https://schema.org/A" typeof="schema:B" vocab="https://schema.org/" typeof="C" '),
+      fill("itemtype = ' ".padEnd(40, " ")),
+      fill("This domain is parked. "),
     ];
     for (const html of shapes) {
       const started = performance.now();
       checksMod.runSiteChecks({ pages: [page("https://hostile.ca/", html)], https: { served: true, httpRedirects: null }, sitemap: null });
       checksMod.pagesToRead(page("https://hostile.ca/", html), () => true);
       checksMod.visibleText(html);
+      checksMod.notTheSite(page("https://hostile.ca/", html));
       const took = performance.now() - started;
       assert.ok(took < 500, `took ${took.toFixed(0)} ms on ${JSON.stringify(html.slice(0, 24))}`);
     }
@@ -311,23 +331,101 @@ async function main() {
     const tel = checksMod.runSiteChecks({ pages: [page("https://acme.ca/", html)], https: { served: true, httpRedirects: true }, sitemap: null }).find((c) => c.key === "click_to_call");
     assert.equal(tel?.status, "yes", tel?.detail);
   });
+  /** The checks of one home page with this in its body (and `head` in its head): enough text that it does not build itself in the browser. */
+  const PAD = `<p>${"We fix pipes and drains across the city. ".repeat(12)}</p>`;
+  const checksOn = (body: string, head = "", extra: Partial<import("../lib/ai-audit/site-checks").PageSnapshot> = {}) =>
+    new Map(
+      checksMod
+        .runSiteChecks({ pages: [page("https://acme.ca/", `<html><head><title>Acme</title>${head}</head><body>${PAD}${body}</body></html>`, extra)], https: { served: true, httpRedirects: true }, sitemap: null })
+        .map((c) => [c.key, c]),
+    );
+  await check("a scan stopped by its limit says unknown, never no; a long tag or a page-wide form is read whole (review 2, finding 1)", () => {
+    // 4,000 links before the footer's phone link: 85 KB, not cut off.
+    const many = checksOn(`${'<a href="/p/1">x</a> '.repeat(4_000)}<footer><a href="tel:+14035550199">Call us</a> <a href="mailto:a@acme.ca">Email</a></footer>`);
+    assert.equal(many.get("click_to_call")?.status, "unknown");
+    assert.equal(many.get("click_to_call")?.detail, "Not found in what was read, but the home page has more than 3,000 links, and only the first 3,000 were read, so it may be in the rest.");
+    assert.equal(many.get("email_link")?.status, "unknown");
+    assert.equal(many.get("social_links")?.status, "unknown");
+    // The pages to read were chosen from those 3,000 links: the contact and booking pages may be among the rest.
+    assert.equal(many.get("contact_form")?.status, "unknown");
+    assert.equal(many.get("online_booking")?.status, "unknown");
+    const b = briefMod.assembleBrief({ builtAt: BUILT, business: { name: "Acme", type: "local_service" }, form: null, site: { target: acme, checks: [...many.values()], pagesRead: 1, notes: [] } });
+    assert.ok(!b.hypotheses.some((h) => ["no-tap-to-call", "no-way-to-ask", "booking-by-hand"].includes(h.id)), b.hypotheses.map((h) => h.id).join(","));
+    assert.ok(b.gaps.includes("Tap-to-call phone link: Not found in what was read, but the home page has more than 3,000 links, and only the first 3,000 were read, so it may be in the rest."));
+    // 3,000 links are all read: a "no" there is a no.
+    assert.equal(checksOn('<a href="/p/1">x</a> '.repeat(2_990)).get("click_to_call")?.status, "no");
+    // A page-wide form (an ASP.NET page) of 78 KB holding the contact fields is read to its end.
+    const wide = checksOn(`<form method="post" action="./default.aspx">${"<p>content filler paragraph</p>".repeat(2_500)}<input type="text" name="your-name"><input type="email" name="your-email"><textarea name="message"></textarea><input type="submit" value="Send"></form>`);
+    assert.equal(wide.get("contact_form")?.status, "yes", wide.get("contact_form")?.detail);
+    // A phone link whose tag carries a 4,100-character attribute is read.
+    const longTag = checksOn(`<a href="tel:+14035550199" data-x="${"y".repeat(4_100)}">Call</a>`);
+    assert.equal(longTag.get("click_to_call")?.status, "yes");
+    // More meta tags than are read: the description may be among the rest.
+    assert.equal(checksOn("", '<meta name="x" content="y">'.repeat(3_001)).get("meta_description")?.status, "unknown");
+    // The scanner says when it stopped short, and only then.
+    const scan = (html: string) => {
+      const s: import("../lib/ai-audit/site-checks").Scan = { capped: null };
+      return [checksMod.tagsOf(html, "a", undefined, s).length, s.capped];
+    };
+    assert.deepEqual(scan("<a>".repeat(3_000)), [3_000, null]);
+    assert.deepEqual(scan("<a>".repeat(3_001)), [3_000, "has more than 3,000 links, and only the first 3,000 were read"]);
+  });
+  await check("a Verified sentence says no more than was seen: forms, the viewport, structured data, the platform (review 2, finding 7)", () => {
+    for (const [label, form] of [
+      ["a login with an email", `<form action="/login" method="post"><input type="email" name="user_email"><input type="password" name="pw"><button>Log in</button></form>`],
+      ["a login with a user name", `<form action="/login"><input type="text" name="username"><input type="password" name="password"></form>`],
+      ["a newsletter sign-up", `<form action="/subscribe"><input type="text" name="FNAME"><input type="email" name="EMAIL"><button>Join</button></form>`],
+    ]) {
+      assert.equal(checksOn(form).get("contact_form")?.status, "no", label);
+    }
+    const contact = checksOn(`<form action="/send"><input name="your-name"><input type="email" name="email"><textarea name="message"></textarea></form>`).get("contact_form");
+    assert.deepEqual([contact?.status, contact?.detail], ["yes", "The site has a contact form (a form with a message field)."]);
+    assert.equal(checksOn(`<form action="/send"><input name="name"><input type="email" name="email"><input name="your-question"></form>`).get("contact_form")?.status, "yes", "a field named for a message, without a text box");
+    assert.equal(checksOn(`<form id="research-request" action="/send"><input name="name"><input type="email" name="email"><textarea name="message"></textarea></form>`).get("contact_form")?.status, "yes", "a form named for research is not a site search");
+    const signUp = checksOn(`<form action="/join"><input type="email" name="email"><input type="password" name="pw"><textarea name="about"></textarea></form>`).get("contact_form");
+    assert.deepEqual([signUp?.status, signUp?.detail], ["unknown", "A form on the home page has a message field but also asks for a password, so whether it is a contact form is not known."]);
+    const service = checksOn(`<iframe src="https://form.typeform.com/to/abc123"></iframe>`).get("contact_form");
+    assert.deepEqual([service?.status, service?.detail], ["yes", "The site has a form from Typeform; what it asks for is not in the page's HTML."]);
+    // A viewport setting without width=device-width is said as seen, with the tag as evidence.
+    const vp = checksOn("", '<meta name="viewport" content="initial-scale=1.0, maximum-scale=1.0">').get("mobile_viewport");
+    assert.equal(vp?.status, "no");
+    assert.equal(vp?.detail, 'The home page\'s viewport setting ("initial-scale=1.0, maximum-scale=1.0") does not include width=device-width, so phones may not fit it to the screen.');
+    assert.match(vp?.evidence?.excerpt ?? "", /initial-scale=1\.0/);
+    assert.equal(checksOn("").get("mobile_viewport")?.detail, "The home page has no mobile viewport setting, so phones may show it zoomed out.");
+    // Microdata and RDFa are structured data too.
+    assert.deepEqual(checksOn('<div itemscope itemtype="https://schema.org/LocalBusiness"><span itemprop="name">Acme</span></div>').get("structured_data")?.found, ["LocalBusiness"]);
+    assert.deepEqual(checksOn('<div vocab="https://schema.org/" typeof="Plumber"><span property="name">Acme</span></div>').get("structured_data")?.found, ["Plumber"]);
+    assert.deepEqual(checksOn('<div typeof="schema:Dentist">Acme</div>').get("structured_data")?.found, ["Dentist"]);
+    assert.equal(checksOn('<div typeof="Plumber">Acme</div>').get("structured_data")?.status, "no", "a bare type with no schema.org vocabulary is not schema.org");
+    // One file from another site's /wp-content/ is a sign of WordPress; two kinds of sign are WordPress.
+    const one = checksOn('<img src="https://blog.example.org/wp-content/uploads/a.jpg">').get("platform");
+    assert.deepEqual([one?.status, one?.detail, one?.found], ["yes", "The site shows signs of WordPress.", ["WordPress"]]);
+    const two = checksOn('<link rel="stylesheet" href="/wp-content/themes/x/style.css"><script src="/wp-includes/js/jquery.min.js"></script>').get("platform");
+    assert.equal(two?.detail, "The site is built on WordPress.");
+    const mixed = checksOn('<script src="https://cdn.shopify.com/s/a.js"></script><script>Shopify.theme = {};</script><img src="https://blog.example.org/wp-content/uploads/a.jpg">').get("platform");
+    assert.equal(mixed?.detail, "The site is built on Shopify, and shows signs of WordPress.");
+  });
   await check("the pages worth reading are the site's own contact, booking, services, pricing and about pages", () => {
     const sameSite = (u: URL) => u.hostname === "fixture-plumbing.ca";
     const picked = checksMod.pagesToRead(page("https://fixture-plumbing.ca/", HOME), sameSite);
-    assert.deepEqual(picked, [
-      "https://fixture-plumbing.ca/contact/",
-      "https://fixture-plumbing.ca/book",
-      "https://fixture-plumbing.ca/services",
-      "https://fixture-plumbing.ca/pricing",
-      "https://fixture-plumbing.ca/about",
-      "https://fixture-plumbing.ca/private/team",
-    ]);
+    assert.deepEqual(
+      picked.map((p) => [p.url, p.kind]),
+      [
+        ["https://fixture-plumbing.ca/contact/", "contact"],
+        ["https://fixture-plumbing.ca/book", "booking"],
+        ["https://fixture-plumbing.ca/services", "services"],
+        ["https://fixture-plumbing.ca/pricing", "pricing"],
+        ["https://fixture-plumbing.ca/about", "about"],
+        ["https://fixture-plumbing.ca/private/team", "about"],
+      ],
+      "each with the kind it was chosen as",
+    );
     const long = `<html><body><a href="/contact-${"a".repeat(600)}">Contact</a> <a href="/contact">Contact</a></body></html>`;
-    assert.deepEqual(checksMod.pagesToRead(page("https://acme.ca/", long), () => true), ["https://acme.ca/contact"], "an address longer than 500 characters is not read");
+    assert.deepEqual(checksMod.pagesToRead(page("https://acme.ca/", long), () => true).map((p) => p.url), ["https://acme.ca/contact"], "an address longer than 500 characters is not read");
   });
   await check("robots.txt: the sitemap is found and closed paths are respected", () => {
     const r = checksMod.readRobots("User-agent: Googlebot\nDisallow: /\n\nUser-agent: *\nDisallow: /private/\nDisallow: /*.php$\nSitemap: https://fixture-plumbing.ca/sitemap.xml\n");
-    assert.deepEqual(r, { sitemaps: ["https://fixture-plumbing.ca/sitemap.xml"], allow: [], disallow: ["/private/", "/*.php$"] });
+    assert.deepEqual(r, { sitemaps: ["https://fixture-plumbing.ca/sitemap.xml"], allow: [], disallow: ["/private/", "/*.php$"], tooMany: false });
     assert.equal(checksMod.robotsAllow("/private/area", r), false);
     assert.equal(checksMod.robotsAllow("/index.php", r), false);
     assert.equal(checksMod.robotsAllow("/index.php?x=1", r), true);
@@ -362,6 +460,34 @@ async function main() {
       assert.equal(m(path, rule), want, `${rule} on ${path}`);
     }
   });
+  await check("robots.txt is read whole, and paths and rules are compared as RFC 9309 spells them (review 2, finding 2)", () => {
+    const allow = (text: string, path: string) => checksMod.robotsAllow(path, checksMod.readRobots(text));
+    const comments = Array.from({ length: 2_100 }, (_, i) => `# comment ${i}`).join("\n");
+    assert.equal(allow(`${comments}\nUser-agent: *\nDisallow: /\n`, "/contact"), false, "a group after line 2,000 is read");
+    const e = String.fromCharCode(0xe9);
+    const cafe = new URL(`https://acme.ca/caf${e}/menu`);
+    assert.equal(cafe.pathname, "/caf%C3%A9/menu");
+    assert.equal(allow(`User-agent: *\nDisallow: /caf${e}\n`, cafe.pathname), false, "a rule outside ASCII closes the path the URL parser encodes");
+    assert.equal(allow("User-agent: *\nDisallow: /caf%c3%a9\n", cafe.pathname), false, "percent-encoding's hex is compared without case");
+    assert.equal(allow("User-agent: *\nDisallow: /private\n", "/%70rivate/x"), false, "an encoded letter is the letter");
+    assert.equal(allow("User-agent: *\nDisallow: /%7Euser\n", new URL("https://acme.ca/~user/x").pathname), false);
+    assert.equal(allow("User-agent: *\nDisallow: /a b\n", new URL("https://acme.ca/a b").pathname), false, "a space in a rule is the URL's %20");
+    assert.equal(allow("User-agent: *\nDisallow: /a%2Fb\n", "/a/b"), true, "an encoded slash is not a slash");
+    assert.equal(allow("User-agent: *\nDisallow: /Private\n", "/private"), true, "a path is compared with its case");
+    assert.equal(checksMod.robotsNormal(`/a%2fb%41${e}?q=%7e`), "/a%2FbA%C3%A9?q=~");
+    // More rules for us than are followed: nothing may be read. Another agent's rules do not count.
+    const rules = (n: number) => Array.from({ length: n }, (_, i) => `Disallow: /x${i}`).join("\n");
+    const tooMany = checksMod.readRobots(`User-agent: *\n${rules(checksMod.MAX_ROBOTS_RULES + 1)}\n`);
+    assert.deepEqual([tooMany.tooMany, checksMod.robotsAllow("/contact", tooMany)], [true, false]);
+    assert.equal(checksMod.readRobots(`User-agent: *\n${rules(checksMod.MAX_ROBOTS_RULES)}\n`).tooMany, false, "up to the limit, every rule is followed");
+    assert.equal(checksMod.readRobots(`User-agent: *\nDisallow: /a\n\nUser-agent: *\n${rules(checksMod.MAX_ROBOTS_RULES)}\n`).tooMany, true, "groups for us are counted together");
+    assert.equal(checksMod.readRobots(`User-agent: Googlebot\n${rules(checksMod.MAX_ROBOTS_RULES + 1)}\n\nUser-agent: *\nDisallow: /private\n`).tooMany, false);
+    // A file cut off at the size limit: its last line is read only when it closes.
+    const cutAllow = checksMod.readRobots("User-agent: *\nDisallow: /\nAllow: /cont", checksMod.ROBOTS_AGENT, true);
+    assert.equal(checksMod.robotsAllow("/contact-us", cutAllow), false, "an Allow cut short opens nothing");
+    assert.equal(checksMod.robotsAllow("/private-area", checksMod.readRobots("User-agent: *\nDisallow: /priv", checksMod.ROBOTS_AGENT, true)), false, "a Disallow cut short still closes");
+    assert.equal(checksMod.robotsAllow(cafe.pathname, checksMod.readRobots(`User-agent: *\nDisallow: /caf${String.fromCharCode(0xfffd)}`, checksMod.ROBOTS_AGENT, true)), false, "a character cut in half is left out");
+  });
   await check("robots.txt rules are matched in linear time: the rule that ran past a minute takes a moment (review 1)", () => {
     const nine = checksMod.readRobots(`User-agent: *\nDisallow: /${"*a".repeat(9)}*b\n`);
     let started = performance.now();
@@ -372,6 +498,13 @@ async function main() {
       `User-agent: *\n${Array.from({ length: 2_000 }, (_, i) => `Disallow: /${"*a".repeat(150)}*b${i}`).join("\n")}`.slice(0, 600_000),
       `User-agent: *\n${Array.from({ length: 1_999 }, () => `Disallow: /*${"a".repeat(250)}b*`).join("\n")}`,
       `User-agent: *\n${Array.from({ length: 1_999 }, (_, i) => `${i % 2 ? "Allow" : "Disallow"}: /${"*ab".repeat(20)}$`).join("\n")}`,
+      // The whole file is read now (review 2, finding 2): 600 KB of comments before the group, a line with no colon,
+      // rules of stray "%" and of letters outside ASCII to encode, and more rules than are followed.
+      `${"# a comment\n".repeat(49_000)}User-agent: *\nDisallow: /x\n`,
+      `User-agent: *\n${"a".repeat(599_000)}`,
+      `User-agent: *\nDisallow: /${"%".repeat(599_000)}`,
+      `User-agent: *\nDisallow: /${String.fromCharCode(0xe9).repeat(299_000)}`,
+      `User-agent: *\n${"Disallow: /%41%42*\n".repeat(31_000)}`,
     ];
     for (const text of files) {
       started = performance.now();
@@ -548,7 +681,10 @@ async function main() {
       clock: () => (late ? fetchMod.TOTAL_BUDGET_MS - 10 : 0),
     };
     const timed = await sitemapCheck(slow, slowDeps);
-    assert.deepEqual([timed?.status, timed?.detail], ["unknown", "https://acme.ca/sitemap.xml did not answer within 8 seconds, so whether the site has a sitemap there is not known."]);
+    // It had 10 ms, not 8 seconds: the gap says what stopped it, never a time it was not given (review 2, finding 6).
+    assert.deepEqual([timed?.status, timed?.detail], ["unknown", "https://acme.ca/sitemap.xml did not answer before the time for reading the site ran out, so whether the site has a sitemap there is not known."]);
+    assert.equal(fetchMod.describeReadError("https://acme.ca/", "timed_out"), `https://acme.ca/ did not answer within ${fetchMod.PAGE_TIMEOUT_MS / 1000} seconds.`, "the request's own limit, from the limit itself");
+    assert.equal(fetchMod.PAGE_TIMEOUT_MS, 8_000);
   });
   await check("a hostile robots.txt and a link built for it are read in a moment (the read that did not finish in a minute; review 1)", async () => {
     const web = fakeWeb({
@@ -566,6 +702,127 @@ async function main() {
     const r = await fetchMod.readSite(acme, deps(huge));
     assert.ok(JSON.stringify(briefOf(acme, r)).length < 20_000);
     assert.ok(huge.seen.every((s) => s.url.length < 600));
+  });
+  await check("a robots.txt with more rules for us than are followed closes the site, and says so (review 2, finding 2)", async () => {
+    const web = fakeWeb({ "https://acme.ca/robots.txt": { type: "text/plain", body: `User-agent: *\n${"Disallow: /x\n".repeat(checksMod.MAX_ROBOTS_RULES + 1)}` }, "https://acme.ca/": { body: SIMPLE } });
+    const r = await fetchMod.readSite(acme, deps(web));
+    assert.deepEqual(web.seen.map((s) => s.url), ["https://acme.ca/robots.txt"]);
+    assert.equal(r.unread, "not_allowed");
+    assert.ok(r.notes.includes("https://acme.ca/ was not read: the site's robots.txt has more rules for robots like ours than are followed (2,000), and any of the rest might close it."), r.notes.join(" | "));
+    // A robots.txt cut off at the size limit in the middle of an Allow: the part read ("Allow: /co") opens nothing.
+    const head = "User-agent: *\nAllow: /$\nDisallow: /\n";
+    const cut = fakeWeb({
+      "https://acme.ca/robots.txt": { type: "text/plain", body: `${head}#${"#".repeat(fetchMod.MAX_PAGE_BYTES - head.length - 12)}\nAllow: /contact\n` },
+      "https://acme.ca/": { body: SIMPLE },
+      "https://acme.ca/contact": { body: CONTACT },
+    });
+    const rc = await fetchMod.readSite(acme, deps(cut));
+    assert.ok(rc.pages.some((p) => p.kind === "robots_txt" && p.bytes === fetchMod.MAX_PAGE_BYTES), "robots.txt was cut off");
+    assert.ok(cut.seen.some((s) => s.url === "https://acme.ca/"), "what it opens is read");
+    assert.ok(!cut.seen.some((s) => s.url === "https://acme.ca/contact"), "what the cut line would open is not");
+  });
+  await check("after the fall back to plain HTTP, every fact cites a request that was made, and the brief names the address read (review 2, finding 4)", async () => {
+    const web = fakeWeb({ "http://acme.ca/": { body: SIMPLE } });
+    const r = await fetchMod.readSite(acme, deps(web));
+    assert.equal(r.start, "http://acme.ca/");
+    const b = briefOf(acme, r);
+    const asked = new Set(web.seen.map((s) => s.url));
+    const cited = b.facts.flatMap((f) => (f.source.kind === "site" ? [f.source.url] : []));
+    assert.ok(cited.length >= 5, cited.join(" "));
+    for (const u of cited) assert.ok(u && asked.has(u), `a fact cites ${u}, which was never asked for`);
+    assert.ok(cited.includes("http://acme.ca/"), "a fact with no page of its own cites the home page as read");
+    assert.equal(b.site.url, "http://acme.ca/");
+  });
+  await check("a contact or booking page that was not read leaves what it would show unknown, and no likely problem rests on it (review 2, finding 5)", async () => {
+    const home = `<html><head><title>Acme Plumbing</title><meta name="viewport" content="width=device-width"></head><body>${PAD}<a href="/contact">Contact</a> <a href="/book">Book</a></body></html>`;
+    const empty = `<html><head><title>Page</title></head><body>${PAD}</body></html>`;
+    const RESTING = ["booking-by-hand", "no-way-to-ask", "no-tap-to-call"];
+    // Closed by robots.txt.
+    const closed = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/robots.txt": { type: "text/plain", body: "User-agent: *\nDisallow: /contact\nDisallow: /book\n" }, "https://acme.ca/": { body: home }, "https://acme.ca/contact": { body: empty }, "https://acme.ca/book": { body: empty } })));
+    // Out of time: every request after the home page has 10 ms left, and the two pages do not answer in it.
+    let late = false;
+    const slow = fakeWeb({ "https://acme.ca/": { body: home }, "https://acme.ca/contact": { hang: true }, "https://acme.ca/book": { hang: true } });
+    const timedOut = await fetchMod.readSite(acme, {
+      fetch: (async (u: string, init: Parameters<typeof slow.fetch>[1]) => {
+        if (u === "https://acme.ca/") late = true;
+        return slow.fetch(u, init);
+      }) as never,
+      clock: () => (late ? fetchMod.TOTAL_BUDGET_MS - 10 : 0),
+    });
+    assert.ok(timedOut.notes.includes("https://acme.ca/contact did not answer before the time for reading the site ran out."), timedOut.notes.join(" | "));
+    // Answering 404.
+    const missing = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body: home } })));
+    for (const [label, r] of [["closed by robots.txt", closed], ["out of time", timedOut], ["404", missing]] as const) {
+      const by = new Map(r.checks.map((c) => [c.key, c]));
+      for (const k of ["contact_form", "click_to_call", "email_link"] as const) {
+        assert.equal(by.get(k)?.status, "unknown", `${label}: ${k}`);
+        assert.equal(by.get(k)?.detail, "Not found in what was read, but https://acme.ca/contact, the contact page the home page links to, could not be read, so it may be in the rest.", `${label}: ${k}`);
+      }
+      assert.equal(by.get("online_booking")?.detail, "Not found in what was read, but https://acme.ca/book, the booking page the home page links to, could not be read, so it may be in the rest.", label);
+      assert.equal(by.get("analytics")?.status, "no", `${label}: what the home page settles is still said`);
+      const b = briefOf(acme, r, FORM);
+      assert.ok(!b.hypotheses.some((h) => RESTING.includes(h.id)), `${label}: ${b.hypotheses.map((h) => h.id).join(",")}`);
+      assert.ok(b.hypotheses.some((h) => h.id === "unmeasured-visitors"), label);
+    }
+    // Read, and showing none of it: then it is a "no", and the likely problems are raised.
+    const read = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body: home }, "https://acme.ca/contact": { body: empty }, "https://acme.ca/book": { body: empty } })));
+    const by = new Map(read.checks.map((c) => [c.key, c.status]));
+    assert.deepEqual([by.get("contact_form"), by.get("online_booking"), by.get("click_to_call")], ["no", "no", "no"]);
+    const ids = briefOf(acme, read, FORM).hypotheses.map((h) => h.id);
+    for (const id of RESTING) assert.ok(ids.includes(id), `${id} in ${ids.join(",")}`);
+  });
+  await check("a redirect to an address that is not one is said as that, never as a site that did not answer (review 2, finding 8c)", async () => {
+    const hop = await fetchMod.readPage("https://acme.ca/", deps(fakeWeb({ "https://acme.ca/": { status: 302, location: "http://exa mple.com/" } })), { accept: "html", deadline: clock + 1_000_000 });
+    assert.deepEqual(hop.ok ? null : [hop.error, hop.status], ["bad_redirect", 302]);
+    const r = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { status: 301, location: "https://[::1" } })));
+    assert.equal(r.unread, "home_page_failed");
+    assert.ok(r.notes.includes("https://acme.ca/ redirected to an address that is not a valid one, so it was not followed."), r.notes.join(" | "));
+    assert.ok(!briefOf(acme, r).gaps.some((g) => g.includes("did not answer")));
+  });
+  await check("one failed HTTPS request is not taken for no HTTPS: the secure address is asked once more first (review 2, finding 8e)", async () => {
+    // Fails once, then answers: the site is read over HTTPS, and both requests are kept.
+    const base = fakeWeb({ "https://acme.ca/": { body: SIMPLE }, "https://acme.ca/robots.txt": { type: "text/plain", body: "" } });
+    let tries = 0;
+    const flaky = {
+      fetch: (async (u: string, init: Parameters<typeof base.fetch>[1]) => {
+        if (u === "https://acme.ca/robots.txt" && tries++ === 0) throw new TypeError("fetch failed");
+        return base.fetch(u, init);
+      }) as never,
+      clock: () => (clock += 10),
+    };
+    const once = await fetchMod.readSite(acme, flaky);
+    assert.equal(once.start, "https://acme.ca/");
+    assert.equal(once.checks.find((c) => c.key === "https")?.status, "yes");
+    assert.deepEqual(once.pages.filter((p) => p.url === "https://acme.ca/robots.txt").map((p) => p.error), ["unreachable", null]);
+    assert.ok(!briefOf(acme, once).hypotheses.some((h) => h.id === "not-secure"));
+    // Fails twice, and plain HTTP works: no HTTPS, and the likely problem.
+    const down = fakeWeb({ "http://acme.ca/": { body: SIMPLE } });
+    const twice = await fetchMod.readSite(acme, deps(down));
+    assert.equal(down.seen.filter((s) => s.url === "https://acme.ca/robots.txt").length, 2);
+    assert.equal(twice.checks.find((c) => c.key === "https")?.status, "no");
+    assert.ok(briefOf(acme, twice).hypotheses.some((h) => h.id === "not-secure"));
+  });
+  await check("a parked domain, a host's placeholder or a bot check is not measured as the business's site (review 2, finding 8f)", async () => {
+    for (const [label, body, what] of [
+      ["for sale", `<html><head><title>acme.ca</title></head><body><h1>acme.ca</h1><p>This domain may be for sale!</p></body></html>`, "a domain parking page"],
+      ["parked", `<html><head><title>acme.ca</title></head><body><p>This Web page is parked FREE, courtesy of a registrar.</p></body></html>`, "a domain parking page"],
+      ["parking service", `<html><head><title>acme.ca</title><script src="https://www.sedoparking.com/frmpark/acme.ca/park.js"></script></head><body></body></html>`, "a domain parking page"],
+      ["nginx", `<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the web server is installed.</p></body></html>`, "a web host's placeholder page"],
+      ["suspended", `<html><head><title>Account Suspended</title></head><body><p>This account has been suspended.</p></body></html>`, "a notice that the hosting account is suspended"],
+      ["bot check", `<html><head><title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/x.js"></script></head><body></body></html>`, "a bot check that needs a browser"],
+    ] as const) {
+      const r = await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body } })));
+      assert.equal(r.unread, "not_the_site", label);
+      assert.deepEqual(r.checks, [], label);
+      assert.ok(r.notes.some((n) => n.startsWith(`https://acme.ca/ showed what looks like ${what} ("`)), `${label}: ${r.notes.join(" | ")}`);
+      const b = briefOf(acme, r, FORM);
+      assert.ok(!b.facts.some((f) => f.source.kind === "site"), label);
+      assert.ok(!b.hypotheses.some((h) => WEBSITE_RULES.includes(h.id)), label);
+      assert.equal(b.gaps[b.gaps.length - 1], `No fact about the business's own site was drawn from what its address showed at ${BUILT_WORDS}, for the reason above; check the address with them before the call.`, label);
+    }
+    // A business's own page that happens to use the words is still its site.
+    const shop = `<html><head><title>Acme Plumbing</title></head><body><p>${"We fix pipes and drains across the city. ".repeat(60)}</p><p>Is this domain for sale? No, but our van is.</p></body></html>`;
+    assert.equal((await fetchMod.readSite(acme, deps(fakeWeb({ "https://acme.ca/": { body: shop } })))).unread, null);
   });
 
   console.log("the brief");
@@ -612,6 +869,13 @@ async function main() {
     }
     add(briefMod.assembleBrief({ builtAt: BUILT, business: { name: "Insta Co", type: "local_service" }, form: null, site: { target: url.siteTarget("instagram.com/instaco"), checks: [], pagesRead: 0, notes: [] } }));
     assert.deepEqual([...seen].sort(), ["booking-by-hand", "chat-without-booking", "half-built", "no-own-site", "no-tap-to-call", "no-way-to-ask", "not-secure", "past-vendor", "phone-unfriendly", "shelfware", "unmeasured-visitors"]);
+  });
+  await check("a form answer that names an object's own property is only an answer: no crash, no weight from it (review 2, finding 3)", () => {
+    for (const goal of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf", "isPrototypeOf"]) {
+      const b = briefMod.assembleBrief({ builtAt: BUILT, business: { name: "Acme", type: "local_service" }, form: { answers: { ...FORM, automation_goal: goal, tried_before: goal }, at: null }, site: { target: url.siteTarget("instagram.com/acme"), checks: [], pagesRead: 0, notes: [] } });
+      assert.ok(!b.weight.some((w) => w.why.startsWith("It is what they most want")), goal);
+      assert.ok(b.facts.some((f) => f.id === "form:automation_goal" && f.statement.endsWith(`: ${goal}`)), `${goal}: kept in their words`);
+    }
   });
   await check("what could not be checked is a gap, never a guess; a social profile is a gap and a likely problem", () => {
     const spa = checksMod.runSiteChecks({ pages: [page("https://spa-shop.ca/", `<html><head><title>App</title><script src="/a.js"></script></head><body><div id="root"></div></body></html>`)], https: { served: true, httpRedirects: null }, sitemap: null });
@@ -694,6 +958,8 @@ async function main() {
     }
     assert.ok(!sources.rows.some((s) => String(s.excerpt ?? "").includes("<html")), "excerpts, never pages");
     await assert.rejects(db.execute({ sql: "UPDATE ai_audit_briefs SET status = 'ready' WHERE id = ?", args: [b.id] }), /frozen/);
+    // What a Verified fact rests on never changes either (review 2, finding 8d).
+    await assert.rejects(db.execute({ sql: "UPDATE ai_audit_sources SET excerpt = 'changed' WHERE tenant_id = ? AND brief_id = ?", args: [OASIS, b.id] }), /ai_audit_source_frozen/);
     const again = await briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: deps(fakeWeb(ROUTES)) });
     assert.deepEqual(again, { ok: false, error: "too_soon" });
     const later = await briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: new Date(Date.now() + 120_000), deps: deps(fakeWeb(ROUTES)) });
@@ -773,6 +1039,31 @@ async function main() {
     await db.execute("DROP TRIGGER test_brief_fails");
     const pressed = await briefs.buildBrief(db, { tenantId: OASIS, engagementId: failing, actor: cc, now: at(201)(), deps: deps(fakeWeb({})) });
     assert.ok(pressed.ok && pressed.created, "the button still builds it");
+  });
+
+  await check("a brief read over plain HTTP cites only requests it stored, and names the address read (review 2, finding 4)", async () => {
+    const eid = await openWith(13, "fallback-plumbing.ca", null);
+    const r = await briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: deps(fakeWeb({ "http://fallback-plumbing.ca/": { body: SIMPLE } })) });
+    assert.ok(r.ok && r.created, !r.ok ? r.error : "");
+    const b = r.ok ? r.brief : (null as never);
+    const rows = await db.execute({ sql: "SELECT url, final_url FROM ai_audit_sources WHERE tenant_id = ? AND brief_id = ?", args: [OASIS, b.id] });
+    const stored = new Set(rows.rows.flatMap((s) => [String(s.url), String(s.final_url)]));
+    const cited = b.content.facts.flatMap((f) => (f.source.kind === "site" ? [f.source.url] : []));
+    assert.ok(cited.length >= 5);
+    for (const u of cited) assert.ok(u && stored.has(u), `a Verified fact cites ${u}, which is not a stored request`);
+    assert.deepEqual([b.site_url, b.content.site.url], ["http://fallback-plumbing.ca/", "http://fallback-plumbing.ca/"]);
+  });
+  await check("a visitor's 'constructor' as their goal builds a brief, by the tick and by the route (review 2, finding 3)", async () => {
+    const eid = await openWith(11, null, { ...FORM, automation_goal: "constructor" });
+    assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "call_scheduled", actor: cc, now: NOW() })).ok);
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.deepEqual(rep.errors, [], JSON.stringify(rep.errors));
+    assert.ok(await briefs.latestBrief(db, OASIS, eid), "the tick built it");
+    const fresh = await openWith(12, null, { automation_goal: "toString", monthly_revenue: "__proto__" });
+    await login(USERS.admin);
+    const res = await post(fresh, { action: "build_brief" });
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    await login(null);
   });
 
   console.log("the pages");

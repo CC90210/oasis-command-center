@@ -8,33 +8,40 @@
  *   - only addresses lib/ai-audit/site-url.ts allows (public names, default
  *     ports, no credentials), checked again on every redirect hop, at most 5;
  *   - HTTPS first, whatever the lead typed; plain HTTP only when the secure
- *     address does not answer at all, and the brief then says so;
+ *     address does not answer at all, asked twice (one failed request is not
+ *     enough to say a site has no HTTPS), and the brief then says so;
  *   - an honest user agent that says who is reading and why;
  *   - robots.txt first, once for each scheme and host, and its rules followed
  *     for every request after it, the home page and the sitemap included, on
  *     every redirect hop. As RFC 9309 reads it: the group for our agent, else
  *     the group for everyone; a robots.txt that answers 4xx means no rules;
- *     one that cannot be read (a 5xx, no answer) means nothing there is read;
+ *     one that cannot be read (a 5xx, no answer), or that has more rules for
+ *     us than are followed, means nothing there is read;
  *   - each response read up to MAX_PAGE_BYTES, each request stopped after
  *     PAGE_TIMEOUT_MS, the whole read stopped after TOTAL_BUDGET_MS;
  *   - nothing is sent but a plain GET, never a cookie or a login.
  *
  * Every request is kept as a record (the brief stores each one as a source).
  * What failed or was not read goes in `notes`, never into the checks as a
- * "no": a read that failed is a gap, not an absence. When the home page was
- * not read, there are no checks at all.
+ * "no": a read that failed is a gap, not an absence, and a contact or booking
+ * page that was not read makes what it would have shown unknown. When the
+ * home page was not read, or is not the business's own (a domain parking
+ * page, a host's placeholder), there are no checks at all.
  *
  * The fetch itself is passed in, so tests run on fixtures without a network.
  */
 import { isFetchableUrl, onSameSite, type SiteTarget } from "@/lib/ai-audit/site-url";
 import {
+  MAX_ROBOTS_RULES,
   MAX_URL_CHARS,
   ROBOTS_AGENT,
   asciiLower,
+  notTheSite,
   pagesToRead,
   readRobots,
   robotsAllow,
   runSiteChecks,
+  type LinkedPage,
   type PageSnapshot,
   type RobotsRules,
   type SiteCheck,
@@ -68,14 +75,15 @@ export type PageRecord = {
 };
 
 export type SiteReport = {
+  /** The address the read started from: the target's HTTPS one, or its plain-HTTP twin when the secure address did not answer. */
   start: string;
   /** Every request, in the order made: the brief's sources. */
   pages: PageRecord[];
   checks: SiteCheck[];
   /** What failed or was not read, in words for the brief's gaps. */
   notes: string[];
-  /** Why nothing on the site was read (and there are no checks), or null when its home page was. */
-  unread: "no_answer" | "not_allowed" | "home_page_failed" | null;
+  /** Why nothing on the site was read or checked (and there are no checks), or null when its home page was. */
+  unread: "no_answer" | "not_allowed" | "home_page_failed" | "not_the_site" | null;
 };
 
 type Read = { ok: true; page: PageSnapshot } | { ok: false; error: string; finalUrl: string | null; status: number | null };
@@ -134,7 +142,9 @@ export async function readPage(
     const left = opts.deadline - deps.clock();
     if (left <= 0) return { ok: false, error: "out_of_time", finalUrl: u.toString(), status: null };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(PAGE_TIMEOUT_MS, left));
+    // The request's own limit, or less when less of the whole read's time is left: then that is what stopped it.
+    const limit = Math.min(PAGE_TIMEOUT_MS, left);
+    const timer = setTimeout(() => controller.abort(), limit);
     const started = deps.clock();
     try {
       const res = await deps.fetch(u.toString(), {
@@ -146,7 +156,12 @@ export async function readPage(
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
       if (location) {
         await res.body?.cancel().catch(() => undefined);
-        current = new URL(location, u).toString();
+        try {
+          current = new URL(location, u).toString();
+        } catch {
+          // The site answered, with a redirect to an address that is not one: not "unreachable".
+          return { ok: false, error: "bad_redirect", finalUrl: u.toString(), status: res.status };
+        }
         continue;
       }
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
@@ -160,7 +175,8 @@ export async function readPage(
         page: { url, finalUrl: u.toString(), status: res.status, contentType, html: body.text, bytes: body.bytes, ms: deps.clock() - started, truncated: body.truncated },
       };
     } catch (err) {
-      return { ok: false, error: controller.signal.aborted ? "timed_out" : `unreachable${err instanceof Error && /certificate|tls|ssl/i.test(err.message) ? "_tls" : ""}`, finalUrl: u.toString(), status: null };
+      const stopped = limit < PAGE_TIMEOUT_MS ? "timed_out_budget" : "timed_out";
+      return { ok: false, error: controller.signal.aborted ? stopped : `unreachable${err instanceof Error && /certificate|tls|ssl/i.test(err.message) ? "_tls" : ""}`, finalUrl: u.toString(), status: null };
     } finally {
       clearTimeout(timer);
     }
@@ -182,15 +198,18 @@ function titleOf(html: string): string | null {
 const ERROR_WORDS: Readonly<Record<string, string>> = {
   not_public: "is not a public website address",
   redirected_off_the_public_web: "redirected to an address that is not a public website, so it was not followed",
+  bad_redirect: "redirected to an address that is not a valid one, so it was not followed",
   out_of_time: "was not read: the time for reading the site ran out",
-  timed_out: "did not answer within 8 seconds",
+  timed_out: `did not answer within ${PAGE_TIMEOUT_MS / 1000} seconds`,
+  timed_out_budget: "did not answer before the time for reading the site ran out",
   unreachable: "could not be reached",
   unreachable_tls: "could not be reached over a secure connection (a certificate problem)",
   not_a_web_page: "is not a web page",
-  too_many_redirects: "redirected more than 5 times",
+  too_many_redirects: `redirected more than ${MAX_REDIRECTS} times`,
   bad_address: "is not a valid address",
   robots_closed: "was not read: the site's robots.txt asks robots not to",
   robots_unreadable: "was not read: the site's robots.txt could not be read, and the robots.txt standard (RFC 9309) then says to read nothing there",
+  robots_too_many_rules: `was not read: the site's robots.txt has more rules for robots like ours than are followed (${MAX_ROBOTS_RULES.toLocaleString("en-US")}), and any of the rest might close it`,
 };
 
 export function describeReadError(url: string, error: string): string {
@@ -201,12 +220,13 @@ export function describeReadError(url: string, error: string): string {
 type Robots = { url: string; read: Read; open: boolean; rules: RobotsRules; sitemaps: string[] };
 
 function robotsFrom(url: string, read: Read): Robots {
-  const closed: Robots = { url, read, open: false, rules: { allow: [], disallow: [] }, sitemaps: [] };
+  const closed: Robots = { url, read, open: false, rules: { allow: [], disallow: [], tooMany: false }, sitemaps: [] };
   if (!read.ok) return closed;
   const status = read.page.status;
   if (status >= 400 && status < 500) return { ...closed, open: true };
   if (status < 200 || status >= 300) return closed;
-  const parsed = readRobots(read.page.html);
+  // The whole file, as read (at most MAX_PAGE_BYTES); cut off at the limit, its last line is read only if it closes.
+  const parsed = readRobots(read.page.html, ROBOTS_AGENT, read.page.truncated);
   // A sitemap named by a relative address is read against robots.txt's own.
   const sitemaps = parsed.sitemaps.flatMap((s) => {
     try {
@@ -216,7 +236,7 @@ function robotsFrom(url: string, read: Read): Robots {
       return [];
     }
   });
-  return { ...closed, open: true, rules: { allow: parsed.allow, disallow: parsed.disallow }, sitemaps };
+  return { ...closed, open: true, rules: { allow: parsed.allow, disallow: parsed.disallow, tooMany: parsed.tooMany }, sitemaps };
 }
 
 /** The errors that mean the site did not answer at all. */
@@ -227,6 +247,8 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   const deadline = deps.clock() + TOTAL_BUDGET_MS;
   const pages: PageRecord[] = [];
   const notes: string[] = [];
+  // Where the read starts: the target's HTTPS address, or its plain-HTTP twin once the secure one has not answered.
+  let start = target.start;
   const record = (kind: PageRecord["kind"], url: string, r: Read) => {
     pages.push(
       r.ok
@@ -234,7 +256,8 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
         : { kind, url, finalUrl: r.finalUrl, status: r.status, bytes: 0, ms: 0, title: null, error: r.error, html: null },
     );
   };
-  const done = (checks: SiteCheck[], unread: SiteReport["unread"]): SiteReport => ({ start: target.start, pages, checks, notes, unread });
+  // The start actually used, so the brief never cites an address that was not asked for.
+  const done = (checks: SiteCheck[], unread: SiteReport["unread"]): SiteReport => ({ start, pages, checks, notes, unread });
 
   // robots.txt, once for each scheme and host, before anything else there is read.
   const robotsByOrigin = new Map<string, Promise<Robots>>();
@@ -253,13 +276,20 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   const mayRead = async (u: URL): Promise<string | null> => {
     const robots = await robotsOf(u.origin);
     if (!robots.open) return "robots_unreadable";
+    if (robots.rules.tooMany) return "robots_too_many_rules";
     return robotsAllow(`${u.pathname}${u.search}`, robots.rules) ? null : "robots_closed";
   };
 
   // The first request is robots.txt over HTTPS. A site that does not answer on
-  // the secure address at all is read over plain HTTP, and that is a finding.
-  let start = target.start;
-  let robots = await robotsOf(new URL(start).origin);
+  // the secure address at all is read over plain HTTP, and that is a finding:
+  // so the secure address is asked twice first, since one failed request (a
+  // dropped connection) is not enough to say a site has no HTTPS.
+  const secureOrigin = new URL(start).origin;
+  let robots = await robotsOf(secureOrigin);
+  if (!robots.read.ok && /^unreachable/.test(robots.read.error)) {
+    robotsByOrigin.delete(secureOrigin);
+    robots = await robotsOf(secureOrigin);
+  }
   let secureFailure: { url: string; excerpt: string } | null = null;
   if (!robots.read.ok && /^unreachable/.test(robots.read.error)) {
     secureFailure = { url: robots.url, excerpt: describeReadError(robots.url, robots.read.error) };
@@ -290,6 +320,12 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   if (home.page.status < 200 || home.page.status >= 300) {
     notes.push(`${start} answered with HTTP ${home.page.status}, so nothing on the site was read.`);
     return done([], "home_page_failed");
+  }
+  // A page that is not the business's own (a domain parking page, a host's placeholder, a bot check) is not measured as its site.
+  const other = notTheSite(home.page);
+  if (other) {
+    notes.push(`${start} showed what looks like ${other.what} ("${other.seen.replace(/\s+/g, " ")}"), not the business's own site, so nothing on it was checked.`);
+    return done([], "not_the_site");
   }
   const served = home.page.finalUrl.startsWith("https:");
 
@@ -341,18 +377,26 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
     : { found: false, url: tried[tried.length - 1] ?? null, detail: named ? `robots.txt names a sitemap at ${named}, but it is not there${tried.length > 1 ? ", and there is none at /sitemap.xml" : ""}.` : undefined };
 
   // The pages worth reading, as the home page links to them, four at a time.
+  // One that was not read is kept with its kind: what the contact or booking
+  // page would have shown is then unknown, never "no".
   const wanted = pagesToRead(home.page, sameSite, MAX_EXTRA_PAGES);
   const extra: Read[] = [];
+  const unread: LinkedPage[] = [];
   for (let i = 0; i < wanted.length; i += 4) {
-    const batch = await Promise.all(wanted.slice(i, i + 4).map((u) => readPage(u, deps, { accept: "html", deadline, mayRead })));
+    const batch = await Promise.all(wanted.slice(i, i + 4).map((w) => readPage(w.url, deps, { accept: "html", deadline, mayRead })));
     batch.forEach((r, j) => {
-      const u = wanted[i + j];
-      record("site_page", u, r);
+      const w = wanted[i + j];
+      record("site_page", w.url, r);
       extra.push(r);
-      if (!r.ok) notes.push(describeReadError(u, r.error));
-      else if (r.page.status < 200 || r.page.status >= 300) notes.push(`${u} answered with HTTP ${r.page.status}, so it was not checked.`);
+      if (!r.ok) {
+        notes.push(describeReadError(w.url, r.error));
+        unread.push(w);
+      } else if (r.page.status < 200 || r.page.status >= 300) {
+        notes.push(`${w.url} answered with HTTP ${r.page.status}, so it was not checked.`);
+        unread.push(w);
+      }
     });
   }
   const snapshots = [home.page, ...extra.flatMap((r) => (r.ok ? [r.page] : []))];
-  return done(runSiteChecks({ pages: snapshots, https: { served, httpRedirects, secureFailure }, sitemap }), null);
+  return done(runSiteChecks({ pages: snapshots, https: { served, httpRedirects, secureFailure }, sitemap, unread }), null);
 }

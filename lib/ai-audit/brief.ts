@@ -13,9 +13,12 @@
  *     hypothesis carries no number of its own (a test pins this).
  * Nothing here is a finding of the audit yet: the audit's findings come from
  * the call and from research after Gate 1. When nothing on the website was
- * read (it did not answer, its robots.txt closed it, its home page failed),
- * the brief says so as a gap, with the time, and holds no fact about the site
- * and no likely problem drawn from it.
+ * read (it did not answer, its robots.txt closed it, its home page failed) or
+ * its address showed a page that is not the business's own (a domain parking
+ * page), the brief says so as a gap, with the time, and holds no fact about
+ * the site and no likely problem drawn from it. A check the site's pages
+ * could not settle (a contact page that did not load) is a gap too, and no
+ * likely problem rests on it.
  *
  * Internal only. The client never sees a brief.
  *
@@ -79,13 +82,17 @@ const CONFIRM_WITH: Readonly<Record<string, string>> = {
   timeframe: "dec-who",
 };
 
-/** The questions to weight for what the client most wants taken off their plate. */
-const GOAL_WEIGHT: Readonly<Record<string, readonly string[]>> = {
-  sales_leadgen: ["sales-sources", "sales-handling", "sales-conversion", "sales-lost"],
-  customer_support: ["ops-repetitive", "sales-handling", "tech-frustrations"],
-  workflow_automation: ["ops-manual", "ops-delays", "tech-silos"],
-  agent_fleet: ["dec-first-fix", "ops-repetitive", "tech-tools"],
-};
+/**
+ * The questions to weight for what the client most wants taken off their
+ * plate. A Map, not an object: the goal is whatever the visitor sent, and an
+ * object would answer "constructor" with a function.
+ */
+const GOAL_WEIGHT: ReadonlyMap<string, readonly string[]> = new Map([
+  ["sales_leadgen", ["sales-sources", "sales-handling", "sales-conversion", "sales-lost"]],
+  ["customer_support", ["ops-repetitive", "sales-handling", "tech-frustrations"]],
+  ["workflow_automation", ["ops-manual", "ops-delays", "tech-silos"]],
+  ["agent_fleet", ["dec-first-fix", "ops-repetitive", "tech-tools"]],
+]);
 
 function answerText(field: string, raw: unknown): string | null {
   const def = FORM_FIELDS.get(field);
@@ -189,11 +196,17 @@ const RULES: readonly Rule[] = [
   },
 ];
 
+/**
+ * The brief, from the site's checks and the form's answers. `site.start` is
+ * the address the read started from (SiteReport.start: plain HTTP when the
+ * secure address did not answer); a fact with no page of its own cites it,
+ * and never an address that was not asked for.
+ */
 export function assembleBrief(input: {
   builtAt: string;
   business: { name: string; type: BusinessType | null };
   form: { answers: Record<string, unknown>; at: string | null } | null;
-  site: { target: SiteTarget; checks: SiteCheck[]; pagesRead: number; notes: string[]; unread?: SiteReport["unread"] };
+  site: { target: SiteTarget; start?: string; checks: SiteCheck[]; pagesRead: number; notes: string[]; unread?: SiteReport["unread"] };
 }): PreCallBrief {
   const facts: BriefFact[] = [];
   const confirm: PreCallBrief["confirm"] = [];
@@ -202,6 +215,7 @@ export function assembleBrief(input: {
   // What the website shows: our own measurement. Nothing read, nothing said:
   // no fact about the site and no likely problem from it, only the gap.
   const t = input.site.target;
+  const start = t.kind === "site" ? (input.site.start ?? t.start) : null;
   // No page read is nothing read, whatever the caller says; only "no_answer" may say the site did not answer.
   const unread = t.kind === "site" ? (input.site.unread ?? (input.site.pagesRead === 0 ? "nothing_read" : null)) : null;
   const checks = new Map<CheckKey, SiteCheck>(unread ? [] : input.site.checks.map((c) => [c.key, c]));
@@ -209,6 +223,7 @@ export function assembleBrief(input: {
     // A site that did not answer is one line; the requests that failed are in the sources.
     const at = `${input.builtAt.slice(0, 10)} ${input.builtAt.slice(11, 16)} UTC`;
     if (unread === "no_answer") gaps.push(`The site did not answer when we checked at ${at}; check it before the call.`);
+    else if (unread === "not_the_site") gaps.push(...input.site.notes, `No fact about the business's own site was drawn from what its address showed at ${at}, for the reason above; check the address with them before the call.`);
     else gaps.push(...input.site.notes, `Nothing on the site was read when we checked at ${at}, for the reason above; look at it by hand before the call.`);
   } else if (t.kind === "site") {
     for (const c of input.site.checks) {
@@ -216,7 +231,7 @@ export function assembleBrief(input: {
         gaps.push(`${CHECK_TITLES[c.key]}: ${c.detail}`);
         continue;
       }
-      facts.push({ id: `site:${c.key}`, statement: c.detail, label: "verified", source: { kind: "site", check: c.key, url: c.evidence?.url ?? t.start } });
+      facts.push({ id: `site:${c.key}`, statement: c.detail, label: "verified", source: { kind: "site", check: c.key, url: c.evidence?.url ?? start } });
     }
     gaps.push(...input.site.notes);
   } else if (t.kind === "social") {
@@ -249,14 +264,14 @@ export function assembleBrief(input: {
     if (QUESTION_IDS.has(question_id) && !weight.some((w) => w.question_id === question_id) && weight.length < 6) weight.push({ question_id, why });
   };
   const goal = typeof form?.automation_goal === "string" ? form.automation_goal : null;
-  for (const q of goal ? GOAL_WEIGHT[goal] ?? [] : []) add(q, `It is what they most want taken off their plate (${answerText("automation_goal", goal) ?? goal}).`);
+  for (const q of goal ? (GOAL_WEIGHT.get(goal) ?? []) : []) add(q, `It is what they most want taken off their plate (${answerText("automation_goal", goal) ?? goal}).`);
   for (const h of hypotheses) for (const q of h.questions) add(q, `It tests a likely problem: ${h.statement}`);
 
   return {
     schema: BRIEF_SCHEMA,
     built_at: input.builtAt,
     business_name: input.business.name,
-    site: { kind: t.kind, url: t.kind === "site" ? t.start : t.kind === "social" ? t.url : null, platform: t.kind === "social" ? t.platform : null, pages_read: input.site.pagesRead },
+    site: { kind: t.kind, url: t.kind === "site" ? start : t.kind === "social" ? t.url : null, platform: t.kind === "social" ? t.platform : null, pages_read: input.site.pagesRead },
     facts,
     hypotheses,
     confirm,

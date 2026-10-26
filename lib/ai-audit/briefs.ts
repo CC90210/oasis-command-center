@@ -152,7 +152,7 @@ export async function buildBrief(
     builtAt: at,
     business: { name: engagement.business_name || lead?.businessName || "this business", type: engagement.business_type },
     form,
-    site: { target, checks: report?.checks ?? [], pagesRead, notes: report?.notes ?? [], unread: report?.unread ?? null },
+    site: { target, start: report?.start, checks: report?.checks ?? [], pagesRead, notes: report?.notes ?? [], unread: report?.unread ?? null },
   });
   // Partial: something about the site is a gap (nothing read, a request that failed, a check not known).
   const status: StoredBrief["status"] = report && (report.unread !== null || report.notes.length > 0 || report.checks.some((c) => c.status === "unknown")) ? "partial" : "ready";

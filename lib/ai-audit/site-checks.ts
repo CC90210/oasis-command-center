@@ -7,25 +7,31 @@
  * analytics tag; which platform the site is built on; what structured data
  * and social links it carries; whether it has a sitemap; how large the home
  * page is and how fast it answered (one measurement, from the Command Center).
- * A "yes" names the page and the bit of HTML that shows it. A "no" means none
- * of the pages read showed it, never that the business does not have it
- * elsewhere, and the brief says which pages were read. When the pages build
- * themselves in the browser (little text in the HTML), content checks say
- * "unknown" instead of "no": the browser check in phase 3 can read them. A
- * page cut off at the size limit says "unknown" too, for what was not found
- * in the part that was read. A home page that did not load gives no checks
- * at all: another page never stands in for it.
+ * A "yes" names the page and the bit of HTML that shows it, and says no more
+ * than that bit shows: a login or newsletter form is not a contact form, and
+ * one file from /wp-content/ is a sign of WordPress, not proof of it. A "no"
+ * means none of the pages read showed it, never that the business does not
+ * have it elsewhere, and the brief says which pages were read. When the pages
+ * build themselves in the browser (little text in the HTML), content checks
+ * say "unknown" instead of "no": the browser check in phase 3 can read them.
+ * What was not found is "unknown" too when part of where it would be was not
+ * read: a page cut off at the size limit, a page with more tags of a kind than
+ * are read (MAX_TAGS), or the contact or booking page the home page links to,
+ * when that page could not be read. A home page that did not load gives no
+ * checks at all: another page never stands in for it.
  *
  * These results are the brief's Verified facts: our own measurement, dated.
  *
  * LINEAR TIME. The HTML is the client's (or anyone's who controls the site),
  * so nothing here may slow down on a hostile page: tags are found with
- * indexOf and read from a bounded slice, never with a pattern that can
- * backtrack across the whole page ("<a<a<a..." or an unclosed <script>);
- * attributes are read in one forward pass; every repeat in a signature has a
- * limit; robots.txt rules are matched with indexOf, never compiled into a
- * pattern. tests/ai-audit-brief.test.ts times each against 600 KB of the
- * shapes that once took seconds.
+ * indexOf and each is read whole, once, in one forward pass, the next search
+ * starting where it ends, never with a pattern that can backtrack across the
+ * whole page ("<a<a<a..." or an unclosed <script>); a form or a script is read
+ * to its closing tag as a browser reads it, and no two overlap; every repeat
+ * in a signature has a limit; robots.txt rules are matched with indexOf, never
+ * compiled into a pattern, and at most MAX_ROBOTS_RULES of them.
+ * tests/ai-audit-brief.test.ts times each against 600 KB of the shapes that
+ * once took seconds.
  *
  * PURE: no I/O.
  */
@@ -93,6 +99,12 @@ export const CHECK_TITLES: Readonly<Record<CheckKey, string>> = {
   response_time: "Home page response time",
 };
 
+/** The kinds of page worth reading after the home page, in the order they are chosen. */
+export const PAGE_KINDS = ["contact", "booking", "services", "pricing", "about", "faq"] as const;
+export type PageKind = (typeof PAGE_KINDS)[number];
+/** A page the home page links to, with the kind it was chosen as (pagesToRead). */
+export type LinkedPage = { url: string; kind: PageKind };
+
 /** A named signature. Every repeat in one has a limit ({0,100}, never * or +): an unlimited repeat that is never completed costs the square of the page. */
 type Sig = readonly [name: string, re: RegExp];
 
@@ -157,20 +169,26 @@ const ANALYTICS: readonly Sig[] = [
   ["Segment", /cdn\.segment\.com\/analytics/i],
 ];
 
-const PLATFORM: readonly Sig[] = [
-  ["WordPress", /\/wp-content\/|\/wp-includes\//i],
-  ["Shopify", /cdn\.shopify\.com|Shopify\.theme|\.myshopify\.com/i],
-  ["Wix", /static\.wixstatic\.com|\bparastorage\.com/i],
-  ["Squarespace", /static1\.squarespace\.com|squarespace-cdn\.com|<!-- This is Squarespace/i],
-  ["Webflow", /data-wf-site=|\bwebflow\.js|assets\.website-files\.com/i],
-  ["GoDaddy Website Builder", /img1\.wsimg\.com/i],
-  ["Duda", /irp\.cdn-website\.com|\bdudaone\.com/i],
-  ["Weebly", /\bweebly\.com|editmysite\.com/i],
-  ["HubSpot CMS", /\bhs-sites\.com|hubspotusercontent/i],
-  ["Framer", /framerusercontent\.com/i],
-  ["BigCommerce", /cdn\d{0,3}\.bigcommerce\.com/i],
-  ["Drupal", /\/sites\/default\/files\//i],
-  ["Next.js", /\/_next\/static\//i],
+/**
+ * Each platform's signs, each a different kind of evidence. Two different
+ * signs, the generator tag counting as one, say the site is built on it; one
+ * alone (a single image from another site's /wp-content/, say) says only that
+ * it shows signs of it.
+ */
+const PLATFORM: ReadonlyArray<readonly [name: string, signs: readonly RegExp[]]> = [
+  ["WordPress", [/\/wp-content\//i, /\/wp-includes\//i, /\/wp-json\/|api\.w\.org/i]],
+  ["Shopify", [/cdn\.shopify\.com/i, /Shopify\.theme/, /\.myshopify\.com/i]],
+  ["Wix", [/static\.wixstatic\.com/i, /\bparastorage\.com/i]],
+  ["Squarespace", [/static1\.squarespace\.com/i, /squarespace-cdn\.com/i, /<!-- This is Squarespace/i]],
+  ["Webflow", [/data-wf-site=/i, /\bwebflow\.js/i, /assets\.website-files\.com/i]],
+  ["GoDaddy Website Builder", [/img1\.wsimg\.com/i]],
+  ["Duda", [/irp\.cdn-website\.com/i, /\bdudaone\.com/i]],
+  ["Weebly", [/\bweebly\.com/i, /editmysite\.com/i]],
+  ["HubSpot CMS", [/\bhs-sites\.com/i, /hubspotusercontent/i]],
+  ["Framer", [/framerusercontent\.com/i]],
+  ["BigCommerce", [/cdn\d{0,3}\.bigcommerce\.com/i]],
+  ["Drupal", [/\/sites\/default\/files\//i]],
+  ["Next.js", [/\/_next\/static\//i]],
 ];
 /** What a <meta name="generator"> says, read from the tag itself. */
 const GENERATORS: readonly Sig[] = [
@@ -212,8 +230,9 @@ const EMBEDDED_FORMS: readonly Sig[] = [
 // A linear tag scanner
 // ---------------------------------------------------------------------------
 
-const MAX_TAG = 4_000;
+/** At most this many tags of one kind are read from a page. Past it, what the rest would show is not known (Scan). */
 const MAX_TAGS = 3_000;
+const MAX_TAGS_WORDS = MAX_TAGS.toLocaleString("en-US");
 
 /**
  * Lower case for A to Z only, so every index into the result is the same index
@@ -226,6 +245,23 @@ export function asciiLower(s: string): string {
 }
 
 export type Tag = { index: number; end: number; raw: string; attrs: Record<string, string> };
+
+/**
+ * Why a scan stopped before the end of a page, in the words that follow the
+ * page's name ("has more than 3,000 links, and only the first 3,000 were
+ * read"), or null when it read the page to the end. The scanner sets it; a
+ * check that did not find what it looked for in a scan stopped short says
+ * "unknown", never "no".
+ */
+export type Scan = { capped: string | null };
+
+const PLURALS: ReadonlyMap<string, string> = new Map([
+  ["a", "links"],
+  ["meta", "meta tags"],
+  ["input", "form fields"],
+  ["textarea", "text boxes"],
+  ["select", "drop-down lists"],
+]);
 
 const isSpace = (c: number) => c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
 
@@ -267,33 +303,47 @@ function attrsOf(raw: string): Record<string, string> {
   return attrs;
 }
 
-/** Each opening `<name ...>` tag (at most MAX_TAGS), found with indexOf and read from a bounded slice. */
-export function tagsOf(html: string, name: string, lower = asciiLower(html)): Tag[] {
-  const out: Tag[] = [];
+/**
+ * The next opening `<name ...>` tag at or after `from`, read whole however
+ * long it is (attrsOf costs its length once), or null when there is none, or
+ * it is never closed with ">" (a browser drops such a tag). The next search
+ * starts where it ends, so the tags of a page never overlap and it is read
+ * once.
+ */
+function nextTag(html: string, lower: string, name: string, from: number): Tag | null {
   const open = `<${name}`;
-  let pos = 0;
-  while (out.length < MAX_TAGS) {
+  for (let pos = from; ; ) {
     const i = lower.indexOf(open, pos);
-    if (i === -1) break;
+    if (i === -1) return null;
     pos = i + open.length;
     const next = lower[pos];
     if (next !== undefined && !/[\s>/]/.test(next)) continue;
     const end = lower.indexOf(">", pos);
-    if (end === -1) break;
-    if (end - i > MAX_TAG) {
-      // Every tag that starts before end - MAX_TAG also runs past the limit
-      // (its first ">" is this one): skip them all, so each ">" is looked for once.
-      pos = Math.max(pos, end - MAX_TAG);
-      continue;
-    }
+    if (end === -1) return null;
     const raw = html.slice(i, end + 1);
-    out.push({ index: i, end: end + 1, raw, attrs: attrsOf(raw) });
-    pos = end + 1;
+    return { index: i, end: end + 1, raw, attrs: attrsOf(raw) };
+  }
+}
+
+/** Each opening `<name ...>` tag of a page, at most MAX_TAGS of them: when there are more, `scan` says so. */
+export function tagsOf(html: string, name: string, lower = asciiLower(html), scan?: Scan): Tag[] {
+  const out: Tag[] = [];
+  for (let t = nextTag(html, lower, name, 0); t; t = nextTag(html, lower, name, t.end)) {
+    if (out.length === MAX_TAGS) {
+      if (scan) scan.capped ??= `has more than ${MAX_TAGS_WORDS} ${PLURALS.get(name) ?? `<${name}> tags`}, and only the first ${MAX_TAGS_WORDS} were read`;
+      break;
+    }
+    out.push(t);
   }
   return out;
 }
 
-/** The text between a tag and its closing tag (at most `cap` characters), or null when it is not closed within that. */
+/**
+ * The text between a tag and its closing tag (at most `cap` characters), or
+ * null when it is not closed within that. Only for the words of a link, read
+ * to choose the pages worth reading: no check rests on it, so its limit never
+ * stands for an absence (a check reads an element whole, with elementsOf).
+ */
 export function innerOf(html: string, tag: Tag, name: string, lower = asciiLower(html), cap = 40_000): string | null {
   // Looked for only within `cap` characters, so many unclosed tags cost nothing extra.
   const close = lower.slice(tag.end, tag.end + cap + name.length + 2).indexOf(`</${name}`);
@@ -301,9 +351,40 @@ export function innerOf(html: string, tag: Tag, name: string, lower = asciiLower
   return html.slice(tag.end, tag.end + close);
 }
 
-/** Every link on a page: its address and the words it shows. */
-function linksOf(html: string, lower = asciiLower(html)): Array<{ href: string; text: string; index: number }> {
-  return tagsOf(html, "a", lower)
+/**
+ * Where the content of a `<name>` element ends, from `from` on: at the first
+ * `</name` followed by a space, "/" or ">" (so `</formation>` does not close a
+ * form), or at the end of the page when none does, as a browser reads an
+ * element left open.
+ */
+function closeAt(lower: string, name: string, from: number): number {
+  const close = `</${name}`;
+  for (let i = lower.indexOf(close, from); i !== -1; i = lower.indexOf(close, i + close.length)) {
+    const next = lower[i + close.length];
+    if (next === undefined || /[\s>/]/.test(next)) return i;
+  }
+  return lower.length;
+}
+
+/**
+ * Each `<name>` element of a page with what is inside it, read whole as a
+ * browser reads one: to the tag that closes it, or to the end of the page; a
+ * `<name>` inside one starts nothing (a form inside a form, the text of a
+ * script). No two overlap, so a page is read once however large an element is.
+ */
+function* elementsOf(html: string, lower: string, name: string): Generator<{ tag: Tag; inner: string; innerLower: string }> {
+  for (let tag = nextTag(html, lower, name, 0); tag; ) {
+    const stop = closeAt(lower, name, tag.end);
+    yield { tag, inner: html.slice(tag.end, stop), innerLower: lower.slice(tag.end, stop) };
+    tag = nextTag(html, lower, name, stop);
+  }
+}
+
+type Link = { href: string; text: string; index: number };
+
+/** Every link on a page (at most MAX_TAGS: `scan` says when there were more): its address and the words it shows. */
+function linksOf(html: string, lower = asciiLower(html), scan?: Scan): Link[] {
+  return tagsOf(html, "a", lower, scan)
     .filter((t) => t.attrs.href)
     .map((t) => ({ href: decodeAttr(t.attrs.href.trim()), text: stripTags(innerOf(html, t, "a", lower, 400) ?? ""), index: t.index }));
 }
@@ -359,7 +440,7 @@ function withoutBlocks(html: string, lower = asciiLower(html)): string {
 function excerptAt(html: string, index: number, length: number): string {
   const start = Math.max(0, index - 40);
   return html
-    .slice(start, Math.min(html.length, index + Math.max(length, 0) + 80))
+    .slice(start, Math.min(html.length, index + Math.min(Math.max(length, 0), 200) + 80))
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
@@ -395,43 +476,108 @@ export function builtInBrowser(page: PageSnapshot): boolean {
   return visibleText(page.html).length < 200 && page.html.toLowerCase().includes("<script");
 }
 
-function metaContent(html: string, name: string, lower = asciiLower(html)): { content: string; tag: Tag } | null {
-  for (const t of tagsOf(html, "meta", lower)) {
+/** Pages with less text than this may be one of NOT_THE_SITE; a page with more is taken as the business's own. */
+const NOT_THE_SITE_TEXT = 2_000;
+/** What gives away a page that is not the business's own, tested on the text a visitor reads or on the HTML. */
+const NOT_THE_SITE: ReadonlyArray<readonly [what: string, re: RegExp, on: "text" | "html"]> = [
+  ["a domain parking page", /\b(?:this|the) domain(?: name)? (?:is|may be) for sale\b|\bbuy this domain\b|\bdomain (?:is |has been )?parked\b|\bparked free\b|\bdomain parking\b/i, "text"],
+  ["a domain parking page", /\b(?:sedoparking\.com|parkingcrew\.net|bodis\.com|afternic\.com|hugedomains\.com|dan\.com\/|wsimg\.com\/parking-lander)/i, "html"],
+  ["a web host's placeholder page", /\bwelcome to nginx!|\bapache2? [a-z]{0,20} ?default page\b|\bapache http server test page\b|^it works!|^index of \//i, "text"],
+  ["a notice that the hosting account is suspended", /\baccount (?:has been )?suspended\b/i, "text"],
+  ["a bot check that needs a browser", /^just a moment(?:\.\.\.|\u2026)|\bchecking your browser\b|\battention required! \| cloudflare\b/i, "text"],
+];
+
+/**
+ * A page that answered at the business's address but is not the business's
+ * own: a domain parking page, a web host's placeholder, a suspended account,
+ * a bot check. Said only of a page with very little text (under
+ * NOT_THE_SITE_TEXT characters) that shows one of NOT_THE_SITE, with the
+ * words that show it; null for any other page.
+ */
+export function notTheSite(page: PageSnapshot): { what: string; seen: string } | null {
+  const text = visibleText(page.html);
+  if (text.length >= NOT_THE_SITE_TEXT) return null;
+  for (const [what, re, on] of NOT_THE_SITE) {
+    const m = re.exec(on === "text" ? text : page.html);
+    if (m) return { what, seen: m[0].slice(0, 80) };
+  }
+  return null;
+}
+
+function metaContent(metas: readonly Tag[], name: string): { content: string; tag: Tag } | null {
+  for (const t of metas) {
     if ((t.attrs.name ?? "").toLowerCase() === name && (t.attrs.content ?? "").trim()) return { content: t.attrs.content.trim(), tag: t };
   }
   return null;
 }
 
+/** A page as the checks read it: its HTML lowered (A to Z only, so indexes match), the name the brief gives it, and its links, read once. */
+type Reading = { page: PageSnapshot; lower: string; name: string; links: Link[]; linksCapped: string | null };
+
 /** The first link, on any page, whose address passes `test`. */
-function firstLink(pages: readonly PageSnapshot[], test: (href: string) => boolean): { page: PageSnapshot; href: string; index: number } | null {
-  for (const page of pages) {
-    const link = linksOf(page.html).find((l) => test(l.href));
-    if (link) return { page, href: link.href, index: link.index };
+function firstLink(readings: readonly Reading[], test: (href: string) => boolean): { page: PageSnapshot; href: string; index: number } | null {
+  for (const r of readings) {
+    const link = r.links.find((l) => test(l.href));
+    if (link) return { page: r.page, href: link.href, index: link.index };
   }
   return null;
 }
 
-/** Contact forms: a form with a field a person fills in, not a site search box. */
-function contactForms(pages: readonly PageSnapshot[]): { found: string[]; evidence: SiteCheck["evidence"] } {
-  for (const p of pages) {
-    const lower = asciiLower(p.html);
-    for (const form of tagsOf(p.html, "form", lower).slice(0, 30)) {
-      if (/search/i.test(form.raw)) continue;
-      const inner = innerOf(p.html, form, "form", lower, 60_000);
-      if (inner === null) continue;
-      const innerLower = asciiLower(inner);
-      const fields = [...tagsOf(inner, "input", innerLower), ...tagsOf(inner, "textarea", innerLower), ...tagsOf(inner, "select", innerLower)];
-      const meaningful = fields.filter((f) => !["hidden", "submit", "button", "search", "image", "reset"].includes((f.attrs.type ?? "").toLowerCase()));
-      const person = meaningful.some((f) => f.raw.toLowerCase().startsWith("<textarea") || ["email", "tel"].includes((f.attrs.type ?? "").toLowerCase()) || /email|phone|tel|message|name|comment/i.test(f.attrs.name ?? ""));
-      if (meaningful.length >= 2 && person) return { found: ["a form on the site"], evidence: { url: p.finalUrl, excerpt: excerptAt(p.html, form.index, form.raw.length) } };
+/** Input types a visitor does not type into. */
+const NOT_TYPED_IN = new Set(["hidden", "submit", "button", "search", "image", "reset"]);
+/** A field named for a message: what a contact form asks for and a login or a newsletter sign-up does not. */
+const MESSAGE_FIELD = /message|msg|comment|enquir|inquir|question/i;
+const fieldWords = (f: Tag) => [f.attrs.name, f.attrs.id, f.attrs.placeholder, f.attrs["aria-label"]].filter(Boolean).join(" ");
+
+type FormFinding = {
+  /** The first contact form seen, on the site itself or from a form service. */
+  form: { own: boolean; names: string[]; evidence: SiteCheck["evidence"] } | null;
+  /** The page with a form that has a message field but also asks for a password (a sign-up?), when there is one. */
+  withPassword: string | null;
+  /** Why a form's fields were not all read, when they were not. */
+  capped: string | null;
+};
+
+/**
+ * Contact forms: a form a visitor writes a message in (a text box, or a field
+ * named for a message) with another field to fill in, and no password field.
+ * A login, a newsletter sign-up (a name and an email) and a site search are
+ * not contact forms. A form from a form service (Typeform, a HubSpot form) is
+ * a form whose fields are not in the page's HTML, and is said to be just that.
+ */
+function contactForms(readings: readonly Reading[]): FormFinding {
+  let withPassword: string | null = null;
+  let capped: string | null = null;
+  for (const r of readings) {
+    for (const { tag: form, inner, innerLower } of elementsOf(r.page.html, r.lower, "form")) {
+      if (/\bsearch/i.test(form.raw)) continue;
+      const scan: Scan = { capped: null };
+      const boxes = tagsOf(inner, "textarea", innerLower, scan);
+      const fields = [...tagsOf(inner, "input", innerLower, scan), ...tagsOf(inner, "select", innerLower, scan)];
+      if (scan.capped) capped ??= `${r.name} ${scan.capped}`;
+      const type = (f: Tag) => (f.attrs.type ?? "").trim().toLowerCase();
+      const filledIn = boxes.length + fields.filter((f) => !NOT_TYPED_IN.has(type(f))).length;
+      const message = boxes.length > 0 || fields.some((f) => MESSAGE_FIELD.test(fieldWords(f)));
+      if (filledIn < 2 || !message) continue;
+      if (fields.some((f) => type(f) === "password")) {
+        withPassword ??= r.name;
+        continue;
+      }
+      return { form: { own: true, names: ["a form with a message field"], evidence: { url: r.page.finalUrl, excerpt: excerptAt(r.page.html, form.index, form.raw.length) } }, withPassword, capped };
     }
   }
-  const embedded = findAll(pages, EMBEDDED_FORMS);
-  return embedded.found.length ? embedded : { found: [], evidence: null };
+  const embedded = findAll(readings.map((r) => r.page), EMBEDDED_FORMS);
+  return { form: embedded.found.length ? { own: false, names: embedded.found, evidence: embedded.evidence } : null, withPassword, capped };
 }
 
-/** Structured data (schema.org JSON-LD): the types it declares, LocalBusiness and the like. */
-function structuredTypes(pages: readonly PageSnapshot[]): { types: string[]; evidence: SiteCheck["evidence"] } {
+/** schema.org types named in microdata (itemtype) and in RDFa (typeof, with the schema: prefix, or bare under a schema.org vocab). */
+const MICRODATA_TYPE = /\bitemtype\s{0,10}=\s{0,10}["']?\s{0,10}https?:\/\/(?:www\.)?schema\.org\/([A-Za-z]{1,60})/gi;
+const RDFA_PREFIXED_TYPE = /\btypeof\s{0,10}=\s{0,10}["']?\s{0,10}schema:([A-Za-z]{1,60})/gi;
+const RDFA_VOCAB = /\bvocab\s{0,10}=\s{0,10}["']?\s{0,10}https?:\/\/(?:www\.)?schema\.org/i;
+const RDFA_BARE_TYPE = /\btypeof\s{0,10}=\s{0,10}["']\s{0,10}([A-Za-z]{1,60})["'\s]/gi;
+
+/** Structured data for search engines: the schema.org types the pages declare (LocalBusiness and the like), in JSON-LD, microdata or RDFa. */
+function structuredTypes(readings: readonly Reading[]): { types: string[]; evidence: SiteCheck["evidence"] } {
   const types = new Set<string>();
   let evidence: SiteCheck["evidence"] = null;
   const visit = (v: unknown, depth: number) => {
@@ -446,21 +592,48 @@ function structuredTypes(pages: readonly PageSnapshot[]): { types: string[]; evi
     for (const x of Array.isArray(t) ? t : [t]) if (typeof x === "string" && x.length < 60) types.add(x);
     if (o["@graph"]) visit(o["@graph"], depth + 1);
   };
-  for (const p of pages) {
-    const lower = asciiLower(p.html);
-    // At most 20 blocks a page: each may be read up to 40,000 characters, and a site has a few.
-    for (const t of tagsOf(p.html, "script", lower).filter((s) => (s.attrs.type ?? "").toLowerCase() === "application/ld+json").slice(0, 20)) {
-      const body = innerOf(p.html, t, "script", lower, 40_000);
-      if (body === null) continue;
+  for (const r of readings) {
+    const p = r.page;
+    // Every JSON-LD block, each read whole: scripts never overlap, so the page is read once however large a block is.
+    for (const { tag, inner } of elementsOf(p.html, r.lower, "script")) {
+      if ((tag.attrs.type ?? "").trim().toLowerCase() !== "application/ld+json") continue;
       try {
-        visit(JSON.parse(body), 0);
-        if (!evidence) evidence = { url: p.finalUrl, excerpt: body.replace(/\s+/g, " ").trim().slice(0, 160) };
+        visit(JSON.parse(inner), 0);
+        evidence ??= { url: p.finalUrl, excerpt: inner.slice(0, 400).replace(/\s+/g, " ").trim().slice(0, 160) };
       } catch {
         // Broken JSON-LD is what the site serves; it counts as none.
       }
     }
+    const named = [...p.html.matchAll(MICRODATA_TYPE), ...p.html.matchAll(RDFA_PREFIXED_TYPE), ...(RDFA_VOCAB.test(p.html) ? p.html.matchAll(RDFA_BARE_TYPE) : [])];
+    for (const m of named) {
+      types.add(m[1]);
+      evidence ??= { url: p.finalUrl, excerpt: excerptAt(p.html, m.index ?? 0, m[0].length) };
+    }
   }
   return { types: [...types].slice(0, 12), evidence };
+}
+
+/** The platforms the home page shows: built on (two different signs), or only signs of (one). */
+function platformsOf(home: PageSnapshot, generator: { content: string; tag: Tag } | null): { built: string[]; signs: string[]; evidence: SiteCheck["evidence"] } {
+  const built: string[] = [];
+  const signs: string[] = [];
+  let evidence: SiteCheck["evidence"] = null;
+  for (const name of new Set([...PLATFORM.map(([n]) => n), ...GENERATORS.map(([n]) => n)])) {
+    let seen = 0;
+    for (const re of PLATFORM.find(([n]) => n === name)?.[1] ?? []) {
+      const m = re.exec(home.html);
+      if (!m) continue;
+      seen += 1;
+      evidence ??= { url: home.finalUrl, excerpt: excerptAt(home.html, m.index, m[0].length) };
+    }
+    if (generator && GENERATORS.find(([n]) => n === name)?.[1].test(generator.content)) {
+      seen += 1;
+      evidence ??= { url: home.finalUrl, excerpt: generator.tag.raw.slice(0, 200) };
+    }
+    if (seen >= 2) built.push(name);
+    else if (seen === 1) signs.push(name);
+  }
+  return { built, signs, evidence };
 }
 
 function kb(bytes: number): string {
@@ -468,15 +641,19 @@ function kb(bytes: number): string {
 }
 
 /**
- * A "no" is said only from pages read whole. `cut` says how much of a page
- * cut off at the size limit was read, when one was: what was not found in
- * that part may be in the rest, so it is "unknown", never "no".
+ * A check that is "yes" when `ok`, else "no", unless a "no" cannot be said:
+ * the pages build themselves in the browser (`js`), or `because` says what
+ * was not read ("only the first 600 KB of the home page was read"), so what
+ * was not found may be in the rest; then it is "unknown".
  */
-function yesNo(key: CheckKey, ok: boolean, detailYes: string, detailNo: string, found: string[], evidence: SiteCheck["evidence"], unknown = false, cut: string | null = null): SiteCheck {
-  if (!ok && unknown) return { key, status: "unknown", detail: `${detailNo.replace(/\.$/, "")}, but the pages build themselves in the browser, so this may be wrong.`, found: [], evidence: null };
-  if (!ok && cut) return { key, status: "unknown", detail: `Not found in what was read, but only ${cut} was read, so it may be in the rest.`, found: [], evidence: null };
+function yesNo(key: CheckKey, ok: boolean, detailYes: string, detailNo: string, found: string[], evidence: SiteCheck["evidence"], js = false, because: string | null = null): SiteCheck {
+  if (!ok && js) return { key, status: "unknown", detail: `${detailNo.replace(/\.$/, "")}, but the pages build themselves in the browser, so this may be wrong.`, found: [], evidence: null };
+  if (!ok && because) return { key, status: "unknown", detail: `Not found in what was read, but ${because}, so it may be in the rest.`, found: [], evidence: null };
   return { key, status: ok ? "yes" : "no", detail: ok ? detailYes : detailNo, found, evidence };
 }
+
+/** The first reason given, or null. */
+const first = (...reasons: Array<string | null>): string | null => reasons.find((r) => r !== null) ?? null;
 
 /** What was found about a sitemap: one that is there (and where), one that is not (and why it is said), or why it is not known. */
 export type SitemapFinding = { found: true; url: string | null } | { found: false; url: string | null; detail?: string } | { unknown: string };
@@ -488,12 +665,16 @@ export type SitemapFinding = { found: true; url: string | null } | { found: fals
  * page never stands in for it. `https`: whether the home page was served over
  * HTTPS, whether plain HTTP sends visitors there (null when that was not
  * tried), and the secure request that failed when the site was read over
- * plain HTTP because of it. `sitemap`: null when nothing about it could be read.
+ * plain HTTP because of it. `sitemap`: null when nothing about it could be
+ * read. `unread`: the pages the home page links to that were meant to be read
+ * and were not (they failed, or did not answer 2xx); what the contact or
+ * booking page would have shown is then unknown, never "no".
  */
 export function runSiteChecks(input: {
   pages: readonly PageSnapshot[];
   https: { served: boolean; httpRedirects: boolean | null; secureFailure?: { url: string; excerpt: string } | null };
   sitemap: SitemapFinding | null;
+  unread?: readonly LinkedPage[];
 }): SiteCheck[] {
   const loaded = (p: PageSnapshot) => p.status >= 200 && p.status < 300;
   const home = input.pages[0];
@@ -502,10 +683,28 @@ export function runSiteChecks(input: {
   const n = pages.length;
   const read = n === 1 ? "the home page" : `${n} pages`;
   const js = pages.every(builtInBrowser);
-  const cutName = (p: PageSnapshot | undefined) => (!p ? null : `the first ${kb(p.bytes)} of ${p === home ? "the home page" : p.finalUrl}`);
-  const homeCut = cutName(home.truncated ? home : undefined);
-  const anyCut = cutName(pages.find((p) => p.truncated));
+  const readings: Reading[] = pages.map((page) => {
+    const lower = asciiLower(page.html);
+    const name = page === home ? "the home page" : page.finalUrl;
+    const scan: Scan = { capped: null };
+    const links = linksOf(page.html, lower, scan);
+    return { page, lower, name, links, linksCapped: scan.capped && `${name} ${scan.capped}` };
+  });
+  const homeReading = readings[0];
   const checks: SiteCheck[] = [];
+
+  // Why a "no" cannot be said, when it cannot: part of a page was not read...
+  const cutAt = (p: PageSnapshot | undefined) => (p ? `only the first ${kb(p.bytes)} of ${p === home ? "the home page" : p.finalUrl} was read` : null);
+  const homeCut = cutAt(home.truncated ? home : undefined);
+  const anyCut = cutAt(pages.find((p) => p.truncated));
+  // ...a page has more links than are read (the home page's are where the pages to read were chosen from)...
+  const linksCapped = first(...readings.map((r) => r.linksCapped));
+  // ...or the page the home page links to for it could not be read.
+  const notRead = (kind: PageKind): string | null => {
+    const u = (input.unread ?? []).find((x) => x.kind === kind);
+    return u ? `${u.url}, the ${kind} page the home page links to, could not be read` : null;
+  };
+  const contactUnread = notRead("contact");
 
   const secureFailure = input.https.secureFailure ?? null;
   checks.push(
@@ -516,29 +715,58 @@ export function runSiteChecks(input: {
         : { key: "https", status: "no", detail: "The site's secure HTTPS address sends visitors to plain HTTP, so it was read there.", found: [], evidence: { url: home.finalUrl, excerpt: home.finalUrl } },
   );
 
-  const homeLower = asciiLower(home.html);
-  const viewport = metaContent(home.html, "viewport", homeLower);
-  const fits = !!viewport && /width\s*=\s*device-width/i.test(viewport.content);
-  checks.push(yesNo("mobile_viewport", fits, "The home page tells phones to fit it to the screen (a mobile viewport).", "The home page has no mobile viewport setting, so phones may show it zoomed out.", [], fits && viewport ? { url: home.finalUrl, excerpt: viewport.tag.raw.slice(0, 200) } : null, false, viewport ? null : homeCut));
+  const homeLower = homeReading.lower;
+  const metaScan: Scan = { capped: null };
+  const metas = tagsOf(home.html, "meta", homeLower, metaScan);
+  const metaCapped = metaScan.capped && `the home page ${metaScan.capped}`;
+  const viewport = metaContent(metas, "viewport");
+  const fits = !!viewport && /width\s{0,20}=\s{0,20}device-width/i.test(viewport.content);
+  // A viewport setting without width=device-width is said as it was seen, never as no setting at all.
+  const seenViewport = viewport ? viewport.content.slice(0, 200).replace(/\s+/g, " ").trim().slice(0, 80) : "";
+  checks.push(
+    yesNo(
+      "mobile_viewport",
+      fits,
+      "The home page tells phones to fit it to the screen (a mobile viewport).",
+      viewport ? `The home page's viewport setting ("${seenViewport}") does not include width=device-width, so phones may not fit it to the screen.` : "The home page has no mobile viewport setting, so phones may show it zoomed out.",
+      [],
+      viewport ? { url: home.finalUrl, excerpt: viewport.tag.raw.slice(0, 200) } : null,
+      false,
+      viewport ? null : first(homeCut, metaCapped),
+    ),
+  );
 
-  const titleTag = tagsOf(home.html, "title", homeLower)[0];
-  const titleText = titleTag ? stripTags(innerOf(home.html, titleTag, "title", homeLower, 1_000) ?? "").slice(0, 300) : "";
+  // The title: its first 1,000 characters, wherever it closes (a title is text only, so the start of one is the start of it).
+  const titleTag = nextTag(home.html, homeLower, "title", 0);
+  const titleText = titleTag ? stripTags(home.html.slice(titleTag.end, Math.min(closeAt(homeLower, "title", titleTag.end), titleTag.end + 1_000))).slice(0, 300) : "";
   checks.push(yesNo("title", !!titleText, `The home page title is "${titleText.slice(0, 90)}".`, "The home page has no title for browsers and search results.", [], titleText ? { url: home.finalUrl, excerpt: titleText.slice(0, 160) } : null, false, titleTag ? null : homeCut));
 
-  const description = metaContent(home.html, "description", homeLower);
-  checks.push(yesNo("meta_description", !!description, "The home page has a search description.", "The home page has no search description, so search engines write their own snippet.", [], description ? { url: home.finalUrl, excerpt: description.content.slice(0, 160) } : null, false, homeCut));
+  const description = metaContent(metas, "description");
+  checks.push(yesNo("meta_description", !!description, "The home page has a search description.", "The home page has no search description, so search engines write their own snippet.", [], description ? { url: home.finalUrl, excerpt: description.content.slice(0, 160) } : null, false, first(homeCut, metaCapped)));
 
-  const tel = firstLink(pages, (h) => /^tel:/i.test(h));
-  checks.push(yesNo("click_to_call", !!tel, "A phone number on the site can be tapped to call.", `None of ${read} has a tap-to-call phone link.`, [], tel ? { url: tel.page.finalUrl, excerpt: excerptAt(tel.page.html, tel.index, 60) } : null, js, anyCut));
+  const tel = firstLink(readings, (h) => /^tel:/i.test(h));
+  checks.push(yesNo("click_to_call", !!tel, "A phone number on the site can be tapped to call.", `None of ${read} has a tap-to-call phone link.`, [], tel ? { url: tel.page.finalUrl, excerpt: excerptAt(tel.page.html, tel.index, 60) } : null, js, first(anyCut, linksCapped, contactUnread)));
 
-  const mail = firstLink(pages, (h) => /^mailto:/i.test(h));
-  checks.push(yesNo("email_link", !!mail, "The site has an email link.", `None of ${read} has an email link.`, [], mail ? { url: mail.page.finalUrl, excerpt: excerptAt(mail.page.html, mail.index, 60) } : null, js, anyCut));
+  const mail = firstLink(readings, (h) => /^mailto:/i.test(h));
+  checks.push(yesNo("email_link", !!mail, "The site has an email link.", `None of ${read} has an email link.`, [], mail ? { url: mail.page.finalUrl, excerpt: excerptAt(mail.page.html, mail.index, 60) } : null, js, first(anyCut, linksCapped, contactUnread)));
 
-  const forms = contactForms(pages);
-  checks.push(yesNo("contact_form", forms.found.length > 0, `The site has a contact form (${forms.found.join(", ")}).`, `None of ${read} has a contact form.`, forms.found, forms.evidence, js, anyCut));
+  const forms = contactForms(readings);
+  checks.push(
+    forms.form
+      ? {
+          key: "contact_form",
+          status: "yes",
+          detail: forms.form.own ? `The site has a contact form (${forms.form.names.join(", ")}).` : `The site has a form from ${forms.form.names.join(", ")}; what it asks for is not in the page's HTML.`,
+          found: forms.form.names,
+          evidence: forms.form.evidence,
+        }
+      : !js && forms.withPassword
+        ? { key: "contact_form", status: "unknown", detail: `A form on ${forms.withPassword} has a message field but also asks for a password, so whether it is a contact form is not known.`, found: [], evidence: null }
+        : yesNo("contact_form", false, "", `None of ${read} has a contact form.`, [], null, js, first(anyCut, forms.capped, homeReading.linksCapped, contactUnread)),
+  );
 
   const booking = findAll(pages, BOOKING);
-  checks.push(yesNo("online_booking", booking.found.length > 0, `Visitors can book online (${booking.found.join(", ")}).`, `No online booking tool was found on ${read}.`, booking.found, booking.evidence, js, anyCut));
+  checks.push(yesNo("online_booking", booking.found.length > 0, `Visitors can book online (${booking.found.join(", ")}).`, `No online booking tool was found on ${read}.`, booking.found, booking.evidence, js, first(anyCut, homeReading.linksCapped, notRead("booking"))));
 
   const chat = findAll(pages, CHAT);
   checks.push(yesNo("live_chat", chat.found.length > 0, `The site has live chat (${chat.found.join(", ")}).`, `No live chat tool was found on ${read}.`, chat.found, chat.evidence, js, anyCut));
@@ -546,35 +774,27 @@ export function runSiteChecks(input: {
   const analytics = findAll(pages, ANALYTICS);
   checks.push(yesNo("analytics", analytics.found.length > 0, `The site measures its visitors (${analytics.found.join(", ")}).`, `No visitor analytics tag was found on ${read}.`, analytics.found, analytics.evidence, js, anyCut));
 
-  const platform = findAll([home], PLATFORM);
-  const generator = metaContent(home.html, "generator", homeLower);
-  if (generator) {
-    for (const [name, re] of GENERATORS) {
-      if (re.test(generator.content) && !platform.found.includes(name)) {
-        platform.found.push(name);
-        platform.evidence ??= { url: home.finalUrl, excerpt: generator.tag.raw.slice(0, 200) };
-      }
-    }
-  }
+  const platform = platformsOf(home, metaContent(metas, "generator"));
+  const platformWords = [platform.built.length ? `is built on ${platform.built.join(" and ")}` : "", platform.signs.length ? `shows signs of ${platform.signs.join(" and ")}` : ""].filter(Boolean).join(", and ");
   checks.push(
-    platform.found.length
-      ? { key: "platform", status: "yes", detail: `The site is built on ${platform.found.join(" and ")}.`, found: platform.found, evidence: platform.evidence }
+    platformWords
+      ? { key: "platform", status: "yes", detail: `The site ${platformWords}.`, found: [...platform.built, ...platform.signs], evidence: platform.evidence }
       : { key: "platform", status: "unknown", detail: "The platform the site is built on could not be told from its HTML.", found: [], evidence: null },
   );
 
-  const schema = structuredTypes(pages);
+  const schema = structuredTypes(readings);
   checks.push(yesNo("structured_data", schema.types.length > 0, `The site describes itself to search engines as ${schema.types.join(", ")}.`, `None of ${read} carries structured business data for search engines.`, schema.types, schema.evidence, false, anyCut));
 
   const social: { found: string[]; evidence: SiteCheck["evidence"] } = { found: [], evidence: null };
-  for (const page of pages) {
-    for (const link of linksOf(page.html)) {
+  for (const r of readings) {
+    for (const link of r.links) {
       const hit = SOCIAL_LINKS.find(([name, re]) => re.test(link.href) && !social.found.includes(name));
       if (!hit) continue;
       social.found.push(hit[0]);
-      social.evidence ??= { url: page.finalUrl, excerpt: link.href.slice(0, 200) };
+      social.evidence ??= { url: r.page.finalUrl, excerpt: link.href.slice(0, 200) };
     }
   }
-  checks.push(yesNo("social_links", social.found.length > 0, `The site links to ${social.found.join(", ")}.`, `None of ${read} links to a social profile.`, social.found, social.evidence, js, anyCut));
+  checks.push(yesNo("social_links", social.found.length > 0, `The site links to ${social.found.join(", ")}.`, `None of ${read} links to a social profile.`, social.found, social.evidence, js, first(anyCut, linksCapped)));
 
   const sm = input.sitemap;
   checks.push(
@@ -604,9 +824,9 @@ export function runSiteChecks(input: {
   return checks;
 }
 
-/** Links worth reading after the home page: contact, booking, services, pricing, about. At most `max`, one per kind first. */
-export function pagesToRead(home: PageSnapshot, sameSite: (u: URL) => boolean, max = 8): string[] {
-  const kinds: ReadonlyArray<readonly [string, RegExp]> = [
+/** Links worth reading after the home page: contact, booking, services, pricing, about, FAQ. At most `max`, one per kind first, each with the kind it was chosen as. */
+export function pagesToRead(home: PageSnapshot, sameSite: (u: URL) => boolean, max = 8): LinkedPage[] {
+  const kinds: ReadonlyArray<readonly [PageKind, RegExp]> = [
     ["contact", /contact|get-in-touch|reach-us/i],
     ["booking", /book|booking|appointment|schedule|reserve|reservation/i],
     ["services", /service|what-we-do|treatments|menu|offerings/i],
@@ -615,7 +835,7 @@ export function pagesToRead(home: PageSnapshot, sameSite: (u: URL) => boolean, m
     ["faq", /faq|questions/i],
   ];
   const seen = new Set<string>([home.finalUrl.replace(/#.*$/, "")]);
-  const byKind = new Map<string, string[]>();
+  const byKind = new Map<PageKind, string[]>();
   for (const link of linksOf(home.html)) {
     if (!link.href || link.href.startsWith("#")) continue;
     let u: URL;
@@ -638,13 +858,13 @@ export function pagesToRead(home: PageSnapshot, sameSite: (u: URL) => boolean, m
     seen.add(key);
     byKind.set(kind[0], [...(byKind.get(kind[0]) ?? []), key]);
   }
-  const out: string[] = [];
+  const out: LinkedPage[] = [];
   for (let round = 0; out.length < max; round++) {
     let added = false;
     for (const [kind] of kinds) {
       const list = byKind.get(kind) ?? [];
       if (list[round] && out.length < max) {
-        out.push(list[round]);
+        out.push({ url: list[round], kind });
         added = true;
       }
     }
@@ -657,12 +877,64 @@ export function pagesToRead(home: PageSnapshot, sameSite: (u: URL) => boolean, m
 export const MAX_URL_CHARS = 500;
 /** The product token robots.txt groups are matched against (RFC 9309): the first word of site-fetch.ts's user agent. */
 export const ROBOTS_AGENT = "OASIS-AI-Audit";
+/** At most this many rules are followed for our agent. A robots.txt with more closes the whole site to us: a rule past the limit could close the page asked for. */
+export const MAX_ROBOTS_RULES = 2_000;
 /** A rule longer than this is cut to it (a Disallow cut short closes more, never less); its length still decides which rule wins. */
 const MAX_RULE_CHARS = 512;
 /** At most this many "*" in a rule: past them a Disallow is cut short (it closes more), an Allow is dropped (it opens nothing). */
 const MAX_RULE_STARS = 20;
 
-export type RobotsRules = { allow: string[]; disallow: string[] };
+/** The rules for our agent, each in the spelling robotsNormal gives it; `tooMany` when there were more than MAX_ROBOTS_RULES, and then nothing may be read. */
+export type RobotsRules = { allow: string[]; disallow: string[]; tooMany: boolean };
+
+const isHexDigit = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+/** RFC 3986's unreserved characters: A-Z, a-z, 0-9, "-", ".", "_", "~". */
+const isUnreserved = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45 || c === 46 || c === 95 || c === 126;
+/** Printable ASCII the URL parser still encodes in a path: '"', "<", ">", "`", "{", "}". */
+const ENCODED_IN_PATH = new Set([34, 60, 62, 96, 123, 125]);
+const HEX = "0123456789ABCDEF";
+const pct = (b: number) => `%${HEX[b >> 4]}${HEX[b & 15]}`;
+const UTF8 = new TextEncoder();
+
+/**
+ * A path, or a robots.txt rule, in the one spelling RFC 9309 (section 2.2.2)
+ * compares them in: a character outside ASCII percent-encoded as UTF-8; a
+ * percent-encoded unreserved character decoded ("%70rivate" is "private");
+ * every other percent-encoding kept, its hex in capitals; and what a URL never
+ * carries raw in its path (a control character, a space, '"', "<", ">", "`",
+ * "{", "}") encoded as the URL parser encodes it. Case is kept: a path is
+ * matched case-sensitively. One forward pass.
+ */
+export function robotsNormal(s: string): string {
+  let out = "";
+  let kept = 0;
+  for (let i = 0; i < s.length; ) {
+    const c = s.charCodeAt(i);
+    if (c > 32 && c < 127 && c !== 37 && !ENCODED_IN_PATH.has(c)) {
+      i++;
+      continue;
+    }
+    out += s.slice(kept, i);
+    if (c === 37 && isHexDigit(s.charCodeAt(i + 1)) && isHexDigit(s.charCodeAt(i + 2))) {
+      const b = parseInt(s.slice(i + 1, i + 3), 16);
+      out += isUnreserved(b) ? String.fromCharCode(b) : pct(b);
+      i += 3;
+    } else if (c === 37) {
+      out += "%";
+      i += 1;
+    } else if (c >= 128) {
+      let j = i + 1;
+      while (j < s.length && s.charCodeAt(j) >= 128) j++;
+      for (const b of UTF8.encode(s.slice(i, j))) out += pct(b);
+      i = j;
+    } else {
+      out += pct(c);
+      i += 1;
+    }
+    kept = i;
+  }
+  return out + s.slice(kept);
+}
 
 function agentToken(value: string): string {
   if (value.startsWith("*")) return "*";
@@ -672,37 +944,56 @@ function agentToken(value: string): string {
 /**
  * robots.txt as RFC 9309 reads it: the sitemaps it names, and the rules of the
  * group for our agent (ROBOTS_AGENT), or of the group for everyone ("*") when
- * no group names us. Consecutive user-agent lines share one group; groups for
- * the same agent are combined. A sitemap address longer than MAX_URL_CHARS is
- * skipped: it is not one, and it would be stored with the brief.
+ * no group names us. The whole file is read: site-fetch.ts reads at most
+ * 600,000 bytes of it, and the standard asks for at least 500 KiB.
+ * Consecutive user-agent lines share one group; groups for the same agent are
+ * combined; each rule is kept in robotsNormal's spelling, and past
+ * MAX_ROBOTS_RULES for our agent, `tooMany` says nothing may be read. A
+ * sitemap address longer than MAX_URL_CHARS is skipped: it is not one, and it
+ * would be stored with the brief. `cut`: the file was cut off at the size
+ * limit, so its last line may be part of one, and it is read only when it is
+ * a Disallow (cut short, a Disallow closes more, never less).
  */
-export function readRobots(text: string, agent = ROBOTS_AGENT): { sitemaps: string[] } & RobotsRules {
+export function readRobots(text: string, agent = ROBOTS_AGENT, cut = false): { sitemaps: string[] } & RobotsRules {
   const sitemaps: string[] = [];
-  type Group = { agents: string[]; allow: string[]; disallow: string[] };
+  type Group = { agents: string[]; allow: string[]; disallow: string[]; rules: number };
   const groups: Group[] = [];
   let group: Group | null = null;
   let agentLines = false;
-  for (const raw of text.replace(/^\uFEFF/, "").split(/\r\n|\r|\n/).slice(0, 2000)) {
-    const line = raw.replace(/#.*$/, "").trim();
+  const lines = text.replace(/^\uFEFF/, "").split(/\r\n|\r|\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/#.*$/, "").trim();
     const m = /^([A-Za-z-]+)\s*:\s*(.*)$/.exec(line);
     if (!m) continue;
     const field = m[1].toLowerCase();
-    const value = m[2].trim();
+    let value = m[2].trim();
+    if (cut && i === lines.length - 1) {
+      if (field !== "disallow") continue;
+      // A character cut in half at the limit is decoded as U+FFFD: what came before it is the rule.
+      let end = value.length;
+      while (end > 0 && value.charCodeAt(end - 1) === 0xfffd) end--;
+      value = value.slice(0, end);
+    }
     if (field === "sitemap") {
       if (value && value.length <= MAX_URL_CHARS && sitemaps.length < 10) sitemaps.push(value);
     } else if (field === "user-agent") {
-      if (!group || !agentLines) groups.push((group = { agents: [], allow: [], disallow: [] }));
+      if (!group || !agentLines) groups.push((group = { agents: [], allow: [], disallow: [], rules: 0 }));
       group.agents.push(agentToken(value));
       agentLines = true;
     } else if (field === "allow" || field === "disallow") {
       agentLines = false;
       // A rule before any user-agent line belongs to no group; an empty Disallow closes nothing.
-      if (group && value) group[field].push(value);
+      if (group && value) {
+        group.rules += 1;
+        // Counted past the limit but not kept: the count alone closes the site (below).
+        if (group.rules <= MAX_ROBOTS_RULES) group[field].push(robotsNormal(value));
+      }
     }
   }
   const mine = groups.filter((g) => g.agents.includes(agent.toLowerCase()));
   const chosen = mine.length ? mine : groups.filter((g) => g.agents.includes("*"));
-  return { sitemaps, allow: chosen.flatMap((g) => g.allow), disallow: chosen.flatMap((g) => g.disallow) };
+  const tooMany = chosen.reduce((sum, g) => sum + g.rules, 0) > MAX_ROBOTS_RULES;
+  return { sitemaps, allow: tooMany ? [] : chosen.flatMap((g) => g.allow), disallow: tooMany ? [] : chosen.flatMap((g) => g.disallow), tooMany };
 }
 
 /**
@@ -742,24 +1033,28 @@ function boundedRule(rule: string, allow: boolean): string | null {
 
 /**
  * May `path` (the path and its query, "/contact?ref=1") be read under these
- * rules? The rule that matches the most characters decides; when an Allow and
- * a Disallow tie, the Allow wins; when none matches, it may (RFC 9309). A path
- * longer than 2,048 characters is not matched at all: it counts as closed.
+ * rules? The path is put in robotsNormal's spelling, as the rules are. The
+ * rule that matches the most characters decides; when an Allow and a Disallow
+ * tie, the Allow wins; when none matches, it may (RFC 9309). A path longer
+ * than 2,048 characters is not matched at all: it counts as closed, and so
+ * does every path when there were too many rules to follow.
  */
 export function robotsAllow(path: string, rules: RobotsRules): boolean {
-  if (path.length > 2_048) return false;
+  if (rules.tooMany || path.length > 2_048) return false;
+  const p = robotsNormal(path);
+  if (p.length > 2_048) return false;
   let best = -1;
   let allowed = true;
   for (const rule of rules.disallow) {
     const r = boundedRule(rule, false);
-    if (r && rule.length > best && robotsMatch(path, r)) {
+    if (r && rule.length > best && robotsMatch(p, r)) {
       best = rule.length;
       allowed = false;
     }
   }
   for (const rule of rules.allow) {
     const r = boundedRule(rule, true);
-    if (r && rule.length >= best && robotsMatch(path, r)) {
+    if (r && rule.length >= best && robotsMatch(p, r)) {
       best = rule.length;
       allowed = true;
     }

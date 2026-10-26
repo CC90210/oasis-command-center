@@ -5,7 +5,9 @@
 --                   robots.txt, its sitemap, the plain-HTTP check; fetched by
 --                   the Command Center, never with a login), or the answers the
 --                   client gave on the AI-audit form. Only a short excerpt and a
---                   hash of each response are kept, never the whole page. `kind`
+--                   hash of each response are kept, never the whole page. A row
+--                   never changes once written (a trigger refuses it): the
+--                   brief's Verified facts rest on these rows. `kind`
 --                   and `reliability` are vocabularies kept in
 --                   lib/ai-audit/briefs.ts. Phase 3's research adds kinds
 --                   (search results, PageSpeed).
@@ -64,4 +66,12 @@ CREATE TRIGGER IF NOT EXISTS ai_audit_briefs_frozen
 BEFORE UPDATE ON ai_audit_briefs
 BEGIN
   SELECT RAISE(ABORT, 'ai_audit_brief_frozen');
+END;
+
+-- A source is what a Verified fact rests on (what was read, when, its hash):
+-- it never changes either.
+CREATE TRIGGER IF NOT EXISTS ai_audit_sources_frozen
+BEFORE UPDATE ON ai_audit_sources
+BEGIN
+  SELECT RAISE(ABORT, 'ai_audit_source_frozen');
 END;

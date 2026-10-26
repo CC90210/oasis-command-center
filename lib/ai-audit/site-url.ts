@@ -47,8 +47,8 @@ const PATH_SITES: readonly RegExp[] = [/\.wixsite\.com$/, /(^|\.)square\.site$/,
 
 /** Names that are never a business's public website. */
 const BLOCKED_SUFFIXES = ["localhost", "local", "internal", "intranet", "lan", "home", "corp", "home.arpa", "localdomain", "test", "example", "invalid", "onion", "arpa", "svc"];
-/** Services whose every name points at the address written in it (127.0.0.1.nip.io) or at the machine itself (localtest.me). */
-const PRIVATE_DNS = ["nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me", "vcap.me", "traefik.me"];
+/** Services whose every name points at the address written in it (127.0.0.1.nip.io), at one it is told to (1u.ms), or at the machine itself (localtest.me). */
+const PRIVATE_DNS = ["nip.io", "sslip.io", "xip.io", "xip.name", "1u.ms", "ip.mrtn.dk", "localtest.me", "lvh.me", "vcap.me", "traefik.me", "lacolhost.com", "localho.st", "local.gd", "fuf.me"];
 
 /** A public DNS name: two or more labels, a letter top-level label, no IP address in any form. */
 export function isPublicHostname(raw: string): boolean {
