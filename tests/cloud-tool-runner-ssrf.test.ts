@@ -3,20 +3,28 @@
  * and Learn from a link, through lib/cloud-tool-runner.ts) never reach an address
  * inside OASIS's own network, by literal or by name.
  *
- * Pins (2026-10-26, a sibling session's review of lib/cloud-tool-runner.ts):
+ * Pins (2026-10-26, a sibling session's review of lib/cloud-tool-runner.ts, then
+ * an independent review of the fix):
  *   1. assertSafeUrl refuses every loopback, "this host", link-local, private,
  *      carrier-grade NAT, reserved and multicast literal, in every spelling the
  *      URL parser lets through: dotted, decimal, hex, bracketed IPv6, IPv4-mapped
- *      and NAT64 IPv6, a trailing dot on localhost. Before this it refused the
- *      one string "127.0.0.1" and "::1" without its brackets, so [::1],
- *      127.0.0.2 and 100.64.0.0/10 all went through.
- *   2. isForbiddenIp is the one range table both guards use.
+ *      and NAT64 IPv6, a trailing dot on localhost. A host with an empty label
+ *      ("localhost..", ".localhost") is not a name and is refused. Before this it
+ *      refused the one string "127.0.0.1" and "::1" without its brackets, so
+ *      [::1], 127.0.0.2 and 100.64.0.0/10 all went through.
+ *   2. isForbiddenIp is the one range table both guards use. For IPv6 it passes
+ *      only global unicast (2000::/3), less 6to4 and Teredo, which tunnel to an
+ *      IPv4 address the IPv4 table never sees.
  *   3. assertResolvedIpIsPublic checks every address a name resolves to against
  *      that table, checks a literal host without resolving, and FAILS CLOSED
- *      when no resolver can answer: on a Worker, Node's dns is not there, and the
- *      old guard returned as if the host were fine.
- *   4. The Worker resolves over DNS-over-HTTPS (A and AAAA, following CNAMEs);
- *      a DoH read that fails is "dns_check_failed", never a pass.
+ *      when no resolver can answer. The old guard returned as if the host were
+ *      fine whenever the dns module was missing or threw.
+ *   4. resolveAddresses asks the runtime's lookup first (Node's here; on the
+ *      Worker, the node:dns workerd provides natively) and confirms over
+ *      DNS-over-HTTPS every answer that would leave nothing to check: an error,
+ *      "not found" included, or no addresses. DoH's status is read: NOERROR is
+ *      the addresses, NXDOMAIN is none, and any other status, like a failed
+ *      request, is "dns_check_failed", never a pass.
  *
  * Run: node --conditions=react-server --import tsx tests/cloud-tool-runner-ssrf.test.ts
  */
@@ -59,12 +67,18 @@ async function main() {
       "::1", "[::1]", "::", "[::]", "::ffff:127.0.0.1", "::ffff:7f00:1", "[::ffff:7f00:1]", "::ffff:169.254.169.254",
       "::ffff:a9fe:a9fe", "::ffff:10.0.0.1", "::ffff:100.64.0.1", "::127.0.0.1", "64:ff9b::7f00:1", "64:ff9b::127.0.0.1",
       "fe80::1", "fe80::1%eth0", "febf::1", "fec0::1", "fed0::1", "feff::1", "fc00::1", "fd00::1", "fd00:ec2::254", "fdff::1", "ff02::1", "FE80::1",
+      // Outside global unicast (2000::/3), refused by default: the compatible form even for a public
+      // address, IPv4-translated (::ffff:0:a.b.c.d), local-use NAT64, discard-only, and unassigned blocks.
+      "::8.8.8.8", "::2", "::ffff:0:7f00:1", "::ffff:0:808:808", "64:ff9b:1::7f00:1", "64:ff9b:1::808:808", "100::1",
+      "1::1", "fb00::1", "fe00::1", "fe7f::1", "4000::1", "e000::1",
+      // 6to4 and Teredo tunnel to an IPv4 address, so both are refused whole: 2002:7f00:1:: is 127.0.0.1.
+      "2002:7f00:1::1", "2002:a9fe:a9fe::1", "2002:808:808::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::1",
     ];
     for (const ip of forbidden) assert.equal(isForbiddenIp(ip), true, `${ip} is forbidden`);
     const allowed = [
       "8.8.8.8", "1.1.1.1", "93.184.216.34", "11.0.0.1", "172.32.0.1", "172.15.255.255", "192.167.255.255", "192.169.0.1",
       "100.63.255.255", "100.128.0.0", "198.17.255.255", "198.20.0.1", "223.255.255.255",
-      "2606:4700::1111", "2001:db8::1", "::ffff:8.8.8.8", "::ffff:808:808", "64:ff9b::808:808", "fb00::1", "fe7f::1", "fe00::1",
+      "2606:4700::1111", "2001:db8::1", "2001:4860:4860::8888", "2a00:1450:4001:80b::200e", "::ffff:8.8.8.8", "::ffff:808:808", "64:ff9b::808:808",
     ];
     for (const ip of allowed) assert.equal(isForbiddenIp(ip), false, `${ip} is public`);
     for (const junk of ["", "not-an-ip", "example.com", "1.2.3", "1.2.3.4.5", "256.1.1.1", ":::", "zz::1"]) {
@@ -111,6 +125,16 @@ async function main() {
       ["http://[fd12:3456::1]/", "blocked_private_ip"],
       ["http://[fec0::1]/", "blocked_private_ip"],
       ["http://[ff02::1]/", "blocked_private_ip"],
+      ["http://[2002:7f00:1::1]/", "blocked_private_ip"],
+      ["http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/", "blocked_private_ip"],
+      ["http://[64:ff9b:1::7f00:1]/", "blocked_private_ip"],
+      // The parser keeps an empty label; a host with one is not a name, so it is refused, not resolved.
+      ["http://localhost../", "invalid_url"],
+      ["http://127.0.0.1../", "invalid_url"],
+      ["http://example.com../", "invalid_url"],
+      ["http://.localhost/", "invalid_url"],
+      ["http://a..b/", "invalid_url"],
+      ["http://./", "invalid_url"],
     ];
     for (const [url, code] of refusals) assert.equal(refused(url), code, url);
     assert.equal(refused("ftp://example.com/"), "unsupported_protocol");
@@ -158,44 +182,65 @@ async function main() {
     );
   });
 
-  await check("resolveAddresses: Node's lookup when it works; DNS-over-HTTPS when it is not there (a Worker); failure of both is dns_check_failed", async () => {
-    const doh = (answers: Record<string, Array<{ type: number; data: string }>>) =>
+  await check("resolveAddresses: the runtime's lookup when it answers; DNS-over-HTTPS confirms every answer that leaves nothing to check; a resolver that cannot answer is dns_check_failed", async () => {
+    let asked = 0;
+    /** A DoH resolver: NOERROR for a name it knows (its answers, maybe none of a type), NXDOMAIN otherwise, unless `status` overrides both. */
+    const doh = (answers: Record<string, Array<{ type: number; data: string }>>, status?: number) =>
       (async (input: string | URL | Request) => {
+        asked += 1;
         const u = new URL(String(input));
         const type = u.searchParams.get("type") === "AAAA" ? 28 : 1;
         const name = u.searchParams.get("name") ?? "";
         const Answer = (answers[name] ?? []).filter((a) => a.type === type || a.type === 5);
-        return new Response(JSON.stringify({ Status: Answer.length ? 0 : 3, Answer }), { status: 200, headers: { "content-type": "application/dns-json" } });
+        const Status = status ?? (name in answers ? 0 : 3);
+        return new Response(JSON.stringify({ Status, Answer }), { status: 200, headers: { "content-type": "application/dns-json" } });
       }) as typeof fetch;
-
-    const lookupWorks = async () => [{ address: "93.184.216.34", family: 4 }];
-    assert.deepEqual(await resolveAddresses("example.com", { lookup: lookupWorks, fetchImpl: doh({}) }), [{ address: "93.184.216.34", family: 4 }]);
-
-    const notThere = async () => {
-      const err = new Error("not implemented") as Error & { code?: string };
-      err.code = "ERR_METHOD_NOT_IMPLEMENTED";
+    const failing = (code: string) => async (): Promise<never> => {
+      const err = new Error(code) as Error & { code?: string };
+      err.code = code;
       throw err;
     };
-    const viaDoh = await resolveAddresses("evil.example", {
-      lookup: notThere,
-      fetchImpl: doh({ "evil.example": [{ type: 5, data: "cname.evil.example." }, { type: 1, data: "127.0.0.1" }, { type: 28, data: "fd00::1" }] }),
-    });
-    assert.deepEqual(viaDoh.map((a) => a.address).sort(), ["127.0.0.1", "fd00::1"], "A and AAAA, through the CNAME");
-    // No Node resolver at all (the Worker): straight to DoH.
-    assert.deepEqual(await resolveAddresses("example.com", { lookup: null, fetchImpl: doh({ "example.com": [{ type: 1, data: "93.184.216.34" }] }) }), [{ address: "93.184.216.34", family: 4 }]);
-
-    const nxdomain = async () => {
-      const err = new Error("getaddrinfo ENOTFOUND nxdomain.example") as Error & { code?: string };
-      err.code = "ENOTFOUND";
-      throw err;
-    };
-    assert.deepEqual(await resolveAddresses("nxdomain.example", { lookup: nxdomain, fetchImpl: doh({}) }), [], "a name that does not exist: the fetch surfaces that");
-    assert.deepEqual(await resolveAddresses("nxdomain.example", { lookup: notThere, fetchImpl: doh({}) }), [], "the same over DoH (Status 3, no answers)");
-
     const down = (async () => {
       throw new Error("network down");
     }) as unknown as typeof fetch;
-    await assert.rejects(resolveAddresses("example.com", { lookup: notThere, fetchImpl: down }), /dns_check_failed/, "no resolver could answer");
+
+    const lookupWorks = async () => [{ address: "93.184.216.34", family: 4 }];
+    assert.deepEqual(await resolveAddresses("example.com", { lookup: lookupWorks, fetchImpl: down }), [{ address: "93.184.216.34", family: 4 }], "an answer with addresses needs no second look");
+
+    asked = 0;
+    const viaDoh = await resolveAddresses("evil.example", {
+      lookup: failing("ERR_METHOD_NOT_IMPLEMENTED"),
+      fetchImpl: doh({ "evil.example": [{ type: 5, data: "cname.evil.example." }, { type: 1, data: "127.0.0.1" }, { type: 28, data: "fd00::1" }] }),
+    });
+    assert.deepEqual(viaDoh.map((a) => a.address).sort(), ["127.0.0.1", "fd00::1"], "A and AAAA, through the CNAME");
+    assert.equal(asked, 2, "one DoH question per record type");
+    // No runtime lookup at all: straight to DoH. A name with an A record and no AAAA is NOERROR with no answers for AAAA.
+    assert.deepEqual(await resolveAddresses("example.com", { lookup: null, fetchImpl: doh({ "example.com": [{ type: 1, data: "93.184.216.34" }] }) }), [{ address: "93.184.216.34", family: 4 }]);
+
+    // "Not found" is confirmed, not believed: whatever code a runtime gives, DoH answers for it.
+    for (const code of ["ENOTFOUND", "ENODATA", "EAI_NONAME", "EAI_AGAIN", "ESERVFAIL"]) {
+      assert.deepEqual(await resolveAddresses("nxdomain.example", { lookup: failing(code), fetchImpl: doh({}) }), [], `${code}, and DoH says NXDOMAIN: nothing to check`);
+      await assert.rejects(
+        assertResolvedIpIsPublic("rebind.example", (h) => resolveAddresses(h, { lookup: failing(code), fetchImpl: doh({ "rebind.example": [{ type: 1, data: "127.0.0.1" }] }) })),
+        /blocked_resolved_private_ip/,
+        `${code} from the lookup, but the name exists and points inside: refused`,
+      );
+      await assert.rejects(resolveAddresses("example.com", { lookup: failing(code), fetchImpl: down }), /dns_check_failed/, `${code} and DoH down: a failed check, not a pass`);
+    }
+    asked = 0;
+    assert.deepEqual(await resolveAddresses("rebind.example", { lookup: async () => [], fetchImpl: doh({ "rebind.example": [{ type: 1, data: "10.0.0.7" }] }) }), [{ address: "10.0.0.7", family: 4 }], "an empty answer is confirmed too");
+    assert.equal(asked, 2);
+
+    // DoH's status is read: only NOERROR and NXDOMAIN are answers.
+    for (const status of [1, 2, 4, 5]) {
+      await assert.rejects(resolveViaDoh("example.com", doh({ "example.com": [] }, status)), /dns_check_failed/, `Status ${status} is a resolver that did not answer`);
+      await assert.rejects(resolveAddresses("example.com", { lookup: failing("ENOTFOUND"), fetchImpl: doh({}, status) }), /dns_check_failed/, `ENOTFOUND, then DoH Status ${status}`);
+    }
+    const noStatus = (async () => new Response(JSON.stringify({ Answer: [] }), { status: 200 })) as unknown as typeof fetch;
+    await assert.rejects(resolveViaDoh("example.com", noStatus), /dns_check_failed/, "an answer with no status is not NOERROR");
+    assert.deepEqual(await resolveViaDoh("nxdomain.example", doh({})), [], "NXDOMAIN on both questions: no such name");
+
+    await assert.rejects(resolveAddresses("example.com", { lookup: failing("ERR_METHOD_NOT_IMPLEMENTED"), fetchImpl: down }), /dns_check_failed/, "no resolver could answer");
     const refusing = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
     await assert.rejects(resolveViaDoh("example.com", refusing), /dns_check_failed/, "a DoH error status is a failed check");
   });

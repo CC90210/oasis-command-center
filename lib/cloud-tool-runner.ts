@@ -2055,24 +2055,26 @@ function parseIpv6(s: string): number[] | null {
 }
 
 /**
- * The IPv6 ranges that are inside the network, and the three forms that carry an
- * IPv4 address inside an IPv6 one (mapped ::ffff:a.b.c.d, compatible ::a.b.c.d,
- * NAT64 64:ff9b::a.b.c.d), judged by the IPv4 table.
+ * The IPv6 addresses an agent's web read must never reach. Only global unicast
+ * (2000::/3) is the public internet, so everything outside it is refused by
+ * default: :: and ::1, unique local (fc00::/7), link-local (fe80::/10), the old
+ * site-local block, multicast, local-use NAT64 (64:ff9b:1::/48), the
+ * IPv4-compatible and IPv4-translated forms, and every block not yet assigned.
+ * Two forms carry an IPv4 address and are judged by the IPv4 table instead:
+ * mapped (::ffff:a.b.c.d) and well-known NAT64 (64:ff9b::a.b.c.d). Inside
+ * 2000::/3, 6to4 (2002::/16) and Teredo (2001::/32) tunnel to an IPv4 address
+ * the IPv4 table never sees, so both are refused whole.
+ *
+ * 2026-10-26 (independent review of #737): the table listed the private ranges
+ * and passed the rest, so 2002:7f00:1::1 (6to4 for 127.0.0.1) went through.
  */
 function forbiddenIpv6(g: number[]): boolean {
   const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
   const tailV4 = [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff];
   if (zero(0, 5) && g[5] === 0xffff) return forbiddenIpv4(tailV4);
   if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return forbiddenIpv4(tailV4);
-  if (zero(0, 7) && g[7] <= 1) return true; // :: (unspecified) and ::1 (loopback)
-  if (zero(0, 6)) return forbiddenIpv4(tailV4); // the deprecated IPv4-compatible form
-  const top = g[0];
-  return (
-    (top & 0xfe00) === 0xfc00 || // fc00::/7 unique local
-    (top & 0xffc0) === 0xfe80 || // fe80::/10 link-local
-    (top & 0xffc0) === 0xfec0 || // fec0::/10 site-local (deprecated, still routed in-house)
-    (top & 0xff00) === 0xff00 // ff00::/8 multicast
-  );
+  if ((g[0] & 0xe000) !== 0x2000) return true;
+  return g[0] === 0x2002 || (g[0] === 0x2001 && g[1] === 0);
 }
 
 /** `host` with the brackets an IPv6 literal carries in a URL, and a zone id, taken off. */
@@ -2121,8 +2123,12 @@ export function assertSafeUrl(url: string): URL {
   // need to hit our own internal infra. Cloud-tool calls are explicitly
   // for public web reads. The URL parser has already turned every numeric
   // spelling of an address (127.1, 2130706433, 0x7f000001) into dotted form
-  // and keeps IPv6 in brackets; a trailing dot names the same host.
+  // and keeps IPv6 in brackets. One trailing dot is the DNS root and names the
+  // same host ("localhost." is localhost). Any other empty label
+  // ("localhost..", ".localhost", "a..b") is not a host name: the parser keeps
+  // it, so it is refused here rather than left to a resolver to read.
   const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.split(".").some((label) => label === "")) throw new Error("invalid_url");
   const blocked = [
     "localhost",
     "127.0.0.1",
@@ -2149,10 +2155,15 @@ export type AddressResolver = (host: string) => Promise<ResolvedAddress[]>;
 
 /**
  * Every A and AAAA answer for `host` from Cloudflare's resolver over
- * DNS-over-HTTPS, CNAMEs followed as the resolver follows them. [] when the
- * name does not exist (Status 3, no answers). Throws dns_check_failed when the
- * resolver cannot be asked: a guard that cannot look is a failed check, never a
- * pass. This is how the Worker resolves, where Node's dns is not there.
+ * DNS-over-HTTPS, CNAMEs followed as the resolver follows them. The answer's
+ * DNS status decides what it means: NOERROR (0) is the addresses (none, when
+ * the name has no record of that type), NXDOMAIN (3) is "no such name" ([]).
+ * Any other status (SERVFAIL 2, REFUSED 5, none at all), an HTTP error or a
+ * failed request throws dns_check_failed: a guard that cannot look is a failed
+ * check, never a pass.
+ *
+ * 2026-10-26 (independent review of #737): the first version read only the
+ * answers, so a SERVFAIL, which carries none, passed as "no addresses".
  */
 export async function resolveViaDoh(host: string, fetchImpl: typeof fetch = fetch): Promise<ResolvedAddress[]> {
   const ask = async (type: "A" | "AAAA"): Promise<ResolvedAddress[]> => {
@@ -2161,7 +2172,9 @@ export async function resolveViaDoh(host: string, fetchImpl: typeof fetch = fetc
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`doh_${res.status}`);
-    const body = (await res.json()) as { Answer?: Array<{ type?: number; data?: string }> };
+    const body = (await res.json()) as { Status?: number; Answer?: Array<{ type?: number; data?: string }> };
+    if (body.Status === 3) return []; // NXDOMAIN
+    if (body.Status !== 0) throw new Error(`doh_status_${String(body.Status)}`); // anything but NOERROR
     const want = type === "A" ? 1 : 28;
     return (body.Answer ?? [])
       .filter((a) => a.type === want && typeof a.data === "string")
@@ -2176,19 +2189,22 @@ export async function resolveViaDoh(host: string, fetchImpl: typeof fetch = fetc
   }
 }
 
-/** Lookup errors that mean "no such name": the fetch that follows surfaces them. Anything else means the resolver could not answer. */
-const NAME_NOT_FOUND = new Set(["ENOTFOUND", "ENODATA", "EAI_NODATA", "EAI_NONAME"]);
-
 type NodeLookup = (host: string, opts: { all: true }) => Promise<ResolvedAddress[]>;
 
 /**
- * Every address `host` resolves to: Node's lookup where it exists (the routes
- * declare runtime nodejs), DNS-over-HTTPS where it does not or cannot answer
- * (the Worker, whose node:dns is a stub), and dns_check_failed when neither
- * can. `deps.lookup` null means "no Node resolver"; undefined means "find it".
+ * Every address `host` resolves to. The runtime's own lookup answers first:
+ * Node's in dev and tests, and on the Worker the node:dns that workerd provides
+ * natively under nodejs_compat. An answer that would leave nothing to check
+ * (an error of any kind, "not found" included, or no addresses) is asked again
+ * over DNS-over-HTTPS (resolveViaDoh), whose status is read, and a resolver
+ * that still cannot answer is dns_check_failed. `deps.lookup` null means "no
+ * runtime lookup"; undefined means "find it".
  *
  * 2026-10-26: the old guard returned as if the host were fine whenever the dns
- * module was missing or threw, which on the Worker was every request.
+ * module was missing or threw. The independent review of #737: the first fix
+ * took a lookup's "not found" codes at their word, and which code a resolver
+ * that could not answer reports depends on the runtime, so "not found" is now
+ * confirmed over DoH before it counts.
  */
 export async function resolveAddresses(
   host: string,
@@ -2205,11 +2221,10 @@ export async function resolveAddresses(
   }
   if (lookup) {
     try {
-      return (await lookup(host, { all: true })).map((a) => ({ address: a.address, family: a.family }));
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code && NAME_NOT_FOUND.has(code)) return [];
-      // Not an answer but a resolver that could not give one: ask over HTTPS instead.
+      const found = (await lookup(host, { all: true })).map((a) => ({ address: a.address, family: a.family }));
+      if (found.length > 0) return found;
+    } catch {
+      // No address to check, whatever the code says: DoH confirms it below.
     }
   }
   return resolveViaDoh(host, deps.fetchImpl ?? fetch);
