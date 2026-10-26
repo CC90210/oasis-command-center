@@ -29,7 +29,6 @@ import {
   EVIDENCE_LABELS,
   PROFILE_EDIT_STAGES,
   VERSION_STATUSES,
-  WAITING_ON_CLIENT_STAGES,
   isOneOf,
   type EvidenceLabel,
   type VersionStatus,
@@ -456,11 +455,13 @@ export async function listProposalVersions(db: Client, tenantId: string, engagem
 export type SaveDraftResult<T> = { ok: true; version: T; created: boolean } | { ok: false; error: "conflict" | "not_editable" | "not_found" };
 
 /**
- * Where a delivered version may get a new draft: while it waits on the client,
- * and in Research & Audit Generation after a revision moved it back
- * (lib/ai-audit/delivery.ts reviseAfterDelivery, phase 5).
+ * Where a delivered version may get a new draft: only in Research & Audit
+ * Generation, after a revision moved the engagement back (lib/ai-audit/delivery.ts
+ * reviseAfterDelivery, phase 5). While the client has it, the delivered
+ * versions and the pointers the payment rules read stay as they are
+ * (re-review of phase 5).
  */
-const REVISION_STAGES: readonly string[] = [...WAITING_ON_CLIENT_STAGES, "generating"];
+const REVISION_STAGES: readonly string[] = ["generating"];
 
 /**
  * Save the audit document on the engagement's draft version. When the current
@@ -596,6 +597,9 @@ export async function saveProposalDraft(
   if (!engagement) return { ok: false, error: "not_found" };
   if (engagement.row_version !== input.expectedRowVersion) return { ok: false, error: "conflict" };
   const current = engagement.current_proposal_version_id ? await getProposalVersion(db, t, engagement.current_proposal_version_id) : null;
+  if (current && current.status === "delivered" && !REVISION_STAGES.includes(engagement.stage)) {
+    return { ok: false, error: "not_editable" };
+  }
   const content = await normalizeProposal(db, t, input.content, current?.content ?? null, input.actor.id ?? "", input.tax, input.now, {
     allowFixtureItems: engagement.is_fixture,
     ownerMayPrice: input.ownerMayPrice === true,

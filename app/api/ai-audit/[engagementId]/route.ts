@@ -66,6 +66,7 @@ import { attachMeetTranscript, createAuditRoom } from "@/lib/ai-audit/meet-link"
 import { meetMediaReady } from "@/lib/meet/handlers";
 import { liveMeetDeps } from "@/lib/meet/live-deps";
 import { revokeShareLink } from "@/lib/ai-audit/link";
+import { EMAIL_RE } from "@/lib/ai-audit/delivery-payload";
 import { saveAssumptions, startResearch } from "@/lib/ai-audit/research";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { startWriting } from "@/lib/ai-audit/writing";
@@ -78,7 +79,6 @@ export const maxDuration = 60;
 
 type Ctx = { params: Promise<{ engagementId: string }> };
 const NO_STORE = { "cache-control": "no-store" };
-const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 
 function json(status: number, body: Record<string, unknown>) {
   return NextResponse.json(body, { status, headers: NO_STORE });

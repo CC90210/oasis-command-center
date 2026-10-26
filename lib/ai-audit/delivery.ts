@@ -543,16 +543,22 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
   const url = `${deps.baseUrl()}/your-audit/${token}`;
   const body = p.body.replace(AUDIT_LINK_PLACEHOLDER, url);
   const approverEmail = (ctx.approver?.email || "").trim().toLowerCase() || null;
-  const sent = await ctx.deps.sendEmail({
-    tenantId: t,
-    to: p.to,
-    cc: approverEmail && approverEmail !== p.to ? [approverEmail] : [],
-    subject: p.subject,
-    body,
-    signer: ctx.deps.signerFor(approverEmail, "oasis"),
-    idempotencyKey: ctx.approval.idempotency_key,
-    purpose: "sales",
-  });
+  const sent = await ctx.deps
+    .sendEmail({
+      tenantId: t,
+      to: p.to,
+      cc: approverEmail && approverEmail !== p.to ? [approverEmail] : [],
+      subject: p.subject,
+      body,
+      signer: ctx.deps.signerFor(approverEmail, "oasis"),
+      idempotencyKey: ctx.approval.idempotency_key,
+      purpose: "sales",
+    })
+    .catch(
+      // A send that threw may or may not have gone out: it is handled as one the mail server stopped answering, so CC
+      // checks the Sent folder before anything revokes or restores a link (review of phase 5).
+      (err: unknown) => ({ ok: false as const, provider: EMAIL_PROVIDER, reason: "delivery_unknown" as const, error: err instanceof Error ? err.message : String(err) }),
+    );
   if (!sent.ok && sent.reason === "delivery_unknown") {
     // The mail server took the message and then stopped answering: it may have
     // arrived. The link keeps working, and nothing here offers a second send

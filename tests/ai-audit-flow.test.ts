@@ -761,6 +761,18 @@ async function main() {
       [e.stage, e.current_audit_version_id, e.current_proposal_version_id, e.delivery_approval_id, e.share_link_id, e.health],
     );
     assert.ok(await pub.loadPublicAudit(db, token, NOW()), "the client's link still opens");
+    // While the client has it, nothing saves a draft over the delivered versions (re-review of phase 5).
+    const now2 = (await store.getEngagement(db, OASIS, engagementId))!;
+    const delivered = (await versions.getProposalVersion(db, OASIS, now2.current_proposal_version_id!))!;
+    assert.deepEqual(
+      await versions.saveProposalDraft(db, { tenantId: OASIS, engagementId, content: delivered.content!, actor: cc, now: NOW(), expectedRowVersion: now2.row_version, tax: null }),
+      { ok: false, error: "not_editable" },
+    );
+    const deliveredAudit = (await versions.getAuditVersion(db, OASIS, now2.current_audit_version_id!))!;
+    assert.deepEqual(
+      await versions.saveAuditDraft(db, { tenantId: OASIS, engagementId, doc: deliveredAudit.doc!, actor: cc, now: NOW(), expectedRowVersion: now2.row_version }),
+      { ok: false, error: "not_editable" },
+    );
   });
 
   console.log("the client's link");

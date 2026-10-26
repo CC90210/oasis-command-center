@@ -594,14 +594,15 @@ async function stripeSessionState(f: typeof fetch, secret: string, sessionId: st
  * this existed, or a session Stripe opened while a revision landed (review of
  * phase 5, finding 1).
  */
-export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10, now = new Date()): Promise<string[]> {
   const rs = await db.execute({
     sql: `SELECT DISTINCT c.engagement_id FROM ai_audit_checkouts c
           JOIN ai_audit_engagements e ON e.tenant_id = c.tenant_id AND e.id = c.engagement_id
           WHERE c.tenant_id = ? AND c.status IN ('creating', 'open') AND c.stripe_session_id IS NOT NULL
             AND (e.stage NOT IN (${WAITING_ON_CLIENT_STAGES.map(() => "?").join(", ")}) OR c.proposal_version_id IS NOT e.current_proposal_version_id)
+            AND (c.last_checked_at IS NULL OR c.last_checked_at < ?)
           LIMIT ?`,
-    args: [requireTenant(tenantId), ...WAITING_ON_CLIENT_STAGES, limit],
+    args: [requireTenant(tenantId), ...WAITING_ON_CLIENT_STAGES, new Date(now.getTime() - 30 * 60_000).toISOString(), limit],
   });
   return rs.rows.map((r) => String(r.engagement_id));
 }
