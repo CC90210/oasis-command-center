@@ -12,6 +12,7 @@ const ERROR_WORDS: Record<string, string> = {
   no_transcript: "Add a transcript with lines in it first.",
   research_not_installed: "Research needs its tables first: database migration bravo__243 is not applied yet.",
   no_research: "Research has not finished yet, so there is nothing to draft from.",
+  no_ai_engine: "The client did not agree to AI analysis, so no model writes any of it. The draft's own wording stays.",
   draft_exists: "There is a draft already. Press again and confirm to replace what it says.",
   no_audit_draft: "There is no audit draft yet. Draft the audit first.",
   not_editable: "The audit is with you for final approval or already sent. Take it back for edits first.",

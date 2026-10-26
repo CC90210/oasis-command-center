@@ -90,6 +90,7 @@ import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
 import { checkSearchAnswer, searchJobInput } from "@/lib/ai-audit/research";
+import { finishWriting, writeJobInput } from "@/lib/ai-audit/writing";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import {
   LEASE_GUARD,
@@ -290,7 +291,9 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     if (job.toolKey === "ai_audit_model") {
       // The prompt is built now, from the database, and handed over once: the
       // job row holds ids only. Consent and the stage are checked again here.
-      const built = await modelJobInput(deps.db, job);
+      // One tool, two purposes: a window of a profile draft, or a pass over an audit's opening prose.
+      const writing = job.input.purpose === "write";
+      const built = writing ? await writeJobInput(deps.db, job) : await modelJobInput(deps.db, job);
       if (built.ok) return answer(built.input, hold);
       const at = deps.now.toISOString();
       const code = built.code === "gone" ? "ai_audit_gone" : "ai_audit_not_permitted";
@@ -300,7 +303,7 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
         args: [code, toolErrorLine(code, "runner"), at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
       });
       const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
-      if (stepId) await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
+      if (stepId && !writing) await finishMacExtractionIfComplete(deps.db, job.tenantId, stepId, deps.now, { alert: deps.aiAuditAlert ?? writeAgentAlert });
       return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
     }
     if (job.toolKey === "ai_audit_search") {
@@ -725,6 +728,7 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
   if (job.toolKey !== "ai_audit_model") return invalid("tool_key");
+  if (job.input.purpose === "write") return completeAuditWrite(job, ref, b.text, deps);
   const checked = await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
   const at = deps.now.toISOString();
   const resultJson = checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
@@ -766,6 +770,23 @@ async function completeAuditSearch(ref: LeaseRef, b: Record<string, unknown>, de
   });
   if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
   return toolsJson(200, { ok: true, duplicate: false, results: checked.results.length, unreadable: checked.unreadable });
+}
+
+/**
+ * The Mac's prose for an audit's opening: the job is closed first (it keeps
+ * only what was decided, never the model's text), then the answer is checked
+ * and put in the draft if the draft is still the one the pass read.
+ */
+async function completeAuditWrite(job: { id: string; tenantId: string; input: Record<string, unknown> }, ref: LeaseRef, text: string, deps: RunnerDeps): Promise<Response> {
+  const at = deps.now.toISOString();
+  const rs = await deps.db.execute({
+    sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = '{"write":"received"}', error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+    args: [at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+  });
+  if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
+  const done = await finishWriting(deps.db, { tenantId: job.tenantId, jobInput: job.input, text, now: deps.now, alert: deps.aiAuditAlert ?? writeAgentAlert });
+  return toolsJson(200, { ok: true, duplicate: false, written: done.ok ? done.written : false, withheld: done.ok ? done.withheld : 0 });
 }
 
 async function systemRepeatOrLost(db: Client, ref: LeaseRef, toolKey: SystemRunnerToolKey): Promise<Response> {

@@ -52,8 +52,9 @@ import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
 import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, purgeUnauthorizedResearch, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
+import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
 
-export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps };
+export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps; writing?: WriteDeps };
 
 export type TickReport = {
   tenants: number;
@@ -80,6 +81,9 @@ export type TickReport = {
   researchAdvanced: number;
   /** First drafts of an audit (and its proposal) made from a research run that just finished. */
   auditsDrafted: number;
+  /** Passes over an audit's opening prose started, and cloud passes run. */
+  writingStarted: number;
+  writingRun: number;
   errors: Array<{ tenantId: string; step: string; engagementId?: string; error: string }>;
   stoppedForBudget: boolean;
 };
@@ -117,6 +121,8 @@ export async function runAiAuditTick(
     researchStarted: 0,
     researchAdvanced: 0,
     auditsDrafted: 0,
+    writingStarted: 0,
+    writingRun: 0,
     errors: [],
     stoppedForBudget: false,
   };
@@ -354,6 +360,29 @@ export async function runAiAuditTick(
         report.auditsDrafted += 1;
         const proposal = await draftProposalFromAudit(db, { tenantId, engagementId, actor: system, now: now() });
         if (!proposal.ok && proposal.error !== "draft_exists") throw new Error(`the proposal could not be drafted: ${proposal.error}`);
+        // Then the model's pass over the opening, on the engine CC authorized (none when the client said no to AI).
+        const write = await startWriting(db, { tenantId, engagementId, actor: system, now: now() });
+        if (write.ok && write.created) report.writingStarted += 1;
+      });
+    }
+
+    // 7e. The model's passes over audits' opening prose: cloud passes run here; Mac passes nobody ran for a day are called off.
+    const writeDeps: WriteDeps = deps.writing ?? { model: defaultWriteModel(), alert: deps.payment.alert };
+    let dueWrites: { cloud: string[]; stale: string[] } = { cloud: [], stale: [] };
+    await guard("writing", undefined, async () => {
+      dueWrites = await dueWriting(db, tenantId, now());
+    });
+    for (const stepId of dueWrites.cloud) {
+      if (over()) break;
+      await guard("writing", undefined, async () => {
+        const r = await advanceCloudWriting(db, { tenantId, stepId, now: now(), deps: writeDeps });
+        if (r === "finished") report.writingRun += 1;
+      });
+    }
+    for (const stepId of dueWrites.stale) {
+      if (over()) break;
+      await guard("writing", undefined, async () => {
+        await callOffStaleWriting(db, tenantId, stepId, now(), writeDeps.alert);
       });
     }
 

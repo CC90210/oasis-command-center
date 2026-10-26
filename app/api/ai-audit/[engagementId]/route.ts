@@ -31,6 +31,7 @@
  *   save_assumptions   { overrides }                       CC's own ranges for the impact calculator; owner only
  *   draft_audit        { replace? }                        draft the audit from the latest research; owner only
  *   draft_proposal     { replace? }                        draft the proposal from the audit's opportunities; owner only
+ *   write_prose                                           the model's pass over the audit's opening, on the authorized engine; owner only
  * (Adding a transcript has its own route, ./transcript, for its larger body.)
  *
  * Nothing here sends anything to the client: delivery happens only when the
@@ -66,6 +67,7 @@ import { liveMeetDeps } from "@/lib/meet/live-deps";
 import { revokeShareLink } from "@/lib/ai-audit/link";
 import { saveAssumptions, startResearch } from "@/lib/ai-audit/research";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
+import { startWriting } from "@/lib/ai-audit/writing";
 import { runOnboarding } from "@/lib/ai-audit/onboarding";
 import { engagementView } from "@/lib/ai-audit/view";
 
@@ -370,6 +372,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         : await draftProposalFromAudit(s.db, { tenantId: s.tenantId, engagementId, actor, now, replace });
       if (!r.ok) return json(r.error === "not_found" ? 404 : r.error === "invalid" ? 500 : 409, { ok: false, error: r.error === "invalid" ? "draft_invalid" : r.error });
       return json(200, { ok: true, version_id: r.versionId, created: r.created, blocking: r.issues.filter((i) => i.severity === "block").length, opportunities: r.opportunities });
+    }
+    case "write_prose": {
+      // A model reads the client's facts: the owner's press, on the engine he authorized at Gate 1.
+      if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
+      const r = await startWriting(s.db, { tenantId: s.tenantId, engagementId, actor, now });
+      if (!r.ok) return json(r.error === "not_found" ? 404 : 409, { ok: false, error: r.error });
+      return json(200, { ok: true, step_id: r.stepId, created: r.created, runs_on: r.runsOn });
     }
     case "request_authorization": {
       const r = await requestAuthorization(s.db, { tenantId: s.tenantId, engagementId, actor, now, engine: body.engine });

@@ -254,7 +254,7 @@ function AssumptionsForm({ engagementId, saved, editable }: { engagementId: stri
 function DraftBox({ view }: { view: EngagementView }) {
   const router = useRouter();
   const e = view.engagement;
-  const [busy, setBusy] = useState<"" | "audit" | "proposal">("");
+  const [busy, setBusy] = useState<"" | "audit" | "proposal" | "prose">("");
   const [message, setMessage] = useState<string | null>(null);
   const auditDraft = view.audit?.status === "draft";
   const proposalDraft = view.proposal?.status === "draft";
@@ -283,6 +283,21 @@ function DraftBox({ view }: { view: EngagementView }) {
     router.refresh();
   }
 
+  const writing = view.research?.writing ?? null;
+  const writingNow = !!writing && ["queued", "running", "waiting_runner"].includes(writing.status);
+  async function prose() {
+    setBusy("prose");
+    setMessage(null);
+    const r = await postAction(e.id, "write_prose");
+    setBusy("");
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    setMessage(r.runs_on === "mac" ? "The opening is being written on CC's Mac. Every sentence is checked against the research before it is kept." : "The opening is being written. Every sentence is checked against the research before it is kept.");
+    router.refresh();
+  }
+
   return (
     <div className="grid gap-2 rounded-lg border border-hairline px-3 py-3">
       <h3 className="text-[13px] font-semibold text-fg">Next: the audit and the proposal</h3>
@@ -296,7 +311,27 @@ function DraftBox({ view }: { view: EngagementView }) {
         <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft} onClick={() => void draft("proposal")}>
           {busy === "proposal" ? "Drafting" : view.proposal ? "Draft the proposal again" : "Draft the proposal"}
         </button>
+        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft || writingNow} onClick={() => void prose()}>
+          {busy === "prose" ? "Starting" : writingNow ? "Writing the opening" : "Write the opening with AI"}
+        </button>
       </div>
+      {writing && !writingNow ? (
+        <div className="text-[12px] text-fg-muted">
+          {writing.written
+            ? `The opening was written ${when(writing.created_at)}.`
+            : `The last pass did not change the draft${writing.error ? ` (${writing.error.replace(/_/g, " ")})` : ""}.`}
+          {writing.withheld.length ? ` ${writing.withheld.length} sentence${writing.withheld.length === 1 ? " was" : "s were"} held back:` : ""}
+        </div>
+      ) : null}
+      {writing?.withheld.length ? (
+        <ul className="grid list-disc gap-0.5 pl-5 text-[12px] text-fg-muted">
+          {writing.withheld.slice(0, 12).map((w, i) => (
+            <li key={`${w.part}:${i}`} className="min-w-0 break-words">
+              <span className="text-fg">{w.sentence}</span> ({w.reason})
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
     </div>
   );
