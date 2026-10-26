@@ -42,7 +42,7 @@ import { CHECK_TITLES, visibleText, type CheckKey, type SiteCheck } from "@/lib/
 import { siteTarget, type SiteTarget } from "@/lib/ai-audit/site-url";
 import { runPageSpeed, type PageSpeedFetch, type PageSpeedResult } from "@/lib/ai-audit/pagespeed";
 import { loginWalled, parseSearchAnswer, searchPrompt, type SearchResult } from "@/lib/ai-audit/search";
-import { enforceEvidence, identifiesBusiness, sentenceStating, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
+import { claimSubject, enforceEvidence, identifiesBusiness, sentenceStating, type ClaimSubject, type EvidenceChange, type EvidenceSource } from "@/lib/ai-audit/evidence";
 import { researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 import { estimateImpact, validateOverrides, type AssumptionOverrides, type ImpactInputs } from "@/lib/ai-audit/impact";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
@@ -86,8 +86,10 @@ export type ResearchSource = {
   reliability: NonNullable<EvidenceSource["reliability"]>;
   published_at: string | null;
   confirmed_note: string | null;
-  /** A listing or review page of the business: whether it names the business (a page that does not speaks for no one). */
+  /** A listing or review page of the business: whether it is the business's own (a page that is not speaks for no one). */
   about_business?: boolean | null;
+  /** A competitor's page: each of its claims is about the name the claim gives itself. */
+  competitor?: boolean;
 };
 
 export type ResearchModule = { module: "profile" | "site" | "pagespeed" | "search"; status: "done" | "partial" | "skipped" | "failed"; detail: string };
@@ -274,8 +276,11 @@ function socialProfile(url: string | null): string | null {
   if (!url) return null;
   try {
     const u = new URL(url);
-    const handle = u.pathname.split("/").filter(Boolean)[0] ?? "";
-    return readsAsHandle(handle) ? `${u.protocol}//${u.host}/${handle}` : null;
+    // facebook.com/people/<name>/<id> and /pages/<name>/<id>: the name is the handle.
+    const parts = u.pathname.split("/").filter(Boolean);
+    const named = parts[0] === "people" || parts[0] === "pages";
+    const handle = (named ? parts[1] : parts[0]) ?? "";
+    return readsAsHandle(handle) ? `${u.protocol}//${u.host}/${named ? `${parts[0]}/` : ""}${handle}` : null;
   } catch {
     return null;
   }
@@ -285,6 +290,7 @@ function socialProfile(url: string | null): string | null {
 export function publicName(name: string): string {
   return name
     .replace(/\S+@\S+/g, " ")
+    .replace(/\S+\s+(?:at|\(at\)|\[at\])\s+\S+\s+(?:dot|\(dot\)|\[dot\])\s+[a-z]{2,}\b/gi, " ")
     .replace(/\+?\d[\d\s().-]{6,}\d/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -323,17 +329,29 @@ function publishedAt(html: string): string | null {
 
 /**
  * The passage that states each claim, then the page's first lines: what the
- * evidence rules check claims against. `subject` is the business's name on its
- * own listing. The first lines are kept only when they prove no claim the
- * whole page does not (a sentence cut at the end can lose its "not").
+ * evidence rules check claims against. `subject` is who the claims are about
+ * on a listing: the business on its own, or, on a competitor's page ("claim"),
+ * the name each claim gives itself. The first lines are kept only when they
+ * prove no claim the whole page does not (a sentence cut at the end can lose
+ * its "not").
  */
-function excerptFor(text: string, claims: SearchResult["claims"], subject: string | null): string {
-  const stated = claims.map((c) => sentenceStating(c.text, text, subject));
+function excerptFor(text: string, claims: SearchResult["claims"], subject: ClaimSubject | "claim" | null): string {
+  const stating = (claim: string, within: string): string | null => {
+    if (subject !== "claim") return sentenceStating(claim, within, subject);
+    const name = claimSubject(claim);
+    return name ? sentenceStating(claim, within, { name }) : null;
+  };
+  const stated = claims.map((c) => stating(c.text, text));
   const passages = [...new Set(stated.filter((x): x is string => !!x))];
   const fit = (parts: string[]) => parts.join(" ... ").replace(/\s+/g, " ").slice(0, EXCERPT_MAX_CHARS);
-  const misleads = (excerpt: string) => claims.some((c, i) => !stated[i] && sentenceStating(c.text, excerpt, subject) !== null);
+  const misleads = (excerpt: string) => claims.some((c, i) => !stated[i] && stating(c.text, excerpt) !== null);
   for (const excerpt of [fit([...passages, text.replace(/\s+/g, " ").slice(0, 400)]), fit(passages)]) if (!misleads(excerpt)) return excerpt;
   return "";
+}
+
+/** The page's visible text with each list item, table row and article apart: one business's entry never runs into the next one's. */
+export function visibleRows(html: string): string {
+  return visibleText(html.replace(/<\/(?:li|tr|article)\s*>/gi, (m) => `${m} ... `));
 }
 
 /** What tells the business's own listing from a namesake's: its name, and its city, own web address and phone when known. */
@@ -532,7 +550,8 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
         fetched.push({ index, source: null, gap: `${u.hostname.replace(/^www\./, "")} answered HTTP ${read.page.status}, so its page was not used.` });
         continue;
       }
-      const text = visibleText(read.page.html);
+      // Rows kept apart (re-review of phase 3, finding 2): a directory's entries are never read as one.
+      const text = visibleRows(read.page.html);
       fetched.push({
         index,
         gap: null,
@@ -544,13 +563,14 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
           retrieved_at: at,
           http_status: read.page.status,
           content_sha256: contentHash(read.page.html),
-          excerpt: excerptFor(text, r.claims, r.kind === "listing" || r.kind === "review" ? e.business_name || "" : null),
+          excerpt: excerptFor(text, r.claims, r.kind === "listing" || r.kind === "review" ? { name: e.business_name || "", city: identityOf(e, lead).city } : r.kind === "competitor" ? "claim" : null),
           reliability: r.kind === "industry" ? reliabilityOf(new URL(read.page.finalUrl)) : "low",
           published_at: publishedAt(read.page.html),
           confirmed_note: null,
           // The business's own listing or reviews must be its own (its name, and its city, address or phone when known);
           // a competitor's page speaks for the competitor (its title says so).
           about_business: r.kind === "listing" || r.kind === "review" ? identifiesBusiness(text, identityOf(e, lead)) : null,
+          ...(r.kind === "competitor" ? { competitor: true } : {}),
         },
       });
     }
@@ -776,6 +796,8 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
       http_status: s.http_status,
       about_business: s.about_business ?? null,
       subject_name: s.about_business ? e.business_name || "" : null,
+      subject_city: s.about_business ? identityOf(e, lead).city : null,
+      subject_from_claim: s.competitor === true,
     })),
     now,
   );
@@ -922,7 +944,7 @@ export async function purgeUnauthorizedResearch(db: Client, tenantId: string): P
   const rows = await db.execute({
     // The newest runs first, so a void that landed during a run is found on the next tick.
     sql: `SELECT r.engagement_id AS id, MAX(r.created_at) AS at FROM ai_audit_research r JOIN ai_audit_engagements e ON e.tenant_id = r.tenant_id AND e.id = r.engagement_id
-           WHERE r.tenant_id = ? AND e.stage IN (${RESEARCH_STAGES.map(() => "?").join(", ")}) GROUP BY r.engagement_id ORDER BY at DESC LIMIT 100`,
+           WHERE r.tenant_id = ? AND e.stage IN (${RESEARCH_STAGES.map(() => "?").join(", ")}) GROUP BY r.engagement_id ORDER BY at DESC LIMIT 20`,
     args: [t, ...RESEARCH_STAGES],
   });
   let purged = 0;

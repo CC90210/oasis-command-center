@@ -388,9 +388,51 @@ async function main() {
     assert.ok(evidence.identifiesBusiness("Fixture Plumbing. Call (403) 555-0100.", { name: "Fixture Plumbing", city: null, host: null, phone: "+1 403-555-0100" }));
     assert.ok(evidence.identifiesBusiness("Fixture Plumbing. Rated 4.2 stars.", { name: "Fixture Plumbing" }), "nothing else known: the name is all there is to check");
   });
+  await check("third round, findings 1 and 2: a figure counts only what the page ties to it, and another business's figures never become the business's", () => {
+    const own = (text: string, statement: string, metric?: { value: number; unit: string }) =>
+      evidence.enforceEvidence([finding("x", statement, "verified", ["s"], metric)], [page("s", text, { about_business: true, subject_name: "[TEST] Fixture Plumbing", subject_city: "Calgary" })], now).findings[0]?.label ?? "dropped";
+    // Labels before their figures, a date, a sub-score.
+    const tabs = "Fixture Plumbing Calgary, AB Plumber Overview Reviews (95) Photos (120) Projects (12) Q&A (3)";
+    assert.equal(own(tabs, "Fixture Plumbing has 95 photos", { value: 95, unit: "photos" }), "dropped", "95 is the reviews' count");
+    assert.equal(own(tabs, "Fixture Plumbing has 95 reviews", { value: 95, unit: "reviews" }), "verified", "Reviews (95)");
+    const bbb = "Fixture Plumbing BBB Accredited since 01/14/2012 BBB Rating A+ Customer Reviews 3.8/5 Based on 12 Customer Reviews";
+    assert.equal(own(bbb, "Fixture Plumbing has 14 reviews", { value: 14, unit: "reviews" }), "dropped", "14 is part of a date");
+    assert.equal(own(bbb, "Fixture Plumbing is rated 3.8 stars from 12 reviews", { value: 3.8, unit: "stars" }), "verified");
+    const scores = "Fixture Plumbing Calgary Reviews Overall rating 4.5 Based on 95 reviews Service 4.7 Price 4.1 Punctuality 4.4";
+    assert.equal(own(scores, "Fixture Plumbing is rated 4.7 stars", { value: 4.7, unit: "stars" }), "dropped", "a sub-score is not the rating");
+    assert.equal(own(scores, "Fixture Plumbing is rated 4.5 stars from 95 reviews", { value: 4.5, unit: "stars" }), "verified");
+    assert.equal(own("Fixture Plumbing Photos 120 Years in business 14", "Fixture Plumbing has been in business for 120 years", { value: 120, unit: "years" }), "dropped", "120 is tied to nothing");
+    // A business listed with no rating, then a rival's row; the business's own unit-less rating, then a rival's.
+    assert.equal(own("Plumbers near Calgary Fixture Plumbing Calgary, AB Plumber Acme Drains 3.9 stars 40 reviews", "Fixture Plumbing is rated 3.9 stars from 40 reviews", { value: 3.9, unit: "stars" }), "dropped", "another business's name between");
+    const rows = "Fixture Plumbing Calgary Rating: 4.5 / 5 (95 reviews) Rival Pipes Plumbing Calgary Rating: 4.8 stars (120 reviews)";
+    assert.equal(own(rows, "Fixture Plumbing is rated 4.8 stars", { value: 4.8, unit: "stars" }), "dropped");
+    assert.equal(own(rows, "Fixture Plumbing is rated 4.5 stars from 95 reviews", { value: 4.5, unit: "stars" }), "verified");
+    assert.equal(own("Fixture Plumbing 123 17th Ave SW Calgary Plumbing Be the first to review Acme Drains 3.9 (40 reviews)", "Fixture Plumbing is rated 3.9 stars from 40 reviews", { value: 3.9, unit: "stars" }), "dropped", "be the first to review");
+    // The directory's rows, kept apart by the page's own structure.
+    const html = "<ul><li>Fixture Plumbing, Calgary</li><li>Acme Drains 3.9 stars (40 reviews)</li></ul>";
+    assert.equal(evidence.sentenceStating("Fixture Plumbing is rated 3.9 stars from 40 reviews", research.visibleRows(html), { name: "Fixture Plumbing", city: "Calgary" }), null);
+    // A competitor's claim is about the name it gives itself, bound the same way.
+    const rival = (text: string, statement: string, metric?: { value: number; unit: string }) =>
+      evidence.enforceEvidence([finding("x", statement, "verified", ["s"], metric)], [page("s", text, { subject_from_claim: true })], now).findings[0]?.label ?? "dropped";
+    const list = "Fixture Plumbing 4.5 (95 reviews) Plumbing Acme Drains 3.9 (40 reviews) Drain Cleaning";
+    assert.equal(rival(list, "Acme Drains is rated 3.9 stars from 40 reviews", { value: 3.9, unit: "stars" }), "verified");
+    assert.equal(rival(list, "Acme Drains is rated 4.5 stars from 95 reviews", { value: 4.5, unit: "stars" }), "dropped", "the next row's figures");
+    assert.equal(rival(list, "Rated 4.5 stars from 95 reviews", { value: 4.5, unit: "stars" }), "dropped", "a competitor's claim that names nobody");
+    assert.equal(evidence.claimSubject("Rival Pipes Plumbing is rated 4.8 stars from 120 reviews"), "Rival Pipes Plumbing");
+    assert.equal(evidence.claimSubject("Rated 4.8 stars from 120 reviews"), null);
+  });
+  await check("third round, finding 3: a claim with many figures is never searched for", () => {
+    const t0 = Date.now();
+    const claim = `Fixture Plumbing reviews ${Array.from({ length: 40 }, () => "1").join(" ")}`;
+    assert.equal(evidence.sentenceStating(claim, "1 ".repeat(100_000), null), null);
+    assert.equal(evidence.sentenceStating("Fixture Plumbing has 1 2 3 4 5 6 7 reviews", "Fixture Plumbing has 1 2 3 4 5 6 7 reviews.", null), null, "more than six figures");
+    assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
+  });
   await check("finding 3: a hypothesis's own words are not a share ('half-works'), but a multiple is a figure", () => {
     assert.ok(!evidence.statesAnyFigure("Something they built themselves half-works; it may be a starting point rather than something to replace."));
-    for (const fig of ["They get twice as many calls as they answer", "Bookings could double the week's jobs", "A tenfold rise in leads"]) assert.ok(evidence.statesAnyFigure(fig), fig);
+    for (const fig of ["They get twice as many calls as they answer", "Bookings could double the week's jobs", "A tenfold rise in leads", "About half go unanswered", "Half our jobs come from referrals", "A third go unanswered", "Calls double after the ad runs"])
+      assert.ok(evidence.statesAnyFigure(fig), fig);
+    for (const plain of ["A third party tool handles bookings", "They avoid double-booking by hand", "The owner does it on behalf of the team"]) assert.ok(!evidence.statesAnyFigure(plain), plain);
   });
 
   console.log("review of phase 3: what the search is given and what it may send back");
@@ -405,6 +447,8 @@ async function main() {
     assert.equal(research.publicFacts({ website: "https://www.facebook.com/we-miss-about-20-calls", city: null }).website, null);
     assert.equal(research.publicFacts({ website: "https://www.facebook.com/fixtureplumbing/about", city: null }).website, "https://www.facebook.com/fixtureplumbing");
     assert.equal(research.publicName("Fixture Plumbing owner@acme.ca 403-555-0100"), "Fixture Plumbing");
+    assert.equal(research.publicName("Fixture Plumbing bob at gmail dot com"), "Fixture Plumbing");
+    assert.equal(research.publicFacts({ website: "https://www.facebook.com/people/Fixture-Plumbing/100083456789", city: null }).website, "https://www.facebook.com/people/Fixture-Plumbing");
   });
   await check("F7 and F9: an answer too long to be real is not parsed; refusals are bounded; PageSpeed keeps a web address only", () => {
     const t0 = Date.now();
