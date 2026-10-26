@@ -28,7 +28,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { newId } from "@/lib/ai-audit/hash";
 import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
-import { CHECKOUT_TTL_HOURS, shortName, type InstallmentKind } from "@/lib/ai-audit/rules";
+import { CHECKOUT_TTL_HOURS, WAITING_ON_CLIENT_STAGES, shortName, type InstallmentKind } from "@/lib/ai-audit/rules";
 import { getProposalVersion } from "@/lib/ai-audit/versions";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
 import { casWrite, engagementUpdateStatement, eventStatement, getEngagement, int, patchEngagement, requireTenant, text, type Engagement } from "@/lib/ai-audit/store";
@@ -120,7 +120,7 @@ export type PayResult =
   | { ok: true; url: string; reused: boolean }
   | { ok: false; error: "not_payable" | "already_paid" | "dry_run" | "stripe_not_connected" | "busy" | "stripe_failed"; detail?: string };
 
-const PAYABLE_STAGES = new Set(["delivered", "proposal_review", "payment_pending"]);
+const PAYABLE_STAGES: ReadonlySet<string> = new Set(WAITING_ON_CLIENT_STAGES);
 
 /**
  * The Pay button. Reuses the open session, or opens one for exactly what the
@@ -215,6 +215,13 @@ export async function createOrReuseCheckout(
           WHERE tenant_id = ? AND id = ? AND status = 'creating'`,
     args: [session.reference, session.url, expires, input.now.toISOString(), t, id],
   });
+  // A revision (or a decline) that landed while Stripe was opening this session: it is closed again at once, so
+  // nothing is paid for a version being replaced (review of phase 5, finding 1).
+  const still = await getEngagement(db, t, engagement.id);
+  if (!still || !PAYABLE_STAGES.has(still.stage) || still.current_proposal_version_id !== proposal.id) {
+    await expireOpenCheckouts(db, t, engagement.id, input.now, deps);
+    return { ok: false, error: "not_payable" };
+  }
   let marked: { ok: boolean; error?: string };
   if (engagement.stage !== "payment_pending") {
     marked = await advanceEngagement(db, {
@@ -352,8 +359,8 @@ export async function verifyCheckout(
   return { status: "paid", receiptId: id, duplicate };
 }
 
-/** Stages from which a verified payment moves the engagement to Payment Confirmed. */
-const SETTLE_FROM = new Set(["delivered", "proposal_review", "payment_pending"]);
+/** Stages from which a verified payment moves the engagement to Payment Confirmed: the ones waiting on the client. */
+const SETTLE_FROM = PAYABLE_STAGES;
 /** Stages a settled payment has already moved past. */
 const SETTLED = new Set(["payment_confirmed", "onboarding", "active_client"]);
 
@@ -418,8 +425,11 @@ export async function settlePayment(
       });
       return "overpaid";
     }
-    if (SETTLED.has(e.stage)) return "already";
-    if (SETTLE_FROM.has(e.stage)) {
+    // A payment for a version the client no longer has (the audit was revised since) never settles onto the newer
+    // one: the money is real, so it is kept and CC decides (review of phase 5, finding 1).
+    const replaced = e.current_proposal_version_id !== input.checkout.proposal_version_id;
+    if (!replaced && SETTLED.has(e.stage)) return "already";
+    if (!replaced && SETTLE_FROM.has(e.stage)) {
       const moved = await advanceEngagement(db, {
         tenantId: t,
         engagementId: e.id,
@@ -434,8 +444,10 @@ export async function settlePayment(
       if (moved.ok) return "settled";
       if (moved.error === "conflict") continue;
     }
-    // Paid, but the engagement cannot take it (declined, cancelled, reopened).
-    const reason = `Stripe confirmed a payment, but the engagement is ${e.stage.replace(/_/g, " ")}. Decide whether to refund it in Stripe or reopen the engagement.`;
+    // Paid, but the engagement cannot take it (declined, cancelled, reopened, or paid for a replaced proposal).
+    const reason = replaced
+      ? "Stripe confirmed a payment for an earlier version of the proposal, which has since been revised. Refund it in Stripe, or settle it with the client by hand."
+      : `Stripe confirmed a payment, but the engagement is ${e.stage.replace(/_/g, " ")}. Decide whether to refund it in Stripe or reopen the engagement.`;
     if (e.health === "failed" && e.health_reason === reason && e.payment_status === "paid") return "unplaced";
     const flagged = await patchEngagement(db, {
       tenantId: t,
@@ -453,7 +465,7 @@ export async function settlePayment(
       tenantId: t,
       alertType: "ai_audit_payment_unplaced",
       severity: "urgent",
-      title: `Payment received for a ${e.stage.replace(/_/g, " ")} audit: ${shortName(e.business_name, "a client")}`,
+      title: replaced ? `Payment for an earlier proposal: ${shortName(e.business_name, "a client")}` : `Payment received for a ${e.stage.replace(/_/g, " ")} audit: ${shortName(e.business_name, "a client")}`,
       body: reason,
       subjectType: "ai_audit_engagement",
       subjectId: e.id,
@@ -476,10 +488,10 @@ export async function settleVerifiedReceipts(db: Client, tenantId: string, now: 
           FROM ai_audit_payment_receipts r
           JOIN ai_audit_engagements e ON e.tenant_id = r.tenant_id AND e.id = r.engagement_id
           WHERE r.tenant_id = ? AND r.status = 'verified'
-            AND (e.stage IN ('delivered', 'proposal_review', 'payment_pending')
+            AND ((e.stage IN (${WAITING_ON_CLIENT_STAGES.map(() => "?").join(", ")}) AND NOT (e.health = 'failed' AND e.payment_status = 'paid'))
                  OR (e.stage IN ('declined', 'cancelled', 'final_review', 'generating') AND e.health <> 'failed'))
           ORDER BY r.verified_at ASC LIMIT ?`,
-    args: [t, limit],
+    args: [t, ...WAITING_ON_CLIENT_STAGES, limit],
   });
   let n = 0;
   for (const r of rs.rows) {
@@ -504,18 +516,27 @@ export async function settleVerifiedReceipts(db: Client, tenantId: string, now: 
  * Stop a declined or cancelled engagement's open Checkout Sessions being paid:
  * each is expired at Stripe (POST /v1/checkout/sessions/:id/expire), then
  * marked expired here. A session Stripe says is already complete is verified
- * instead, so a payment that beat the decline is caught and flagged.
+ * instead, so a payment that beat the decline is caught and flagged; those are
+ * counted as complete (paid, or a bank payment still clearing), since money is
+ * on its way for them.
  */
-export async function expireOpenCheckouts(db: Client, tenantId: string, engagementId: string, now: Date, deps: PaymentDeps = defaultPaymentDeps()): Promise<{ expired: number; failed: number }> {
+export async function expireOpenCheckouts(
+  db: Client,
+  tenantId: string,
+  engagementId: string,
+  now: Date,
+  deps: PaymentDeps = defaultPaymentDeps(),
+): Promise<{ expired: number; failed: number; complete: number }> {
   const t = requireTenant(tenantId);
   const rs = await db.execute({
     sql: `SELECT ${CHECKOUT_COLUMNS} FROM ai_audit_checkouts WHERE tenant_id = ? AND engagement_id = ? AND status IN ('creating', 'open') AND stripe_session_id IS NOT NULL`,
     args: [t, engagementId],
   });
-  if (!rs.rows.length) return { expired: 0, failed: 0 };
+  if (!rs.rows.length) return { expired: 0, failed: 0, complete: 0 };
   const secret = await deps.stripeSecret(t);
   let expired = 0;
   let failed = 0;
+  let complete = 0;
   const f = deps.fetchImpl ?? fetch;
   for (const row of rs.rows) {
     const c = mapCheckout(row);
@@ -541,18 +562,24 @@ export async function expireOpenCheckouts(db: Client, tenantId: string, engageme
       await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'expired', updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('creating', 'open')", args: [at, t, c.id] });
       expired += 1;
     } else if (state === "complete") {
+      complete += 1;
       // Paid before the decline landed: record it, and settlePayment flags it for CC.
       const v = await verifyCheckout(db, { tenantId: t, checkoutId: c.id, now, trigger: "tick", deps });
       // Complete but not a payment we can count (a mismatch was flagged once): stop retrying it.
       if (v.status === "problem") {
         await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'failed', last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('creating', 'open')", args: [`complete_unverified:${v.code}`.slice(0, 200), at, t, c.id] });
       }
+      // Finished but not paid yet (a bank payment still clearing): Stripe will not expire it, so the sweep leaves it to
+      // the regular payment check instead of asking again on every tick (CodeRabbit on #746).
+      if (v.status === "unpaid") {
+        await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = 'complete_unpaid', updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'open'", args: [at, t, c.id] });
+      }
     } else {
       failed += 1;
       await db.execute({ sql: "UPDATE ai_audit_checkouts SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?", args: [secret ? "expire_failed" : "stripe_not_connected", at, t, c.id] });
     }
   }
-  return { expired, failed };
+  return { expired, failed, complete };
 }
 
 async function stripeSessionState(f: typeof fetch, secret: string, sessionId: string): Promise<string | null> {
@@ -565,14 +592,24 @@ async function stripeSessionState(f: typeof fetch, secret: string, sessionId: st
   return res.ok && typeof body?.status === "string" ? body.status : null;
 }
 
-/** Closed engagements whose sessions are still open (a failed expire, or a decline before this existed). */
-export async function closedEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+/**
+ * Engagements with a session still open that the client must not pay: closed
+ * (declined, cancelled), being revised, or past payment; and any session for a
+ * proposal the engagement no longer holds. A failed expire, a decline before
+ * this existed, or a session Stripe opened while a revision landed (review of
+ * phase 5, finding 1).
+ */
+export async function unpayableEngagementsWithOpenCheckouts(db: Client, tenantId: string, limit = 10): Promise<string[]> {
+  // A session the client finished but has not paid yet is left to the regular payment check (dueOpenCheckouts):
+  // Stripe will not expire it. Every other open one is asked again on each tick until it closes.
   const rs = await db.execute({
     sql: `SELECT DISTINCT c.engagement_id FROM ai_audit_checkouts c
           JOIN ai_audit_engagements e ON e.tenant_id = c.tenant_id AND e.id = c.engagement_id
-          WHERE c.tenant_id = ? AND c.status IN ('creating', 'open') AND c.stripe_session_id IS NOT NULL AND e.stage IN ('declined', 'cancelled')
+          WHERE c.tenant_id = ? AND c.status IN ('creating', 'open') AND c.stripe_session_id IS NOT NULL
+            AND (e.stage NOT IN (${WAITING_ON_CLIENT_STAGES.map(() => "?").join(", ")}) OR c.proposal_version_id IS NOT e.current_proposal_version_id)
+            AND (c.last_error IS NULL OR c.last_error <> 'complete_unpaid')
           LIMIT ?`,
-    args: [requireTenant(tenantId), limit],
+    args: [requireTenant(tenantId), ...WAITING_ON_CLIENT_STAGES, limit],
   });
   return rs.rows.map((r) => String(r.engagement_id));
 }

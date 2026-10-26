@@ -102,9 +102,11 @@ export const STAGE_MOVES: Readonly<Record<AiAuditStage, readonly AiAuditStage[]>
   // the frozen versions and opens drafts), decline or cancel. A bare move back
   // left the versions frozen and every editor locked (Codex review of PR #732).
   final_review: ["delivered", "generating", "declined", "cancelled"],
-  delivered: ["proposal_review", "payment_pending", "payment_confirmed", "final_review", "declined", "cancelled"],
-  proposal_review: ["payment_pending", "payment_confirmed", "final_review", "declined", "cancelled"],
-  payment_pending: ["payment_confirmed", "proposal_review", "final_review", "declined", "cancelled"],
+  // Back to generating only through a revision after delivery (lib/ai-audit/delivery.ts reviseAfterDelivery, phase 5):
+  // it closes the payment pages and opens drafts copied from what the client has; never a move by hand.
+  delivered: ["proposal_review", "payment_pending", "payment_confirmed", "final_review", "generating", "declined", "cancelled"],
+  proposal_review: ["payment_pending", "payment_confirmed", "final_review", "generating", "declined", "cancelled"],
+  payment_pending: ["payment_confirmed", "proposal_review", "final_review", "generating", "declined", "cancelled"],
   payment_confirmed: ["onboarding"],
   onboarding: ["active_client"],
   active_client: [],
@@ -332,4 +334,9 @@ export function shortName(name: string | null | undefined, fallback: string, max
   const n = (name ?? "").trim();
   if (!n) return fallback;
   return n.length > max ? `${n.slice(0, max - 3).trimEnd()}...` : n;
+}
+
+/** A business name as an email to the client says it: on one line, and short enough for any subject line. */
+export function oneLineName(name: string | null | undefined, fallback: string, max = 80): string {
+  return shortName((name ?? "").replace(/\s+/g, " "), fallback, max);
 }

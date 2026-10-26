@@ -130,7 +130,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 ## After delivery
 
 - The board shows when the client first opened it. Opening counts only when the page has been visible for a few seconds, so a mail scanner does not count.
-- If it is **stalled** (not opened in 3 days, or opened and unpaid for 7), follow up in your own words. The system flags; it never chases the client by itself.
+- If it is **stalled** (not opened in 3 days, or opened and unpaid for 7), a short follow-up email waits for your approval in **Needs you**: one for each kind of stall, never more. It resends the same private link the client already has. Read it and approve it as it is; only the workspace owner can. If you would rather say something else, send the card back (or let it expire after 7 days) and reply from your inbox. It goes only to the address the audit was sent to, only if the client still has not paid and the link still works, and a "not opened" note only if they still have not opened it; nothing is ever sent by itself. A card that stops fitting while it waits (the client paid, declined or was sent a new link) is withdrawn by itself.
 - Present the audit on a short call if they want one. Walk through the findings first and the price last.
 - Objections: answer with the evidence in the audit, not with pressure. "Not now" is a valid answer; note when to check back.
 
@@ -158,13 +158,29 @@ Decision point: if the card says it ran in **dry run**, nothing was sent. Audit 
 | Research is waiting on the web search | The Mac is off or offline. After six hours research carries on without the search, with a gap. Turn the Mac on and press **Research again** for a full run. |
 | "PDF not printed" | The Mac failed three times. Check that it is on and online, then press **Retry PDF**. |
 | The PDF never arrives | The Mac runner is off or offline. Turn the Mac on; the job is picked up within a minute. |
-| The client asks for changes before paying | Reopen is only possible before delivery. After delivery, a revision is a new version and a new link (coming in a later phase; until then, answer by email). |
+| The client asks for changes before paying | Before delivery, press **Reopen for edits**. After delivery, press **Revise and send again** (owner only). Any payment page the client has open stops working at once, and the engagement goes back to Research & Audit Generation with drafts copied from what the client has; the email is reworded as an update. The client keeps reading the delivered version until you submit, approve and send the new one: that delivery replaces their link, and the old one stops working; if that email fails, their earlier link works again. A paid audit cannot be revised, and Revise waits while money is moving: a payment Stripe confirmed, a checkout the client completed (a bank payment can take days to clear), or a Pay press still opening its page. If the drafts cannot be made, the engagement goes back to what the client has and you can press it again. |
 | "Call transcript waiting" | An Oasis Meet transcript was not attached by itself; the alert says why. If the client's answer about AI analysis is missing, record it on the live-call screen and the next run attaches it. Otherwise open **Call and transcripts**, check that it is this audit's call, and attach it by hand. A guest who did not agree to the recording means it cannot be used; one over 500 KB is never cut: paste the part that matters instead. |
 | The client asks you to delete a recorded call | Deleting the recording in Oasis Meet does not delete the copy attached to the audit. Delete the transcript under **Call and transcripts** too (only you can). |
-| The client asks you to delete their data | Write it down and tell CC's operations process; the data purge arrives in a later phase. |
+| The client asks you to delete their data | Delete each transcript on the engagement (that wipes the call's words and voids the authorization), and the meeting in Oasis Meet if there was one. The lead itself cannot be deleted while it has an audit: the audit's history points at it. Write the request down for CC's operations process; the full data purge arrives in a later phase. |
 
 ## Testing safely
 
 - The permanent test prospect is "[TEST] OASIS Audit Fixture Co", priced with a fixture-only catalogue item that never appears on a real proposal.
 - Automated tests never send email or create Stripe sessions.
+- In dry run, an approved follow-up is recorded, not sent, and that link gets no second card for the same reason. Test follow-ups on the fixture, never on a real client.
 - The one live check (an email to your own inbox and one real but unpaid Stripe session, expired at once) runs only when you say go.
+
+### The acceptance run, step by step
+
+Each step is one of the ten acceptance checks (docs/BUILD_ACCEPTANCE_STANDARD.md). Every step but the last runs with live sending off, so nothing leaves the building.
+
+1. **The fixture exists and stays apart.** Open the engagement for "[TEST] OASIS Audit Fixture Co" on the AI audits board. Its email is an inbox you own, it is marked as a fixture, and its only catalogue item is the fixture item.
+2. **Only the owner passes a gate.** An admin who is not the owner presses approve on its Gate 1 card: the card waits for you.
+3. **The settings resolve without showing a key.** The engagement page shows the AI engine, Stripe and the private-link setting as ready, never their values.
+4. **The inputs hold.** Paste the fixture transcript, with its traps: two different lead counts, an offered password and an instruction to the AI. The password is taken out, the two counts are flagged, and the instruction stays text.
+5. **The work is right.** After you approve Gate 1, research runs, the audit and proposal are drafted, and every figure cites a source.
+6. **It reads right.** Open Preview on a phone and on a desktop, then the PDF.
+7. **The guards hold.** No transcript quote, line number or note of yours appears on the client page; every finding carries a label.
+8. **Failures are handled.** Press Retry PDF with the Mac asleep: it waits, then asks you. Approving Gate 2 twice sends one email.
+9. **The live canary (only when you say go).** With live sending on for this one run, approve Gate 2 for the fixture. One email reaches your own inbox. Pressing Pay opens one real Stripe page, which is expired at once. Nothing is paid.
+10. **The receipt and the clean-up.** The board shows Audit Delivered with the email's message id, the Stripe session shows expired, and live sending is switched off again.

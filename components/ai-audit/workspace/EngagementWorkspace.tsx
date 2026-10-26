@@ -20,6 +20,7 @@ import {
   MANUAL_STAGE_TARGETS,
   PROFILE_EDIT_STAGES,
   STAGE_MOVES,
+  WAITING_ON_CLIENT_STAGES,
   type AiAuditStage,
   type BusinessType,
 } from "@/lib/ai-audit/rules";
@@ -220,6 +221,19 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               {submitted && e.stage === "final_review" ? (
                 <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("reopen", {}, "Reopened for edits.")}>
                   Reopen for edits
+                </button>
+              ) : null}
+              {isOwner && WAITING_ON_CLIENT_STAGES.includes(e.stage) && (e.payment_status === "none" || e.payment_status === "pending") ? (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    if (!window.confirm("Revise this audit? Any payment page the client has open stops working now. The client keeps reading the version they have until you approve and send the new one, which replaces their link.")) return;
+                    void act("revise_after_delivery", {}, "Revising: edit the drafts, then submit again for final approval.");
+                  }}
+                >
+                  Revise and send again
                 </button>
               ) : null}
               {submitted && view.deliveryApproval?.status === "failed" && view.deliveryApproval.reason === "delivery_unknown" && isOwner ? (

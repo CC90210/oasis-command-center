@@ -306,6 +306,12 @@ async function blockersFor(
     blockers.push("This lead has a website deal. A lead with financial history cannot be deleted.");
   }
 
+  // A Free AI Audit keeps the client's call, profile, audit and any payment for this lead: deleting the lead would
+  // leave all of that pointing at nothing (phase 5). The audit's own data has its own delete; the lead stays.
+  if (await countLink(db, "ai_audit_engagements", "lead_id", tenantId, leadId)) {
+    blockers.push("This lead has a Free AI Audit. Keep the lead with its audit history; delete the audit's transcripts on the engagement if the client asked.");
+  }
+
   const onboarding =
     await countLink(db, "website_onboarding", "lead_id", tenantId, leadId, true) +
     await countLink(db, "website_onboarding_v2_retired", "lead_id", tenantId, leadId);
@@ -521,6 +527,8 @@ const DELETE_GUARDS: ReadonlyArray<readonly [table: string, where: string, live:
   ["customers", "source_lead_id = ?", true],
   ["delivery_projects", "lead_id = ?", true],
   ["client_automation_profiles", "lead_id = ?", true],
+  // A Free AI Audit's history points at its lead (phase 5); guarded when the table exists.
+  ["ai_audit_engagements", "lead_id = ?", false],
 ];
 
 /**

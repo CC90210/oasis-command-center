@@ -28,6 +28,7 @@ import {
   type Currency,
 } from "@/lib/ai-audit/rules";
 import { PRICE_MAX_CENTS } from "@/lib/ai-audit/catalogue";
+import { EMAIL_RE } from "@/lib/ai-audit/delivery-payload";
 
 export const PROPOSAL_SCHEMA = "ai_audit_proposal/v1" as const;
 export const AUDIT_LINK_PLACEHOLDER = "{{audit_link}}";
@@ -104,7 +105,6 @@ export type ProposalTotals = {
 };
 
 const LINE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function emptyProposal(input: { currency: Currency; tax: TaxRule | null; to: string; businessName: string; contactName: string; validUntil: string }): ProposalContent {

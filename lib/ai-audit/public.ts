@@ -50,6 +50,8 @@ export function payUnavailableReason(p: PublicAudit, now: Date): string | null {
     return "Thank you: your payment is confirmed. We will be in touch about next steps.";
   }
   if (p.engagement.stage === "declined" || p.engagement.stage === "cancelled") return "This proposal is no longer open. Reply to our email if you would like to talk.";
+  // Being revised (phase 5): the client reads what they have, and pays the new version once it is sent.
+  if (p.engagement.stage === "generating" || p.engagement.stage === "final_review") return "We are updating this proposal. The new version will reach you by email, and you can pay from there.";
   if (p.proposal.status !== "delivered") return "This proposal has been replaced by a newer one. Check your email for the latest link.";
   if (p.proposal.content.valid_until < now.toISOString().slice(0, 10)) return "This proposal's offer period has ended. Reply to our email and we will send an updated one.";
   return null;
