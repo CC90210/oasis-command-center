@@ -80,6 +80,7 @@ export async function saveCallNote(
   if (!engagement) return { ok: false, error: "not_found" };
   if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, error: "stage_closed" };
   const at = input.now.toISOString();
+  const before = (await listCallNotes(db, t, engagement.id)).find((n) => n.question_id === input.questionId) ?? null;
   // Every write carries "still before Gate 1" itself: Gate 1 freezes in one
   // write, so a note lands before it (the card no longer matches) or not at all (review of phase 2, F3).
   const open = stillEditable(t, engagement.id);
@@ -112,8 +113,17 @@ export async function saveCallNote(
     return { ok: false, error: "not_found" };
   }
   if (!current) throw new Error("ai-audit.call-notes: saved a note but cannot read it back");
+  // The audit trail: one line per note per ten minutes of typing, not one per keystroke pause.
+  if (current.notes !== (before?.notes ?? "") && (!before || input.now.getTime() - Date.parse(before.updated_at) > NOTE_EVENT_GAP_MS)) {
+    await db.execute(
+      eventStatement({ tenantId: t, engagementId: engagement.id, event: "call_note_saved", actor: input.actor, at, refType: "call_note", refId: input.questionId, meta: { row_version: current.row_version, chars: current.notes.length } }),
+    );
+  }
   return { ok: true, note: current };
 }
+
+/** Note saves within this gap of the last one leave no new line in the audit trail. */
+export const NOTE_EVENT_GAP_MS = 10 * 60_000;
 
 /**
  * Start or end the call's clock (the live-call screen's elapsed time). Neither

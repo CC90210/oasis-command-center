@@ -440,11 +440,13 @@ export async function patchEngagement(
     refType?: string;
     refId?: string;
     extra?: InStatement[];
+    /** Write only while the engagement is in one of these stages, checked by the UPDATE itself. */
+    onlyInStages?: readonly AiAuditStage[];
   },
 ): Promise<CasResult> {
   const tenantId = requireTenant(input.tenantId);
   const at = input.now.toISOString();
-  const update = engagementUpdateStatement(tenantId, input.id, input.expectedRowVersion, input.patch, at);
+  const update = engagementUpdateStatement(tenantId, input.id, input.expectedRowVersion, input.patch, at, undefined, input.onlyInStages);
   const event = eventStatement({ tenantId, engagementId: input.id, event: input.event, actor: input.actor, at, meta: input.meta, refType: input.refType, refId: input.refId });
   const applied = await casWrite(db, update, [event, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, input.id);

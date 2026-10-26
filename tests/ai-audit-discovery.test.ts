@@ -509,6 +509,44 @@ async function main() {
     assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
     assert.equal((await approvals.getApprovalInTenant(db, OASIS, card.ok ? card.approval.id : ""))!.status, "cancelled");
   });
+  await check("a rename that read the engagement before Gate 1 cannot land after it; anything changed behind an authorization voids it (review of phase 2, second pass)", async () => {
+    const { eid } = await freshEngagement("Late Rename Co");
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const e = await engagementOf(eid);
+    // The write the route makes for a name change carries the stage condition: on the version the approval left, it changes nothing.
+    const late = await store.patchEngagement(db, { tenantId: OASIS, id: eid, expectedRowVersion: e.row_version, patch: { business_name: "Sneaky Rename" }, event: "details_saved", actor: cc, now: NOW(), onlyInStages: rules.PROFILE_EDIT_STAGES });
+    assert.equal(late.ok, false);
+    assert.equal((await engagementOf(eid)).business_name, e.business_name);
+    assert.ok(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)));
+    // Changed out of band anyway (a bug, a hand edit): the authorization stops holding, for the notes and for the business.
+    await db.execute({ sql: "INSERT INTO ai_audit_call_notes (id, tenant_id, engagement_id, question_id, notes, row_version, created_at, updated_at) VALUES ('oob-note', ?, ?, 'biz-goals', 'added by hand', 1, ?, ?)", args: [OASIS, eid, NOW().toISOString(), NOW().toISOString()] });
+    assert.equal(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)), null, "a note it never saw");
+    await db.execute("DELETE FROM ai_audit_call_notes WHERE id = 'oob-note'");
+    assert.ok(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)));
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET business_name = 'Renamed By Hand' WHERE id = ?", args: [eid] });
+    assert.equal(await authorize.authorizedProfile(db, OASIS, await engagementOf(eid)), null, "a business it never saw");
+  });
+  await check("after a transcript is deleted past Gate 1, the page says the authorization is void and the engagement needs attention (review of phase 2, second pass)", async () => {
+    const { eid, transcriptId: tid } = await freshEngagement("Void View Co");
+    assert.equal(resultOf(await approveAs(await fileCard(eid), USERS.cc))?.outcome, "authorized");
+    const view = await import("../lib/ai-audit/view");
+    assert.equal((await view.engagementView(db, OASIS, eid, NOW()))!.authorization?.status, "executed");
+    assert.deepEqual(await transcripts.deleteTranscript(db, { tenantId: OASIS, engagementId: eid, id: tid, actor: cc, now: NOW() }), { ok: true });
+    const v = (await view.engagementView(db, OASIS, eid, NOW()))!;
+    assert.equal(v.authorization?.status, "voided");
+    assert.match(String(v.authorization?.message), /no longer holds/);
+    assert.equal(v.engagement.health, "attention");
+  });
+  await check("note edits leave a line in the audit trail, one per note per ten minutes of typing (review F10)", async () => {
+    const { eid } = await freshEngagement("Note Trail Co");
+    const at0 = new Date("2026-10-26T10:00:00Z");
+    const save = (text: string, expected: number, now: Date) => notes.saveCallNote(db, { tenantId: OASIS, engagementId: eid, questionId: "biz-goals", notes: text, expectedVersion: expected, actor: cc, now });
+    assert.ok((await save("Grow to two vans", 0, at0)).ok);
+    assert.ok((await save("Grow to two vans this year", 1, new Date(at0.getTime() + 60_000))).ok);
+    assert.equal(await eventCount(eid, "call_note_saved"), 1, "typing on within ten minutes adds nothing");
+    assert.ok((await save("Grow to two vans this year, then a shop", 2, new Date(at0.getTime() + 20 * 60_000))).ok);
+    assert.equal(await eventCount(eid, "call_note_saved"), 2);
+  });
   await check("the install guard needs every table and column phase 2 reads (review F6)", async () => {
     const { createClient } = await import("@libsql/client");
     const bare = createClient({ url: ":memory:" });

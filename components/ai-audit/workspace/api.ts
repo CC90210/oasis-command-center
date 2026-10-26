@@ -37,6 +37,7 @@ const ERROR_WORDS: Record<string, string> = {
   too_many_transcripts: "This engagement already has 20 transcripts. Delete one you no longer need first.",
   details_frozen: "The business's name and type were authorized at Gate 1, so they can no longer change here. The contact can still change. To change the business, move the engagement back to Transcript Awaiting Approval.",
   unknown_question: "That question is not in the discovery framework.",
+  business_name_invalid: "The business name is missing or too long (200 characters at most). Fix it under Details, then ask again.",
   too_long: "That note is too long. Keep it under 4,000 characters.",
 };
 

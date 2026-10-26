@@ -132,7 +132,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       // it, only the contact (who receives the audit, bound again at Gate 2)
       // may change (review of phase 2, F3). The row version makes this check
       // hold: an approval in between moves it, and this save then conflicts.
-      if (!PROFILE_EDIT_STAGES.includes(engagement.stage) && ((name || null) !== engagement.business_name || type !== engagement.business_type)) {
+      const bindingChanges = (name || null) !== engagement.business_name || type !== engagement.business_type;
+      if (!PROFILE_EDIT_STAGES.includes(engagement.stage) && bindingChanges) {
         return json(409, { ok: false, error: "details_frozen" });
       }
       const r = await patchEngagement(s.db, {
@@ -143,7 +144,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         event: "details_saved",
         actor,
         now,
+        // The check above read the engagement before this write: an approval in
+        // between could pass it on the version the approval leaves. The UPDATE
+        // itself says "still before Gate 1" (review of phase 2, second pass).
+        ...(bindingChanges ? { onlyInStages: PROFILE_EDIT_STAGES } : {}),
       });
+      if (!r.ok && bindingChanges && r.engagement && !PROFILE_EDIT_STAGES.includes(r.engagement.stage)) return json(409, { ok: false, error: "details_frozen" });
       if (!r.ok) return casError(r.error);
       const withdrawn = await withdrawAuthorizationIfStale(s.db, s.tenantId, engagementId, actor, now);
       const after = withdrawn ? await getEngagement(s.db, s.tenantId, engagementId) : null;

@@ -21,7 +21,7 @@ import "server-only";
 import type { Client, Row } from "@libsql/client";
 import { contentHash, newId } from "@/lib/ai-audit/hash";
 import { advanceEngagement } from "@/lib/ai-audit/lifecycle";
-import { casWrite, eventStatement, getEngagement, int, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
+import { casWrite, eventStatement, getEngagement, int, patchEngagement, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
 import { TRANSCRIPT_FORMATS, isOneOfFormat, type ParsedTranscript, type TranscriptFormat, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { cancelPendingApproval } from "@/lib/os/approvals/store";
@@ -290,6 +290,21 @@ export async function deleteTranscript(
   // executor refuses it too; this takes the card out of Needs you).
   if (ok && afterGate && engagement?.delivery_approval_id) {
     await cancelPendingApproval(db, t, engagement.delivery_approval_id, { type: input.actor.type === "user" ? "user" : "system", id: input.actor.id }, { reason: "authorization_voided" }, input.now);
+  }
+  if (ok && afterGate) {
+    // The page says so as well as the trail (review of phase 2, second pass). A lost race only means someone else wrote first.
+    const now = await getEngagement(db, t, input.engagementId);
+    if (now) {
+      await patchEngagement(db, {
+        tenantId: t,
+        id: now.id,
+        expectedRowVersion: now.row_version,
+        patch: { health: "attention", health_reason: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript Awaiting Approval and authorize again." },
+        event: "authorization_voided_flagged",
+        actor: input.actor,
+        now: input.now,
+      });
+    }
   }
   return ok ? { ok: true } : { ok: false, error: "not_found" };
 }

@@ -146,7 +146,7 @@ export async function authorizationInputs(
   const raw: AuthorizeAiAuditPayload = {
     engagement_id: engagement.id,
     lead_id: engagement.lead_id,
-    business_name: engagement.business_name || "Unnamed business",
+    business_name: boundName(engagement),
     business_type: engagement.business_type,
     profile_version_id: version.id,
     profile_version_no: version.version_no,
@@ -166,6 +166,11 @@ export async function authorizationInputs(
   const valid = validateAuthorizeAiAuditPayload(raw);
   if (!valid.ok) return { ok: false, error: valid.error };
   return { ok: true, value: { engagement, fields, transcripts, payload: valid.value } };
+}
+
+/** The business name a card binds: what the engagement says, within the payload's 200 characters. */
+export function boundName(engagement: Pick<Engagement, "business_name">): string {
+  return (engagement.business_name || "Unnamed business").trim().slice(0, 200);
 }
 
 /** Everything a card binds, as one key: the same information gives the same key. */
@@ -373,7 +378,7 @@ async function runAuthorization(ctx: ExecutorContext): Promise<ExecutorOutcome> 
     if (engagement.stage !== "transcript_review") return refuse("stage_moved", "The engagement is no longer waiting for authorization.");
     if (engagement.authorization_approval_id !== ctx.approval.id) return refuse("payload_changed", "A newer authorization card exists for this engagement. Approve that one instead.");
     if (engagement.current_profile_version_id !== p.profile_version_id) return refuse("payload_changed", "The discovery profile changed after this card was made. Approve the newer card.");
-    if ((engagement.business_name || "Unnamed business") !== p.business_name || engagement.business_type !== p.business_type) {
+    if (boundName(engagement) !== p.business_name || engagement.business_type !== p.business_type) {
       return refuse("payload_changed", "The business's name or type changed after this card was made. Ask for authorization again.");
     }
     const transcripts = await listTranscripts(read, t, engagement.id);
@@ -469,6 +474,9 @@ export async function authorizedProfile(db: Client, tenantId: string, engagement
   const fields = await listProfileFields(db, t, version.id);
   if (profileHashOf(fields) !== v.value.profile_sha256) return null;
   if (transcriptsHash(await listTranscripts(db, t, engagement.id)) !== v.value.transcripts_sha256) return null;
+  // And the rest of what CC authorized: the notes and the business, however they were changed (review of phase 2, second pass).
+  if (notesHash((await listCallNotes(db, t, engagement.id)).filter((n) => n.notes.trim())) !== v.value.notes_sha256) return null;
+  if (boundName(engagement) !== v.value.business_name || engagement.business_type !== v.value.business_type) return null;
   return { versionId: version.id, profileSha256: v.value.profile_sha256, engine: v.value.engine };
 }
 

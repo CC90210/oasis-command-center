@@ -2,8 +2,10 @@
  * lib/ai-audit/view.ts — everything the engagement page and the board show,
  * read in one place. Plain data: it crosses the server/client boundary.
  */
-import { effectiveStatus } from "@/lib/os/approvals/rules";
 import "server-only";
+import { authorizedProfile } from "@/lib/ai-audit/authorize";
+import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
+import { effectiveStatus } from "@/lib/os/approvals/rules";
 import type { Client } from "@libsql/client";
 import {
   AI_AUDIT_STAGE_LABELS,
@@ -129,6 +131,12 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     }
   }
   const captured = new Set(fields.map((f) => f.field_key));
+  const authVoided =
+    !!authApproval &&
+    authApproval.status === "executed" &&
+    !PROFILE_EDIT_STAGES.includes(engagement.stage) &&
+    !TERMINAL_STAGES.includes(engagement.stage) &&
+    !(await authorizedProfile(db, tenantId, engagement));
   const link = engagement.share_link_id ? await getShareLink(db, tenantId, engagement.share_link_id) : null;
   return {
     engagement,
@@ -164,10 +172,13 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     authorization: authApproval
       ? {
           id: authApproval.id,
-          // "expired" once past its expiry, though the stored row still says pending.
-          status: effectiveStatus(authApproval, new Date().toISOString()),
+          // "expired" once past its expiry, though the stored row still says pending;
+          // "voided" once an executed authorization no longer holds (a transcript it covered deleted, review of phase 2).
+          status: authVoided ? "voided" : effectiveStatus(authApproval, new Date().toISOString()),
           outcome: (authApproval.execution_result as { outcome?: string } | null)?.outcome ?? null,
-          message: (authApproval.execution_result as { message?: string } | null)?.message ?? null,
+          message: authVoided
+            ? "The authorization no longer holds: something it covered changed or was deleted. Move the engagement back to Transcript Awaiting Approval and authorize again."
+            : ((authApproval.execution_result as { message?: string } | null)?.message ?? null),
           engine: authPayload?.ok ? authPayload.value.engine : null,
           engine_label: authPayload?.ok ? AI_ENGINE_LABELS[authPayload.value.engine] : null,
           plan: authPayload?.ok ? authPayload.value.plan : [],
