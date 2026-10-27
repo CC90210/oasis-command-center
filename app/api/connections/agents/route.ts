@@ -23,6 +23,7 @@ import {
   saveAgentAccess,
 } from "@/lib/os/agent-access-store";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
+import { looksLikeSecret } from "@/lib/os/custom-keys";
 import { VAULT_KEY_PATTERN } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
@@ -74,7 +75,13 @@ export async function PUT(req: NextRequest) {
   let target: AccessTarget;
   if (body.kind === "connector" && typeof body.id === "string" && knownApps().includes(body.id)) {
     target = { kind: "connector", slug: body.id };
-  } else if (body.kind === "custom" && typeof body.id === "string" && VAULT_KEY_PATTERN.test(body.id.trim().toUpperCase())) {
+  } else if (
+    body.kind === "custom" &&
+    typeof body.id === "string" &&
+    // A secret is never stored as a name, here or in the vault (lib/os/custom-keys.ts).
+    !looksLikeSecret(body.id) &&
+    VAULT_KEY_PATTERN.test(body.id.trim().toUpperCase())
+  ) {
     target = { kind: "custom", key: body.id.trim().toUpperCase() };
   } else {
     return NextResponse.json({ ok: false, error: "unknown_target" }, { status: 400 });

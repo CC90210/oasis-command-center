@@ -482,6 +482,23 @@ async function main() {
     assert.ok(!JSON.stringify(r).toLowerCase().includes(bare.slice(0, 8).toLowerCase()), "no part of it in the answer");
     const one = await (await customRoute.POST(json({ key: ["sk-", "ant-", "api03-", "abcdef"].join(""), value: "v" }))).json();
     assert.equal(one.results[0].error, "key_looks_like_a_secret");
+    // An agent's add_credential refuses one too, and its audit line does not carry it.
+    const seen: string[] = [];
+    const real = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+    console.log = console.info = console.warn = console.error = (...a: unknown[]) => void seen.push(a.map(String).join(" "));
+    let added = "";
+    try {
+      added = (await runner.executeTool("add_credential", { name: bare, value: "v" }, ctx("bravo"))).content;
+    } finally {
+      Object.assign(console, real);
+    }
+    assert.match(added, /credential_name_looks_like_a_secret/);
+    assert.ok(seen.some((l) => l.includes("(a secret without a name)")), "the refusal is audited");
+    assert.ok(!(added + seen.join("\n")).toLowerCase().includes(bare.slice(0, 8).toLowerCase()), "not in the answer or the audit");
+    // Nor is an owner's agent choice saved under one.
+    const hexSecret = ["a3f9c2e1b4d5a6f7", "e8d9c0b1a2f3e4d5", "c6b7a8f9"].join("");
+    assert.equal((await agentsRoute.PUT(json({ kind: "custom", id: hexSecret, agents: ["sales"] }, "PUT"))).status, 400);
+    assert.ok(!(await accessRows()).some((f) => f.includes("a3f9c2e1")), "no choice row named after it");
     // A short one reads as a name, but "=" padding alone is never a value.
     const short = await (await customRoute.POST(json({ dotenv: "Qk9C==" }))).json();
     assert.deepEqual([short.ok, short.results[0].error], [false, "empty_value"]);

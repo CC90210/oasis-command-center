@@ -53,6 +53,7 @@ import {
 import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
 import { agentMayUse, judgeAccess, readAgentAccessOverrides } from "./os/agent-access-store";
 import { APP_TOOLS, appForTool, refusalSentence } from "./os/agent-access";
+import { looksLikeSecret } from "./os/custom-keys";
 import { openDepartmentsFor } from "./os/approvals/scope";
 import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
@@ -1474,7 +1475,10 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
 async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContext) {
   const rawName = typeof input.name === "string" ? input.name.trim() : "";
   const rawValue = typeof input.value === "string" ? input.value : "";
-  const targetForAudit = rawName ? rawName.toUpperCase().slice(0, 64) : "(empty)";
+  // A secret given as the name is never stored or logged as one: names are kept in the clear
+  // (lib/os/custom-keys.ts looksLikeSecret; the vault and its route refuse the same).
+  const secretName = looksLikeSecret(rawName);
+  const targetForAudit = secretName ? "(a secret without a name)" : rawName ? rawName.toUpperCase().slice(0, 64) : "(empty)";
   if (!ctx.isAdmin) {
     auditCredentialAccess({
       action: "add_credential",
@@ -1494,6 +1498,18 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
   if (!rawName) throw new Error("name_required");
   if (!rawValue) throw new Error("value_required");
   const upperName = rawName.toUpperCase();
+  if (secretName) {
+    auditCredentialAccess({
+      action: "add_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "credential_name_looks_like_a_secret",
+    });
+    throw new Error("credential_name_looks_like_a_secret: put the secret in `value` and give it a NAME like ACME_API_KEY");
+  }
   if (!VAULT_KEY_PATTERN.test(upperName)) {
     auditCredentialAccess({
       action: "add_credential",
