@@ -191,9 +191,18 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
   scenarios.push({ id: "setup:live", screen: "setup", props: { checks: json(live) } });
   expect.set("setup:live", { has: ["Online (oasis-mac-ai-audit"] });
 
+  // The render needs whole React: drop the suite's react-server condition, which CI passes in NODE_OPTIONS and a
+  // child inherits (the same as tests/os-channels-honest.test.ts).
+  const nodeOptions = (process.env.NODE_OPTIONS || "")
+    .split(/\s+/)
+    .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+    .join(" ");
+  const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+  if (!nodeOptions) delete env.NODE_OPTIONS;
   const run = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-audit-ui.render.ts"], {
     input: JSON.stringify(scenarios),
     encoding: "utf8",
+    env,
     maxBuffer: 512 * 1024 * 1024,
   });
   assert.equal(run.status, 0, `the screen renderer failed: ${run.stderr?.slice(-2000)}`);
