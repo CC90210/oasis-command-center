@@ -327,13 +327,14 @@ export function CustomCredentialsVault({
       setPasteResults(j.results || []);
       const saved = j.saved || 0;
       const failed = j.failed || 0;
-      // The lines that were saved leave the box; the ones that were not stay, to be fixed.
+      // The keys that were not saved stay in the box, to be fixed; saved keys, comments
+      // and lines that are not KEY=value (already shown as skipped) leave it (CodeRabbit, #750).
       const savedKeys = new Set((j.results || []).filter((x) => x.ok).map((x) => x.key.toUpperCase()));
       const left = pasteText
         .split(/\r?\n/)
         .filter((line) => {
           const parsed = parseDotenvLines(line)[0];
-          return line.trim() && !(parsed && savedKeys.has(parsed.key.trim().toUpperCase()));
+          return !!parsed && !savedKeys.has(parsed.key.trim().toUpperCase());
         })
         .join("\n");
       setPasteText(left);

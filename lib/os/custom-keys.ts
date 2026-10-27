@@ -476,7 +476,9 @@ export function customKeysLine(
   const parts: string[] = [];
   if (departments.length > 0) parts.push(`assigned to ${agentNamesSentence(departments, choices)}`);
   if (forAll > 0) parts.push(forAll === entries.length ? "each for all agents" : `${forAll} for all agents`);
-  if (parts.length === 0 && unreadable < entries.length) parts.push("assigned to no agents");
+  // A key for no agent is the narrowest of all: it is said too, not hidden by the others (CodeRabbit, #750).
+  const none = entries.filter((e) => Array.isArray(e.agents) && e.agents.length === 0).length;
+  if (none > 0) parts.push(none === entries.length ? "assigned to no agents" : `${none} for no agents`);
   if (unreadable > 0) parts.push(`${unreadable} can't be read`);
   return `${count}, ${parts.join("; ")}`;
 }

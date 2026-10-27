@@ -255,6 +255,8 @@ check("a pick made for a saved key stays with it; one made for a new key carries
   assert.match(read("components/os/connections/ConnectorAgentAccess.tsx"), /detail: \{ scope: "connector" \}/);
   // A paste keeps its unsaved lines, and says so before sending more than the route takes.
   assert.match(vault, /setPasteText\(left\);/);
+  // Only keys that were not saved stay; comments and skipped lines leave with the saved ones (CodeRabbit on #750).
+  assert.match(vault, /return !!parsed && !savedKeys\.has\(parsed\.key\.trim\(\)\.toUpperCase\(\)\);/);
   assert.match(vault, /const pasteTooMany = pasteReady\.length > VAULT_MAX_PASTE_ENTRIES;/);
   assert.match(read("app/api/credentials/custom/route.ts"), /const MAX_BULK_ENTRIES = VAULT_MAX_PASTE_ENTRIES;/);
   // A long name breaks instead of pushing the drawer sideways on a phone.
@@ -298,6 +300,9 @@ check("the Custom keys card's line: how many keys, and whom they are assigned to
   assert.equal(customKeysLine([{ agents: null }, { agents: ["finance"] }], founder), "2 keys, assigned to Atlas; 1 can't be read");
   assert.equal(customKeysLine([{ agents: null }], founder), "1 key, 1 can't be read");
   assert.equal(customKeysLine([{ agents: [] }]), "1 key, assigned to no agents");
+  // A key for no agent is said beside the others, not hidden by them (CodeRabbit on #750).
+  assert.equal(customKeysLine([{ agents: [] }, { agents: "all" }], founder), "2 keys, 1 for all agents; 1 for no agents");
+  assert.equal(customKeysLine([{ agents: [] }, { agents: ["sales"] }], founder), "2 keys, assigned to SDR; 1 for no agents");
   assert.equal(customKeysLine([{ agents: ["finance"] }]), "1 key, assigned to Finance", "a workspace that names no agent reads departments");
   // When the choices could not be read, or the agents cannot use keys, it says only that.
   assert.equal(customKeysLine([{ agents: null }, { agents: null }], founder, { agentsUnreadable: true }), "2 keys; whom they are assigned to can't be read right now");

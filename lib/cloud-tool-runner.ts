@@ -1358,11 +1358,25 @@ function auditCredentialAccess(args: {
   );
 }
 
+/**
+ * A credential name as the audit log and the activity chip show it: the name
+ * itself only when it is one (VAULT_KEY_PATTERN), otherwise a placeholder, so
+ * neither a secret given as a name nor text that is no name at all ("Bearer
+ * ey...") reaches a log (CodeRabbit on #750).
+ */
+function credentialNameForLog(raw: string): string {
+  const name = raw.trim();
+  if (!name) return "(empty)";
+  if (looksLikeSecret(name)) return "(a secret without a name)";
+  const upper = name.toUpperCase();
+  return VAULT_KEY_PATTERN.test(upper) ? upper : "(not a credential name)";
+}
+
 async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
   const raw = typeof input.name === "string" ? input.name.trim() : "";
-  // A secret given as the name is never logged or echoed (as in add_credential).
+  // A secret given as the name is refused, and never logged or echoed (as in add_credential).
   const secretName = looksLikeSecret(raw);
-  const targetForAudit = secretName ? "(a secret without a name)" : raw ? raw.toUpperCase().slice(0, 64) : "(empty)";
+  const targetForAudit = credentialNameForLog(raw);
   // ADMIN-ONLY (Codex P1 finding, 2026-05-24). The Settings UI for the
   // vault is gated on canManageTenant; the tool must enforce the same
   // gate or a non-admin member (loan_officer, processor, etc.) could
@@ -1492,7 +1506,7 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
   // A secret given as the name is never stored or logged as one: names are kept in the clear
   // (lib/os/custom-keys.ts looksLikeSecret; the vault and its route refuse the same).
   const secretName = looksLikeSecret(rawName);
-  const targetForAudit = secretName ? "(a secret without a name)" : rawName ? rawName.toUpperCase().slice(0, 64) : "(empty)";
+  const targetForAudit = credentialNameForLog(rawName);
   if (!ctx.isAdmin) {
     auditCredentialAccess({
       action: "add_credential",
@@ -2487,7 +2501,7 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
     }
     case "get_credential": {
       const d = data as { found?: boolean; forbidden?: boolean };
-      const name = looksLikeSecret(String(input.name || "")) ? "(a secret without a name)" : String(input.name || "?").toUpperCase();
+      const name = credentialNameForLog(String(input.name || ""));
       if (d.forbidden) return `credential ${name} access denied (admin only)`;
       return d.found
         ? `retrieved credential ${name} (value masked)`
@@ -2495,7 +2509,7 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
     }
     case "add_credential": {
       const d = data as { ok?: boolean; forbidden?: boolean };
-      const name = looksLikeSecret(String(input.name || "")) ? "(a secret without a name)" : String(input.name || "?").toUpperCase();
+      const name = credentialNameForLog(String(input.name || ""));
       if (d.forbidden) return `add credential ${name} denied (admin only)`;
       return d.ok ? `saved credential ${name} to vault` : `add credential ${name} failed`;
     }

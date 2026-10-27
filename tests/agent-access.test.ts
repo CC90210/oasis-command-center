@@ -523,6 +523,18 @@ async function main() {
     assert.ok(!(JSON.stringify(got) + seen.join("\n")).toLowerCase().includes(token.slice(0, 8).toLowerCase()), "not in the answer, the chip or the audit");
     // An ordinary name that starts like a key is still a name (final review of #748).
     assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "hf_token" }, ctx("bravo"))).content).found, false);
+    // Text that is no name at all (a header pasted whole) is not logged either (CodeRabbit on #750).
+    const header = ["Bear", "er ", "eyJhbGciOi", "JIUzI1NiJ9"].join("");
+    const seen2: string[] = [];
+    console.log = console.info = console.warn = console.error = (...a: unknown[]) => void seen2.push(a.map(String).join(" "));
+    let got2: unknown = null;
+    try {
+      got2 = await runner.executeTool("get_credential", { name: header }, ctx("bravo"));
+    } finally {
+      Object.assign(console, real);
+    }
+    assert.ok(!(JSON.stringify(got2) + seen2.join("\n")).toUpperCase().includes("EYJHBGCIOI"), "no part of it in the audit, the chip or the answer");
+    assert.ok(seen2.some((l) => l.includes("(not a credential name)")), "the audit line names it as no name");
   });
 
   await check("a workspace whose agents cannot use custom keys or app tools is told so, not shown agents", async () => {
