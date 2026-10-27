@@ -59,7 +59,8 @@ export function selectionFor(
 ): { ok: true; selection: EngineSelection } | { ok: false; reason: string } {
   const fallback = current.mode === "api" ? "none" : current.fallback;
   if (current.mode === "local") {
-    const model = device.localModels.find((m) => m.ref === current.modelRef) ?? device.localModels.find((m) => m.state !== "unavailable");
+    const usableModels = device.localModels.filter((m) => m.state !== "unavailable");
+    const model = usableModels.find((m) => m.ref === current.modelRef) ?? usableModels[0];
     if (model) return { ok: true, selection: { mode: "local", pairingId: device.pairingId, modelRef: model.ref, fallback } };
     // Pure local never becomes a hosted app by a move (Codex review of #758):
     // leaving local is the owner's choice, made in AI brain.

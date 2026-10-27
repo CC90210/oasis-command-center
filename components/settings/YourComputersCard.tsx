@@ -437,11 +437,16 @@ export function YourComputersCard() {
               Your {setup.scope === "workspace" ? "workspace's " : ""}agents run on{" "}
               <span className="font-semibold">{selectionWords(setup.selection, agentsDevice)}</span>
               {!agentsDevice.online && (
-                <span className="text-status-warm"> · it is offline, so they cannot answer. Choose Use for agents on a computer that is on.</span>
+                <span className="text-status-warm">
+                  {setup.selection.mode !== "api" && setup.selection.fallback === "workspace_api"
+                    ? " · it is offline, so the workspace API account answers until it is back. Choose Use for agents on a computer that is on."
+                    : " · it is offline, so they cannot answer. Choose Use for agents on a computer that is on."}
+                </span>
               )}
             </>
           ) : agentsOn ? (
-            <>Your agents run on a computer that is no longer listed. Choose Use for agents on one below.</>
+            // A member inherits a workspace choice on a computer that is not theirs, so it is not in their list.
+            <>Your agents run on a computer that is not in your list here. Use for agents moves them to one of yours.</>
           ) : (
             <>Your agents run on an API key, not a computer. Use for agents moves them to one of your computers.</>
           )}

@@ -104,6 +104,13 @@ async function main() {
       ok: true,
       selection: { mode: "local", pairingId: "pair-mac", modelRef: "ollama/llama3.3", fallback: "workspace_api" },
     });
+    // The same model reported unavailable there: the next usable one is tried instead.
+    const stale = device({ localModels: [
+      { ref: "ollama/llama3.3", label: "Llama 3.3", adapter: "ollama", state: "unavailable", lastTestedAt: null },
+      { ref: "ollama/qwen3", label: "Qwen 3", adapter: "ollama", state: "ready", lastTestedAt: null },
+    ] });
+    const picked = move.selectionFor(stale as never, local, true);
+    assert.equal(picked.ok && picked.selection.mode === "local" && picked.selection.modelRef, "ollama/qwen3");
     // No local model there: refused, never switched to a signed-in hosted app (Claude Code and Codex are signed in on this device).
     const none = move.selectionFor(device() as never, local, true);
     assert.equal(none.ok, false);
@@ -182,6 +189,8 @@ async function main() {
     const card = readFileSync(join(ROOT, "components/settings/YourComputersCard.tsx"), "utf8");
     assert.match(card, /data-testid="agents-run-on"/);
     assert.match(card, /it is offline, so they cannot answer/);
+    assert.match(card, /it is offline, so the workspace API account answers until it is back/, "an armed API fallback is not 'cannot answer'");
+    assert.match(card, /a computer that is not in your list here/);
     assert.match(card, /data-testid="runs-agents-badge"/);
     assert.match(card, /device\.pairingId !== agentsOn && device\.online && device\.approved && device\.agentClaimEligible && eligibleFor\(device, setup\.scope\)/);
     assert.match(card, /moveAgentsToComputer\(device, engine\.state, setNotice\)/);
