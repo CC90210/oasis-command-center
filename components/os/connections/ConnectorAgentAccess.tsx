@@ -16,7 +16,16 @@
 
 import { useEffect, useState } from "react";
 import { AgentPicker } from "@/components/os/connections/AgentPicker";
-import { agentAccessLabel, agentToolsOf, connectorDefaultAccess, sameAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
+import {
+  AGENT_ACCESS_CHANGED_EVENT,
+  AGENT_CHOICES,
+  agentAccessLabel,
+  agentToolsOf,
+  connectorDefaultAccess,
+  sameAgentAccess,
+  type AgentAccess,
+  type AgentChoice,
+} from "@/lib/os/agent-access";
 import type { DepartmentKey } from "@/lib/os/types";
 
 type Loaded = { access: AgentAccess | null; saved: boolean; suggested: AgentAccess; unreadable?: boolean };
@@ -25,6 +34,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
   const suggested = connectorDefaultAccess({ departments });
   const tools = agentToolsOf(slug);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  // The workspace's agents by name ("Maven (Marketing)"), from the route.
+  const [choices, setChoices] = useState<ReadonlyArray<AgentChoice>>(AGENT_CHOICES);
   const [readOnly, setReadOnly] = useState(false);
   const [draft, setDraft] = useState<AgentAccess>(suggested);
   const [busy, setBusy] = useState(false);
@@ -39,7 +50,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
           if (live) setReadOnly(true);
           return;
         }
-        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; connectors?: Record<string, Loaded> };
+        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; connectors?: Record<string, Loaded>; choices?: AgentChoice[] };
+        if (live && Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
         const mine = j.connectors?.[slug];
         if (!r.ok || !j.ok || !mine) throw new Error("not_loaded");
         if (!live) return;
@@ -75,6 +87,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
       setLoaded({ access: j.access, saved: !!j.saved, suggested });
       setDraft(j.access);
       setNote({ tone: "ok", text: agents === null ? "Back to the suggested agents." : "Saved." });
+      // Every card on the page reads its agents again.
+      window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT));
     } catch {
       setNote({ tone: "bad", text: "Not saved: the server could not be reached." });
     } finally {
@@ -89,7 +103,7 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
   const changed = current === null || !sameAgentAccess(draft, current);
   return (
     <div className="space-y-2" data-testid="connector-agent-access">
-      <AgentPicker value={draft} onChange={setDraft} disabled={busy || !loaded} label="Agents that use this app" />
+      <AgentPicker value={draft} onChange={setDraft} disabled={busy || !loaded} label="Agents that use this app" choices={choices} />
       <p className="text-[11.5px] leading-4 text-fg-dim">
         {loaded?.saved && loaded.access !== null ? "Your choice." : "Suggested: the agents this app is built for, plus the Chief of Staff."}{" "}
         {tools

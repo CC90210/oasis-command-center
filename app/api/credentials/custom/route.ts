@@ -9,9 +9,11 @@
  *
  *   GET     — list every (key, last_updated, agents) — NEVER returns the value.
  *   POST    — upsert one entry. Body: { key, value, agents? }.
- *   POST (bulk) — upsert many entries. Body: { entries: [{key, value}, ...] }
+ *   POST (bulk) — upsert many entries. Body: { entries: [{key, value, agents?}, ...] }
  *                 OR { dotenv: "KEY1=value1\nKEY2=value2" } for raw paste,
  *                 with an optional `agents` for every entry in the request.
+ *                 An entry's own `agents` wins over the request's (the vault
+ *                 sends each pasted key with the agents shown beside it).
  *   DELETE  — remove one entry (and its agent choice). Body: { key }.
  *
  * Agents (CC, 2026-10-26): `agents` is "all" or a list of departments
@@ -45,6 +47,8 @@ import {
   VAULT_KEY_PATTERN,
 } from "@/lib/tenant-integration-store";
 import { normalizeAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
+import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
+import { parseDotenvLines } from "@/lib/os/custom-keys";
 import { clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
 
 export const runtime = "nodejs";
@@ -110,37 +114,18 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     entries: rows,
+    // The agents as this workspace's AI Team names them, for the picker and each key's "Used by".
+    choices: await agentChoicesForSession(),
     ...(overrides.ok ? {} : { agents_error: "Could not read which agents may use these keys." }),
   });
 }
 
 type SingleUpsertBody = { key: string; value: string };
-type BulkUpsertBody = { entries: SingleUpsertBody[] };
+/** A pending write, with the agents for this key alone when it names them. */
+type PendingEntry = SingleUpsertBody & { agents?: AgentAccess };
+type BulkUpsertBody = { entries: Array<SingleUpsertBody & { agents?: unknown }> };
 type DotenvUpsertBody = { dotenv: string };
 type AgentsBody = { agents: unknown };
-
-function parseDotenv(text: string): SingleUpsertBody[] {
-  const out: SingleUpsertBody[] = [];
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    // Allow optional `export ` prefix (bash style).
-    const stripped = line.startsWith("export ") ? line.slice(7) : line;
-    const eq = stripped.indexOf("=");
-    if (eq <= 0) continue;
-    const key = stripped.slice(0, eq).trim();
-    let value = stripped.slice(eq + 1).trim();
-    // Strip optional surrounding quotes.
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (key) out.push({ key, value });
-  }
-  return out;
-}
 
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
@@ -169,14 +154,26 @@ export async function POST(req: NextRequest) {
 
   // Normalize all three input shapes (single, bulk, dotenv) into one
   // list of pending writes. Validation runs uniformly across all paths.
-  let pending: SingleUpsertBody[] = [];
+  let pending: PendingEntry[] = [];
   if (typeof body.dotenv === "string") {
-    pending = parseDotenv(body.dotenv);
+    pending = parseDotenvLines(body.dotenv);
   } else if (Array.isArray(body.entries)) {
-    pending = body.entries.filter(
-      (e): e is SingleUpsertBody =>
+    const shaped = body.entries.filter(
+      (e): e is SingleUpsertBody & { agents?: unknown } =>
         !!e && typeof e === "object" && typeof e.key === "string" && typeof e.value === "string",
     );
+    // An entry's own agents are checked before anything is written: one typo saves nothing.
+    for (const e of shaped) {
+      if (e.agents === undefined) {
+        pending.push({ key: e.key, value: e.value });
+        continue;
+      }
+      const own = normalizeAgentAccess(e.agents);
+      if (own === null) {
+        return NextResponse.json({ ok: false, error: "invalid_agents" }, { status: 400 });
+      }
+      pending.push({ key: e.key, value: e.value, agents: own });
+    }
   } else if (typeof body.key === "string" && typeof body.value === "string") {
     pending = [{ key: body.key, value: body.value }];
   } else {
@@ -222,11 +219,12 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
-    if (agents !== undefined) {
+    const entryAgents = entry.agents ?? agents;
+    if (entryAgents !== undefined) {
       const a = await saveAgentAccess({
         tenantId: sess.tenantId,
         target: { kind: "custom", key: normalizedKey },
-        access: agents,
+        access: entryAgents,
         createdBy: sess.profileId,
       });
       if (!a.ok) {

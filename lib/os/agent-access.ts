@@ -34,8 +34,49 @@ export type AgentAccess = "all" | readonly DepartmentKey[];
 /** What an access choice is about. */
 export type AccessTarget = { kind: "custom"; key: string } | { kind: "connector"; slug: string };
 
-/** The agents an owner can pick, in the order the rail lists them. */
-export const AGENT_CHOICES: ReadonlyArray<{ key: DepartmentKey; label: string }> = OS_DEPARTMENTS.map((d) => ({
+/**
+ * One agent an owner can pick: its department, the words the picker shows for
+ * it ("Maven (Marketing)"), and the agent's name alone when the workspace
+ * names one ("Maven"), for a short line on a card.
+ */
+export type AgentChoice = { key: DepartmentKey; label: string; agent?: string };
+
+/**
+ * A choice as a card's short line: the agents' names, each once (Bravo leads
+ * two of OASIS's departments), or the departments where a workspace names no
+ * agent. "All agents" and "No agents" as agentAccessLabel says them.
+ */
+export function agentNamesLine(access: AgentAccess, choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string {
+  if (access === "all" || access.length === 0) return agentAccessLabel(access, choices);
+  return agentNames(access, choices).join(", ");
+}
+
+/** A choice in a sentence: "SDR, Maven and Bravo", "all agents", "no agents". */
+export function agentNamesSentence(access: AgentAccess, choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string {
+  if (access === "all") return "all agents";
+  const names = agentNames(access, choices);
+  if (names.length === 0) return "no agents";
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** The agents of a list of departments, by name, each once ("Bravo", "SDR"); a department with no named agent by its label. */
+export function agentNames(access: readonly DepartmentKey[], choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string[] {
+  const words = access.map((k) => {
+    const c = choices.find((x) => x.key === k);
+    return c?.agent || AGENT_CHOICES.find((x) => x.key === k)?.label || k;
+  });
+  return [...new Set(words)];
+}
+
+/** The event a saved agent choice sends, so every card on the page reads it again. */
+export const AGENT_ACCESS_CHANGED_EVENT = "oasis:agent-access-changed";
+
+/**
+ * The agents an owner can pick, in the order the rail lists them, labelled by
+ * department. A workspace names them (lib/os/agent-access-names.ts
+ * namedAgentChoices: "Maven (Marketing)"); this is the label without a name.
+ */
+export const AGENT_CHOICES: ReadonlyArray<AgentChoice> = OS_DEPARTMENTS.map((d) => ({
   key: d.key,
   label: d.label,
 }));
@@ -92,11 +133,14 @@ export function accessAllows(access: AgentAccess, department: DepartmentKey | nu
   return department !== null && access.includes(department);
 }
 
-/** The words a list shows for a choice: "All agents", "No agents", or the departments. */
-export function agentAccessLabel(access: AgentAccess): string {
+/**
+ * The words a list shows for a choice: "All agents", "No agents", or each
+ * agent as the workspace names it ("Maven (Marketing), Atlas (Finance)").
+ */
+export function agentAccessLabel(access: AgentAccess, choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string {
   if (access === "all") return "All agents";
   if (access.length === 0) return "No agents";
-  return access.map((k) => AGENT_CHOICES.find((c) => c.key === k)?.label ?? k).join(", ");
+  return access.map((k) => choices.find((c) => c.key === k)?.label ?? AGENT_CHOICES.find((c) => c.key === k)?.label ?? k).join(", ");
 }
 
 /** Same choice? Order does not matter. */

@@ -51,7 +51,38 @@ async function standInForSession() {
     id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [],
     exports: { ...realAuth, resolveSessionContext: async () => session },
   } as unknown as NodeModule;
+  // The routes name the agents from the signed-in viewer's workspace
+  // (lib/os/agent-access-names-session.ts); the test decides who that is, so the
+  // real viewer (cookies) never runs. next/navigation is stood in the way
+  // tests/one-agent-roster.test.ts does: its client build needs React's client half.
+  const n = require.resolve("next/navigation");
+  require.cache[n] = {
+    id: n, filename: n, path: dirname(n), loaded: true, children: [], paths: [],
+    exports: {
+      redirect: (url: string) => {
+        throw new Error(`NEXT_REDIRECT;${url}`);
+      },
+      notFound: () => {
+        throw new Error("NEXT_HTTP_ERROR_FALLBACK;404");
+      },
+    },
+  } as unknown as NodeModule;
+  const v = require.resolve("../components/os/department/viewer");
+  require.cache[v] = {
+    id: v, filename: v, path: dirname(v), loaded: true, children: [], paths: [],
+    exports: {
+      resolveOsViewer: async () => {
+        if (viewer instanceof Error) throw viewer;
+        return viewer;
+      },
+    },
+  } as unknown as NodeModule;
 }
+const FOUNDER_VIEWER = {
+  ok: true, oasis: true, manifest: null,
+  surface: { ok: true, persona: "founder", tenantId: OASIS, tenantSlug: "oasis", userId: "u-owner", teamRole: "owner", degraded: false },
+};
+let viewer: Record<string, unknown> | Error = FOUNDER_VIEWER;
 
 let failures = 0;
 async function check(name: string, fn: () => Promise<void> | void) {
@@ -294,6 +325,81 @@ async function main() {
     assert.match(vault, /setEditAgents\(row\.agents_unreadable \? \[\] : row\.agents \?\? "all"\)/, "saving it unchanged must not widen it");
   });
 
+  await check("the agents are named as the workspace's AI Team names them (CC: connected to a specific AI)", async () => {
+    const { namedAgentChoices } = await import("../lib/os/agent-access-names");
+    const founder = namedAgentChoices({ oasis: true, manifest: null, internal: true });
+    assert.deepEqual(founder.map((c) => c.label), [
+      "Bravo (Chief of Staff)", "SDR (Sales)", "Maven (Marketing)", "Customer Support (Client Success)", "Atlas (Finance)", "Bravo (Operations)",
+    ]);
+    assert.equal(rules.agentNamesLine(["chief_of_staff", "operations", "sales"], founder), "Bravo, SDR", "each agent once");
+    assert.equal(rules.agentAccessLabel(["marketing", "finance"], founder), "Maven (Marketing), Atlas (Finance)");
+    assert.equal(rules.agentNamesLine("all", founder), "All agents");
+    // Anyone but OASIS's founders reads a house agent as its department (lib/os/agent-names.ts).
+    const oasisRep = namedAgentChoices({ oasis: true, manifest: null, internal: false });
+    assert.equal(oasisRep.find((c) => c.key === "chief_of_staff")!.label, "Chief of Staff");
+    assert.equal(oasisRep.find((c) => c.key === "sales")!.label, "SDR (Sales)", "a library template keeps its name");
+    // A client with no teammates sees departments; one with a teammate sees that teammate's name.
+    assert.deepEqual(namedAgentChoices({ oasis: false, manifest: null, internal: false }).map((c) => c.label), rules.AGENT_CHOICES.map((c) => c.label));
+    const withRiley = namedAgentChoices({
+      oasis: false,
+      manifest: { agents: [{ slug: "sdr", display_name: "Riley", enabled: true, departments: ["sales"] }] } as never,
+      internal: false,
+    });
+    assert.equal(withRiley.find((c) => c.key === "sales")!.label, "Riley (Sales)");
+    // The picker shows the names it is given.
+    const React = await import("react");
+    (globalThis as unknown as { React: typeof React }).React = React;
+    const { AgentPicker } = await import("../components/os/connections/AgentPicker");
+    const tree = AgentPicker({ value: "all", onChange: () => undefined, choices: founder }) as unknown as { props: { children: [unknown, Array<{ props: { children: unknown } }>] } };
+    assert.deepEqual(tree.props.children[1].map((b) => b.props.children), founder.map((c) => c.label));
+    // Both routes send the names, as the signed-in viewer's AI Team names them.
+    const labels = (j: { choices: Array<{ label: string }> }) => j.choices.map((c) => c.label);
+    viewer = FOUNDER_VIEWER;
+    assert.deepEqual(labels(await (await agentsRoute.GET()).json()), founder.map((c) => c.label));
+    assert.deepEqual(labels(await (await customRoute.GET()).json()), founder.map((c) => c.label));
+    viewer = { ...FOUNDER_VIEWER, surface: { ...(FOUNDER_VIEWER.surface as object), persona: "rep" } };
+    assert.equal(labels(await (await agentsRoute.GET()).json())[0], "Chief of Staff", "a rep reads the house agent's department");
+    // A lookup that fails shows the departments, and says so in the log.
+    const realError = console.error;
+    const logged: unknown[] = [];
+    console.error = (...a: unknown[]) => void logged.push(a);
+    viewer = new Error("viewer lookup failed");
+    try {
+      assert.deepEqual(labels(await (await customRoute.GET()).json()), rules.AGENT_CHOICES.map((c) => c.label));
+    } finally {
+      console.error = realError;
+      viewer = FOUNDER_VIEWER;
+    }
+    assert.equal(logged.length, 1);
+    // The cards and every saved custom key show them.
+    const hub = read("components/os/connections/ConnectionsHub.tsx");
+    assert.match(hub, /Used by \{agents\}/);
+    assert.match(hub, /agents=\{agentLines\[def\.slug\]\}/);
+    assert.match(hub, /\{customLine \?\? "Each key names the agents that may use it"\}/);
+    assert.match(read("components/settings/CustomCredentialsVault.tsx"), /<AgentChips access=\{row\.agents\} choices=\{choices\} \/>/);
+  });
+
+  await check("a paste saves each key with its own agents; one bad choice saves nothing", async () => {
+    const before = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows[0].n;
+    const bad = await customRoute.POST(json({ entries: [{ key: "P_ONE", value: "1", agents: ["sales"] }, { key: "P_TWO", value: "2", agents: ["salse"] }] }));
+    assert.equal(bad.status, 400);
+    assert.equal((await bad.json()).error, "invalid_agents");
+    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows[0].n, before, "nothing saved");
+    const ok = await (await customRoute.POST(json({
+      agents: ["finance"],
+      entries: [
+        { key: "P_ONE", value: "1", agents: ["sales"] },
+        { key: "P_TWO", value: "2" },
+      ],
+    }))).json();
+    assert.deepEqual([ok.ok, ok.saved], [true, 2]);
+    const listed = (await (await customRoute.GET()).json()).entries as Array<{ key: string; agents: unknown }>;
+    assert.deepEqual(listed.find((e) => e.key === "P_ONE")?.agents, ["sales"], "its own agents win");
+    assert.deepEqual(listed.find((e) => e.key === "P_TWO")?.agents, ["finance"], "the request's agents otherwise");
+    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "P_ONE" }, ctx("atlas"))).content).forbidden, true);
+    for (const key of ["P_ONE", "P_TWO"]) await customRoute.DELETE(json({ key }, "DELETE"));
+  });
+
   await check("APP_TOOLS is whole: every credential read in the runner belongs to a mapped tool", () => {
     const src = read("lib/cloud-tool-runner.ts");
     const reads = (src.match(/get(Kixie|TextTorrent)Credentials\(ctx\.tenantId\)/g) || []).length;
@@ -328,10 +434,10 @@ async function main() {
     assert.equal(buttons("all", () => undefined).every((b) => b.props["aria-pressed"]), true);
   });
 
-  await check("the vault sends agents only when the picker was touched; the drawer says what an app's tools are", () => {
+  await check("the vault sends agents only when chosen or suggested (tests/custom-keys.test.ts); the drawer says what an app's tools are", () => {
     const vault = read("components/settings/CustomCredentialsVault.tsx");
-    assert.match(vault, /\.\.\.\(singleAgentsTouched \? \{ agents: singleAgents \} : \{\}\)/);
-    assert.match(vault, /\.\.\.\(bulkAgentsTouched \? \{ agents: bulkAgents \} : \{\}\)/);
+    assert.match(vault, /\.\.\.\(toSend !== undefined \? \{ agents: toSend \} : \{\}\)/);
+    assert.match(vault, /\.\.\.\(p\.send !== undefined \? \{ agents: p\.send \} : \{\}\)/);
     const drawer = read("components/os/connections/ConnectorDrawer.tsx");
     assert.match(drawer, /Used by<\/h3>\s*<ConnectorAgentAccess key=\{def\.slug\} slug=\{def\.slug\} departments=\{def\.departments\} \/>/);
     const access = read("components/os/connections/ConnectorAgentAccess.tsx");

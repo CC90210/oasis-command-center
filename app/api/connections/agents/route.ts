@@ -13,7 +13,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { AGENT_CHOICES, APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
+import { APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
+import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
 import {
   clearAgentAccess,
   defaultAccess,
@@ -51,7 +52,8 @@ export async function GET() {
     const { access, saved } = effectiveAccess(overrides, target);
     connectors[slug] = { access, saved, suggested: defaultAccess(target), unreadable: access === null };
   }
-  return NextResponse.json({ ok: true, choices: AGENT_CHOICES, connectors });
+  // The agents as this workspace's AI Team names them ("Maven (Marketing)"), for the picker and the cards.
+  return NextResponse.json({ ok: true, choices: await agentChoicesForSession(), connectors });
 }
 
 /** The apps a choice may be saved for: every card, plus the apps agent tools use (TextTorrent, Kixie have no card). */

@@ -987,7 +987,7 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   assert.match(read("components/os/connections/ServiceKeysForm.tsx"), /\} finally \{[\s\S]{0,300}await reload\(\);\s*onChanged\(\);/);
 
   // Custom keys are one card, opened in the same accessible sheet.
-  assert.match(hub, /<CustomCredentialsVault \/>/);
+  assert.match(hub, /<CustomCredentialsVault onOpenApp=\{openFromCustom\} \/>/);
   assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
 
   // Every app with a way to connect has its own card in its own category, even
