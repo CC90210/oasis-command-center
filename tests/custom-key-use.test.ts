@@ -215,10 +215,48 @@ async function main() {
     assert.ok(!JSON.stringify(rq).includes(SECRET), "an error that quotes the key does not reach the model");
     assert.ok(logged.length > 0 && logged.every((l) => !l.includes(SECRET)), "nor the audit log");
 
-    const redirect = network(() => new Response("", { status: 302, headers: { location: `https://evil.example.com/?k=${SECRET}` } }));
+    // Codex review of #755: each of these recovered the key before.
+    const slashKey = "abc/def/ghi/jkl/mno/pqr/stu/vwx";
+    await saveKey(CLIENT, "SLASHY_KEY", slashKey);
+    await hosts.saveKeyHost({ tenantId: CLIENT, key: "SLASHY_KEY", host: "api.hubapi.com" });
+    const jsonEcho = network(() => new Response(JSON.stringify({ seen: slashKey }).replace(/\//g, "\\/"), { status: 200, headers: { "content-type": `text/plain; echoed=${SECRET}` } }));
+    const rj = (await use({ name: "SLASHY_KEY", url: "https://api.hubapi.com/x" }, ctx(CLIENT), jsonEcho)) as Record<string, unknown>;
+    assert.ok(!String(rj.body).includes("ghi\\/jkl") && !String(rj.body).includes("ghi/jkl"), "JSON slash-escaped echo hidden");
+    // Each encoding the review recovered the key from, alone in a body, through the tool.
+    const b64 = (t: string) => Buffer.from(t).toString("base64");
+    const b64url = (t: string) => b64(t).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const echoes: Record<string, string> = {
+      "base64 of the whole Authorization value": b64(`Bearer ${SECRET}`),
+      "base64url of the whole Authorization value": b64url(`Bearer ${SECRET}`),
+      "base64url of the key": b64url(SECRET),
+      "lower-case percent-encoding": encodeURIComponent(`${SECRET}/x`).toLowerCase(),
+    };
+    for (const [what, echo] of Object.entries(echoes)) {
+      const n = network(() => new Response(`{"echo":"${echo}"}`, { status: 200, headers: { "content-type": "application/json" } }));
+      const re2 = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), n)) as Record<string, unknown>;
+      assert.ok(!String(re2.body).includes(echo.slice(4, 16)), `${what}: hidden`);
+    }
+    assert.equal(rj.content_type, "text/plain", "the content type alone, never the raw header");
+    const bearerB64 = Buffer.from(`Bearer ${SECRET}`).toString("base64");
+    const lowerPct = encodeURIComponent(SECRET + "/").toLowerCase();
+    const wide = network(() => new Response(`${"x".repeat(199_990)}${SECRET}${bearerB64}${lowerPct}`, { status: 200 }));
+    const rw = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), wide)) as Record<string, unknown>;
+    const out = String(rw.body);
+    for (let i = 0; i + 4 <= SECRET.length; i++) assert.ok(!out.includes(SECRET.slice(i, i + 4)), `no 4-character piece of the key survives the cap (${i})`);
+    const whole = runner.scrubSecret(`a ${SECRET} b`, runner.secretForms(SECRET, `Bearer ${SECRET}`));
+    assert.equal(whole, "a [key hidden] b", "the whole key goes, its tail included");
+    assert.ok(!out.includes(bearerB64.slice(0, 16)), "base64 of the whole Authorization value hidden");
+    assert.ok(out.length <= 200_000 + 12);
+    for (let i = 0; i + 12 <= SECRET.length; i++) {
+      const scrubbed = runner.scrubSecret(`pre ${SECRET.slice(i, i + 12).toUpperCase()} post`, runner.secretForms(SECRET, `Bearer ${SECRET}`));
+      assert.ok(scrubbed.includes("[key hidden]"), `any 12 characters of the key, in any case (${i})`);
+    }
+
+    const redirect = network(() => new Response("", { status: 302, headers: { location: `https://evil.example.com/?k=${lowerPct}` } }));
     const rr = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), redirect)) as Record<string, unknown>;
     assert.equal(redirect.sent.length, 1, "a redirect is reported, never followed");
     assert.equal(rr.status, 302);
+    assert.equal(rr.redirect_not_followed, true, "a redirect is said, its Location never returned");
     assert.ok(!JSON.stringify(rr).includes(SECRET));
   });
 

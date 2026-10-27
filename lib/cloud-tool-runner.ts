@@ -1512,6 +1512,72 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
   return { found: true, name: raw.toUpperCase(), value };
 }
 
+/** The run length of a key the scrubber hides wherever it appears: long enough to be the key, short enough that a fragment of it never survives. */
+export const SECRET_WINDOW = 12;
+
+/**
+ * Every common way a server could echo a secret back: as sent, JSON-escaped,
+ * percent-encoded, and base64 / base64url of the value and of the whole header
+ * that carried it (Codex review of #755 recovered the key from each of these).
+ */
+export function secretForms(value: string, headerValue: string): string[] {
+  const b64 = (t: string) => Buffer.from(t, "utf8").toString("base64");
+  const b64url = (t: string) => b64(t).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const json = JSON.stringify(value).slice(1, -1);
+  const forms = [value, json, json.replace(/\//g, "\\/"), encodeURIComponent(value), b64(value), b64url(value), b64(headerValue), b64url(headerValue)];
+  return [...new Set(forms.map((f) => f.replace(/=+$/, "")))].filter((f) => f.length >= 4);
+}
+
+/**
+ * `text` with every run of SECRET_WINDOW characters (case-insensitive) from any
+ * of `forms` hidden, so a key cannot leave in pieces, in another case, or cut
+ * by a size limit: a shorter form is hidden whole, and an end of `text` that is
+ * the start of a form is hidden too.
+ */
+export function scrubSecret(text: string, forms: readonly string[]): string {
+  // Lower-cased one UTF-16 unit at a time, so every index still points at the same character.
+  const lower = (t: string) => Array.from({ length: t.length }, (_, i) => {
+    const c = t[i];
+    const l = c.toLowerCase();
+    return l.length === 1 ? l : c;
+  }).join("");
+  const hay = lower(text);
+  const hidden = new Uint8Array(text.length);
+  const mark = (from: number, to: number) => hidden.fill(1, Math.max(0, from), Math.min(text.length, to));
+  for (const f of forms) {
+    const needle = lower(f);
+    const size = Math.min(needle.length, SECRET_WINDOW);
+    for (let i = 0; i + size <= needle.length; i++) {
+      const w = needle.slice(i, i + size);
+      for (let at = hay.indexOf(w); at !== -1; at = hay.indexOf(w, at + 1)) mark(at, at + size);
+    }
+    // A cut end: the last characters may be the start of a form, too short for a window.
+    for (let n = size - 1; n >= 4; n--) {
+      if (hay.endsWith(needle.slice(0, n))) {
+        mark(text.length - n, text.length);
+        break;
+      }
+    }
+  }
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    if (!hidden[i]) {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    while (i < text.length && hidden[i]) i += 1;
+    out += "[key hidden]";
+  }
+  return out;
+}
+
+/** The media type alone ("application/json"), or "other": a raw header could carry anything back. */
+function mediaTypeOnly(contentType: string): string {
+  const t = contentType.split(";")[0].trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(t) ? t : "other";
+}
+
 /** Headers a key may be sent in with auth "header": a plain name, never one the request itself relies on. */
 const KEY_HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
 const KEY_HEADER_REFUSED = new Set(["host", "connection", "content-length", "cookie", "transfer-encoding", "te", "upgrade", "proxy-authorization"]);
@@ -1581,9 +1647,9 @@ export async function toolUseCustomKey(
   // The key, as text, URL-encoded and in base64, is hidden in everything that
   // leaves this function: the result, the error words, the audit line. A
   // runtime's "invalid header value" error quotes the value it refused.
-  const forms = [...new Set([value, encodeURIComponent(value), Buffer.from(value).toString("base64")])].filter((f) => f.length >= 4);
-  const hide = (text: string) => forms.reduce((t, f) => t.split(f).join("[key hidden]"), text);
   const auth = input.auth === "header" ? "header" : "bearer";
+  const forms = secretForms(value, auth === "header" ? value : `Bearer ${value}`);
+  const hide = (text: string) => scrubSecret(text, forms);
   const headers: Record<string, string> = { accept: "application/json, text/plain;q=0.9, */*;q=0.5" };
   if (auth === "header") {
     const headerName = typeof input.header_name === "string" ? input.header_name.trim() : "";
@@ -1604,15 +1670,20 @@ export async function toolUseCustomKey(
     return { ok: false, refused: "fetch_failed", name, hint: `The request to ${host} failed (${why}).` };
   }
   audit("ok");
+  // Scrubbed BEFORE the cap, so the cap cannot cut a key short of being recognised;
+  // the cut end is scrubbed again. A redirect says only that there was one: its
+  // Location could carry anything back.
+  const cap = 200_000;
+  const scrubbed = hide(r.body.slice(0, cap + 4096));
   return {
     ok: true,
     name,
     website: host,
     status: r.status,
-    content_type: r.contentType,
-    body: hide(r.body.slice(0, 200_000)),
-    truncated: r.truncated,
-    ...(r.location ? { redirect_not_followed: hide(r.location) } : {}),
+    content_type: mediaTypeOnly(r.contentType),
+    body: scrubbed.length > cap ? hide(scrubbed.slice(0, cap)) : scrubbed,
+    truncated: r.truncated || scrubbed.length > cap,
+    ...(r.location ? { redirect_not_followed: true } : {}),
   };
 }
 

@@ -500,8 +500,8 @@ export function agentsShown(input: { saved: boolean; existing: AgentAccess | nul
  * it to a GET request, and only to this host, so a key cannot be sent anywhere
  * the owner did not name, whatever a web page tells the agent.
  *
- * A host name, or a URL to take it from: "api.hubapi.com" and
- * "https://api.hubapi.com/crm/v3" are both api.hubapi.com. Refused: an IP
+ * A host name, or a URL to take it from: "api.example.com" and
+ * "https://api.example.com/crm/v3" are both api.example.com. Refused: an IP
  * address, a name without a dot, a local or internal name, a port, and
  * anything that is not a plain public host name.
  */
@@ -542,16 +542,16 @@ export function keyHost(raw: string): { ok: true; host: string } | { ok: false; 
 export function keyHostProblemWords(problem: KeyHostProblem): string {
   switch (problem) {
     case "empty":
-      return "Type the website this key is for, like api.hubapi.com.";
+      return "Type the website this key is for, like api.example.com.";
     case "ip_address":
-      return "Use the website's name, like api.hubapi.com, not an IP address.";
+      return "Use the website's name, like api.example.com, not an IP address.";
     case "local_name":
       return "That name is for a private network. Agents can only send a key to a public website.";
     case "has_port":
-      return "Leave out the port: type just the website, like api.hubapi.com.";
+      return "Leave out the port: type just the website, like api.example.com.";
     case "too_long":
       return "That website name is too long.";
     default:
-      return "That doesn't look like a website. Type its name, like api.hubapi.com, or paste an https:// link to it.";
+      return "That doesn't look like a website. Type its name, like api.example.com, or paste an https:// link to it.";
   }
 }
