@@ -4,7 +4,7 @@ export const CLI_INVENTORY_MAX_AGE_MS = 5 * 60 * 1000;
 const INSTALL_URLS = {
   claude: "https://docs.anthropic.com/en/docs/claude-code/quickstart",
   codex: "https://github.com/openai/codex",
-  gemini: "https://github.com/google-gemini/gemini-cli",
+  opencode: "https://opencode.ai",
 } as const;
 
 export type CliProvider = keyof typeof INSTALL_URLS;
@@ -37,7 +37,8 @@ export type CliStatusInfo = {
   checked: boolean;
   /**
    * The vendor refuses this computer's sign-in for this app (probe "unsupported":
-   * Google ended Gemini CLI on a personal Google sign-in). A finished verdict
+   * Google ended Gemini CLI on a personal Google sign-in, which is why it was
+   * removed on 2026-10-27). A finished verdict
    * that signing in again cannot change. Absent on a snapshot from an older reader.
    */
   unsupported?: boolean;
@@ -82,15 +83,15 @@ export function cliStatusState(info: Pick<CliStatusInfo, "installed" | "authenti
 export const CLI_SIGN_IN: Record<CliProvider, { label: string; command: string | null; instructions: string }> = {
   claude: { label: "Claude Code", command: "claude", instructions: "Launch `claude`, then enter `/login`." },
   codex: { label: "Codex", command: "codex login", instructions: "Run `codex login`." },
-  gemini: {
-    label: "Gemini CLI",
-    command: null,
-    instructions: "Personal Gemini CLI sign-in is unsupported. Use a Google Gemini API key instead.",
+  opencode: {
+    label: "OpenCode",
+    command: "opencode auth login",
+    instructions: "Run `opencode auth login` and choose a provider (for Kimi K2, Moonshot AI).",
   },
 };
 
 export function isSignInProvider(v: unknown): v is CliProvider {
-  return v === "claude" || v === "codex" || v === "gemini";
+  return v === "claude" || v === "codex" || v === "opencode";
 }
 
 export const CLI_STATE_LABEL: Record<CliState, string> = {
@@ -102,13 +103,11 @@ export const CLI_STATE_LABEL: Record<CliState, string> = {
 };
 
 /** Why an app is "unsupported" on this sign-in, in plain words (the same sentence the bridge's run error maps to, lib/os/channel/outcome.ts). */
-export const CLI_UNSUPPORTED_DETAIL = "Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account.";
+export const CLI_UNSUPPORTED_DETAIL = "The app's maker does not allow this sign-in on your paired computer. Pick another app, or use an AI account.";
 
-/** The same, for any app: only Gemini is refused today; another app's refusal gets a general sentence. */
-export function cliUnsupportedDetail(provider: CliProvider): string {
-  return provider === "gemini"
-    ? CLI_UNSUPPORTED_DETAIL
-    : "The app's maker does not allow this sign-in on this computer. Pick another app, or use an AI account.";
+/** The same, for one app (no app is refused by name since Gemini CLI was removed). */
+export function cliUnsupportedDetail(_provider: CliProvider): string {
+  return CLI_UNSUPPORTED_DETAIL;
 }
 
 /**
@@ -181,7 +180,10 @@ function parseProviders(rawProviders: unknown): CliStatusSnapshot | null {
   const record = rawProviders as NonNullable<CliInventoryMetadata["providers"]>;
   const providers = {} as CliStatusSnapshot;
   for (const provider of Object.keys(INSTALL_URLS) as CliProvider[]) {
-    const raw = record[provider];
+    // A connector from before 2026-10-27 does not report OpenCode at all: it
+    // cannot run it, so it reads as not installed there (a finished check)
+    // instead of dropping that computer's whole list.
+    const raw = record[provider] ?? (provider === "opencode" ? { installed: false, authenticated: false, version: null } : undefined);
     if (!raw || typeof raw !== "object") return null;
     const rawVersion = raw.version;
     const version = typeof rawVersion === "string" && rawVersion.trim() ? rawVersion.trim().slice(0, 160) : null;

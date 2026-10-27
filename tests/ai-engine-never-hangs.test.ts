@@ -53,8 +53,8 @@ async function check(name: string, fn: () => Promise<void> | void) {
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
-const GEMINI = { mode: "subscription", provider: "gemini", pairingId: "pair-ccpc", fallback: "none" } as const;
-const BRIDGE_GEMINI = { kind: "cli", cli: "gemini" } as const;
+const OPENCODE = { mode: "subscription", provider: "opencode", pairingId: "pair-ccpc", fallback: "none" } as const;
+const BRIDGE_OPENCODE = { kind: "cli", cli: "opencode" } as const;
 
 async function main() {
   // A promise that never settles must not let node exit 0 mid-suite (it would read as a pass).
@@ -66,10 +66,10 @@ async function main() {
 
   console.log("1. the browser call always ends");
   await check("a 422 with JSON hands back the server's own sentence (Save and Test)", async () => {
-    const sentence = "It did not pass the test, so nothing was changed. Google no longer lets Gemini CLI run on a personal Google sign-in.";
+    const sentence = "It did not pass the test, so nothing was changed. The app's maker does not allow this sign-in on that computer.";
     const fetch422 = async () => json(422, { ok: false, error: "engine_test_failed", message: sentence });
-    assert.deepEqual(await client.saveEngine(GEMINI, null, fetch422), { ok: false, message: sentence });
-    assert.deepEqual(await client.queueEngineProbe(GEMINI, "person", fetch422), { ok: false, message: sentence });
+    assert.deepEqual(await client.saveEngine(OPENCODE, null, fetch422), { ok: false, message: sentence });
+    assert.deepEqual(await client.queueEngineProbe(OPENCODE, "person", fetch422), { ok: false, message: sentence });
   });
   await check("a 500, a non-JSON 502 and a 504 each end in a plain sentence, never a status code or HTML", async () => {
     for (const [status, raw] of [
@@ -79,7 +79,7 @@ async function main() {
       [524, "error code: 524"],
     ] as const) {
       const f = async () => new Response(raw, { status });
-      for (const r of [await client.saveEngine(GEMINI, null, f), await client.queueEngineProbe(GEMINI, "person", f)]) {
+      for (const r of [await client.saveEngine(OPENCODE, null, f), await client.queueEngineProbe(OPENCODE, "person", f)]) {
         assert.equal(r.ok, false);
         const message = (r as { message: string }).message;
         assert.match(message, /^[A-Z][^<>]*[.]$/, `${status}: ${message}`);
@@ -92,23 +92,23 @@ async function main() {
     const f = async () => {
       throw new TypeError("Failed to fetch");
     };
-    const r = await client.saveEngine(GEMINI, null, f);
+    const r = await client.saveEngine(OPENCODE, null, f);
     assert.deepEqual(r, { ok: false, message: "We couldn't reach OASIS just now. Check your connection, then try again. Nothing was changed." });
   });
   await check("a connection that never answers ends at the deadline, even when fetch ignores its signal", async () => {
     const never = () => new Promise<Response>(() => undefined);
     const started = Date.now();
-    const r = await client.queueEngineProbe(GEMINI, "person", never, { deadlineMs: 40 });
+    const r = await client.queueEngineProbe(OPENCODE, "person", never, { deadlineMs: 40 });
     assert.ok(Date.now() - started < 1000, "the call must end at its own deadline");
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /didn't answer in time\. Try again, or pick another app\./);
-    const s = await client.saveEngine(GEMINI, null, never, { deadlineMs: 40 });
+    const s = await client.saveEngine(OPENCODE, null, never, { deadlineMs: 40 });
     assert.match((s as { message: string }).message, /In use/, "a save that timed out points at the page's own truth");
     assert.equal((s as { stopped?: boolean }).stopped, true, "and says it was stopped, so the panel re-reads");
   });
   await check("a body that never arrives also ends at the deadline", async () => {
     const stuck = async () => ({ ok: true, status: 200, json: () => new Promise(() => undefined) }) as unknown as Response;
-    const r = await client.queueEngineProbe(GEMINI, "person", stuck, { deadlineMs: 40 });
+    const r = await client.queueEngineProbe(OPENCODE, "person", stuck, { deadlineMs: 40 });
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /didn't answer in time/);
   });
@@ -120,18 +120,18 @@ async function main() {
         init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
       });
     const ctl = new AbortController();
-    const pending = client.queueEngineProbe(GEMINI, "person", waits, { signal: ctl.signal });
+    const pending = client.queueEngineProbe(OPENCODE, "person", waits, { signal: ctl.signal });
     ctl.abort();
     const r = await pending;
     assert.equal(seen?.aborted, true, "the request itself was aborted");
     assert.deepEqual(r, { ok: false, message: "Stopped waiting for the test. Nothing was changed." });
     const already = new AbortController();
     already.abort();
-    assert.equal((await client.queueEngineProbe(GEMINI, "person", waits, { signal: already.signal })).ok, false, "an already-cancelled call ends at once");
+    assert.equal((await client.queueEngineProbe(OPENCODE, "person", waits, { signal: already.signal })).ok, false, "an already-cancelled call ends at once");
   });
   await check("a stopped call says the right thing for what it was doing (save, provider switch, key removal, test)", async () => {
     const never = () => new Promise<Response>(() => undefined);
-    const save = await client.saveEngine(GEMINI, null, never, { deadlineMs: 30 });
+    const save = await client.saveEngine(OPENCODE, null, never, { deadlineMs: 30 });
     assert.match((save as { message: string }).message, /"In use" above shows what your agents really run on/);
     const sw = await client.switchProvider("openai", never, { deadlineMs: 30 });
     assert.match((sw as { message: string }).message, /provider didn't answer in time\. The AI account shown is what your agents really use/);
@@ -143,13 +143,13 @@ async function main() {
     ctl.abort();
     assert.match(((await pend) as { message: string }).message, /^Stopped waiting\. The saved keys listed/);
     const sendsVersion: string[] = [];
-    await client.saveEngine(GEMINI, "v-7", async (_u: string, init: RequestInit) => {
+    await client.saveEngine(OPENCODE, "v-7", async (_u: string, init: RequestInit) => {
       sendsVersion.push(String(init.body));
       return json(200, { ok: true });
     });
     assert.deepEqual(
       JSON.parse(sendsVersion[0]),
-      { engine: GEMINI, scope: "person", expected_version: "v-7" },
+      { engine: OPENCODE, scope: "person", expected_version: "v-7" },
       "a save hands back the exact selection, scope and version the page read",
     );
   });
@@ -182,7 +182,7 @@ async function main() {
       }
       const r = await bridge.testBridgeEngine({
         caller: { target: { baseUrl: "http://bridge.invalid", bearerToken: "t" }, tenantId: "t", userId: "u", teamRole: "owner" } as never,
-        engine: BRIDGE_GEMINI,
+        engine: BRIDGE_OPENCODE,
         tenantSlug: "oasis",
         system: "s",
         ask: "a",
@@ -198,14 +198,14 @@ async function main() {
   });
 
   console.log("3. the bridge's failure codes, in plain words");
-  await check("cli_account_unsupported says why Gemini CLI cannot run, in CC's words", async () => {
+  await check("cli_account_unsupported says why the app cannot run, in plain words", async () => {
     assert.equal(outcome.classifyStreamError("cli_error:cli_account_unsupported"), "cli_account_unsupported");
     const c = outcome.failureCopy("cli_account_unsupported", { canManageAi: true });
-    assert.equal(c.sentence, "Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account.");
+    assert.equal(c.sentence, "The app's maker does not allow this sign-in on your paired computer. Pick another app, or use an AI account.");
     assert.equal(cliStatus.CLI_UNSUPPORTED_DETAIL, c.sentence, "the card and the run error say the same words");
     const r = await bridge.testBridgeEngine({
       caller: { target: { baseUrl: "http://bridge.invalid", bearerToken: "t" }, tenantId: "t", userId: "u", teamRole: "owner" } as never,
-      engine: BRIDGE_GEMINI,
+      engine: BRIDGE_OPENCODE,
       tenantSlug: "oasis",
       system: "s",
       ask: "a",
@@ -241,11 +241,11 @@ async function main() {
   await check("probe 'unsupported' is its own state: never Ready, never Needs sign-in, never 'not confirmed'", () => {
     const claude = { installed: true, authenticated: true, version: "2.1.270" };
     const codex = { installed: true, authenticated: true, version: "0.146" };
-    const gemini = { installed: true, authenticated: false, version: null, probe: "unsupported" };
-    const snap = cliStatus.normalizeCliSnapshot({ providers: { claude, codex, gemini } }, new Date().toISOString());
+    const opencode = { installed: true, authenticated: false, version: null, probe: "unsupported" };
+    const snap = cliStatus.normalizeCliSnapshot({ providers: { claude, codex, opencode } }, new Date().toISOString());
     assert.ok(snap.ok);
     if (!snap.ok) return;
-    const g = snap.data.gemini;
+    const g = snap.data.opencode;
     assert.equal(g.unsupported, true);
     assert.equal(g.checked, true, "a verdict, not a check that failed to finish");
     assert.equal(cliStatus.cliStatusState(g), "unsupported");
@@ -262,9 +262,9 @@ async function main() {
   await check("an app is listed as refused only when every computer that has it says so", () => {
     const info = (unsupported: boolean, ready = false) => ({ installed: true, authenticated: ready, version: "1", install_hint_url: "x", checked: true, unsupported });
     const ok = info(false, true);
-    const machine = (id: string, gemini: ReturnType<typeof info>) => ({ id, label: id, data: { claude: ok, codex: ok, gemini } });
-    assert.deepEqual(cliStatus.unsupportedProviders([machine("a", info(true))]), ["gemini"]);
-    assert.deepEqual(cliStatus.unsupportedProviders([machine("a", info(true)), machine("b", info(true))]), ["gemini"]);
+    const machine = (id: string, opencode: ReturnType<typeof info>) => ({ id, label: id, data: { claude: ok, codex: ok, opencode } });
+    assert.deepEqual(cliStatus.unsupportedProviders([machine("a", info(true))]), ["opencode"]);
+    assert.deepEqual(cliStatus.unsupportedProviders([machine("a", info(true)), machine("b", info(true))]), ["opencode"]);
     assert.deepEqual(cliStatus.unsupportedProviders([machine("a", info(true)), machine("b", info(false, true))]), [], "one computer where it works means it is not refused");
     assert.deepEqual(cliStatus.unsupportedProviders([]), []);
   });
@@ -284,25 +284,25 @@ async function main() {
           id: "probe-pair-ccpc",
           status,
           action: "probe",
-          engine: { kind: "cli", name: "gemini" },
+          engine: { kind: "cli", name: "opencode" },
           result: status === "completed" ? { reply: "Hello", latency_ms: 4200 } : null,
         },
       });
     };
-    const queued = await client.queueEngineProbe(GEMINI, "person", fetcher);
+    const queued = await client.queueEngineProbe(OPENCODE, "person", fetcher);
     assert.deepEqual(queued, { ok: true, jobId: "probe-pair-ccpc" });
     const updates: string[] = [];
     const done = await client.pollRuntimeJob("probe-pair-ccpc", fetcher, { intervalMs: 0, onUpdate: (job) => updates.push(job.status) });
     assert.equal(done.ok && done.job.status, "done");
     if (done.ok) {
-      assert.equal(done.job.engine?.name, "gemini");
+      assert.equal(done.job.engine?.name, "opencode");
       assert.deepEqual(done.job.result, { reply: "Hello", latencyMs: 4200 });
     }
     assert.deepEqual(updates, ["queued", "running", "done"]);
     assert.deepEqual(calls[0], {
       url: "/api/ai/engine",
       method: "POST",
-      body: { engine: GEMINI, scope: "person" },
+      body: { engine: OPENCODE, scope: "person" },
     });
     assert.ok(calls.slice(1).every((call) => call.url === "/api/bridge/runtime-jobs/probe-pair-ccpc" && call.method === "GET"));
   });
@@ -317,19 +317,19 @@ async function main() {
             id: "probe-failed",
             status: "failed",
             action: "probe",
-            engine: { kind: "cli", name: "gemini" },
+            engine: { kind: "cli", name: "opencode" },
             error_code: "unsupported_personal_sign_in",
-            message: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.",
+            message: "The app's maker does not allow this sign-in on that computer.",
           },
         }),
       { intervalMs: 0 },
     );
     assert.deepEqual(result, {
       ok: false,
-      message: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.",
+      message: "The app's maker does not allow this sign-in on that computer.",
       code: "unsupported_personal_sign_in",
     });
-    assert.match(client.repairForCode("unsupported_personal_sign_in") ?? "", /Google API key/);
+    assert.match(client.repairForCode("unsupported_personal_sign_in") ?? "", /does not allow this sign-in/);
   });
 
   await check("polling a connection that never answers aborts at its browser deadline", async () => {

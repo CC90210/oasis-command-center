@@ -202,7 +202,7 @@ async function providerReady(
   if (session.computerDispatch) {
     const dispatch = session.computerDispatch;
     const chosen: AgentEngineChoice = dispatch.engineKind === "cli"
-      ? { kind: "cli", cli: dispatch.engineName as "claude" | "codex" | "gemini", pairingId: dispatch.pairingId, fallback: dispatch.fallback }
+      ? { kind: "cli", cli: dispatch.engineName as "claude" | "codex" | "opencode", pairingId: dispatch.pairingId, fallback: dispatch.fallback }
       : { kind: "local", model: dispatch.engineName, pairingId: dispatch.pairingId, fallback: dispatch.fallback };
     return {
       readiness: "ready",

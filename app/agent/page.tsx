@@ -1,7 +1,7 @@
 /**
  * /agent — Admin › Coding harness (2026-09-30; was "Agent console").
  *
- * OPERATOR ONLY. It runs Claude Code, Codex or Gemini in a department's repo
+ * OPERATOR ONLY. It runs Claude Code, Codex or OpenCode in a department's repo
  * on the operator's computer through the bridge (Business-Empire-Agent for
  * Chief of Staff and Operations, CMO-Agent for Marketing, CFO-Agent for
  * Finance). Anyone else is sent to Chief of Staff, where everyday questions

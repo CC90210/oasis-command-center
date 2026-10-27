@@ -93,6 +93,8 @@ async function createSchema() {
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
       status TEXT NOT NULL, created_at TEXT NOT NULL
     );
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT);
+    INSERT INTO tenants (id, slug) VALUES ('tenant-auth-a', 'oasis'), ('tenant-auth-b', 'acme-client');
   `);
   const migration = readFileSync(join(ROOT, "database", "turso", "bravo__215_ai_engine_pairing_runtime.sql"), "utf8");
   for (const statement of splitStatements(migration)) await db.execute(statement);
@@ -253,15 +255,39 @@ async function main() {
     assert.deepEqual([row.rows[0].pairing_id, row.rows[0].engine_name], ["pair-claude", "claude"]);
   });
 
-  await check("Gemini personal login is terminal Unsupported and queues no job", async () => {
+  await check("OpenCode sign-in is queued on that computer with its terminal command", async () => {
+    await addPairing({ id: "pair-opencode" });
+    const result = await json(await route.POST(request({ provider: "opencode", pairing_id: "pair-opencode" })));
+    assert.equal(result.status, 202, JSON.stringify(result.body));
+    assert.equal(result.body.command, "opencode auth login");
+    assert.match(String(result.body.instructions), /Moonshot AI/);
+    const row = await db.execute({ sql: "SELECT pairing_id, engine_name FROM bridge_runtime_jobs WHERE id = ?", args: [String(result.body.job_id)] });
+    assert.deepEqual([row.rows[0].pairing_id, row.rows[0].engine_name], ["pair-opencode", "opencode"]);
+  });
+
+  await check("a client workspace cannot queue a Codex or OpenCode sign-in (the rollout gate, Codex review of #758)", async () => {
+    await db.execute("UPDATE tenants SET slug = 'acme-client' WHERE id = 'tenant-auth-a'");
+    try {
+      await addPairing({ id: "pair-client-oc" });
+      const before = Number((await db.execute("SELECT count(*) AS n FROM bridge_runtime_jobs")).rows[0].n);
+      for (const provider of ["opencode", "codex"]) {
+        const result = await json(await route.POST(request({ provider, pairing_id: "pair-client-oc" })));
+        assert.equal(result.status, 409, JSON.stringify(result.body));
+        assert.equal(result.body.error, "codex_oasis_rollout_only");
+      }
+      const after = Number((await db.execute("SELECT count(*) AS n FROM bridge_runtime_jobs")).rows[0].n);
+      assert.equal(after, before, "nothing queued");
+    } finally {
+      await db.execute("UPDATE tenants SET slug = 'oasis' WHERE id = 'tenant-auth-a'");
+    }
+  });
+
+  await check("Gemini CLI was removed: a sign-in for it is refused and queues no job", async () => {
     await addPairing({ id: "pair-gemini" });
     const before = Number((await db.execute("SELECT count(*) AS n FROM bridge_runtime_jobs")).rows[0].n);
     const result = await json(await route.POST(request({ provider: "gemini", pairing_id: "pair-gemini" })));
     const after = Number((await db.execute("SELECT count(*) AS n FROM bridge_runtime_jobs")).rows[0].n);
-    assert.equal(result.status, 409, JSON.stringify(result.body));
-    assert.equal(result.body.error, "unsupported_personal_sign_in");
-    assert.match(String(result.body.message), /Google.*API/i);
-    assert.deepEqual(result.body.alternative, { mode: "api", provider: "google" });
+    assert.equal(result.status >= 400 && result.status < 500, true, JSON.stringify(result.body));
     assert.equal(after, before);
   });
 

@@ -216,7 +216,7 @@ async function main() {
       pairingId: "bp-cc", label: "CCPC (Windows)", ownerName: null, ownedByViewer: true, workspaceEligible: true, agentClaimEligible: true,
       os: "windows", lastSeenAt: fresh, approved: true, online: true, busy: false,
       protocols: ["runtime_action_v1", "department_task_v2", "coding_harness_task_v1"], localModels: [],
-      runtimes: { claude: runtime({}), codex: runtime({}), gemini: runtime({}), ...runtimes },
+      runtimes: { claude: runtime({}), codex: runtime({}), opencode: runtime({}), ...runtimes },
     }) as unknown as Parameters<typeof appStatusLines>[0];
     assert.deepEqual(
       appStatusLines(device({ claude: runtime({ installed: true, signedIn: true }), codex: runtime({ installed: true }) }), true),

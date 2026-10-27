@@ -9,7 +9,7 @@
  *          provider's key (Anthropic, OpenAI, Google, OpenRouter) and its model.
  *          Every reply spends that account's API credits. This is the default:
  *          a workspace that never chose answers exactly as before.
- *   cli    an AI app on the paired computer (Claude Code, Codex, Gemini CLI),
+ *   cli    an AI app on the paired computer (Claude Code, Codex, OpenCode),
  *          reached through the OASIS bridge the coding harness already uses.
  *          Replies run on that app's own sign-in on that computer (a
  *          subscription), not on API credits. Never a sign-in inside OASIS.
@@ -31,7 +31,11 @@
 
 export const ENGINE_AGENT_KEY = "__engine__";
 
-export const CLI_ENGINES = ["claude", "codex", "gemini"] as const;
+// Gemini CLI was removed on 2026-10-27 (Google refuses personal sign-ins, so it
+// could never pass Test); OpenCode took its place. A stored "gemini" row is
+// read by engineFromRow as OpenCode with no computer: it cannot run until its
+// owner picks a computer and passes Test, and it never falls to API credits.
+export const CLI_ENGINES = ["claude", "codex", "opencode"] as const;
 export type CliEngine = (typeof CLI_ENGINES)[number];
 
 export const API_ENGINE_PROVIDERS = ["anthropic", "openai", "google", "openrouter"] as const;
@@ -56,7 +60,7 @@ export type AgentEngineChoice =
 export const CLI_ENGINE_LABEL: Record<CliEngine, string> = {
   claude: "Claude Code",
   codex: "Codex",
-  gemini: "Gemini CLI",
+  opencode: "OpenCode",
 };
 
 /** Whose money or plan a reply runs on. */
@@ -99,6 +103,12 @@ export function engineFromRow(
   const fallback = isEngineFallback(row.fallback_policy) ? row.fallback_policy : undefined;
   if (row.provider === "cli" && isCliEngine(row.model)) {
     return { kind: "cli", cli: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
+  }
+  if (row.provider === "cli" && row.model === "gemini") {
+    // Retired app (Codex review of #758): reading it as the API default would
+    // spend credits the owner never agreed to. No computer and no fallback make
+    // it "choose a computer", the same unavailable state as any unbound row.
+    return { kind: "cli", cli: "opencode", fallback: "none" };
   }
   if (row.provider === "local" && isLocalModelName(row.model)) {
     return { kind: "local", model: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
@@ -312,7 +322,7 @@ export function harnessRouteFor(choice: AgentEngineChoice): HarnessRoute {
 /**
  * The code a turn leaves in ai_usage_events.fallback_reason when the chosen
  * engine could not answer and the API account did: `engine_unreachable:claude`
- * (or codex, gemini, local). A code, never prose; lib/health/department-chat-
+ * (or codex, opencode, local). A code, never prose; lib/health/department-chat-
  * checks.ts reads it back into words, so keep the two in step.
  */
 export const ENGINE_FALLBACK_PREFIX = "engine_unreachable:";

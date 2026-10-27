@@ -25,7 +25,7 @@ const metadata: CliInventoryMetadata = {
       authenticated: true,
       version: "codex-cli 0.146.0",
     },
-    gemini: {
+    opencode: {
       installed: true,
       authenticated: true,
       version: "0.42.0",
@@ -38,7 +38,22 @@ assert.equal(fresh.ok, true);
 if (fresh.ok) {
   assert.equal(fresh.data.claude.authenticated, true);
   assert.equal(fresh.data.codex.version, "codex-cli 0.146.0");
-  assert.equal(fresh.data.gemini.installed, true);
+  assert.equal(fresh.data.opencode.installed, true);
+}
+
+// A connector from before 2026-10-27 reports Gemini CLI and no OpenCode. Its
+// computer must keep its app list (OpenCode reads Not detected there), not
+// lose it; the Gemini entry is ignored.
+const legacy = normalizeCliSnapshot(
+  { providers: { claude: metadata.providers!.claude, codex: metadata.providers!.codex, gemini: { installed: true, authenticated: false, version: null, probe: "unsupported" } } },
+  "2026-08-25T16:29:00.000Z",
+  NOW,
+);
+assert.equal(legacy.ok, true, "a pre-OpenCode connector's report still reads");
+if (legacy.ok) {
+  assert.equal(cliStatusState(legacy.data.opencode), "not_detected");
+  assert.equal(cliStatusState(legacy.data.claude), "ready");
+  assert.equal("gemini" in legacy.data, false);
 }
 
 assert.deepEqual(
@@ -104,29 +119,29 @@ assert.ok(
   "a failed CLI snapshot write must produce a non-success heartbeat",
 );
 
-// Google ended Gemini CLI on a personal sign-in: the bridge sends probe "unsupported".
+// An app whose maker refuses this sign-in: the bridge sends probe "unsupported".
 // It is a FINISHED check with its own state: never Ready, never Needs sign-in
 // (signing in again does not help), never "Sign-in not confirmed".
 const refused = normalizeCliSnapshot(
-  { providers: { ...metadata.providers, gemini: { installed: true, authenticated: false, version: null, probe: "unsupported" } } },
+  { providers: { ...metadata.providers, opencode: { installed: true, authenticated: false, version: null, probe: "unsupported" } } },
   "2026-08-25T16:29:00.000Z",
   NOW,
 );
 assert.equal(refused.ok, true);
 if (refused.ok) {
-  const state = cliStatusState(refused.data.gemini);
+  const state = cliStatusState(refused.data.opencode);
   assert.equal(state, "unsupported");
   assert.equal(CLI_STATE_LABEL[state], "Not supported on this sign-in");
-  assert.equal(refused.data.gemini.checked, true);
+  assert.equal(refused.data.opencode.checked, true);
   assert.equal(cliStatusState(refused.data.claude), "ready");
 }
 // The same shape without the probe still reads "not confirmed": only the bridge's verdict makes it final.
 const unversioned = normalizeCliSnapshot(
-  { providers: { ...metadata.providers, gemini: { installed: true, authenticated: false, version: null } } },
+  { providers: { ...metadata.providers, opencode: { installed: true, authenticated: false, version: null } } },
   "2026-08-25T16:29:00.000Z",
   NOW,
 );
-assert.equal(unversioned.ok && cliStatusState(unversioned.data.gemini), "unknown");
+assert.equal(unversioned.ok && cliStatusState(unversioned.data.opencode), "unknown");
 
 const deviceFromHeartbeat = (executionReady: boolean): EngineDevice => ({
   pairingId: "pair-ccpc",
@@ -144,7 +159,7 @@ const deviceFromHeartbeat = (executionReady: boolean): EngineDevice => ({
   runtimes: {
     claude: { installed: true, signedIn: true, executionReady, unsupported: false, version: "2.1.215", lastTestedAt: null, code: null },
     codex: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "0.146.0", lastTestedAt: null, code: null },
-    gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.42.0", lastTestedAt: null, code: "unsupported_personal_sign_in" },
+    opencode: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "1.19.4", lastTestedAt: null, code: "unsupported_personal_sign_in" },
   },
   localModels: [],
 });
@@ -159,8 +174,8 @@ assert.deepEqual(describeRuntime(deviceFromHeartbeat(true), "claude"), {
   verified: true,
   repair: null,
 }, "the same pairing becomes ready only after execution evidence says so");
-assert.equal(describeRuntime(deviceFromHeartbeat(false), "gemini").label, "Unsupported");
-assert.match(describeRuntime(deviceFromHeartbeat(false), "gemini").repair ?? "", /Google API key/);
+assert.equal(describeRuntime(deviceFromHeartbeat(false), "opencode").label, "Unsupported");
+assert.match(describeRuntime(deviceFromHeartbeat(false), "opencode").repair ?? "", /does not allow this sign-in/);
 assert.equal(describeRuntime({ ...deviceFromHeartbeat(true), online: false }, "claude").label, "Offline", "a stale/offline pairing overrides an old successful probe");
 
 console.log("local-cli-heartbeat-status.test.ts: OK");

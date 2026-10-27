@@ -465,7 +465,8 @@ export async function resolveRunSession(input: {
     // rows saved before a rollout restriction existed can still reach this
     // execution path. Re-apply the canonical rollout gate immediately before
     // resolving or auto-binding a computer so dispatch cannot bypass it.
-    if (selectedEngine.kind === "cli" && selectedEngine.cli === "codex") {
+    // Any app the rollout holds to OASIS's own computers (Codex, OpenCode).
+    if (selectedEngine.kind === "cli" && subscriptionRolloutError(selectedEngine.cli, false) !== null) {
       let oasisWorkspace: boolean;
       try {
         oasisWorkspace = await isOasisWorkspace(tenantId);

@@ -163,7 +163,7 @@ function publicSelection(choice: Awaited<ReturnType<typeof readAgentEngine>>, ap
 
 function runtimeInfo(
   root: Record<string, unknown>,
-  provider: "claude" | "codex" | "gemini",
+  provider: "claude" | "codex" | "opencode",
   inventory: CliStatusSnapshot | undefined,
   receipt: RuntimeProbeReceipt | undefined,
   savedProof?: SavedRuntimeProbeProof | null,
@@ -445,7 +445,7 @@ export async function GET() {
   const tenantId = ctx.tenantId;
   const canManage = ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess);
   try {
-    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, savedKeyReceipts, pairings, oasis, agentsOwner, effectiveEngine] = await Promise.all([
+    const [workspaceEngine, workspaceVersion, personEngine, personVersion, account, savedProviders, savedKeyReceipts, pairings, oasis, firstOwnerRead, effectiveEngine] = await Promise.all([
       readAgentEngine(tenantId),
       readAgentEngineVersion(tenantId),
       readPersonAgentEngine(tenantId, ctx.authUserId),
@@ -458,6 +458,12 @@ export async function GET() {
       readAgentsOwner(tenantId),
       readEffectiveAgentEngineWithProof(tenantId, ctx.authUserId),
     ]);
+    // A failed owner read made every computer ineligible for the workspace
+    // default, so the picker read "No approved computer" for one reading and
+    // came back on the next (CC 2026-10-27: "sometimes it disappears"). One
+    // retry, then the read fails loudly and the page keeps its last reading.
+    const agentsOwner = firstOwnerRead.state === "unavailable" ? await readAgentsOwner(tenantId) : firstOwnerRead;
+    if (agentsOwner.state === "unavailable") throw new Error("agents owner read failed twice");
     // Personal AI Brain is available to every member, but that must not turn
     // into a tenant-wide device directory. Managers need the full inventory
     // for Workspace default; everyone else receives only their own machines.
@@ -491,7 +497,7 @@ export async function GET() {
         },
         Date.now(),
       );
-      const runtime = (provider: "claude" | "codex" | "gemini") =>
+      const runtime = (provider: "claude" | "codex" | "opencode") =>
         runtimeInfo(
           root,
           provider,
@@ -515,7 +521,7 @@ export async function GET() {
         runtimes: {
           claude: runtime("claude"),
           codex: runtime("codex"),
-          gemini: runtime("gemini"),
+          opencode: runtime("opencode"),
         },
         localModels: localModels(root, pairing.id, probeReceipts),
       };
@@ -592,7 +598,7 @@ export async function POST(req: NextRequest) {
     const root = runtimeRoot(checked.pairing.claim_runtime_state);
     const selectedState = selection.mode === "subscription" ? object(root[selection.provider])?.state : null;
     if (selection.mode === "subscription" && selectedState === "unsupported") {
-      return fail(409, "unsupported_personal_sign_in", "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.");
+      return fail(409, "unsupported_personal_sign_in", "The app's maker does not allow this sign-in on that computer. Choose another app, or an API key.");
     }
     const engine = engineFor(selection)!;
     const queued = await enqueueRuntimeJob({

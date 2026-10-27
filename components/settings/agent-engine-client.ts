@@ -241,7 +241,7 @@ function device(raw: unknown): EngineDevice | null {
     online: value.online === true,
     busy: value.busy === true,
     protocols: Array.isArray(value.protocols) ? value.protocols.filter((item): item is string => typeof item === "string") : [],
-    runtimes: { claude: runtime(runtimes.claude), codex: runtime(runtimes.codex), gemini: runtime(runtimes.gemini) },
+    runtimes: { claude: runtime(runtimes.claude), codex: runtime(runtimes.codex), opencode: runtime(runtimes.opencode) },
     localModels: models.flatMap((item) => {
       if (!item || typeof item !== "object") return [];
       const model = item as Record<string, unknown>;
@@ -587,13 +587,19 @@ export async function switchProvider(
   }
 }
 
-const CLI_LABEL: Record<CliEngine, string> = { claude: "Claude Code", codex: "Codex", gemini: "Gemini CLI" };
+const CLI_LABEL: Record<CliEngine, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 const CLI_INSTALL: Record<CliEngine, string> = {
   claude: "npm install -g @anthropic-ai/claude-code",
   codex: "npm install -g @openai/codex",
-  gemini: "npm install -g @google/gemini-cli",
+  opencode: "npm install -g opencode-ai",
 };
-const CLI_LOGIN: Record<CliEngine, string> = { claude: "claude\n/login", codex: "codex login", gemini: "Use a Google API key" };
+const CLI_LOGIN: Record<CliEngine, string> = { claude: "claude\n/login", codex: "codex login", opencode: "opencode auth login" };
+/** How to bring each app up to date: the connector passes options an old version rejects. */
+export const CLI_UPDATE: Record<CliEngine, string> = {
+  claude: "npm install -g @anthropic-ai/claude-code@latest",
+  codex: "npm install -g @openai/codex@latest",
+  opencode: "opencode upgrade",
+};
 
 /** Copy-safe launcher command for the exact paired computer. The launcher
  * delegates to that OS's registered supervisor, rather than starting an
@@ -639,8 +645,8 @@ export function describeRuntime(
   if (notInstalledCodes.has(code ?? "")) {
     return { label: runtimeStatusWords("not_installed"), verified: false, repair: `On ${target.label}, run: ${CLI_INSTALL[provider]}` };
   }
-  if (state.unsupported || unsupportedCodes.has(code ?? "") || (provider === "gemini" && state.installed && !state.signedIn)) {
-    return { label: runtimeStatusWords("unsupported"), verified: false, repair: "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead." };
+  if (state.unsupported || unsupportedCodes.has(code ?? "")) {
+    return { label: runtimeStatusWords("unsupported"), verified: false, repair: `${name}'s maker does not allow this sign-in on ${target.label}. Choose another app, or an API key.` };
   }
   if (code === "rate_limited") {
     return {
@@ -658,11 +664,9 @@ export function describeRuntime(
   }
   if (signInCodes.has(code ?? "")) {
     return {
-      label: runtimeStatusWords(provider === "gemini" ? "unsupported" : "sign_in_needed"),
+      label: runtimeStatusWords("sign_in_needed"),
       verified: false,
-      repair: provider === "gemini"
-        ? "Gemini CLI personal sign-in is not supported. Choose a Google API key instead."
-        : `On ${target.label}, run: ${CLI_LOGIN[provider]}`,
+      repair: `On ${target.label}, run: ${CLI_LOGIN[provider]}`,
     };
   }
   if (target.busy) return { label: runtimeStatusWords("busy"), verified: false, repair: `${target.label} is finishing another agent run. Wait for it to finish, then Test again.` };
@@ -765,7 +769,6 @@ export function repairForCode(
     case "auth_timeout":
     case "cli_auth_required":
     case "manual_auth_required":
-      if (provider === "gemini") return "Gemini CLI personal sign-in is not supported. Choose a Google API key instead.";
       return provider
         ? `On ${deviceLabel ?? "the selected computer"}, run: ${CLI_LOGIN[provider]}`
         : `Sign in to the selected app${where}, then Test again.`;
@@ -773,11 +776,20 @@ export function repairForCode(
       return `The selected app is still signed in${where}, but its subscription usage limit is reached. Wait for the provider's usage window to reset, then Test again; reconnecting will not help.`;
     case "account_unsupported":
     case "unsupported_personal_sign_in":
-      return "Gemini CLI cannot use this personal sign-in. Choose a Google API key instead.";
+      return "The app's maker does not allow this sign-in on that computer. Choose another app, or an API key.";
     case "runtime_engine_not_allowed":
       return "That runtime cannot perform this action. Choose a supported subscription app or API key, then Test again.";
-    case "cli_empty_output":
+    case "cli_update_required":
+      return provider
+        ? `${CLI_LABEL[provider]} is out of date${where}. Run: ${CLI_UPDATE[provider]}, then Test again.`
+        : `Update the selected app${where}, then Test again.`;
     case "cli_nonzero_exit":
+      // The app started and then failed. On 2026-10-27 that was an old Claude
+      // Code rejecting an option, which restarting the connector never fixes.
+      return provider
+        ? `${CLI_LABEL[provider]} stopped with an error${where}. Update it with: ${CLI_UPDATE[provider]}, then Test again. If it still fails, restart the connector with: ${connectorRestartCommand(deviceOS)}`
+        : `The selected runtime could not finish the check. Restart the connector${where} with: ${connectorRestartCommand(deviceOS)}, then Test again.`;
+    case "cli_empty_output":
     case "runtime_action_failed":
     case "runtime_probe_failed":
     case "status_check_failed":

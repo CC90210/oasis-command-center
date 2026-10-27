@@ -275,7 +275,9 @@ export function interpolate(template: string, vars: Record<string, string>): str
 function computerRuntimeProvider(engine: BridgeEngine): Provider {
   if (engine.kind === "local") return LOCAL_MODEL_PROVIDER;
   if (engine.cli === "codex") return "openai";
-  if (engine.cli === "gemini") return "google";
+  // OpenCode routes to whichever provider its owner signed in (Kimi, OpenAI,
+  // Anthropic...); the nominal family for a multi-provider app is the router.
+  if (engine.cli === "opencode") return "openrouter";
   return "anthropic";
 }
 
@@ -763,7 +765,7 @@ async function recordRefusedTurn(
   });
 }
 
-/** What the ledger calls the engine: the app's id ("claude", "codex", "gemini") or the local model's name. */
+/** What the ledger calls the engine: the app's id ("claude", "codex", "opencode") or the local model's name. */
 function bridgeLedgerModel(engine: BridgeEngine): string {
   return engine.kind === "cli" ? engine.cli : engine.model;
 }

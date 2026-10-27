@@ -1613,7 +1613,7 @@ async function main() {
     const member = policy.bridgeCliPolicy("closer", "codex");
     assert.equal(member.cliProvider, "claude");
     assert.ok(member.disallowedTools.length > 0);
-    assert.deepEqual(policy.bridgeCliPolicy("owner", "gemini"), { cliProvider: "gemini", disallowedTools: [] });
+    assert.deepEqual(policy.bridgeCliPolicy("owner", "opencode"), { cliProvider: "opencode", disallowedTools: [] });
     const turnReq = bridgeTurn.bridgeTurnRequest({
       caller: { ...ccCaller, teamRole: "closer" },
       engine: { kind: "cli", cli: "codex" },
@@ -1715,8 +1715,8 @@ async function main() {
     assert.equal(cliStatus.CLI_SIGN_IN.claude.command, "claude");
     assert.match(cliStatus.CLI_SIGN_IN.claude.instructions, /then enter `\/login`/);
     assert.equal(cliStatus.CLI_SIGN_IN.codex.command, "codex login");
-    assert.equal(cliStatus.CLI_SIGN_IN.gemini.command, null);
-    assert.match(cliStatus.CLI_SIGN_IN.gemini.instructions, /unsupported.*Google Gemini API key/i);
+    assert.equal(cliStatus.CLI_SIGN_IN.opencode.command, "opencode auth login");
+    assert.match(cliStatus.CLI_SIGN_IN.opencode.instructions, /Moonshot AI/);
     const calls: string[] = [];
     const { startCliSignIn } = await import("../components/settings/LocalCliProvidersCard");
     const res = await startCliSignIn("codex", "pair-ccpc", async (url, init) => {
@@ -1725,14 +1725,12 @@ async function main() {
     });
     assert.deepEqual(res, { ok: true, text: "Started on CCPC.", jobId: "auth-codex-1", command: "codex login" });
     assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex","pairing_id":"pair-ccpc"}']);
-    let geminiCalled = false;
-    const unsupported = await startCliSignIn("gemini", "pair-ccpc", async () => {
-      geminiCalled = true;
-      return new Response(null, { status: 204 });
-    });
-    assert.equal(unsupported.ok, false);
-    assert.equal(geminiCalled, false, "Gemini personal sign-in never starts a reconnect loop");
-    assert.match(unsupported.text, /Google API key/);
+    // OpenCode's sign-in is a terminal command on that computer; the server queues it like the others.
+    const opencode = await startCliSignIn("opencode", "pair-ccpc", async () =>
+      new Response(JSON.stringify({ ok: false, message: "That computer is not paired to your account." }), { status: 404 }),
+    );
+    assert.equal(opencode.ok, false);
+    assert.equal(opencode.command, "opencode auth login", "a refused start still names the command to run there");
   });
 
   await check("the coding harness never spins forever: each read has a time limit and says why it failed", async () => {
@@ -1756,27 +1754,27 @@ async function main() {
 
   // -- 3. CLI status words --------------------------------------------------------
   console.log("3. CLI status");
-  await check("CC's PC (heartbeat 2026-10-09 17:54Z): Claude ready, Gemini's unfinished check is 'not confirmed', Codex 'not detected'", () => {
+  await check("CC's PC (heartbeat 2026-10-09 17:54Z): Claude ready, OpenCode's unfinished check is 'not confirmed', Codex 'not detected'", () => {
     const meta = {
       via: "paired_bridge_heartbeat",
       providers: {
         claude: { installed: true, authenticated: true, version: "2.1.270 (Claude Code)" },
         codex: { installed: false, authenticated: false, version: null },
-        gemini: { installed: true, authenticated: false, version: null },
+        opencode: { installed: true, authenticated: false, version: null },
       },
     };
     const now = Date.parse("2026-10-09T17:55:00Z");
     const snap = cliStatus.normalizeCliSnapshot(meta, "2026-10-09T17:54:32.945Z", now);
     assert.ok(snap.ok);
     if (!snap.ok) return;
-    const words = Object.fromEntries((["claude", "codex", "gemini"] as const).map((p) => [p, cliStatus.CLI_STATE_LABEL[cliStatus.cliStatusState(snap.data[p])]]));
-    assert.deepEqual(words, { claude: "Ready", codex: "Not detected", gemini: "Sign-in not confirmed" });
+    const words = Object.fromEntries((["claude", "codex", "opencode"] as const).map((p) => [p, cliStatus.CLI_STATE_LABEL[cliStatus.cliStatusState(snap.data[p])]]));
+    assert.deepEqual(words, { claude: "Ready", codex: "Not detected", opencode: "Sign-in not confirmed" });
     // A FINISHED check that said no is the only "Needs sign-in".
-    const signedOut = cliStatus.normalizeCliSnapshot({ providers: { ...meta.providers, gemini: { installed: true, authenticated: false, version: "0.63.0" } } }, "2026-10-09T17:54:32.945Z", now);
-    assert.ok(signedOut.ok && cliStatus.cliStatusState(signedOut.data.gemini) === "needs_sign_in");
+    const signedOut = cliStatus.normalizeCliSnapshot({ providers: { ...meta.providers, opencode: { installed: true, authenticated: false, version: "0.63.0" } } }, "2026-10-09T17:54:32.945Z", now);
+    assert.ok(signedOut.ok && cliStatus.cliStatusState(signedOut.data.opencode) === "needs_sign_in");
     // A newer bridge that says its check timed out is unknown, whatever else it sent.
-    const timedOut = cliStatus.normalizeCliSnapshot({ providers: { ...meta.providers, gemini: { installed: true, authenticated: false, version: "0.63.0", probe: "timeout" } } }, "2026-10-09T17:54:32.945Z", now);
-    assert.ok(timedOut.ok && cliStatus.cliStatusState(timedOut.data.gemini) === "unknown");
+    const timedOut = cliStatus.normalizeCliSnapshot({ providers: { ...meta.providers, opencode: { installed: true, authenticated: false, version: "0.63.0", probe: "timeout" } } }, "2026-10-09T17:54:32.945Z", now);
+    assert.ok(timedOut.ok && cliStatus.cliStatusState(timedOut.data.opencode) === "unknown");
   });
 
   await check("the consolidated panel distinguishes installed/sign-in evidence from a real agent-ready probe", async () => {
@@ -1791,12 +1789,12 @@ async function main() {
       runtimes: {
         claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },
         codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: "0.146", lastTestedAt: stamp, code: null },
-        gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.63", lastTestedAt: null, code: "unsupported_personal_sign_in" },
+        opencode: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.63", lastTestedAt: null, code: "unsupported_personal_sign_in" },
       },
     };
     assert.equal(client.describeRuntime(device, "claude").label, "Needs test", "signed in is inventory evidence, not execution proof");
     assert.equal(client.describeRuntime(device, "codex").label, "Ready for agents");
-    assert.equal(client.describeRuntime(device, "gemini").label, "Unsupported");
+    assert.equal(client.describeRuntime(device, "opencode").label, "Unsupported");
     const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
     assert.match(panel, /describeRuntime\(selectedDevice, provider\)/, "the unified picker uses the truthful per-device state");
     assert.doesNotMatch(readFileSync(join(ROOT, "components/settings/LocalCliProvidersCard.tsx"), "utf8"), /fetch\("\/api\/bridge\/cli-status"/, "the retired separate card cannot publish a competing status");

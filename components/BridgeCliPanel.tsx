@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * BridgeCliPanel — which AI command-line tools (Claude Code, Codex, Gemini)
+ * BridgeCliPanel — which AI command-line tools (Claude Code, Codex, OpenCode)
  * the operator's computer has, and whether each is signed in.
  *
  * READ THROUGH THE SERVER (2026-09-30). This panel used to probe the loopback
@@ -33,7 +33,7 @@ export const CLI_STATUS_ROUTE = "/api/bridge/cli-status";
 
 type CliInfo = { installed: boolean; authenticated: boolean; version: string | null; install_hint_url: string; checked?: boolean; unsupported?: boolean };
 type CliSnapshotBody =
-  | { ok: true; machines?: CliMachineSnapshot[]; data?: Record<"claude" | "codex" | "gemini", CliInfo> }
+  | { ok: true; machines?: CliMachineSnapshot[]; data?: Record<"claude" | "codex" | "opencode", CliInfo> }
   | { ok: false; reason: string };
 
 type CliPanelRows = Array<{ name: string; info: CliInfo }>;
@@ -76,7 +76,8 @@ export function describeCliPanel(
         machines: machines.map((m) => ({
           id: m.id,
           label: m.label,
-          rows: (["claude", "codex", "gemini"] as const).map((name) => ({ name, info: m.data[name] })),
+          // A report from before OpenCode was added has no entry for it: leave it off rather than fail the panel.
+          rows: (["claude", "codex", "opencode"] as const).filter((name) => m.data[name]).map((name) => ({ name, info: m.data[name] })),
         })),
       };
     }
@@ -192,7 +193,7 @@ export function BridgeCliPanel({
 }
 
 function CliRow({ name, info }: { name: string; info: CliInfo }) {
-  const label = name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : "Gemini";
+  const label = name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : "OpenCode";
   // The words Settings > AI brain uses too (lib/bridge-cli-status.ts): a check
   // that did not finish is "not confirmed", never "not signed in".
   const cli = cliStatusState({ installed: info.installed, authenticated: info.authenticated, checked: info.checked === true, unsupported: info.unsupported === true });
@@ -215,7 +216,7 @@ function CliRow({ name, info }: { name: string; info: CliInfo }) {
           <span className={`text-xs ${good ? "text-status-engaged" : "text-fg-muted"}`}>{state}</span>
         </div>
         {info.version && <div className="mt-0.5 text-xs text-fg-dim font-mono break-all">{info.version}</div>}
-        {cli === "unsupported" && <div className="mt-0.5 text-xs text-fg-muted">{cliUnsupportedDetail(name === "claude" || name === "codex" ? name : "gemini")}</div>}
+        {cli === "unsupported" && <div className="mt-0.5 text-xs text-fg-muted">{cliUnsupportedDetail(name === "claude" || name === "codex" ? name : "opencode")}</div>}
         {!info.installed && (
           <a href={info.install_hint_url} target="_blank" rel="noopener noreferrer" className="mt-1 inline-block text-xs text-accent hover:underline">
             How to install {label}

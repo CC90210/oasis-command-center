@@ -56,7 +56,7 @@ export const TURN_FAILURE_CODES = [
   "cli_failed", //             it was reached, and the app there could not answer
   // Why the app could not answer, when the bridge says (bridge_chat_server.py
   // _split_cli_error: cli_error:<code>); anything else stays cli_failed.
-  "cli_account_unsupported", // the vendor refuses this sign-in (Gemini CLI on a personal Google sign-in)
+  "cli_account_unsupported", // the app's maker refuses this sign-in on that computer
   "cli_auth_required", //      the app is not signed in on that computer
   "cli_not_found", //          the app is not installed there
   "cli_outdated", //           the installed app is too old
@@ -423,8 +423,8 @@ const COPY: Record<TurnFailureCode, { sentence: string; short: string; fix: Fail
   },
   cli_account_unsupported: {
     sentence:
-      "Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account.",
-    short: "Gemini CLI is not supported on this Google sign-in",
+      "The app's maker does not allow this sign-in on your paired computer. Pick another app, or use an AI account.",
+    short: "the app does not allow this sign-in on the paired computer",
     fix: OPEN_ENGINE_SETTINGS,
   },
   cli_auth_required: {

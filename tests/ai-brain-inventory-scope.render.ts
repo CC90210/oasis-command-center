@@ -137,7 +137,7 @@ const device = (pairingId: string, label: string, over: Record<string, unknown>,
   protocols: PROTOCOLS,
   localModels: [],
   ...over,
-  runtimes: { claude: runtime(), codex: runtime(), gemini: runtime(), ...runtimes },
+  runtimes: { claude: runtime(), codex: runtime(), opencode: runtime(), ...runtimes },
 });
 
 /**
@@ -151,7 +151,7 @@ const DEVICES = [
   }),
   device("p-mac", "Old Mac", {}, {
     claude: runtime({ installed: true, signedIn: true }),
-    gemini: runtime({ installed: true, signedIn: false, code: "auth_required" }),
+    opencode: runtime({ installed: true, signedIn: false, code: "auth_required" }),
   }),
   device("p-laptop", "Laptop", { approved: false }, {
     claude: runtime({ installed: true }),
@@ -286,7 +286,7 @@ async function main() {
 
   // The inventory: one card per computer, one status line per app, in order.
   const statuses = panelEls.filter((e) => e.props["data-testid"] === "engine-inventory-status").map((e) => squash(textOf(e)));
-  const apps = ["Claude Code", "Codex", "Gemini CLI"];
+  const apps = ["Claude Code", "Codex", "OpenCode"];
   const aiBrain: Record<string, Record<string, string>> = {};
   DEVICES.forEach((d, i) => {
     aiBrain[String(d.label)] = Object.fromEntries(apps.map((app, j) => [app, statuses[i * apps.length + j]]));
@@ -320,7 +320,7 @@ async function main() {
     const row = lines.find((l) => / · /.test(l));
     if (!row) continue;
     const label = row.split(" · ")[0];
-    const appLines = lines.filter((l) => /^(Claude Code|Codex|Gemini CLI): /.test(l));
+    const appLines = lines.filter((l) => /^(Claude Code|Codex|OpenCode): /.test(l));
     devices[label] = {
       row,
       apps: Object.fromEntries(appLines.map((l) => [l.slice(0, l.indexOf(": ")), l.slice(l.indexOf(": ") + 2)])),

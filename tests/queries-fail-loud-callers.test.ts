@@ -579,7 +579,7 @@ async function main() {
     // "Not installed".
     assert.match(cliReport, /Claude Code Ready/);
     assert.match(cliReport, /Codex Needs sign-in/);
-    assert.match(cliReport, /Gemini Not detected/);
+    assert.match(cliReport, /OpenCode Not detected/);
     assert.match(plain(html.cliNetworkError), /Couldn't check your computer's AI tools/);
     assert.match(plain(html.cliSignedOut), /You're signed out/);
   });

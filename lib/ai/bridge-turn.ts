@@ -1,7 +1,7 @@
 /**
  * lib/ai/bridge-turn.ts - one department turn on the paired computer, when the
  * workspace's engine (lib/ai/agent-engine.ts) is an AI app there (Claude Code,
- * Codex, Gemini CLI) or a local model (Ollama, LM Studio).
+ * Codex, OpenCode) or a local model (Ollama, LM Studio).
  *
  * THE SAME ROAD THE CODING HARNESS USES. The coding harness reaches the paired
  * computer through app/api/bridge/chat: the server resolves the workspace's
@@ -20,7 +20,7 @@
  * conversation are composed into that one message (composeCliPrompt). The
  * turn runs in plan mode: the app reads and answers; it is asked not to change
  * files or run commands for a department reply. Claude Code enforces plan mode
- * (--permission-mode plan); Codex and Gemini CLI take it as an instruction.
+ * (--permission-mode plan); Codex and OpenCode take it as an instruction.
  * Who may run which app, and which tools are switched off, is the coding
  * harness's own rule (lib/bridge-cli-policy.ts).
  *

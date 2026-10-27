@@ -74,9 +74,10 @@ async function main() {
     assert.match(route, /requestObject\(decoded, \["engine", "scope"\]\)/, "probe requests reject primitives and unknown fields");
     assert.match(route, /apiSwitchRateLimit\(req, ctx\.tenantId, ctx\.authUserId\)/, "paid provider tests are limited by authenticated user and client IP");
     assert.match(panel, /addEventListener\("oasis:agent-configs-changed"/, "connecting a key below refreshes the engine panel immediately");
-    assert.match(panel, /status\?\.label === runtimeStatusWords\("unsupported"\)/, "an unsupported Gemini account disables reconnect and offers the API path");
-    assert.match(panel, /provider === "gemini" \?/, "Gemini never renders the unsupported CLI auth action");
-    assert.match(panel, /Managed Gemini CLI account detected/, "a connector-detected managed Gemini account keeps Test without a fake reconnect");
+    assert.match(panel, /status\?\.label === runtimeStatusWords\("unsupported"\)/, "an unsupported account disables reconnect");
+    assert.match(panel, /provider === "opencode" \?/, "OpenCode's sign-in is a terminal command on that computer, never a browser reconnect");
+    assert.match(panel, /opencode auth login, and choose a provider \(Kimi K2 is under Moonshot AI\)/, "OpenCode says how to sign in there");
+    assert.doesNotMatch(panel, /"gemini"|Gemini CLI/, "Gemini CLI was removed from AI brain");
     assert.match(panel, /subscriptionLimited[\s\S]*no reconnect is needed/, "a signed-in rate-limited runtime never starts a pointless reconnect loop");
     assert.match(panel, /Choose a computer to finish upgrading this saved setup\./, "legacy unbound rows explain the one required upgrade action");
     const connectFlow = panel.slice(panel.indexOf("async function connect"), panel.indexOf("const modeOption"));
@@ -98,10 +99,15 @@ async function main() {
     assert.equal(rollout.subscriptionRolloutError("codex", false), "codex_oasis_rollout_only");
     assert.equal(rollout.subscriptionRolloutError("codex", true), null);
     assert.equal(rollout.subscriptionRolloutError("claude", false), null);
+    assert.equal(rollout.subscriptionRolloutError("opencode", false), "codex_oasis_rollout_only");
+    assert.equal(rollout.subscriptionRolloutError("opencode", true), null);
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /subscriptionRolloutError\(selection\.provider, oasis\)/, "probe and save use the server-side rollout gate");
     assert.match(route, /pairingForSelection/, "the rollout gate is followed by exact-pairing approval checks");
     const runSession = readFileSync(join(ROOT, "lib/os/runs/session.ts"), "utf8");
+    // Dispatch re-checks every held app, not only Codex (Codex review of #758: a saved OpenCode row in a client workspace).
+    assert.match(runSession, /selectedEngine\.kind === "cli" && subscriptionRolloutError\(selectedEngine\.cli, false\) !== null/);
+    assert.doesNotMatch(runSession, /selectedEngine\.cli === "codex"/);
     assert.match(
       runSession,
       /subscriptionRolloutError\(selectedEngine\.cli, oasisWorkspace\)/,
@@ -159,7 +165,7 @@ async function main() {
     runtimes: {
       claude: { installed: true, signedIn: true, executionReady: false, unsupported: false, version: "2.1.270", lastTestedAt: null, code: null },
       codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: "0.146.0", lastTestedAt: "2026-10-12T06:00:00.000Z", code: null },
-      gemini: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "0.63.0", lastTestedAt: null, code: "unsupported_personal_sign_in" },
+      opencode: { installed: true, signedIn: false, executionReady: false, unsupported: true, version: "1.19.4", lastTestedAt: null, code: "unsupported_personal_sign_in" },
     },
     localModels: [{ ref: "ollama/llama3.3", label: "Llama 3.3", adapter: "ollama", state: "ready", lastTestedAt: "2026-10-12T06:00:00.000Z" }],
   } as const;
@@ -242,34 +248,36 @@ async function main() {
       verified: true,
       repair: null,
     });
-    const gemini = client.describeRuntime(DEVICE, "gemini");
-    assert.equal(gemini.label, "Unsupported");
-    assert.equal(gemini.verified, false);
-    assert.match(gemini.repair ?? "", /Google API key/);
-    assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "gemini").label, "Unsupported", "busy never masks an unsupported account");
-    assert.equal(
-      client.describeRuntime({
-        ...DEVICE,
-        runtimes: {
-          ...DEVICE.runtimes,
-          gemini: { ...DEVICE.runtimes.gemini, unsupported: false, installed: true, signedIn: false },
-        },
-      }, "gemini").label,
-      "Unsupported",
-      "an installed Gemini CLI without a connector-detected managed account offers Google API instead of a login loop",
-    );
+    const refused = client.describeRuntime(DEVICE, "opencode");
+    assert.equal(refused.label, "Unsupported");
+    assert.equal(refused.verified, false);
+    assert.match(refused.repair ?? "", /does not allow this sign-in on CCPC/);
+    assert.equal(client.describeRuntime({ ...DEVICE, busy: true }, "opencode").label, "Unsupported", "busy never masks an unsupported account");
+    const signedOut = client.describeRuntime({
+      ...DEVICE,
+      runtimes: {
+        ...DEVICE.runtimes,
+        opencode: { ...DEVICE.runtimes.opencode, unsupported: false, installed: true, signedIn: false, code: "needs_sign_in" },
+      },
+    }, "opencode");
+    assert.equal(signedOut.label, "Sign-in needed", "OpenCode with no provider signed in asks for a sign-in, not Unsupported");
+    assert.match(signedOut.repair ?? "", /opencode auth login/);
     assert.match(client.repairForCode("runtime_unavailable", "CCPC", undefined, "Windows") ?? "", /\.oasis\\bin\\oasis\.cmd.*bridge restart/);
     assert.match(client.repairForCode("runtime_unavailable", "Mac", undefined, "macOS") ?? "", /\.oasis\/bin\/oasis.*bridge restart/);
     assert.match(client.repairForCode("not_authenticated", "CCPC") ?? "", /Sign in/);
     assert.match(client.repairForCode("engine_not_found", "CCPC") ?? "", /Start Ollama or LM Studio/);
     assert.match(client.repairForCode("not_authenticated", "CCPC", "claude") ?? "", /claude\n\/login/);
-    assert.match(client.repairForCode("not_authenticated", "CCPC", "gemini") ?? "", /Google API key/);
+    assert.match(client.repairForCode("not_authenticated", "CCPC", "opencode") ?? "", /opencode auth login/);
     assert.match(client.repairForCode("cli_auth_required", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_process_failed", "CCPC", "codex") ?? "", /codex login/);
     assert.match(client.repairForCode("auth_timeout", "Mac", "claude") ?? "", /claude\n\/login/);
     assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /still signed in/);
     assert.match(client.repairForCode("runtime_rate_limited", "CCPC", "claude") ?? "", /reconnecting will not help/);
-    assert.match(client.repairForCode("account_unsupported", "Mac", "gemini") ?? "", /Google API key/);
+    assert.match(client.repairForCode("account_unsupported", "Mac", "opencode") ?? "", /does not allow this sign-in/);
+    // CC 2026-10-27: Claude Code 2.1.81 rejected an option and the page said "restart the connector".
+    assert.match(client.repairForCode("cli_update_required", "Mac", "claude") ?? "", /Claude Code is out of date on Mac\. Run: npm install -g @anthropic-ai\/claude-code@latest/);
+    assert.match(client.repairForCode("cli_update_required", "Mac", "opencode") ?? "", /opencode upgrade/);
+    assert.match(client.repairForCode("cli_nonzero_exit", "Mac", "claude", "macOS") ?? "", /Update it with: npm install -g @anthropic-ai\/claude-code@latest/);
     assert.match(client.repairForCode("cli_not_found", "CCPC", "codex") ?? "", /@openai\/codex/);
     assert.match(client.repairForCode("cli_timeout", "CCPC", "codex") ?? "", /did not finish in time/);
     const nonzeroRepair = client.repairForCode("cli_nonzero_exit", "CCPC", "codex", "Windows") ?? "";
@@ -279,7 +287,7 @@ async function main() {
     assert.match(client.repairForCode("pairing_revoked", "CCPC") ?? "", /Pair the computer again/);
     assert.match(client.repairForCode("requester_seat_inactive", "CCPC") ?? "", /workspace owner or admin/);
     for (const code of runtimeTypes.RUNTIME_FAILURE_CODES) {
-      const provider = code === "account_unsupported" ? "gemini" : "codex";
+      const provider = code === "account_unsupported" ? "opencode" : "codex";
       assert.ok(client.repairForCode(code, "CCPC", provider, "Windows"), `missing repair for runtime terminal code: ${code}`);
     }
     assert.equal(client.describeRuntime({ ...DEVICE, approved: false }, "codex").label, "Approval needed");
@@ -433,14 +441,14 @@ async function main() {
     assert.equal(result.jobId, "auth-2");
     assert.deepEqual(calls, ['POST /api/bridge/cli-auth {"provider":"codex","pairing_id":"pair-win"}']);
 
-    let geminiCalled = false;
-    const unsupported = await startCliSignIn("gemini", "pair-win", async () => {
-      geminiCalled = true;
-      return new Response(null, { status: 204 });
+    const opencodeCalls: string[] = [];
+    const opencode = await startCliSignIn("opencode", "pair-win", async (url, init) => {
+      opencodeCalls.push(`${init.method} ${url} ${String(init.body)}`);
+      return new Response(JSON.stringify({ job_id: "auth-3", command: "opencode auth login", message: "Sign-in was queued for CCPC." }), { status: 202 });
     });
-    assert.equal(unsupported.ok, false);
-    assert.equal(geminiCalled, false, "Gemini personal CLI never enters an auth loop");
-    assert.match(unsupported.text, /Google API key/);
+    assert.equal(opencode.ok, true);
+    assert.equal(opencode.command, "opencode auth login");
+    assert.deepEqual(opencodeCalls, ['POST /api/bridge/cli-auth {"provider":"opencode","pairing_id":"pair-win"}']);
   });
 
   await check("Connect returns the hard-coded vendor instructions while the dashboard polls", async () => {

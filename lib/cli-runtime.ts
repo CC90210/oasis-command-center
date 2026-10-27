@@ -23,7 +23,7 @@
 /** localStorage key holding the operator's chosen local CLI runtime. */
 export const CLI_RUNTIME_STORAGE_KEY = "oasis.chat.cliRuntime.v1";
 
-export const CLI_RUNTIMES = ["claude", "codex", "gemini"] as const;
+export const CLI_RUNTIMES = ["claude", "codex", "opencode"] as const;
 export type CliRuntime = (typeof CLI_RUNTIMES)[number];
 
 export function isCliRuntime(v: unknown): v is CliRuntime {

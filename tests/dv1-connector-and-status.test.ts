@@ -246,7 +246,7 @@ async function main() {
     const base = { executor: "computer" as const, targetPairingId: "pair-1" };
     assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "codex" }), "Codex");
     assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "claude" }), "Claude Code");
-    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "gemini" }), "Gemini CLI");
+    assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "opencode" }), "OpenCode");
     assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "local", runtimeEngineName: "ollama/llama3:8b" }), "llama3:8b (local model)");
     assert.equal(runEngineLabel({ ...base, runtimeEngineKind: "cli", runtimeEngineName: "something-new" }), null, "an app this build does not know is not guessed");
     assert.equal(runEngineLabel({ executor: "computer", targetPairingId: null, runtimeEngineKind: null, runtimeEngineName: null }), "Claude Code", "the first computer contract only ever ran Claude Code");

@@ -11,6 +11,8 @@ import { enqueueRuntimeJob, hasOnlyKeys, isPlainObject, validRequestId } from "@
 import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext } from "@/lib/team";
+import { isOasisWorkspace } from "@/lib/ai/agent-engine-store";
+import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -54,13 +56,18 @@ export async function POST(req: Request) {
     return fail(400, "unexpected_field", "Only an AI app and paired computer can be sent here.");
   }
   if (!isSignInProvider(raw.provider)) {
-    return fail(400, "invalid_provider", "Pick Claude Code, Codex, or the supported Google API alternative.");
+    return fail(400, "invalid_provider", "Pick Claude Code, Codex or OpenCode.");
   }
   if (!validRequestId(raw.pairing_id)) {
     return fail(400, "invalid_pairing_id", "Choose the computer where this AI app should sign in.");
   }
 
   try {
+    // The same workspace gate Test, Save and dispatch apply: no sign-in is
+    // queued for an app this workspace cannot use (Codex review of #758).
+    if (subscriptionRolloutError(raw.provider, await isOasisWorkspace(session.tenantId))) {
+      return fail(409, "codex_oasis_rollout_only", CODEX_OASIS_ROLLOUT_MESSAGE);
+    }
     const { data, error } = await getServiceSupabase()
       .from("bridge_pairings")
       .select("id, label, claim_enabled_at, paired_via, claim_protocols")
@@ -79,15 +86,6 @@ export async function POST(req: Request) {
     }
     if (!stringList(pairing.claim_protocols).includes("runtime_action_v1")) {
       return fail(409, "connector_update_required", "Update and restart the connector on that computer, then try again.");
-    }
-
-    if (raw.provider === "gemini") {
-      return fail(
-        409,
-        "unsupported_personal_sign_in",
-        "Gemini CLI personal sign-in is unsupported. Connect a Google Gemini API key instead.",
-        { alternative: { mode: "api", provider: "google" } },
-      );
     }
 
     const signIn = CLI_SIGN_IN[raw.provider];

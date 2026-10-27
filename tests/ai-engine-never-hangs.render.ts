@@ -7,7 +7,7 @@
  * `node --import tsx` and asserts against the JSON it prints (one line per
  * scenario). It asserts nothing itself.
  *
- * Each scenario: choose "An app on your paired computer" and Gemini CLI, press
+ * Each scenario: choose "An app on your paired computer" and OpenCode, press
  * Test or "Use this for my agents", look at the page WHILE the request is
  * pending (what is disabled, is there a Cancel, the elapsed counter), then
  * let the request end (a 422 with JSON, a 500, a non-JSON 502, a dropped
@@ -123,13 +123,13 @@ const STATE = {
   canManage: true,
   engineVersion: "v-1",
 };
-const machine = (gemini: Record<string, unknown>) => ({
+const machine = (opencode: Record<string, unknown>) => ({
   id: "m1",
   label: "CCPC",
   data: {
     claude: { installed: true, authenticated: true, version: "2.1.270", install_hint_url: "x", checked: true },
     codex: { installed: true, authenticated: true, version: "0.146", install_hint_url: "x", checked: true },
-    gemini: { install_hint_url: "x", ...gemini },
+    opencode: { install_hint_url: "x", ...opencode },
   },
 });
 
@@ -151,7 +151,7 @@ async function main() {
 
   const out: Record<string, unknown> = {};
 
-  async function scenario(name: string, opts: { reply: Reply; press: "test" | "save"; gemini?: Record<string, unknown>; cancel?: boolean; waitMs?: number; realDeadline?: boolean; truth?: Array<Record<string, unknown>>; app?: "Gemini CLI" | "Claude Code" }) {
+  async function scenario(name: string, opts: { reply: Reply; press: "test" | "save"; opencode?: Record<string, unknown>; cancel?: boolean; waitMs?: number; realDeadline?: boolean; truth?: Array<Record<string, unknown>>; app?: "OpenCode" | "Claude Code" }) {
     scaleDeadline = !opts.realDeadline;
     const stubbed: Stub = { reply: opts.reply };
     const methodsSeen: string[] = [];
@@ -170,7 +170,7 @@ async function main() {
       }
       if (u === "/api/bridge/cli-status") {
         return new Response(
-          JSON.stringify({ ok: true, machines: [machine(opts.gemini ?? { installed: true, authenticated: true, version: "0.63", checked: true })], agents_run_on: null }),
+          JSON.stringify({ ok: true, machines: [machine(opts.opencode ?? { installed: true, authenticated: true, version: "0.63", checked: true })], agents_run_on: null }),
           { status: 200 },
         );
       }
@@ -204,7 +204,7 @@ async function main() {
     };
     press((e) => e.props.type === "radio" && e.props.value === "cli", "cli radio");
     tree = frames({ children: Account });
-    press((e) => e.props.role === "radio" && textOf(e).startsWith(opts.app ?? "Gemini CLI"), "app button");
+    press((e) => e.props.role === "radio" && textOf(e).startsWith(opts.app ?? "OpenCode"), "app button");
     tree = frames({ children: Account });
 
     const before = {
@@ -271,7 +271,7 @@ async function main() {
     frames.unmount();
   }
 
-  await scenario("422 json", { press: "save", reply: { status: 422, body: { ok: false, error: "engine_test_failed", message: "It did not pass the test, so nothing was changed. Google no longer lets Gemini CLI run on a personal Google sign-in. Pick Claude Code or Codex, or use an AI account." } } });
+  await scenario("422 json", { press: "save", reply: { status: 422, body: { ok: false, error: "engine_test_failed", message: "It did not pass the test, so nothing was changed. The app's maker does not allow this sign-in on that computer. Pick Claude Code or Codex, or use an AI account." } } });
   await scenario("test 422 json", { press: "test", reply: { status: 422, body: { ok: false, message: "The app on your paired computer didn't answer in time. Try again, or pick another app." } } });
   await scenario("500 plain text", { press: "save", reply: { status: 500, raw: "Internal Server Error" } });
   await scenario("502 html", { press: "test", reply: { status: 502, raw: "<html><body>Bad gateway</body></html>" } });
@@ -282,11 +282,11 @@ async function main() {
   await scenario("cancel", { press: "test", reply: "hang", cancel: true, waitMs: 20 });
   await scenario("elapsed counter", { press: "test", reply: "slow", realDeadline: true, waitMs: 1500 });
   // Cancel a save; the server went on and committed Codex. The page reads the truth at once and once more after the server's window.
-  await scenario("cancel save: truth is re-read twice", { press: "save", reply: "hang", cancel: true, waitMs: 20, truth: [{ kind: "api" }, { kind: "cli", cli: "gemini" }] });
+  await scenario("cancel save: truth is re-read twice", { press: "save", reply: "hang", cancel: true, waitMs: 20, truth: [{ kind: "api" }, { kind: "cli", cli: "opencode" }] });
   await scenario("ok", { press: "test", reply: { status: 200, body: { ok: true, latency_ms: 4200, reply: "Hello" } } });
-  await scenario("unsupported gemini", { press: "test", gemini: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });
-  await scenario("unsupported gemini save", { press: "save", gemini: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });
-  await scenario("claude with gemini unsupported", { press: "test", app: "Claude Code", gemini: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: { ok: true, latency_ms: 900, reply: "Hi" } } });
+  await scenario("unsupported opencode", { press: "test", opencode: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });
+  await scenario("unsupported opencode save", { press: "save", opencode: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: {} } });
+  await scenario("claude with opencode unsupported", { press: "test", app: "Claude Code", opencode: { installed: true, authenticated: false, version: null, checked: true, unsupported: true }, reply: { status: 200, body: { ok: true, latency_ms: 900, reply: "Hi" } } });
 
   console.log(JSON.stringify(out));
   process.exit(0);
