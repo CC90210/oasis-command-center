@@ -26,7 +26,12 @@
  */
 
 import { useState, type FormEvent } from "react";
+import Link from "next/link";
 import { formatOperatorDate, operatorDateKey } from "@/lib/dates";
+import { AI_ENGINE_LABELS } from "@/lib/ai-audit/authorize-payload";
+import { formatMoney } from "@/lib/ai-audit/catalogue";
+import { AUDIT_LINK_PLACEHOLDER } from "@/lib/ai-audit/proposal";
+import { BUSINESS_TYPE_LABELS } from "@/lib/ai-audit/rules";
 import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
 import type { ApprovalView } from "@/lib/os/approvals/rules";
 import { describeOutcome, newerApproval, requesterLabel, type OutcomeTone } from "@/components/os/approvals/outcome";
@@ -158,6 +163,168 @@ function TicketReplyPreview({ payload, clamp }: { payload: Record<string, unknow
   );
 }
 
+/** The audit kinds: owner-only, each about one engagement on the AI audits board. */
+const AI_AUDIT_KINDS: ReadonlySet<string> = new Set(["authorize_ai_audit", "deliver_ai_audit", "follow_up_ai_audit"]);
+
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** "12 facts", "1 fact". */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** An email body with the client's link shown where it will go (the link is made only when it is sent). */
+function BodyWithLink({ body, clamp }: { body: string; clamp: boolean }) {
+  const parts = body.split(AUDIT_LINK_PLACEHOLDER);
+  return (
+    <p className={`mt-2 whitespace-pre-wrap break-words text-fg-muted ${clamp ? "line-clamp-4" : ""}`}>
+      {parts.map((part, i) => (
+        <span key={i}>
+          {part}
+          {i < parts.length - 1 ? <span className="rounded border border-hairline px-1 text-[12px] text-fg">the client&apos;s private audit link</span> : null}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+/** Where to read what the card is about, before deciding. */
+function AuditLinks({ links }: { links: Array<{ href: string; label: string }> }) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[13px]">
+      {links.map((l) => (
+        <Link key={l.href} href={l.href} className="font-medium text-fg underline underline-offset-2">
+          {l.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A Free AI Audit card in words: Gate 1 (what is authorized, which AI reads it,
+ * what approving does), Gate 2 and the follow-ups (the whole email and, for
+ * Gate 2, the amount). Every field still comes from the payload the approval is
+ * bound to; the fingerprints say which versions it is locked to.
+ */
+function AiAuditPreview({ kind, payload, clamp }: { kind: string; payload: Record<string, unknown>; clamp: boolean }) {
+  const id = encodeURIComponent(str(payload.engagement_id));
+  const open = { href: `/ai-audits/${id}`, label: "Open the engagement" };
+  const short = (v: unknown) => str(v).slice(0, 8);
+  if (kind === "authorize_ai_audit") {
+    const engine = str(payload.engine);
+    const type = str(payload.business_type);
+    const facts = num(payload.field_count) ?? 0;
+    const gaps = num(payload.gap_count) ?? 0;
+    const transcripts = num(payload.transcript_count) ?? 0;
+    const notes = num(payload.note_count) ?? 0;
+    const redactions = num(payload.redaction_count) ?? 0;
+    const plan = Array.isArray(payload.plan) ? payload.plan.filter((l): l is string => typeof l === "string") : [];
+    const call = [transcripts ? count(transcripts, "call transcript", "call transcripts") : "No call transcript", ...(notes ? [count(notes, "call note", "call notes")] : [])].join(", ");
+    return (
+      <div className="rounded-lg border border-hairline bg-bg-deep/40 px-3 py-2.5 text-[13px] leading-5">
+        <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5">
+          <dt className="text-fg-dim">Business</dt>
+          <dd className="text-fg">
+            {str(payload.business_name)}
+            <span className="text-fg-muted">, {(BUSINESS_TYPE_LABELS as Record<string, string>)[type] ?? "type not chosen yet"}</span>
+          </dd>
+          <dt className="text-fg-dim">Processed by</dt>
+          <dd className="text-fg">{(AI_ENGINE_LABELS as Record<string, string>)[engine] ?? "an unknown engine"}</dd>
+          <dt className="text-fg-dim">Profile</dt>
+          <dd className="text-fg-muted">
+            Version {num(payload.profile_version_no) ?? "?"}, {count(facts, "fact", "facts")}
+            {gaps ? <span className="text-status-warm">, {count(gaps, "essential answer", "essential answers")} still missing</span> : null}
+          </dd>
+          <dt className="text-fg-dim">From the call</dt>
+          <dd className="text-fg-muted">{call}</dd>
+          {redactions ? (
+            <>
+              <dt className="text-fg-dim">Taken out</dt>
+              <dd className="text-status-warm">{count(redactions, "possible password or account detail", "possible passwords or account details")}</dd>
+            </>
+          ) : null}
+          {payload.founder_attested === true ? (
+            <>
+              <dt className="text-fg-dim">Consent</dt>
+              <dd className="text-status-warm">Attested by a founder other than you</dd>
+            </>
+          ) : null}
+        </dl>
+        {plan.length ? (
+          <>
+            <p className="mt-2 text-xs font-medium text-fg-dim">If you approve</p>
+            <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-fg-muted">
+              {plan.map((line, i) => (
+                <li key={i}>{line}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+        <AuditLinks
+          links={[
+            ...(transcripts ? [{ href: `/ai-audits/${id}?tab=call`, label: "Read the transcript lines" }] : []),
+            { href: `/ai-audits/${id}?tab=profile`, label: "Check the profile" },
+            open,
+          ]}
+        />
+        <p className="mt-1.5 text-[11px] leading-4 text-fg-dim">
+          Locked to profile version {num(payload.profile_version_no) ?? "?"} ({short(payload.profile_sha256)})
+          {str(payload.transcripts_sha256) ? ` and its transcripts (${short(payload.transcripts_sha256)})` : ""}. A change files a new card.
+        </p>
+      </div>
+    );
+  }
+  const currency = payload.currency === "USD" ? "USD" : "CAD";
+  const total = num(payload.total_cents);
+  const due = num(payload.due_now_cents);
+  const reason = str(payload.reason);
+  return (
+    <div className="rounded-lg border border-hairline bg-bg-deep/40 px-3 py-2.5 text-[13px] leading-5">
+      <dl className="grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5">
+        <dt className="text-fg-dim">To</dt>
+        <dd className="break-all text-fg">{str(payload.to)}</dd>
+        <dt className="text-fg-dim">Subject</dt>
+        <dd className="font-medium text-fg">{str(payload.subject)}</dd>
+        {kind === "deliver_ai_audit" && total !== null ? (
+          <>
+            <dt className="text-fg-dim">Price</dt>
+            <dd className="tabular-nums text-fg">
+              {formatMoney(total, currency)} {currency}
+              {due !== null && due !== total ? <span className="text-fg-muted">, {formatMoney(due, currency)} due now</span> : null}
+            </dd>
+          </>
+        ) : null}
+        {kind === "follow_up_ai_audit" && reason ? (
+          <>
+            <dt className="text-fg-dim">Why</dt>
+            <dd className="text-fg-muted">{reason === "not_opened" ? "They have not opened the audit." : "They opened the audit but have not paid."}</dd>
+          </>
+        ) : null}
+      </dl>
+      <BodyWithLink body={str(payload.body)} clamp={clamp} />
+      <AuditLinks
+        links={
+          kind === "deliver_ai_audit"
+            ? [
+                { href: `/ai-audits/${id}/preview`, label: "Read it as the client will" },
+                { href: `/api/ai-audit/${id}/pdf`, label: "Open the PDF" },
+                open,
+              ]
+            : [open]
+        }
+      />
+      {kind === "deliver_ai_audit" ? (
+        <p className="mt-1.5 text-[11px] leading-4 text-fg-dim">
+          Locked to the audit ({short(payload.audit_sha256)}), the proposal ({short(payload.proposal_sha256)}) and the PDF ({short(payload.pdf_sha256)}). A change files a new card.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** A kind with no dedicated preview still shows everything it would act on. */
 function GenericPreview({ payload }: { payload: Record<string, unknown> }) {
   const entries = Object.entries(payload);
@@ -203,7 +370,7 @@ export function ApprovalCard({
   const pending = approval.status === "pending";
   const kind = approval.action_kind;
   const body = str(approval.payload.body);
-  const clampable = density === "compact" && (kind === "send_email" || kind === "reply_ticket") && body.length > 240;
+  const clampable = density === "compact" && (kind === "send_email" || kind === "reply_ticket" || kind === "deliver_ai_audit" || kind === "follow_up_ai_audit") && body.length > 240;
 
   async function call(action: "approve" | "send-back" | "comment", payload: Record<string, unknown>, which: Busy) {
     if (busy) return;
@@ -248,7 +415,7 @@ export function ApprovalCard({
     }
   }
 
-  const deptLabel = approval.department_label ?? "Unattributed";
+  const deptLabel = approval.department_label ?? (AI_AUDIT_KINDS.has(kind) ? "Free AI Audit" : "Unattributed");
 
   return (
     <article
@@ -280,6 +447,8 @@ export function ApprovalCard({
           <SlackPreview payload={approval.payload} />
         ) : kind === "reply_ticket" ? (
           <TicketReplyPreview payload={approval.payload} clamp={clampable && !expanded} />
+        ) : AI_AUDIT_KINDS.has(kind) ? (
+          <AiAuditPreview kind={kind} payload={approval.payload} clamp={clampable && !expanded} />
         ) : (
           <GenericPreview payload={approval.payload} />
         )}

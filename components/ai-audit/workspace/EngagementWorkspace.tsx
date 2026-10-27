@@ -31,6 +31,7 @@ import { ProposalEditor } from "./ProposalEditor";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { ResearchPanel } from "./ResearchPanel";
 import { describeError, postAction } from "./api";
+import { approvalStatusWords } from "./words";
 
 type Tab = "overview" | "call" | "profile" | "research" | "audit" | "proposal" | "delivery" | "history";
 
@@ -45,16 +46,73 @@ const TABS: Array<{ key: Tab; label: string }> = [
   { key: "history", label: "History" },
 ];
 
+const CHECKOUT_WORDS: Record<string, string> = {
+  creating: "opening",
+  open: "open, not paid yet",
+  expired: "expired unpaid",
+  failed: "could not open",
+  paid: "paid",
+};
+
+/** A checkout's last error (lib/ai-audit/payment.ts), in words. */
+function checkoutErrorWords(code: string): string {
+  if (code === "complete_unpaid") return "The client finished checkout; the payment has not cleared yet (a bank payment can take a few days).";
+  if (code === "expire_failed") return "Stripe did not close this checkout when asked; it is tried again.";
+  if (code === "stripe_not_connected") return "Stripe is not connected, so it could not be checked.";
+  if (code.startsWith("complete_unverified:")) return `The client finished checkout, but the payment could not be counted (${code.slice("complete_unverified:".length).replace(/_/g, " ")}). Check it in Stripe.`;
+  return `Stripe said: ${code.replace(/_/g, " ")}.`;
+}
+
+const RECEIPT_WORDS: Record<string, string> = {
+  verified: "confirmed",
+  refunded: "refunded",
+  partially_refunded: "partly refunded",
+  disputed: "disputed",
+};
+
+const LINK_REVOKED_WORDS: Record<string, string> = {
+  revoked_by_owner: "revoked by you",
+  replaced: "replaced by a newer link",
+  superseded: "replaced by the revised audit's link",
+  send_failed: "the email did not go out",
+  not_sent_confirmed: "you confirmed the email was not sent",
+};
+
+const PAYMENT_STATUS_WORDS: Record<string, string> = {
+  none: "not started",
+  pending: "checkout open, waiting for Stripe",
+  failed: "failed",
+  paid: "paid, confirmed by Stripe",
+  overpaid_review: "paid twice: needs a refund decision",
+  partially_refunded: "partly refunded",
+  refunded: "refunded",
+  disputed: "disputed",
+};
+
+const ONBOARDING_WORDS: Record<string, string> = { not_started: "not started", in_progress: "in progress", done: "done", blocked: "blocked" };
+
+/** What one payment re-check found, from verifyCheckout's answer (lib/ai-audit/payment.ts). */
+function recheckWords(r: { status?: unknown; code?: unknown; duplicate?: unknown }): string {
+  if (r.status === "paid") return r.duplicate === true ? "paid, a second time (flagged for review)" : "paid";
+  if (r.status === "unpaid") return "not paid yet";
+  if (r.status === "expired") return "the checkout expired unpaid";
+  const code = typeof r.code === "string" ? r.code : "";
+  return code === "stripe_not_connected" ? "could not check: Stripe is not connected" : `could not check (${code.replace(/_/g, " ") || "no reason given"})`;
+}
+
+const TAB_KEYS: ReadonlySet<string> = new Set(TABS.map((t) => t.key));
+
 function when(iso: string | null | undefined): string {
   if (!iso) return "";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("en-CA", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; isOwner: boolean }) {
+export function EngagementWorkspace({ view, isOwner, initialTab }: { view: EngagementView; isOwner: boolean; initialTab?: string }) {
   const router = useRouter();
   const e = view.engagement;
-  const [tab, setTab] = useState<Tab>("overview");
+  // A link can open one tab (/ai-audits/<id>?tab=call, from an approval card); anything else opens the overview.
+  const [tab, setTab] = useState<Tab>(initialTab && TAB_KEYS.has(initialTab) ? (initialTab as Tab) : "overview");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
@@ -82,13 +140,39 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
     router.refresh();
   }
 
-  const manualMoves = STAGE_MOVES[e.stage].filter((s) => MANUAL_STAGE_TARGETS.includes(s));
+  async function recheckPayment() {
+    setBusy(true);
+    setMessage(null);
+    setProblems([]);
+    const r = await postAction(e.id, "recheck_payment", {});
+    setBusy(false);
+    if (!r.ok) {
+      setMessage(describeError(r));
+      return;
+    }
+    const results = Array.isArray(r.results) ? (r.results as Array<Record<string, unknown>>) : [];
+    setMessage(results.length ? `Checked with Stripe: ${results.map(recheckWords).join("; ")}.` : "There is no checkout to check with Stripe yet.");
+    router.refresh();
+  }
+
+  // Forward into Transcript Awaiting Approval only through "Ask for authorization", which files Gate 1's card;
+  // the move by hand stays for going back there from a later stage.
+  const manualMoves = STAGE_MOVES[e.stage].filter((s) => MANUAL_STAGE_TARGETS.includes(s) && !(s === "transcript_review" && e.stage === "call_completed"));
   const auditEditable = !view.audit || view.audit.status === "draft";
   const proposalEditable = !view.proposal || view.proposal.status === "draft";
   const submitted = view.audit?.status === "awaiting_approval";
   // Submission comes after Gate 1: only an authorized engagement reaches generating.
   const canSubmit = ["generating", "final_review"].includes(e.stage) && view.audit?.status === "draft" && view.proposal?.status === "draft";
   const cur = view.proposal?.currency ?? view.settings.default_currency;
+  const testRun = view.deliveryApproval?.status === "executed" && view.deliveryApproval.outcome === "dry_run";
+  // Why Submit is not offered, at the stages where it would be.
+  const submitNeeds =
+    ["generating", "final_review"].includes(e.stage) && !submitted && !canSubmit
+      ? [
+          ...(view.audit?.status === "draft" ? [] : ["save an audit draft (Audit tab)"]),
+          ...(view.proposal?.status === "draft" ? [] : ["save the proposal (Proposal tab)"]),
+        ]
+      : [];
 
   return (
     <PageFrame
@@ -158,7 +242,8 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
 
       {tab === "overview" ? (
         <div className="grid gap-5 lg:grid-cols-2">
-          <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
+          {/* content-start: the taller "Where it stands" column beside it must not stretch these rows (or the Save button). */}
+          <section className="grid content-start gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
             <h2 className="text-sm font-semibold text-fg">Business and contact</h2>
             <div className="grid gap-3 md:grid-cols-2">
               <div>
@@ -198,7 +283,12 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               Stage: <span className="text-fg">{view.row.stage_label}</span>
             </div>
             <div className="text-fg-muted">
-              Profile: <span className="text-fg">{view.profile ? `version ${view.profile.version.version_no}, ${view.profile.fields.length} facts, ${view.profile.version.status}` : "not started"}</span>
+              Profile:{" "}
+              <span className="text-fg">
+                {view.profile
+                  ? `version ${view.profile.version.version_no}, ${view.profile.fields.length} fact${view.profile.fields.length === 1 ? "" : "s"}, ${view.profile.version.status}`
+                  : "not started"}
+              </span>
             </div>
             <div className="text-fg-muted">
               Audit: <span className="text-fg">{view.audit ? `version ${view.audit.version_no}, ${view.audit.status.replace(/_/g, " ")}` : "not started"}</span>
@@ -207,11 +297,28 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               Proposal: <span className="text-fg">{view.proposal ? `version ${view.proposal.version_no}, ${view.proposal.status.replace(/_/g, " ")}, ${formatMoney(view.proposal.total_cents, cur)}` : "not started"}</span>
             </div>
             <div className="text-fg-muted">
-              Payment: <span className="text-fg">{e.payment_status.replace(/_/g, " ")}</span>
+              Payment: <span className="text-fg">{PAYMENT_STATUS_WORDS[e.payment_status] ?? e.payment_status.replace(/_/g, " ")}</span>
             </div>
             <div className="text-fg-muted">
-              Onboarding: <span className="text-fg">{e.onboarding_status.replace(/_/g, " ")}</span>
+              Onboarding: <span className="text-fg">{ONBOARDING_WORDS[e.onboarding_status] ?? e.onboarding_status.replace(/_/g, " ")}</span>
             </div>
+            <div className="text-fg-muted">
+              Sending to the client:{" "}
+              <span className={view.sending.auditEmailLive ? "text-fg" : "text-status-warm"}>email {view.sending.auditEmailLive ? "live" : "in test mode"}</span>,{" "}
+              <span className={view.sending.paymentsLive ? "text-fg" : "text-status-warm"}>payments {view.sending.paymentsLive ? "live" : "in test mode"}</span>.{" "}
+              <Link href="/ai-audits/settings#setup" className="underline underline-offset-2">
+                Setup
+              </Link>
+            </div>
+            {testRun ? (
+              <div className="mt-1 rounded-lg border border-hairline px-3 py-2 text-[13px] text-status-warm">
+                Test run: you approved the final card, and nothing went to the client because client email is in test mode.
+                {view.sending.auditEmailLive ? " Client email is live now: press Retry delivery for a new card." : " Once it is live, press Retry delivery for a new card."}
+              </div>
+            ) : null}
+            {submitNeeds.length ? (
+              <div className="mt-1 text-[13px] text-fg-muted">To submit for final approval, first {submitNeeds.join(" and ")}.</div>
+            ) : null}
             <div className="mt-2 flex flex-wrap gap-2">
               {canSubmit ? (
                 <button type="button" className="btn-primary" disabled={busy} onClick={() => act("submit", {}, "Submitted. The PDF is being printed on the Mac; the final approval card appears when it is ready.")}>
@@ -323,7 +430,13 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
             <div className="text-fg-muted">
               PDF:{" "}
               <span className="text-fg">
-                {view.audit?.pdf_sha256 ? `ready (${view.audit.pdf_pages ?? "?"} pages)` : submitted ? "waiting for the Mac to print it" : "made when you submit"}
+                {view.audit?.pdf_sha256
+                  ? view.audit.pdf_pages
+                    ? `ready (${view.audit.pdf_pages} page${view.audit.pdf_pages === 1 ? "" : "s"})`
+                    : "ready"
+                  : submitted
+                    ? "waiting for the Mac to print it"
+                    : "made when you submit"}
               </span>
               {view.audit?.pdf_sha256 ? (
                 <a className="ml-2 underline" href={`/api/ai-audit/${e.id}/pdf`}>
@@ -337,7 +450,7 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               </button>
             ) : null}
             <div className="text-fg-muted">
-              Final approval: <span className="text-fg">{view.deliveryApproval ? view.deliveryApproval.status.replace(/_/g, " ") : "not filed yet"}</span>
+              Final approval: <span className="text-fg">{view.deliveryApproval ? approvalStatusWords(view.deliveryApproval) : "not filed yet"}</span>
               {view.deliveryApproval?.message ? <div className="text-[13px] text-status-warm">{view.deliveryApproval.message}</div> : null}
             </div>
             {view.deliveryApproval?.status === "pending" ? (
@@ -350,7 +463,7 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               <span className="text-fg">
                 {view.link
                   ? view.link.revoked_at
-                    ? `revoked (${view.link.revoked_reason ?? "by you"})`
+                    ? `no longer works (${LINK_REVOKED_WORDS[view.link.revoked_reason ?? ""] ?? (view.link.revoked_reason ? view.link.revoked_reason.replace(/_/g, " ") : "revoked")})`
                     : `live until ${when(view.link.expires_at)}, opened ${view.link.view_count} time${view.link.view_count === 1 ? "" : "s"}${view.link.first_viewed_at ? `, first ${when(view.link.first_viewed_at)}` : ""}`
                   : "not sent"}
               </span>
@@ -366,18 +479,19 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
             {view.checkouts.length === 0 ? <div className="text-fg-muted">No checkout opened yet.</div> : null}
             {view.checkouts.map((c) => (
               <div key={c.id} className="text-fg-muted">
-                Checkout {formatMoney(c.amount_cents, c.currency)} ({c.installment_kind}): <span className="text-fg">{c.status}</span>
-                {c.last_error ? <span className="ml-1 text-status-warm">{c.last_error}</span> : null}
+                {c.installment_kind === "deposit" ? "Deposit" : "Payment"} checkout, {formatMoney(c.amount_cents, c.currency)}: <span className="text-fg">{CHECKOUT_WORDS[c.status] ?? c.status.replace(/_/g, " ")}</span>
+                {c.last_error ? <span className="ml-1 text-status-warm">{checkoutErrorWords(c.last_error)}</span> : null}
               </div>
             ))}
             {view.receipts.map((r) => (
               <div key={r.id} className="text-fg">
-                Stripe confirmed {formatMoney(r.amount_cents, r.currency)} on {when(r.verified_at)} ({r.status})
+                Stripe confirmed {formatMoney(r.amount_cents, r.currency)} on {when(r.verified_at)}
+                {r.status !== "verified" ? <span className="text-status-warm">, since {RECEIPT_WORDS[r.status] ?? r.status.replace(/_/g, " ")}</span> : null}
               </div>
             ))}
             <div className="mt-1 flex flex-wrap gap-2">
               {view.checkouts.some((c) => c.stripe_session_id) ? (
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("recheck_payment", {}, "Checked with Stripe.")}>
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => void recheckPayment()}>
                   Re-check payment with Stripe
                 </button>
               ) : null}
@@ -388,8 +502,39 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
               ) : null}
             </div>
             <div className="mt-2 text-fg-muted">
-              Client record: <span className="text-fg">{e.customer_id ? "created" : "not yet"}</span>. Project: <span className="text-fg">{e.delivery_project_id ? "created" : "not yet"}</span>.
+              Client record:{" "}
+              {e.customer_id ? (
+                <Link href={`/clients/${e.customer_id}`} className="text-fg underline underline-offset-2">
+                  open it
+                </Link>
+              ) : (
+                <span className="text-fg">not yet</span>
+              )}
+              . Project:{" "}
+              {e.delivery_project_id ? (
+                <Link href={`/projects/${e.delivery_project_id}`} className="text-fg underline underline-offset-2">
+                  open the checklist
+                </Link>
+              ) : (
+                <span className="text-fg">not yet</span>
+              )}
+              .
             </div>
+            {view.welcome ? (
+              <div className="text-fg-muted">
+                Welcome email:{" "}
+                <span className="text-fg">
+                  {view.welcome.status === "pending" ? "waiting for your approval" : approvalStatusWords(view.welcome)}
+                </span>
+                {view.welcome.status === "pending" ? (
+                  <Link href="/feed" className="ml-2 underline underline-offset-2">
+                    Open it in Needs you
+                  </Link>
+                ) : null}
+              </div>
+            ) : e.customer_id && !e.contact_email ? (
+              <div className="text-status-warm">No welcome email: the engagement has no contact email.</div>
+            ) : null}
           </section>
         </div>
       ) : null}

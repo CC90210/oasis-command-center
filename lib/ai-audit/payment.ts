@@ -116,6 +116,28 @@ async function getCheckout(db: Client, tenantId: string, id: string): Promise<Ch
   return row ? mapCheckout(row) : null;
 }
 
+/**
+ * A client pressed Pay and no checkout opened for a reason only CC can fix. One
+ * open card per engagement (writeAgentAlert refreshes it), paged once. A failed
+ * alert is logged and never stops the client being sent back to their page.
+ */
+async function alertPayBlocked(deps: PaymentDeps, e: Engagement, why: string): Promise<void> {
+  try {
+    await deps.alert({
+      tenantId: e.tenant_id,
+      alertType: "ai_audit_pay_blocked",
+      severity: "urgent",
+      title: `A client could not pay: ${shortName(e.business_name, "an AI audit")}`,
+      body: `${why} Fix it, then reply to them.`,
+      subjectType: "ai_audit_engagement",
+      subjectId: e.id,
+      telegramOncePerOpen: true,
+    });
+  } catch (err) {
+    console.error("[ai-audit.payment] the blocked-payment alert could not be written", { engagementId: e.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+  }
+}
+
 export type PayResult =
   | { ok: true; url: string; reused: boolean }
   | { ok: false; error: "not_payable" | "already_paid" | "dry_run" | "stripe_not_connected" | "busy" | "stripe_failed"; detail?: string };
@@ -150,7 +172,10 @@ export async function createOrReuseCheckout(
   // The payment switch is checked before an open session is reused too: turning
   // LIVE_SEND_STRIPE_CHECKOUT off (or BRAVO_FORCE_DRY_RUN on) must stop the
   // Pay button handing out a live session (Codex review of PR #732).
-  if (deps.isDryRun(DRY_RUN_CHANNEL)) return { ok: false, error: "dry_run" };
+  if (deps.isDryRun(DRY_RUN_CHANNEL)) {
+    await alertPayBlocked(deps, engagement, "Client payments are in test mode (LIVE_SEND_STRIPE_CHECKOUT is not on), so no checkout opened. The client pressed Pay and was told online payment is not open yet.");
+    return { ok: false, error: "dry_run" };
+  }
   if (open) {
     const c = mapCheckout(open);
     const fresh = c.expires_at ? Date.parse(c.expires_at) - input.now.getTime() > 30 * 60_000 : false;
@@ -165,7 +190,10 @@ export async function createOrReuseCheckout(
   }
 
   const secret = await deps.stripeSecret(t);
-  if (!secret) return { ok: false, error: "stripe_not_connected" };
+  if (!secret) {
+    await alertPayBlocked(deps, engagement, "Stripe is not connected for this workspace, so no checkout opened. The client pressed Pay and was told online payment is not open yet.");
+    return { ok: false, error: "stripe_not_connected" };
+  }
 
   const id = newId();
   const token = newId();
@@ -207,6 +235,7 @@ export async function createOrReuseCheckout(
       sql: "UPDATE ai_audit_checkouts SET status = 'failed', last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
       args: [code.slice(0, 200), input.now.toISOString(), t, id],
     });
+    await alertPayBlocked(deps, engagement, `Stripe refused to open the checkout (${code.slice(0, 160)}). The client pressed Pay and was asked to try again in a minute.`);
     return { ok: false, error: "stripe_failed", detail: code };
   }
   const expires = new Date(input.now.getTime() + CHECKOUT_TTL_HOURS * 3_600_000).toISOString();

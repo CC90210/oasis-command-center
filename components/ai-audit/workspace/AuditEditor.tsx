@@ -271,9 +271,19 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
           {message ? <span className="ml-2 text-fg">{message}</span> : null}
         </div>
         <div className="flex gap-2">
-          <a className="btn-secondary" href={`/ai-audits/${engagementId}/preview`} target="_blank" rel="noreferrer">
-            Preview
-          </a>
+          {initialDoc ? (
+            <a
+              className="btn-secondary"
+              href={`/ai-audits/${engagementId}/preview`}
+              target="_blank"
+              rel="noreferrer"
+              title={dirty ? "The preview shows the last saved draft: save first to see these changes." : "The audit as the client will see it."}
+            >
+              {dirty ? "Preview the saved draft" : "Preview"}
+            </a>
+          ) : (
+            <span className="self-center text-[13px] text-fg-dim">Save the draft to preview it</span>
+          )}
           {editable ? (
             <button type="button" className="btn-primary" onClick={save} disabled={busy || !dirty}>
               Save draft

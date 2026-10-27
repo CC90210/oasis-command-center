@@ -22,6 +22,7 @@ import { AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payloa
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
+import { approvalStatusWords } from "./words";
 import { BriefPanel } from "./BriefPanel";
 
 function when(iso: string | null | undefined): string {
@@ -83,6 +84,28 @@ function TranscriptLines({ engagementId, transcriptId }: { engagementId: string;
     </ol>
   );
 }
+
+/** How to change what Gate 1 froze, from where the engagement stands (lib/ai-audit/rules.ts STAGE_MOVES). */
+function wayBack(stage: string): string {
+  if (stage === "generating") return "To change them, move the engagement back to Transcript Awaiting Approval.";
+  if (stage === "final_review") return "To change them, reopen the audit for edits, then move the engagement back to Transcript Awaiting Approval.";
+  if (["delivered", "proposal_review", "payment_pending"].includes(stage)) return "The audit is with the client: to change them, revise the audit first.";
+  return "They are final for this engagement.";
+}
+
+/** A profile draft's run, in words (lib/ai-audit/extraction.ts step statuses). */
+const EXTRACTION_STATUS_WORDS: Record<string, string> = {
+  queued: "queued",
+  running: "running",
+  waiting_runner: "waiting for the Mac to pick it up",
+  done: "done",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
+/** Stages before the call is held: Gate 1 waits for Discovery Call Completed. */
+const BEFORE_THE_CALL: readonly string[] = ["new_lead", "pre_call_research", "call_scheduled"];
+
 
 export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwner: boolean }) {
   const router = useRouter();
@@ -224,7 +247,9 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
 
       <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
         <h2 className="text-sm font-semibold text-fg">Transcripts</h2>
-        {view.transcripts.length === 0 ? <div className="text-fg-muted">No transcript yet. Paste or upload the call&apos;s transcript below.</div> : null}
+        {view.transcripts.length === 0 ? (
+          <div className="text-fg-muted">{open ? "No transcript yet. Paste or upload the call's transcript below." : "No transcript was added for this call."}</div>
+        ) : null}
         {open
           ? view.meetRooms
               .filter((r) => r.transcript?.status === "ready" && !r.attachedTranscriptId)
@@ -346,7 +371,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
             </p>
           </div>
         ) : (
-          <div className="text-[12px] text-fg-dim">The profile is authorized, so transcripts can no longer be added. Move the engagement back to Transcript Awaiting Approval to change them.</div>
+          <div className="text-[12px] text-fg-dim">The profile is authorized, so transcripts can no longer be added. {wayBack(e.stage)}</div>
         )}
       </section>
 
@@ -391,7 +416,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           )}
           {view.extraction ? (
             <div className="text-fg-muted">
-              Last run: <span className="text-fg">{view.extraction.status.replace(/_/g, " ")}</span>
+              Last run: <span className="text-fg">{EXTRACTION_STATUS_WORDS[view.extraction.status] ?? view.extraction.status.replace(/_/g, " ")}</span>
               {view.extraction.windows ? `, ${view.extraction.done} of ${view.extraction.windows} part${view.extraction.windows === 1 ? "" : "s"} read` : ""}
               {view.extraction.failed ? <span className="text-status-warm">, {view.extraction.failed} failed</span> : null}
               {view.extraction.status === "waiting_runner" ? ", waiting for the Mac" : ""}.
@@ -464,7 +489,10 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
         ) : null}
         {auth ? (
           <div className="text-fg-muted">
-            Authorization: <span className="text-fg">{auth.status === "executed" && auth.outcome === "authorized" ? "authorized" : auth.status.replace(/_/g, " ")}</span>
+            Authorization:{" "}
+            <span className="text-fg">
+              {approvalStatusWords(auth)}
+            </span>
             {auth.engine_label ? <span>, processed by {auth.engine_label}</span> : null}
             {auth.message ? <div className="text-[13px] text-status-warm">{auth.message}</div> : null}
           </div>
@@ -482,6 +510,21 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           ) : null}
         </div>
         {!canAsk && open && !(view.profile?.fields.length ?? 0) ? <div className="text-[12px] text-fg-dim">Add at least one fact to the discovery profile first.</div> : null}
+        {BEFORE_THE_CALL.includes(e.stage) ? (
+          <div className="grid gap-1.5 text-[13px] text-fg-muted">
+            <div>
+              Authorization comes after the call. A transcript moves the engagement on by itself. For a call with no transcript (a phone call, or one the client did not want recorded), mark the call done.
+            </div>
+            <button
+              type="button"
+              className="btn-secondary justify-self-start"
+              disabled={busy}
+              onClick={() => act("set_stage", { to: "call_completed", expected_row_version: e.row_version }, "The call is marked done. Check the profile, then ask for authorization.")}
+            >
+              The call is done
+            </button>
+          </div>
+        ) : null}
       </section>
     </div>
   );

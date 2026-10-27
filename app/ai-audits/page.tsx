@@ -16,6 +16,8 @@ import { KpiTile } from "@/components/os/KpiTile";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { boardMetrics, boardRows, type BoardMetrics } from "@/lib/ai-audit/view";
 import { AI_AUDIT_STAGES, AI_AUDIT_STAGE_LABELS, stageNumber } from "@/lib/ai-audit/rules";
+import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
+import { SetupChecklist } from "@/components/ai-audit/SetupChecklist";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +42,13 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
     metrics = await boardMetrics(session.db, session.tenantId);
   } catch (err) {
     console.error("[ai-audits] the board's numbers could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));
+  }
+  // Setup reads each check on its own; if even that throws, the board says so instead of hiding the list.
+  let setup: SetupCheck[] | null = null;
+  try {
+    setup = await setupChecks(session.db, session.tenantId, new Date());
+  } catch (err) {
+    console.error("[ai-audits] the setup checks could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));
   }
   const tile = (value: number) => ({ value: metrics ? value : null, status: metrics ? ("live" as const) : ("error" as const) });
   const closeRate = metrics && metrics.delivered ? `${Math.round((metrics.won / metrics.delivered) * 100)}%` : null;
@@ -88,6 +97,14 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
         />
       </div>
 
+      <div className="mb-5">
+        {setup ? (
+          <SetupChecklist checks={setup} />
+        ) : (
+          <div className="rounded-xl border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-status-warm">Setup could not be checked just now. Reload the page; the error was logged.</div>
+        )}
+      </div>
+
       <div className="mb-5 overflow-x-auto rounded-xl border border-hairline bg-bg-panel">
         <ol className="flex min-w-max divide-x divide-hairline text-[12px]">
           {AI_AUDIT_STAGES.slice(0, 13).map((s) => (
@@ -104,8 +121,11 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
         <div className="rounded-xl border border-hairline bg-bg-panel p-6 text-sm text-fg-muted">
           <p className="font-medium text-fg">{showClosed ? "No audits yet." : "No open audits."}</p>
           <ol className="mt-2 list-decimal space-y-1 pl-5">
-            <li>After a discovery call, open the lead in the pipeline and choose Start AI audit.</li>
-            <li>The Oasis Meet transcript attaches by itself once everyone agreed to the recording. For another call, paste or upload it.</li>
+            <li>When the discovery call is booked, open the lead in the pipeline and choose Start AI audit. The pre-call brief builds by itself.</li>
+            <li>
+              Hold the call in Oasis Meet: its transcript attaches by itself once everyone agreed to the recording. A call held before the audit was started, or anywhere else, is attached or pasted on the
+              engagement&apos;s Call and transcripts tab.
+            </li>
             <li>Check the profile drafted from the call and approve it. Research and the audit draft follow.</li>
             <li>Review the audit and proposal, then approve the email that sends the client their private link.</li>
           </ol>

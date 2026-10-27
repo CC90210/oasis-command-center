@@ -18,6 +18,7 @@ import { validateAuditDoc, type AuditDoc } from "@/lib/ai-audit/doc";
 import {
   proposalTotals,
   validateProposalContent,
+  withConfirmedPrice,
   type ProposalContent,
   type ProposalLine,
   type TaxRule,
@@ -548,24 +549,8 @@ export async function normalizeProposal(
         lines.push(unpriced(l, l.sku || undefined));
         continue;
       }
-      lines.push({
-        kind: "catalogue",
-        line_id: l.line_id,
-        sku: item.sku,
-        item_id: item.id,
-        item_version: item.item_version,
-        name: item.name,
-        description: l.description || item.description,
-        category: item.category,
-        unit: item.unit,
-        ...(item.unit_label ? { unit_label: item.unit_label } : {}),
-        quantity: item.unit === "per_unit" ? l.quantity : 1,
-        optional: l.optional,
-        unit_price_cents: item.price_cents as number,
-        currency: item.currency,
-        deliverables: l.deliverables.length ? l.deliverables : item.deliverables,
-        onboarding_requirements: l.onboarding_requirements.length ? l.onboarding_requirements : item.onboarding_requirements,
-      });
+      // The same line the editor's "Use the confirmed price" builds (lib/ai-audit/proposal.ts withConfirmedPrice).
+      lines.push(withConfirmedPrice(l, item));
     } else if (l.kind === "owner_set") {
       const prior = previous?.lines.find((p) => p.line_id === l.line_id);
       const unchanged = prior && prior.kind === "owner_set" && prior.unit_price_cents === l.unit_price_cents && prior.set_by;

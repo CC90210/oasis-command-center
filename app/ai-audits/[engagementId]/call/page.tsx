@@ -6,11 +6,7 @@
 import { notFound } from "next/navigation";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { getEngagement } from "@/lib/ai-audit/store";
-import { getProfileVersion, listProfileFields } from "@/lib/ai-audit/versions";
-import { listCallNotes } from "@/lib/ai-audit/call-notes";
-import { briefForPage } from "@/lib/ai-audit/briefs";
-import { roomsForEngagement } from "@/lib/ai-audit/meet-link";
-import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
+import { liveCallProps } from "@/lib/ai-audit/view";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LiveCall } from "@/components/ai-audit/call/LiveCall";
 
@@ -24,41 +20,10 @@ export default async function LiveCallPage({ params }: Props) {
   const { engagementId } = await params;
   const e = await getEngagement(session.db, session.tenantId, engagementId);
   if (!e) notFound();
-  const version = e.current_profile_version_id ? await getProfileVersion(session.db, session.tenantId, e.current_profile_version_id) : null;
-  const [fields, notes, brief, rooms] = await Promise.all([
-    version ? listProfileFields(session.db, session.tenantId, version.id) : Promise.resolve([]),
-    listCallNotes(session.db, session.tenantId, e.id),
-    briefForPage(session.db, session.tenantId, e.id),
-    roomsForEngagement(session.db, session.tenantId, e),
-  ]);
+  const props = await liveCallProps(session.db, session.tenantId, e);
   return (
     <PageFrame title={`Discovery call: ${e.business_name || "Unnamed business"}`} subtitle="Ask about the business first. Notes save as you type; figures go straight into the profile as Client-reported.">
-      <LiveCall
-        brief={brief ? { hypotheses: brief.content.hypotheses, confirm: brief.content.confirm, weight: brief.content.weight } : null}
-        room={(() => {
-          // The room still to be held, else the newest: its box says what became of that call's transcript.
-          const open = rooms.find((r) => r.status !== "ended") ?? rooms[0] ?? null;
-          return open
-            ? {
-                code: open.code,
-                title: open.title,
-                status: open.status,
-                recordAudio: open.recordAudio,
-                guests: open.guests,
-                transcript: open.transcript?.status ?? null,
-                attached: !!open.attachedTranscriptId,
-                holds: open.holds,
-              }
-            : null;
-        })()}
-        engagementId={e.id}
-        businessType={e.business_type}
-        callStartedAt={e.call_started_at}
-        callEndedAt={e.call_ended_at}
-        notes={notes.map((n) => ({ question_id: n.question_id, notes: n.notes, row_version: n.row_version }))}
-        fields={fields.map((f) => ({ field_key: f.field_key, value: f.value, label: f.label }))}
-        editable={PROFILE_EDIT_STAGES.includes(e.stage)}
-      />
+      <LiveCall {...props} />
     </PageFrame>
   );
 }

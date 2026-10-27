@@ -11,6 +11,8 @@
  *   6. re-check recent receipts for refunds and disputes (each at most hourly);
  *   7. flag stalls (not opened in 3 days, opened but unpaid for 7 days), once;
  *   7b. advance profile drafting from transcripts;
+ *   7b3. move an engagement still at New Lead or Research in Progress to
+ *       Discovery Call Scheduled once its lead's founder call is booked;
  *   7c. build the first pre-call brief for engagements at Research in Progress
  *       or Discovery Call Scheduled (it reads the client's public website),
  *       each on its own: a try is marked before it starts, and one that fails
@@ -28,7 +30,7 @@ import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WAITING_ON_CLIENT_STAGES, shortName, stallReason } from "@/lib/ai-audit/rules";
-import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
+import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, readLead, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
@@ -43,7 +45,7 @@ import {
   type PaymentDeps,
 } from "@/lib/ai-audit/payment";
 import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type OnboardingDeps } from "@/lib/ai-audit/onboarding";
-import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
+import { advanceEngagement, syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, sweepStaleExtractions, type CloudDeps } from "@/lib/ai-audit/extraction";
 import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
@@ -77,6 +79,8 @@ export type TickReport = {
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
+  /** Engagements moved to Discovery Call Scheduled because their lead's call was booked. */
+  callsBooked: number;
   /** Oasis Meet transcripts attached to their engagement; and those listed for CC (no AI answer, a guest who did not agree, a call held for his hand). */
   meetTranscriptsAttached: number;
   meetTranscriptsWaiting: number;
@@ -122,6 +126,7 @@ export async function runAiAuditTick(
     leadsRepaired: 0,
     extractionsAdvanced: 0,
     briefsBuilt: 0,
+    callsBooked: 0,
     meetTranscriptsAttached: 0,
     meetTranscriptsWaiting: 0,
     researchStarted: 0,
@@ -307,6 +312,17 @@ export async function runAiAuditTick(
       report.meetTranscriptsAttached += r.attached;
       report.meetTranscriptsWaiting += r.waiting;
     });
+
+    // 7b3. A call booked on the lead after the engagement was opened: the engagement follows, forward only.
+    for (const e of open.filter((x) => x.stage === "new_lead" || x.stage === "pre_call_research")) {
+      if (over()) break;
+      await guard("call_booked", e.id, async () => {
+        const lead = await readLead(db, tenantId, e.lead_id);
+        if (lead?.stage !== "founder_meeting_booked") return;
+        const r = await advanceEngagement(db, { tenantId, engagementId: e.id, to: "call_scheduled", actor: { type: "system", id: null }, now: now(), expectedRowVersion: e.row_version, event: "call_booked" });
+        if (r.ok) report.callsBooked += 1;
+      });
+    }
 
     // 7c. The first pre-call brief, two per tick at most: each reads a website (up to 25 seconds).
     // Each engagement is tried on its own, and the try is marked before it starts, so one
