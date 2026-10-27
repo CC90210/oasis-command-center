@@ -538,12 +538,15 @@ function useConnectionsRead<T>(url: string, read: (body: unknown) => T | null): 
   const [value, setValue] = useState<T | null>(null);
   useEffect(() => {
     let live = true;
+    // Only the latest read may land: one started before a change can finish after it (CodeRabbit, #748).
+    let latest = 0;
     const load = async () => {
+      const mine = ++latest;
       try {
         const r = await fetch(url, { cache: "no-store" });
         if (!r.ok) return;
         const next = read(await r.json().catch(() => null));
-        if (live && next !== null) setValue(next);
+        if (live && mine === latest && next !== null) setValue(next);
       } catch {
         // Nothing is shown; the drawers still read and save.
       }

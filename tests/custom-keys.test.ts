@@ -229,6 +229,9 @@ check("a pick made for a saved key stays with it; one made for a new key carries
   assert.match(vault, /const canSave = !blockedBy && /);
   assert.match(vault, /: agentsError\s*\? "Which agents may use these keys could not be read, so nothing can be saved yet\."/);
   assert.match(vault, /if \(active\) void fetchRows\(\);/);
+  // Only the latest read lands, in the vault and in the cards' lines (CodeRabbit on #748).
+  assert.match(vault, /if \(mine !== latestRead\.current\) return null;/);
+  assert.match(read("components/os/connections/ConnectionsHub.tsx"), /if \(live && mine === latest && next !== null\) setValue\(next\);/);
   // One column: the viewport-wide grid put the Save button past the drawer's edge.
   assert.doesNotMatch(vault, /sm:grid-cols/);
   // A key for an app with its own card opens that card; the drawer passes whether it is open.

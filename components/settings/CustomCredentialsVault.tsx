@@ -27,7 +27,7 @@
  * put the Save button off the drawer's edge.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, Trash2, Upload } from "lucide-react";
 import { timeAgo } from "@/lib/devices/presence";
 import { AgentPicker } from "@/components/os/connections/AgentPicker";
@@ -124,8 +124,12 @@ export function CustomCredentialsVault({
   const [editAgents, setEditAgents] = useState<AgentAccess>("all");
   const [editBusy, setEditBusy] = useState(false);
 
-  /** Read the saved keys; the rows, or null when they could not be read. */
+  // Only the latest read may land: an opening and a save can overlap (CodeRabbit, #748).
+  const latestRead = useRef(0);
+
+  /** Read the saved keys; the rows, or null when they could not be read (or a newer read took over). */
   const fetchRows = useCallback(async (): Promise<CustomCredentialRow[] | null> => {
+    const mine = ++latestRead.current;
     setLoading(true);
     try {
       const r = await fetch("/api/credentials/custom", { cache: "no-store" });
@@ -136,6 +140,7 @@ export function CustomCredentialsVault({
         choices?: AgentChoice[];
         error?: string;
       };
+      if (mine !== latestRead.current) return null;
       if (!r.ok || !j.ok) {
         setListError(j.error || `http_${r.status}`);
         setRows([]);
@@ -150,12 +155,13 @@ export function CustomCredentialsVault({
       if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
       return entries;
     } catch (e) {
+      if (mine !== latestRead.current) return null;
       setListError(e instanceof Error ? e.message : "fetch_failed");
       setRows([]);
       setListed(false);
       return null;
     } finally {
-      setLoading(false);
+      if (mine === latestRead.current) setLoading(false);
     }
   }, []);
 
