@@ -695,10 +695,31 @@ ol.aa-list {
 }
 
 @media print {
+  /* Chrome paints the page margins in the color scheme's canvas color, and the app's root is color-scheme: dark, so
+     every printed page had a black frame (self-test, 2026-10-27). The printed audit is white to the edge. */
+  :root {
+    color-scheme: light !important;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+  }
+
   .aa {
     background: #ffffff;
     padding: 0;
     font-size: 11pt;
+  }
+
+  /* A footer group repeats at every page break: a long proposal showed its total under its first line only. And a
+     line stays whole, its name with its description. */
+  .aa-proposal-table tfoot {
+    display: table-row-group;
+  }
+
+  .aa-proposal-table tr {
+    break-inside: avoid;
   }
 
   .aa-paper {
