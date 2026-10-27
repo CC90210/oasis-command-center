@@ -92,11 +92,12 @@ const SYSTEM = [
   "You read one part of a business discovery call and extract facts the CLIENT stated about their business, for a free AI audit.",
   "Rules:",
   "1. Extract only what the client said. A question, a guess or a suggestion from the interviewer is not a fact.",
-  "2. For every fact give the line numbers it comes from (from, to) and a short quote copied exactly from those lines (at most 25 words).",
-  "3. A number is a fact only if the client said that number. Turn number words into digits (forty is 40). If the client gave a range or was unsure, do not give a value: leave the fact out and put the question in open_questions.",
-  "4. Never infer, estimate, average or calculate. Never fill a field the call does not answer.",
-  "5. Never copy a password, a login, a card number or any other credential, even if one appears.",
-  "6. Answer with JSON only, in exactly this shape:",
+  "2. For every fact give the line numbers it comes from (from, to) and a quote: ONE unbroken run of the client's words, copied character for character from those lines (at most 25 words). Never skip, join or shorten sentences inside a quote. If a fact needs two sentences, quote the one that states it.",
+  "3. Write a text value, and every list item, in the client's own words, as close to the quote as you can. Use only the field keys listed, exactly as written, and for rows the column names exactly as listed, spaces included.",
+  "4. A number is a fact only if the client said that number. Turn number words into digits (forty is 40, half is 50 for a share). One number said with about, around, roughly, maybe or I'd guess is still the client's number: give it, and the quote keeps their word. If the client gave a range (6,000 to 9,000) or different numbers for the same thing, do not give a value: leave the fact out and put the question in open_questions. Never change a figure's period or unit.",
+  "5. Never infer, estimate, average or calculate. Never fill a field the call does not answer.",
+  "6. Never copy a password, a login, a card number or any other credential, even if one appears.",
+  "7. Answer with JSON only, in exactly this shape:",
   '{"facts":[{"key":"<field key>","value":<value>,"from":<first line number>,"to":<last line number>,"quote":"<exact words>"}],"summary":{"goals":["..."],"problems":["..."],"commitments":["..."],"open_questions":["..."]}}',
   "The summary lists, in a few words each, what the client wants, what problems they described, what either side agreed to do, and what is still unclear. At most 8 items each; empty lists are fine.",
   "",
@@ -1285,7 +1286,8 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
     if (typeof f.value === "string") {
       for (const m of baseText(f.value).matchAll(MAGNITUDE)) if (!stems.has(stemOf(m[0]))) return { ok: false, reason: "its words are not what the call said" };
       if (support(f.value, stems) < 0.6) return { ok: false, reason: "its words are not what the call said" };
-      if (!NEGATION.test(baseText(f.value)) && negatedIn(f.value, ctx)) return { ok: false, reason: "the call says they do not, or no longer" };
+      // What they tried before is, by its nature, something they no longer do: "tried an answering service" is the fact.
+      if (key !== "decision.past_attempts" && !NEGATION.test(baseText(f.value)) && negatedIn(f.value, ctx)) return { ok: false, reason: "the call says they do not, or no longer" };
     }
   }
   const v = validateProfileField({ field_key: key, value, label: "client_reported", source_type: "transcript" });

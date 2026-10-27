@@ -1135,9 +1135,27 @@ async function main() {
     assert.match(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "1200" }], 2, "We pay Jobber 1200 dollars a year").dropped[0]?.reason ?? "", /per year, not per month/);
     assert.match(check1("ops.repetitive_tasks", [{ task: "Admin", "hours per week": "2" }], 3, "Admin eats 2 hours a day").dropped[0]?.reason ?? "", /per day, not per week/);
     assert.equal(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "100" }], 4, "We pay Jobber 100 a month").kept.length, 1, "said per month: kept");
+    // The self-test of 2026-10-27: a model writes "what_it_is_for"; the column is the same one, not an empty cell.
+    const snake = check1("tech.tools", [{ tool: "Jobber", what_it_is_for: "scheduling", monthly_cost: "100" }], 4, "We pay Jobber 100 a month for scheduling");
+    assert.deepEqual(snake.kept[0]?.value, [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "100" }], "snake_case columns are read as the listed columns");
     const key = ["sk", "a".repeat(24)].join("-");
     const pr = ex.extractionPrompt({ businessName: `Acme ${key}`, window: tr.transcriptWindows(lines)[0] });
     assert.ok(!pr.prompt.includes(key), "the name's key never reaches the model");
+    // The self-test of 2026-10-27: quotes are one unbroken run, values use the client's words, an approximate figure is
+    // the client's number, and a range is not (its loss was most of the profile).
+    assert.match(pr.system, /ONE unbroken run of the client's words/);
+    assert.match(pr.system, /in the client's own words/);
+    assert.match(pr.system, /about, around, roughly, maybe or I'd guess is still the client's number/);
+    assert.match(pr.system, /If the client gave a range \(6,000 to 9,000\)/);
+    // What they tried before is something they no longer do: that is the fact, not a negation of it.
+    const tried = tr.parseTranscriptText("Dana: I tried an answering service two years ago. They took messages wrong and customers hated it.");
+    const triedLines = tried.ok ? tried.value.lines : [];
+    const attempt = ex.checkFacts(
+      { facts: [{ key: "decision.past_attempts", value: "Tried an answering service two years ago; it took messages wrong", from: 1, to: 1, quote: "I tried an answering service two years ago. They took messages wrong and customers hated it." }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } },
+      triedLines,
+      { from: 1, to: 1 },
+    );
+    assert.equal(attempt.kept.length, 1, JSON.stringify(attempt.dropped));
   });
   await check("figures are read as written: digits in a word are no figure, scales multiply, and object names are not numbers (review of phase 2b)", () => {
     assert.deepEqual(ex.numbersIn("a constructor and a prototype"), []);
