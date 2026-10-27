@@ -452,6 +452,16 @@ export function draftProposal(input: {
     }
   }
   const skuOf = new Map(input.opportunities.map((o) => [o.id, o.sku]));
+  // Firm for what to do now, open for later (CC, 2026-10-27): a line that only the roadmap's Later column needs is an
+  // optional add-on, listed outside the total. If every line is for later, they all stay in, so something is due.
+  const soonerSkus = new Set([...input.roadmap.now, ...input.roadmap.next].map((r) => skuOf.get(r.opportunity_id)).filter((x): x is string => !!x));
+  const laterOnly = (lineId: string) => {
+    const sku = [...lineOfSku.entries()].find(([, id]) => id === lineId)?.[0];
+    return !!sku && !soonerSkus.has(sku) && input.roadmap.later.some((r) => skuOf.get(r.opportunity_id) === sku);
+  };
+  if (lines.some((l) => !laterOnly(l.line_id))) {
+    for (const l of lines) if (laterOnly(l.line_id)) l.optional = true;
+  }
   const phase = (key: "now" | "next" | "later", label: string, description: string) => {
     const ids = [...new Set(input.roadmap[key].map((r) => lineOfSku.get(skuOf.get(r.opportunity_id) ?? "")).filter((x): x is string => !!x))];
     return ids.length ? [{ name: label, description, line_ids: ids }] : [];

@@ -23,7 +23,7 @@ import {
   type DocRoadmapItem,
   type DocSource,
 } from "@/lib/ai-audit/doc";
-import { BUSINESS_TYPES, BUSINESS_TYPE_LABELS, EVIDENCE_LABEL_NAMES, type BusinessType, type EvidenceLabel } from "@/lib/ai-audit/rules";
+import { BUSINESS_TYPES, BUSINESS_TYPE_LABELS, CURRENCIES, EVIDENCE_LABEL_NAMES, type BusinessType, type Currency, type EvidenceLabel } from "@/lib/ai-audit/rules";
 import { describeError, postAction } from "./api";
 import { NumberInput } from "./inputs";
 
@@ -333,6 +333,21 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
           </Field>
           <Field label="Website (optional)">
             <input className="input" disabled={disabled} value={doc.business.website ?? ""} onChange={(e) => update((d) => void (d.business.website = e.target.value || undefined))} />
+          </Field>
+          <Field label="The client's figures are in">
+            <select
+              className="select"
+              disabled={disabled}
+              value={doc.business.currency ?? ""}
+              onChange={(e) => update((d) => void (d.business.currency = (e.target.value || undefined) as Currency | undefined))}
+            >
+              <option value="">Not set: no payback is shown</option>
+              {CURRENCIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
           </Field>
         </div>
       </section>

@@ -116,11 +116,13 @@ When you write or change a part yourself:
 - **USD is the core currency.** A client who would rather pay in CAD gets the same prices converted: set the exchange rate once in **AI audit settings** ("Use the Bank of Canada rate" fills it in; nothing changes until you save), then switch that client's proposal to CAD. Every catalogue line converts to the cent and shows the rate it used, and the client's page says so in one line under the price table. With no rate saved, a CAD proposal can use only prices you type. Prices you typed are never converted: check them when you switch currency.
 - The tax rule is set: OASIS is not registered for HST yet (under the $30K small-supplier threshold), so proposals add no tax. When you register, change it in **AI audit settings** and add your number.
 - Monthly fees are shown beside the total and start after launch. Optional add-ons are listed outside the total.
+- **What the draft prices.** Each opportunity brings its catalogue item. The AI sales setter is drafted at the tier the catalogue describes for the client: launch for one lead source, scale for several. The complete tier is yours to choose. An item only the roadmap's Later column needs is drafted as an optional add-on, outside the total: a firm price for what to do now, and open options for later.
+- **Payback on the cover.** The audit says how fast the work pays back only after you set **The client's figures are in** (the audit's business details) to the proposal's currency. It then works from the full one-time price, less any monthly fee, and counts only revenue from work in the price, never staff time. Without that setting, the audit makes no payback claim.
 
 ## Submitting and Gate 2
 
 - Press **Submit for final approval**. The audit and proposal freeze, and the Mac prints the PDF (the Mac must be on). If the Mac fails to print three times, the engagement is flagged and you get one alert. Fix the Mac, then press **Retry PDF**.
-- When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Open the PDF from the engagement's Delivery tab, read the email on the card, and approve only if every word is right.
+- When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Press **Open the audit and its PDF** on the card: the page the client will see, with the PDF they get at its top (**Download the PDF**). Read both and the email on the card, and approve only if every word is right.
 - Changed your mind? **Reopen for edits** before you approve. The frozen versions are kept, and new drafts open.
 - Only the workspace owner can approve. An admin who presses Approve is told so, and the card stays waiting for you.
 - Approving checks the stored PDF file itself, not just its record. If the file is missing or altered, nothing is sent: reopen the audit and submit it again.

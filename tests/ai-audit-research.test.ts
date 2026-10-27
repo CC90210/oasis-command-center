@@ -632,6 +632,9 @@ async function main() {
     const gaps = pack.gaps.map((g) => g.why).join(" | ");
     assert.match(gaps, /No Mac ran the web search within six hours/);
     assert.match(gaps, /No website is known for the business/);
+    // Self-test of 2026-10-27: no website is itself the likely problem, so the audit can offer one.
+    const noSite = pack.findings.find((f) => f.id === "h-no-own-site");
+    assert.ok(noSite && noSite.label === "hypothesis" && noSite.how_to_test, JSON.stringify(pack.findings.map((f) => f.id)));
     assert.deepEqual(pack.plan.map((m) => [m.module, m.status]), [["profile", "done"], ["site", "skipped"], ["pagespeed", "skipped"], ["search", "skipped"]]);
     const job = (await db.execute({ sql: "SELECT status, error_code FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_search' AND json_extract(input_json, '$.step_id') = ?", args: [OASIS, id] })).rows[0];
     assert.deepEqual([String(job.status), String(job.error_code)], ["failed", "runner_offline"]);

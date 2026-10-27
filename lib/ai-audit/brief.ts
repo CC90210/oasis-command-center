@@ -116,12 +116,18 @@ const no = (c: Map<CheckKey, SiteCheck>, k: CheckKey) => c.get(k)?.status === "n
 const serviceLike = (t: BusinessType | null) => t === null || t === "local_service" || t === "professional_services";
 
 /** Likely problems: each needs evidence from the checks or the form, carries no number, and says how to test it. */
+/** The no-website likely problem, also used when research has no website to read at all (lib/ai-audit/research.ts). */
+export const NO_OWN_SITE = {
+  statement: "Without a website of their own, new customers probably find them through social platforms, listings or referrals only.",
+  test: "Ask where new customers find them, and what happens when someone searches for the business by name.",
+} as const;
+
 const RULES: readonly Rule[] = [
   {
     id: "no-own-site",
     when: (_c, ctx) => ctx.site !== "site",
-    statement: "Without a website of their own, new customers probably find them through social platforms, listings or referrals only.",
-    test: "Ask where new customers find them, and what happens when someone searches for the business by name.",
+    statement: NO_OWN_SITE.statement,
+    test: NO_OWN_SITE.test,
     questions: ["sales-sources", "biz-goals"],
   },
   {

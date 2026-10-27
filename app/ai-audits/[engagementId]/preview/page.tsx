@@ -44,7 +44,7 @@ export default async function AuditPreviewPage({ params }: Props) {
       }
     >
       <div className={offerFontVariables}>
-        <AuditDocument doc={audit.doc} proposal={proposal} totals={proposalTotals(proposal)} mode="preview" notice={`Preview of version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees the same page with a Pay button.`} />
+        <AuditDocument doc={audit.doc} proposal={proposal} totals={proposalTotals(proposal)} mode="preview" pdfHref={audit.pdf_path ? `/api/ai-audit/${e.id}/pdf` : null} notice={`Preview of version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees the same page with a Pay button.`} />
       </div>
     </PageFrame>
   );

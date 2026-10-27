@@ -35,7 +35,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { contentHash, newId } from "@/lib/ai-audit/hash";
 import type { DocEstimate, DocFinding } from "@/lib/ai-audit/doc";
-import { assembleBrief } from "@/lib/ai-audit/brief";
+import { NO_OWN_SITE, assembleBrief } from "@/lib/ai-audit/brief";
 import { formAnswers } from "@/lib/ai-audit/briefs";
 import { readPage, readSite, robotsGate, type SiteReadDeps, type SiteReport } from "@/lib/ai-audit/site-fetch";
 import { CHECK_TITLES, visibleText, type CheckKey, type SiteCheck } from "@/lib/ai-audit/site-checks";
@@ -729,6 +729,11 @@ async function assemblePack(db: Client, t: string, e: Engagement, lead: Awaited<
     for (const g of brief.gaps) gaps.push({ topic: "Website", why: g });
     plan.push({ module: "site", status: site.pagesRead ? (site.unread ? "partial" : "done") : "failed", detail: `${site.pagesRead} page${site.pagesRead === 1 ? "" : "s"} of the website read.` });
   } else {
+    // No website to read, or only a social page: that is itself the likely problem the website opportunity answers.
+    // Before, it was only a gap, so a business with no website was never offered one (self-test, 2026-10-27).
+    if (site && "skipped" in site) {
+      findings.push({ id: fid("h", "no-own-site"), title: "Likely problem", statement: NO_OWN_SITE.statement, label: "hypothesis", source_ids: [], how_to_test: NO_OWN_SITE.test });
+    }
     gaps.push({ topic: "Website", why: site && "skipped" in site ? site.skipped : "The website was not read." });
     plan.push({ module: "site", status: "skipped", detail: site && "skipped" in site ? site.skipped : "Not read." });
   }

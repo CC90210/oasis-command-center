@@ -47,6 +47,7 @@ export const F = {
   missedCalls: "f-sales-missed-calls-per-week",
   responseTime: "f-sales-response-time-hours",
   leads: "f-sales-leads-per-month",
+  leadSources: "f-sales-lead-sources",
   adminHours: "f-ops-admin-hours-per-week",
   repetitiveTasks: "f-ops-repetitive-tasks",
   manualWorkflows: "f-ops-manual-workflows",
@@ -262,6 +263,29 @@ export function rangeWords(e: DocEstimate): string {
   return `${one(e.low)} to ${one(e.high)}${e.period ? ` ${e.period}` : ""}`;
 }
 
+/**
+ * The AI sales setter's tier, by the catalogue's own words (lib/ai-audit/catalogue.ts): launch is "one lead source",
+ * scale is "multi-source intake", so two or more sources the client named draft the scale tier. The complete tier
+ * has no rule a figure can meet, so it is CC's choice on the draft, never the code's.
+ */
+export function setterSku(x: Pick<OpportunityInputs, "findings">): string {
+  const named = x.findings.find((f) => f.id === F.leadSources);
+  const said = named && named.statement.includes(": ") ? named.statement.slice(named.statement.indexOf(": ") + 2) : "";
+  const sources = said.split(/;\s*/).filter((s) => s.trim().replace(/\.$/, "")).length;
+  return sources >= 2 ? "checkout-sales-setter-scale" : "checkout-sales-setter-launch";
+}
+
+/** An opportunity's catalogue item, with the setter's tier sized from the findings; undefined for one CC added. */
+export function skuForOpportunity(id: string, x: Pick<OpportunityInputs, "findings">): string | undefined {
+  const sku = OPPORTUNITY_SKU.get(id);
+  return sku === "checkout-sales-setter-launch" ? setterSku(x) : sku;
+}
+
+/** The product an item is a tier of ("checkout-sales-setter-scale" is the setter), so a tier CC changes still matches. */
+export function itemFamily(sku: string): string {
+  return sku.replace(/^(checkout-sales-setter|checkout-conversion-sprint|website)-.+$/, "$1");
+}
+
 /** Every opportunity the research supports, most valuable first, each citing what it rests on. */
 export function planOpportunities(x: OpportunityInputs): PlannedOpportunity[] {
   // Most impact first; among equals, the least effort first.
@@ -287,7 +311,7 @@ export function planOpportunities(x: OpportunityInputs): PlannedOpportunity[] {
       finding_ids,
       estimate_ids,
       workflow: r.workflow,
-      sku: r.sku,
+      sku: skuForOpportunity(r.id, x) ?? r.sku,
       impact: r.impact,
       effort: r.effort,
       urgency: r.urgency,
