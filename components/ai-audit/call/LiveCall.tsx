@@ -565,7 +565,7 @@ export function LiveCall({ brief, room, engagementId, businessType, callStartedA
           <Link href="/playbook/ai-audit-discovery-handbook" className="underline">
             Discovery Call Handbook
           </Link>
-          <Link href={`/ai-audit/${engagementId}`} className="underline">
+          <Link href={`/ai-audits/${engagementId}`} className="underline">
             Back to the engagement
           </Link>
         </section>

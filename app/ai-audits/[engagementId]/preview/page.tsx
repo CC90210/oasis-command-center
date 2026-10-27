@@ -1,5 +1,5 @@
 /**
- * /ai-audit/<engagementId>/preview — CC's view of the current audit and
+ * /ai-audits/<engagementId>/preview — CC's view of the current audit and
  * proposal exactly as the client will see them (draft or submitted), drawn by
  * the same component as the client's page and the PDF, with the Pay button
  * replaced by a note. Founders only.
@@ -38,7 +38,7 @@ export default async function AuditPreviewPage({ params }: Props) {
       title="Audit preview"
       subtitle={`${e.business_name || "Unnamed business"}, version ${audit.version_no} (${audit.status.replace(/_/g, " ")}). The client sees this page with a Pay button.`}
       actions={
-        <Link href={`/ai-audit/${e.id}`} className="btn-secondary">
+        <Link href={`/ai-audits/${e.id}`} className="btn-secondary">
           Back to the engagement
         </Link>
       }

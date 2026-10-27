@@ -35,7 +35,7 @@ export async function AiAuditLeadCard({ tenantId, leadId, canWork }: { tenantId:
         )}
       </div>
       {engagement ? (
-        <Link href={`/ai-audit/${engagement.id}`} className="btn-secondary">
+        <Link href={`/ai-audits/${engagement.id}`} className="btn-secondary">
           Open AI audit
         </Link>
       ) : (

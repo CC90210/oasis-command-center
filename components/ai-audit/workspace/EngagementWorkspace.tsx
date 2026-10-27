@@ -95,7 +95,7 @@ export function EngagementWorkspace({ view, isOwner }: { view: EngagementView; i
       title={e.business_name || "Unnamed business"}
       subtitle={
         <>
-          <Link href="/ai-audit" className="hover:underline">
+          <Link href="/ai-audits" className="hover:underline">
             AI audits
           </Link>
           {" / "}

@@ -15,7 +15,7 @@ export function StartAiAuditButton({ leadId }: { leadId: string }) {
       const res = await fetch("/api/ai-audit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "open", lead_id: leadId }) });
       const json = (await res.json().catch(() => ({}))) as { ok?: boolean; engagement_id?: string; error?: string };
       if (json.ok && json.engagement_id) {
-        router.push(`/ai-audit/${json.engagement_id}`);
+        router.push(`/ai-audits/${json.engagement_id}`);
         return;
       }
       setError(json.error === "lead_lost" ? "This lead is marked lost." : "Could not start the audit.");

@@ -209,7 +209,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           Run the call from the live-call screen: the questions in the handbook&apos;s order, your notes saved as you type, and what the audit still needs.
         </p>
         <div className="flex flex-wrap gap-2">
-          <Link href={`/ai-audit/${e.id}/call`} className="btn-primary">
+          <Link href={`/ai-audits/${e.id}/call`} className="btn-primary">
             Open the live-call screen
           </Link>
           <Link href="/playbook/ai-audit-discovery-handbook" className="btn-secondary">

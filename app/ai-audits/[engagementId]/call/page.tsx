@@ -1,5 +1,5 @@
 /**
- * /ai-audit/<engagementId>/call — the live-call screen for a discovery call
+ * /ai-audits/<engagementId>/call — the live-call screen for a discovery call
  * (components/ai-audit/call/LiveCall.tsx). Founders of OASIS's own workspaces
  * only. Read-only once the profile is authorized (Gate 1).
  */

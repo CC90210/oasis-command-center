@@ -1,5 +1,5 @@
 /**
- * /ai-audit/catalogue — the one service catalogue proposals price from.
+ * /ai-audits/catalogue — the one service catalogue proposals price from.
  * Founders see it; only the workspace owner confirms or retires a price.
  */
 import Link from "next/link";
@@ -21,7 +21,7 @@ export default async function CataloguePage() {
       title="Price catalogue"
       subtitle={`${confirmed} confirmed price${confirmed === 1 ? "" : "s"}. A proposal can only use a confirmed price or one you type for custom work.`}
       actions={
-        <Link href="/ai-audit" className="btn-secondary">
+        <Link href="/ai-audits" className="btn-secondary">
           Back to AI audits
         </Link>
       }

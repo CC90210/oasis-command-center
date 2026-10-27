@@ -1051,6 +1051,27 @@ async function main() {
     assert.equal(rules.mayMoveStage("final_review", "transcript_review"), false);
     assert.equal(rules.mayMoveStage("final_review", "generating"), true);
   });
+  await check("the board's numbers are live counts of real clients, the test prospect left out", async () => {
+    const view = await import("../lib/ai-audit/view");
+    const at = new Date().toISOString();
+    const count = async (sql: string, args: Array<string | number>) => Number((await db.execute({ sql, args })).rows[0].n);
+    const m = await view.boardMetrics(db, OASIS);
+    const real = await count("SELECT COUNT(*) AS n FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0", [OASIS]);
+    const closed = await count("SELECT COUNT(*) AS n FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0 AND stage IN ('declined', 'cancelled')", [OASIS]);
+    assert.equal(m.total, real);
+    assert.equal(m.inProgress + m.withClient + m.won + closed, m.total, "every open engagement is in one group");
+    const cards = await count(
+      "SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND status = 'pending' AND action_kind IN ('authorize_ai_audit', 'deliver_ai_audit', 'follow_up_ai_audit') AND (expires_at IS NULL OR expires_at > ?)",
+      [OASIS, at],
+    );
+    assert.equal(m.cardsWaiting, cards);
+    // The test prospect never counts: marking every engagement a fixture empties the numbers, then they are put back.
+    const realIds = (await db.execute({ sql: "SELECT id FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0", args: [OASIS] })).rows.map((r) => String(r.id));
+    for (const id of realIds) await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 1 WHERE id = ?", args: [id] });
+    const none = await view.boardMetrics(db, OASIS);
+    assert.deepEqual([none.total, none.inProgress, none.withClient, none.won, none.delivered], [0, 0, 0, 0, 0]);
+    for (const id of realIds) await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 0 WHERE id = ?", args: [id] });
+  });
   await check("the tick runs every step without contacting anyone and reports cleanly", async () => {
     const before = sent.length;
     const r = await tick.runAiAuditTick(db, { budgetMs: 30_000, deps: { payment: { ...payDeps, alert: async () => undefined }, onboarding: { alert: async () => undefined, baseUrl: () => "https://oasisai.work" } } });
