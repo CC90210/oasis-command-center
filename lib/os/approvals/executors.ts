@@ -94,6 +94,7 @@ import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
 import { postSlackReply, type SlackPostArgs, type SlackPostOutcome } from "@/lib/slack/send";
 import { deliverAiAuditExecutor, type AiAuditExecutorDeps } from "@/lib/ai-audit/delivery";
 import { followUpAiAuditExecutor } from "@/lib/ai-audit/follow-up";
+import { welcomeAiAuditExecutor } from "@/lib/ai-audit/welcome";
 import { authorizeAiAuditExecutor, type AuthorizeExecutorDeps } from "@/lib/ai-audit/authorize";
 
 export type ExecutorTenant = { id: string; slug: string | null };
@@ -760,6 +761,8 @@ export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> 
   authorize_ai_audit: authorizeAiAuditExecutor,
   // A stalled audit's follow-up: the same link again, through the same mailbox, owner only (dry run: LIVE_SEND_AI_AUDIT).
   follow_up_ai_audit: followUpAiAuditExecutor,
+  // A paying client's welcome email, to the address the audit went to, owner only (dry run: LIVE_SEND_AI_AUDIT).
+  welcome_ai_audit: welcomeAiAuditExecutor,
 };
 
 export function noExecutorMessage(kind: string): string {

@@ -532,8 +532,8 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
                   </Link>
                 ) : null}
               </div>
-            ) : e.customer_id && !e.contact_email ? (
-              <div className="text-status-warm">No welcome email: the engagement has no contact email.</div>
+            ) : e.customer_id ? (
+              <div className="text-status-warm">No welcome email: the address the audit was sent to could not be read, so none was written.</div>
             ) : null}
           </section>
         </div>

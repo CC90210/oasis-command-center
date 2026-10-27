@@ -924,12 +924,15 @@ async function main() {
     assert.equal(await count("SELECT COUNT(*) AS n FROM delivery_projects WHERE tenant_id = ? AND lead_id IS NOT NULL"), 1);
     const tasks = await count("SELECT COUNT(*) AS n FROM delivery_tasks WHERE tenant_id = ?");
     assert.equal(tasks, onboarding.STANDARD_CHECKLIST.length + 1, "the standard steps plus the fixture item's requirement");
-    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email' AND idempotency_key LIKE 'ai-audit-welcome:%'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND action_kind = 'welcome_ai_audit' AND idempotency_key LIKE 'ai-audit-welcome:%'"), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email' AND idempotency_key LIKE 'ai-audit-welcome:%'"), 0, "never a plain email card, which waits on the dashboard-wide switch");
     assert.equal(alerts.length, 1, "one alert to CC");
     const e = (await store.getEngagement(db, OASIS, engagementId))!;
     assert.equal(e.stage, "onboarding");
     assert.equal(await leadStage(db, LEAD), "onboarding");
-    const welcome = await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email'", args: [OASIS] });
+    const welcome = await db.execute({ sql: "SELECT payload_json, risk_level, department_key FROM approvals WHERE tenant_id = ? AND action_kind = 'welcome_ai_audit'", args: [OASIS] });
+    assert.deepEqual([welcome.rows[0].risk_level, welcome.rows[0].department_key], ["outbound", null], "an email to a client, seen only by owners and admins");
+    assert.equal((JSON.parse(String(welcome.rows[0].payload_json)) as { to?: string }).to, "owner@fixture.test", "to the address the audit went to");
     assert.match(String(welcome.rows[0].payload_json), /never send passwords/i);
     // The client's OWN link, in this workspace, signed for their lead: their answers attach to their record.
     const welcomeBody = String((JSON.parse(String(welcome.rows[0].payload_json)) as { body?: string }).body);
@@ -949,6 +952,47 @@ async function main() {
     assert.ok(expires, "the welcome card has an expiry");
     const later = new Date(Date.parse(String(expires)) + 60_000);
     assert.equal((await viewLib.engagementView(db, OASIS, engagementId, later))?.welcome?.status, "expired", "never 'waiting for your approval' once it cannot be approved");
+  });
+  await check("the welcome email goes out on the owner's approval, under the audit's own switch, to where the audit went", async () => {
+    const card = (await db.execute({ sql: "SELECT id FROM approvals WHERE tenant_id = ? AND action_kind = 'welcome_ai_audit'", args: [OASIS] })).rows;
+    assert.equal(card.length, 1);
+    const cardId = String(card[0].id);
+    const ready = (id: string) => db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), id] });
+    const outcome = (r: Awaited<ReturnType<typeof execute.executeApproval>>) => (r.ok ? (r.approval.execution_result as { outcome?: string; reason?: string } | null) : null);
+    const before = sent.length;
+    await ready(cardId);
+    assert.equal(outcome(await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.admin.id, email: USERS.admin.email } }, deps() as never))?.reason, "owner_only");
+    await ready(cardId);
+    // The dashboard-wide email switch stays off here: only the audit's own switch matters.
+    assert.equal(outcome(await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps({ live: false }) as never))?.outcome, "dry_run");
+    assert.equal(sent.length, before, "a dry run sends nothing");
+    // A refund since the card was written: nothing goes out.
+    const e0 = (await store.getEngagement(db, OASIS, engagementId))!;
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET payment_status = 'refunded' WHERE tenant_id = ? AND id = ?", args: [OASIS, engagementId] });
+    await ready(cardId);
+    assert.equal(outcome(await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never))?.reason, "not_paid");
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET payment_status = ? WHERE tenant_id = ? AND id = ?", args: [e0.payment_status, OASIS, engagementId] });
+    await ready(cardId);
+    const live = await execute.executeApproval(db, { tenantId: OASIS, approvalId: cardId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never);
+    assert.equal(outcome(live)?.outcome, "sent", JSON.stringify(live.ok ? live.approval.execution_result : live));
+    assert.equal(sent.length, before + 1);
+    const mail = sent[sent.length - 1];
+    assert.deepEqual([mail.to, mail.cc, mail.purpose, mail.idempotencyKey], ["owner@fixture.test", [USERS.cc.email], "support", `${onboarding.WELCOME_APPROVAL_KEY_PREFIX}${engagementId}`]);
+    assert.match(String(mail.body), /\/f\/oasis-ai-cc\/client-onboarding\//, "the client's own onboarding form");
+    const ev = await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_events WHERE engagement_id = ? AND event = 'welcome_sent'", args: [engagementId] });
+    assert.equal(Number(ev.rows[0].n), 1);
+    // A card addressed anywhere but where the audit went is refused, whatever the contact field says.
+    const welcomePayload = (await import("../lib/ai-audit/welcome-payload")).WELCOME_AI_AUDIT_KIND;
+    const stray = await approvalsStore.createApproval(
+      db,
+      { tenantId: OASIS, departmentKey: null, requestedBy: { type: "routine", id: "ai-audit" }, actionKind: welcomePayload, title: "Welcome", payload: { engagement_id: engagementId, lead_id: LEAD, business_name: "Fixture", to: "someone@else.test", subject: "Welcome", body: "Hi" }, idempotencyKey: `stray-welcome:${engagementId}` },
+      NOW(),
+    );
+    assert.ok(stray.ok);
+    const strayId = stray.ok ? stray.approval.id : "";
+    await ready(strayId);
+    assert.equal(outcome(await execute.executeApproval(db, { tenantId: OASIS, approvalId: strayId, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, deps() as never))?.reason, "recipient_changed");
+    assert.equal(sent.length, before + 1, "nothing more was sent");
   });
   await check("the checklist done makes an Active Client and moves the lead into the build", async () => {
     assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), false);
@@ -1144,7 +1188,7 @@ async function main() {
     assert.deepEqual(r.errors, []);
     // The delivery, and the one follow-up CC approved: the tick itself sends nothing.
     assert.equal(sent.length, before, "the tick sends no email");
-    assert.equal(sent.length, 3, "three emails ever sent: the delivery, the approved follow-up and the revised delivery");
+    assert.equal(sent.length, 4, "four emails ever sent: the delivery, the approved follow-up, the revised delivery and the approved welcome email");
   });
 
   await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {

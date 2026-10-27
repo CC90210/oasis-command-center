@@ -164,7 +164,7 @@ function TicketReplyPreview({ payload, clamp }: { payload: Record<string, unknow
 }
 
 /** The audit kinds: owner-only, each about one engagement on the AI audits board. */
-const AI_AUDIT_KINDS: ReadonlySet<string> = new Set(["authorize_ai_audit", "deliver_ai_audit", "follow_up_ai_audit"]);
+const AI_AUDIT_KINDS: ReadonlySet<string> = new Set(["authorize_ai_audit", "deliver_ai_audit", "follow_up_ai_audit", "welcome_ai_audit"]);
 
 function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
@@ -205,8 +205,8 @@ function AuditLinks({ links }: { links: Array<{ href: string; label: string }> }
 
 /**
  * A Free AI Audit card in words: Gate 1 (what is authorized, which AI reads it,
- * what approving does), Gate 2 and the follow-ups (the whole email and, for
- * Gate 2, the amount). Every field still comes from the payload the approval is
+ * what approving does), Gate 2, the follow-ups and the welcome email (the
+ * whole email and, for Gate 2, the amount). Every field still comes from the payload the approval is
  * bound to; the fingerprints say which versions it is locked to.
  */
 function AiAuditPreview({ kind, payload, clamp }: { kind: string; payload: Record<string, unknown>; clamp: boolean }) {
@@ -370,7 +370,7 @@ export function ApprovalCard({
   const pending = approval.status === "pending";
   const kind = approval.action_kind;
   const body = str(approval.payload.body);
-  const clampable = density === "compact" && (kind === "send_email" || kind === "reply_ticket" || kind === "deliver_ai_audit" || kind === "follow_up_ai_audit") && body.length > 240;
+  const clampable = density === "compact" && (kind === "send_email" || kind === "reply_ticket" || kind === "deliver_ai_audit" || kind === "follow_up_ai_audit" || kind === "welcome_ai_audit") && body.length > 240;
 
   async function call(action: "approve" | "send-back" | "comment", payload: Record<string, unknown>, which: Busy) {
     if (busy) return;

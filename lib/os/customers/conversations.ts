@@ -13,7 +13,8 @@
  *                         whose metadata carries channel "slack" and this
  *                         client's id (the channel is mapped to the client).
  *                         Read, never written, here.
- *   approvals             the client's email drafts from agents (send_email,
+ *   approvals             the client's email drafts from agents (send_email, and a
+ *                         paying AI audit client's welcome email, welcome_ai_audit,
  *                         target_ref customer:<id>): pending ones are listed
  *                         for a decision, executed sends join the thread.
  *
@@ -238,7 +239,7 @@ export async function loadClientConversation(
     db.execute({
       sql: `SELECT id, status, title, payload_json, created_at, decided_at, executed_at, execution_result
             FROM approvals
-            WHERE tenant_id = ? AND action_kind = 'send_email' AND target_ref = ?
+            WHERE tenant_id = ? AND action_kind IN ('send_email', 'welcome_ai_audit') AND target_ref = ?
             ORDER BY created_at DESC, id DESC
             LIMIT 100`,
       args: [tenantId, `customer:${customer.id}`],

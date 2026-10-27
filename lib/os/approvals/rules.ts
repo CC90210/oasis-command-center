@@ -24,6 +24,7 @@ import { parseSlideUrls } from "@/lib/founders-marketing-core";
 import { deliverAiAuditPreview, validateDeliverAiAuditPayload } from "@/lib/ai-audit/delivery-payload";
 import { authorizeAiAuditPreview, validateAuthorizeAiAuditPayload } from "@/lib/ai-audit/authorize-payload";
 import { followUpAiAuditPreview, validateFollowUpAiAuditPayload } from "@/lib/ai-audit/follow-up-payload";
+import { welcomeAiAuditPreview, validateWelcomeAiAuditPayload } from "@/lib/ai-audit/welcome-payload";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -98,6 +99,9 @@ export const APPROVAL_ACTION_KINDS = [
   // A follow-up to a delivered audit that stalled (lib/ai-audit/follow-up.ts):
   // the same private link, sent only on CC's approval.
   "follow_up_ai_audit",
+  // A paying client's welcome email (lib/ai-audit/welcome.ts): the onboarding
+  // form and the kickoff link, sent only on CC's approval.
+  "welcome_ai_audit",
 ] as const;
 export type ApprovalActionKind = (typeof APPROVAL_ACTION_KINDS)[number];
 
@@ -114,6 +118,7 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
   deliver_ai_audit: "AI audit delivery",
   authorize_ai_audit: "AI audit authorization",
   follow_up_ai_audit: "AI audit follow-up",
+  welcome_ai_audit: "AI audit welcome email",
 };
 
 /**
@@ -121,7 +126,7 @@ export const ACTION_KIND_LABELS: Record<ApprovalActionKind, string> = {
  * else, but a refused run used the card up; the approve route checks first, so
  * an admin's click leaves the card waiting for the owner (review of PR #732).
  */
-export const OWNER_ONLY_ACTION_KINDS: ReadonlySet<ApprovalActionKind> = new Set<ApprovalActionKind>(["deliver_ai_audit", "authorize_ai_audit", "follow_up_ai_audit"]);
+export const OWNER_ONLY_ACTION_KINDS: ReadonlySet<ApprovalActionKind> = new Set<ApprovalActionKind>(["deliver_ai_audit", "authorize_ai_audit", "follow_up_ai_audit", "welcome_ai_audit"]);
 
 export const REQUESTER_TYPES = ["agent", "routine", "human"] as const;
 export type RequesterType = (typeof REQUESTER_TYPES)[number];
@@ -146,6 +151,8 @@ export const DEFAULT_RISK: Record<ApprovalActionKind, RiskLevel> = {
   authorize_ai_audit: "data",
   // An email to a client, with the link to their audit and its payment page.
   follow_up_ai_audit: "outbound",
+  // An email to a client who has paid: their onboarding form and the kickoff link.
+  welcome_ai_audit: "outbound",
 };
 
 /** Where a decision was made. v1 decides in the app only. */
@@ -527,6 +534,8 @@ export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<R
       return validateAuthorizeAiAuditPayload(raw) as Valid<Record<string, unknown>>;
     case "follow_up_ai_audit":
       return validateFollowUpAiAuditPayload(raw) as Valid<Record<string, unknown>>;
+    case "welcome_ai_audit":
+      return validateWelcomeAiAuditPayload(raw) as Valid<Record<string, unknown>>;
     default:
       return validateGenericPayload(raw);
   }
@@ -551,6 +560,7 @@ export function previewFor(kind: ApprovalActionKind, payload: Record<string, unk
   if (kind === "deliver_ai_audit") return deliverAiAuditPreview(payload);
   if (kind === "authorize_ai_audit") return authorizeAiAuditPreview(payload);
   if (kind === "follow_up_ai_audit") return followUpAiAuditPreview(payload);
+  if (kind === "welcome_ai_audit") return welcomeAiAuditPreview(payload);
   return "";
 }
 
