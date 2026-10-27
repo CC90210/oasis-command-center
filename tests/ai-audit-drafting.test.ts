@@ -477,6 +477,22 @@ async function main() {
     assert.equal(items[0].why_it_matters.text, "Where customers are lost: calls go to voicemail when the techs are out.", "in the client's words");
     for (const i of items) assert.deepEqual(ex.numbersIn(i.consequence.text), [], "the consequence adds no figure");
     assert.ok(doc.validateAuditDoc(noSite).ok);
+    // An answer that names no problem adds no inefficiency (Codex review of #757).
+    const saidNone = draft.draftAuditDoc({
+      business: { name: "Fixture Heating", type: "local_service", location: "Collingwood" },
+      contactName: "Dana Test",
+      today: "2026-10-27",
+      pack: {
+        ...(pack as Record<string, unknown>),
+        findings: [
+          { id: "f-sales-lost-points", title: "Where customers are lost", statement: "Where customers are lost: none.", label: "client_reported", source_ids: ["s-client-sales-lost-points"] },
+          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: Not really.", label: "client_reported", source_ids: ["s-client-ops-delays"] },
+        ],
+      } as never,
+      estimates: [],
+      tools: [],
+    }).doc;
+    assert.deepEqual(saidNone.sections.inefficiencies.items, [], "none and not really name no problem");
   });
   await check("review of phase 4: a step never comes before what it depends on", () => {
     const base = { title: "x", what_it_does: "x", problem: "x", how_it_works: "x", integrations: [], expected_improvement: { text: "x", cites: [] }, finding_ids: [], estimate_ids: [], sku: "s", urgency: "" };

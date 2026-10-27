@@ -61,6 +61,13 @@ export type DraftInputs = {
 const CLIENT_FACING_PROFILE = /^f-(?:business|goals|ops|tech|sales)-|^f-finance-(?:staff|kpis)/;
 
 /** The client's version of each likely problem: a short title, what it costs them, and how it would be checked together. */
+/** "Where customers are lost: none" answers the question without naming a problem (Codex review of #757). */
+const NO_PROBLEM = /^(?:none|no|nope|nothing|n\/?a|not really|not that i know of|nothing comes to mind|no problems?|no issues?|never|it is fine|it's fine|all good)\.?$/i;
+function namesAProblem(statement: string): boolean {
+  const said = (statement.includes(": ") ? statement.slice(statement.indexOf(": ") + 2) : statement).trim();
+  return said.length >= 8 && !NO_PROBLEM.test(said);
+}
+
 /** A problem the client named, as section 4 frames it (no figure: the finding carries the client's own words). */
 const CLIENT_PROBLEM_COPY: Readonly<Record<string, { title: string; consequence: string }>> = {
   "f-sales-lost-points": { title: "Where customers are lost", consequence: "That is work going to someone else, and it is usually the easiest revenue to win back." },
@@ -324,7 +331,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
   // copy with no figure; the finding itself is the client's words.
   for (const [id, copy] of Object.entries(CLIENT_PROBLEM_COPY)) {
     const f = byId.get(id);
-    if (!f || f.label !== "client_reported" || inefficiencies.length >= 15) continue;
+    if (!f || f.label !== "client_reported" || !namesAProblem(f.statement) || inefficiencies.length >= 15) continue;
     inefficiencies.push({ title: copy.title, why_it_matters: { text: f.statement, cites: [f.id] }, consequence: { text: copy.consequence, cites: [f.id] }, finding_ids: [f.id] });
   }
 
