@@ -110,7 +110,8 @@ export function planFor(input: { engine: AiEngine; versionNo: number; transcript
         ? "Research then starts by itself: the client's public website, page speed, and a web search for listings and reviews."
         : "Research then starts by itself: the client's public website and page speed (web search runs only on Claude on CC's Mac).",
     );
-    plan.push(`A draft of the audit and proposal follows, written by ${AI_ENGINE_LABELS[input.engine]}, from this frozen information and public sources only. You check and edit it before it goes anywhere.`);
+    // Code builds the drafts (lib/ai-audit/draft.ts); the model only rewrites the audit's opening (writing.ts).
+    plan.push(`A draft of the audit and proposal is built from what research finds. ${AI_ENGINE_LABELS[input.engine]} then rewrites the audit's opening, from this frozen information and public sources only. You check and edit it all before it goes anywhere.`);
   }
   if (input.gapCount) {
     plan.push(`${input.gapCount === 1 ? "One essential answer is" : `${input.gapCount} essential answers are`} still missing. The audit will list ${input.gapCount === 1 ? "it" : "them"} as information gaps; it will not guess.`);

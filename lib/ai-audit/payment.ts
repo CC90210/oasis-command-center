@@ -128,7 +128,7 @@ async function alertPayBlocked(deps: PaymentDeps, e: Engagement, why: string): P
       alertType: "ai_audit_pay_blocked",
       severity: "urgent",
       title: `A client could not pay: ${shortName(e.business_name, "an AI audit")}`,
-      body: `${why} They pressed Pay on their audit and were told online payment is not open yet. Fix it, then reply to them.`,
+      body: `${why} Fix it, then reply to them.`,
       subjectType: "ai_audit_engagement",
       subjectId: e.id,
       telegramOncePerOpen: true,
@@ -173,7 +173,7 @@ export async function createOrReuseCheckout(
   // LIVE_SEND_STRIPE_CHECKOUT off (or BRAVO_FORCE_DRY_RUN on) must stop the
   // Pay button handing out a live session (Codex review of PR #732).
   if (deps.isDryRun(DRY_RUN_CHANNEL)) {
-    await alertPayBlocked(deps, engagement, "Client payments are in test mode (LIVE_SEND_STRIPE_CHECKOUT is not on), so no checkout opened.");
+    await alertPayBlocked(deps, engagement, "Client payments are in test mode (LIVE_SEND_STRIPE_CHECKOUT is not on), so no checkout opened. The client pressed Pay and was told online payment is not open yet.");
     return { ok: false, error: "dry_run" };
   }
   if (open) {
@@ -191,7 +191,7 @@ export async function createOrReuseCheckout(
 
   const secret = await deps.stripeSecret(t);
   if (!secret) {
-    await alertPayBlocked(deps, engagement, "Stripe is not connected for this workspace, so no checkout opened.");
+    await alertPayBlocked(deps, engagement, "Stripe is not connected for this workspace, so no checkout opened. The client pressed Pay and was told online payment is not open yet.");
     return { ok: false, error: "stripe_not_connected" };
   }
 
@@ -235,7 +235,7 @@ export async function createOrReuseCheckout(
       sql: "UPDATE ai_audit_checkouts SET status = 'failed', last_error = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
       args: [code.slice(0, 200), input.now.toISOString(), t, id],
     });
-    await alertPayBlocked(deps, engagement, `Stripe refused to open the checkout (${code.slice(0, 160)}). The client was asked to try again in a minute.`);
+    await alertPayBlocked(deps, engagement, `Stripe refused to open the checkout (${code.slice(0, 160)}). The client pressed Pay and was asked to try again in a minute.`);
     return { ok: false, error: "stripe_failed", detail: code };
   }
   const expires = new Date(input.now.getTime() + CHECKOUT_TTL_HOURS * 3_600_000).toISOString();

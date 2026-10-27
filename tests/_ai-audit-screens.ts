@@ -166,6 +166,22 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     runnerFor: async () => ({ label: "oasis-mac-ai-audit", lastSeenAt: now.toISOString() }),
   });
   assert.ok(bare.some((c) => c.state === "missing"), "with nothing set up, setup says what is missing");
+  const pdfOnly = await setup.setupChecks(db, tenantId, now, {
+    isDryRun: () => false,
+    linkSecretSet: () => true,
+    pdfStorageSet: () => true,
+    stripeConnected: async () => true,
+    mailboxConnected: async () => true,
+    runnerFor: async (_db, _t, tool) => (tool === "ai_audit_pdf" ? { label: "old-runner", lastSeenAt: now.toISOString() } : null),
+  });
+  const mac = pdfOnly.find((c) => c.key === "mac");
+  const engine = settings.engine;
+  if (engine === "mac_claude") {
+    assert.equal(mac?.state, "missing", "a runner that only prints PDFs is not ready for Claude on the Mac");
+    assert.match(mac?.detail ?? "", /ai_audit_model/);
+  } else {
+    assert.equal(mac?.state, "ready", "with the cloud engine, the Mac only prints PDFs");
+  }
   assert.equal(bare.filter((c) => c.state === "test_mode").length, 2, "both client-facing switches read as test mode");
   for (const k of ["mac", "pdf_storage", "link_secret", "mailbox", "stripe", "audit_email", "payments"] as const) {
     assert.equal(live.find((c) => c.key === k)?.state, "ready", `${k} reads ready when it is set up`);

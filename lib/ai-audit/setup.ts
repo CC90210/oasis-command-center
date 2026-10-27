@@ -59,6 +59,9 @@ export function defaultSetupDeps(): SetupDeps {
 
 const CONNECTIONS = { href: "/settings/connections", label: "Open Connections" };
 
+/** What the Mac's AI audit runner serves: the PDF for every audit; the model and the web search for Claude on the Mac. */
+const MAC_TOOLS = ["ai_audit_pdf", "ai_audit_model", "ai_audit_search"] as const;
+
 async function attempt<T>(what: string, f: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
   try {
     return { ok: true, value: await f() };
@@ -76,7 +79,8 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
   const [catalogue, settings, runner, stripe, mailbox] = await Promise.all([
     attempt("catalogue", () => listCatalogue(db, tenantId)),
     attempt("settings", () => getSettings(db, tenantId)),
-    attempt("Mac runner", () => deps.runnerFor(db, tenantId, "ai_audit_pdf", now)),
+    // Each tool the Mac row speaks for, on its own: one runner may serve the PDF and not the model (CodeRabbit on #749).
+    attempt("Mac runner", () => Promise.all(MAC_TOOLS.map((tool) => deps.runnerFor(db, tenantId, tool, now)))),
     attempt("Stripe", () => deps.stripeConnected(tenantId)),
     attempt("mailbox", () => deps.mailboxConnected(tenantId)),
   ]);
@@ -119,17 +123,37 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
   }
 
   if (!runner.ok) checks.push(unknown("mac", "The Mac"));
-  else if (runner.value) {
-    const seen = new Date(runner.value.lastSeenAt);
-    const at = Number.isNaN(seen.getTime()) ? runner.value.lastSeenAt : formatOperatorDate({ hour: "numeric", minute: "2-digit" }, seen);
-    checks.push({ key: "mac", label: "The Mac", state: "ready", detail: `Online (${runner.value.label}, checked in at ${at}). It prints each audit's PDF and, with Claude on the Mac, reads the call and writes the drafts.` });
-  } else {
-    checks.push({
-      key: "mac",
-      label: "The Mac",
-      state: "missing",
-      detail: `Not checked in for over ${RUNNER_LIVE_MINUTES} minutes. It prints each audit's PDF and, with Claude on the Mac, reads the call and writes the drafts; that work waits until it is back. Wake the Mac, or start its AI audit runner.`,
-    });
+  else {
+    const [pdf, model, search] = runner.value;
+    // The model and the web search matter only while Claude on the Mac is the engine (the default when unreadable).
+    const onMac = !settings.ok || settings.value.settings.engine === "mac_claude";
+    const lacking = onMac ? [...(model ? [] : ["reading calls and writing (ai_audit_model)"]), ...(search ? [] : ["web search (ai_audit_search)"])] : [];
+    if (!pdf) {
+      checks.push({
+        key: "mac",
+        label: "The Mac",
+        state: "missing",
+        detail: `Not checked in for over ${RUNNER_LIVE_MINUTES} minutes. It prints each audit's PDF and, with Claude on the Mac, reads the call, searches the web and rewrites the audit's opening; that work waits until it is back. Wake the Mac, or start its AI audit runner.`,
+      });
+    } else {
+      const seen = new Date(pdf.lastSeenAt);
+      const at = Number.isNaN(seen.getTime()) ? pdf.lastSeenAt : formatOperatorDate({ hour: "numeric", minute: "2-digit" }, seen);
+      checks.push(
+        lacking.length
+          ? {
+              key: "mac",
+              label: "The Mac",
+              state: "missing",
+              detail: `Online for PDFs (${pdf.label}, checked in at ${at}), but no runner offers ${lacking.join(" or ")}, so with Claude on the Mac that work waits. Update the Mac's AI audit runner.`,
+            }
+          : {
+              key: "mac",
+              label: "The Mac",
+              state: "ready",
+              detail: `Online (${pdf.label}, checked in at ${at}). It prints each audit's PDF${onMac ? " and, with Claude on the Mac, reads the call, searches the web and rewrites the audit's opening" : ""}.`,
+            },
+      );
+    }
   }
 
   checks.push(
