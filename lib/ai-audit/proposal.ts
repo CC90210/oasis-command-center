@@ -47,6 +47,19 @@ type LineBase = {
   onboarding_requirements: string[];
 };
 
+/**
+ * The exchange rate CC sets in AI audit settings: Canadian dollars for one US dollar, in millionths (1.385 is
+ * 1_385_000), as of a day, and where it came from. USD is the core currency; a client may pay in CAD.
+ */
+export type FxRate = { rate_ppm: number; as_of: string; source: "bank_of_canada" | "owner" };
+
+/** Bounds for CAD per USD: a rate outside them is a typo, not a quote. */
+export const FX_RATE_MIN_PPM = 500_000;
+export const FX_RATE_MAX_PPM = 3_000_000;
+
+/** A catalogue line priced in another currency than its item: what it was, and the rate it was converted at. */
+export type LineFx = { from_currency: Currency; from_unit_price_cents: number; rate_ppm: number; as_of: string };
+
 export type CatalogueLine = LineBase & {
   kind: "catalogue";
   sku: string;
@@ -54,6 +67,8 @@ export type CatalogueLine = LineBase & {
   item_version: number;
   unit_price_cents: number;
   currency: Currency;
+  /** Present when the item's price was converted into the proposal's currency (the price above is the converted one). */
+  fx?: LineFx;
 };
 
 export type OwnerSetLine = LineBase & {
@@ -252,7 +267,30 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
       // The line's own currency is kept (the server set it from the catalogue item); rewriting it to
       // the proposal's on every read hid a mismatch and broke the hash Gate 2 binds (review of PR #732).
       const lineCurrency = x.currency === "CAD" || x.currency === "USD" ? x.currency : currency;
-      lines.push({ ...base, kind: "catalogue", sku, item_id: itemId, item_version: Number.isInteger(version) ? version : 0, unit_price_cents: price, currency: lineCurrency });
+      // A conversion record is kept exactly as stored: a stored proposal is read back through here, and Gate 2
+      // binds its hash. A malformed one is refused, never silently dropped.
+      let fx: LineFx | undefined;
+      if (x.fx !== undefined) {
+        const r = isObj(x.fx) ? x.fx : null;
+        const from = r ? r.from_currency : null;
+        const fromCents = r ? Number(r.from_unit_price_cents) : NaN;
+        const ppm = r ? Number(r.rate_ppm) : NaN;
+        const asOf = r && typeof r.as_of === "string" ? r.as_of : "";
+        if (!isOneOf(CURRENCIES, from) || !Number.isSafeInteger(fromCents) || fromCents < 0 || !Number.isInteger(ppm) || ppm < FX_RATE_MIN_PPM || ppm > FX_RATE_MAX_PPM || !DATE_RE.test(asOf)) {
+          return { ok: false, field: `${f}.fx`, error: "a conversion record: from_currency, from_unit_price_cents, rate_ppm, as_of" };
+        }
+        fx = { from_currency: from, from_unit_price_cents: fromCents, rate_ppm: ppm, as_of: asOf };
+      }
+      lines.push({
+        ...base,
+        kind: "catalogue",
+        sku,
+        item_id: itemId,
+        item_version: Number.isInteger(version) ? version : 0,
+        unit_price_cents: price,
+        currency: lineCurrency,
+        ...(fx ? { fx } : {}),
+      });
     } else if (x.kind === "owner_set") {
       const price = cents(x.unit_price_cents, `${f}.unit_price_cents`);
       if (!price.ok) return price;
@@ -328,14 +366,50 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
  * `today` is a YYYY-MM-DD date. Catalogue lines are checked against the live
  * catalogue by the server (store.ts) as well.
  */
+/** A rate as people read it: every digit CC saved, and no more (1_402_500 is "1.4025", 1_402_567 is "1.402567"). */
+export function rateText(ratePpm: number): string {
+  return (ratePpm / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** Cents in another currency at CC's rate, to the cent; null when the pair has no rate. */
+export function convertCents(cents: number, from: Currency, to: Currency, fx: FxRate | null): number | null {
+  if (from === to) return cents;
+  if (!fx || fx.rate_ppm < FX_RATE_MIN_PPM || fx.rate_ppm > FX_RATE_MAX_PPM) return null;
+  if (from === "USD" && to === "CAD") return Math.round((cents * fx.rate_ppm) / 1_000_000);
+  if (from === "CAD" && to === "USD") return Math.round((cents * 1_000_000) / fx.rate_ppm);
+  return null;
+}
+
 /**
- * A line priced from a confirmed catalogue item. One function for both places that do it: a save
- * (lib/ai-audit/versions.ts normalizeProposal) and the proposal editor's "Use the confirmed price", so the two
- * cannot drift (Codex review of #749). It keeps what the line already says for this client (description,
- * deliverables, onboarding needs), its quantity for a per-unit item, and whether it is optional; the item fills
- * only what is empty. A confirmed item always has a price (lib/ai-audit/catalogue-store.ts confirms only one).
+ * What a confirmed item costs in a proposal's currency: its own price, or its price converted at CC's rate (with
+ * the record of the conversion); null when it is in another currency and there is no rate to convert with.
  */
-export function withConfirmedPrice(line: ProposalLine, item: CatalogueItem): CatalogueLine {
+export function itemPriceIn(
+  item: Pick<CatalogueItem, "price_cents" | "currency">,
+  currency: Currency,
+  fx: FxRate | null,
+): { unit_price_cents: number; fx?: LineFx } | null {
+  const cents = item.price_cents ?? 0;
+  if (item.currency === currency) return { unit_price_cents: cents };
+  const converted = convertCents(cents, item.currency, currency, fx);
+  if (converted === null || !fx) return null;
+  return { unit_price_cents: converted, fx: { from_currency: item.currency, from_unit_price_cents: cents, rate_ppm: fx.rate_ppm, as_of: fx.as_of } };
+}
+
+/**
+ * A line priced from a confirmed catalogue item. One function for every place that does it: a save
+ * (lib/ai-audit/versions.ts normalizeProposal), the first draft (draft.ts), and the proposal editor's "Add item" and
+ * "Use the confirmed price", so they cannot drift (Codex review of #749). It keeps what the line already says for
+ * this client (description, deliverables, onboarding needs), its quantity for a per-unit item, and whether it is
+ * optional; the item fills only what is empty. A confirmed item always has a price (catalogue-store.ts confirms
+ * only one). `price` is the item's price in the proposal's currency (itemPriceIn); by default, its own.
+ */
+export function withConfirmedPrice(
+  line: ProposalLine,
+  item: CatalogueItem,
+  price: { unit_price_cents: number; fx?: LineFx } = { unit_price_cents: item.price_cents ?? 0 },
+  currency: Currency = item.currency,
+): CatalogueLine {
   return {
     kind: "catalogue",
     line_id: line.line_id,
@@ -349,10 +423,11 @@ export function withConfirmedPrice(line: ProposalLine, item: CatalogueItem): Cat
     ...(item.unit_label ? { unit_label: item.unit_label } : {}),
     quantity: item.unit === "per_unit" ? line.quantity : 1,
     optional: line.optional,
-    unit_price_cents: item.price_cents ?? 0,
-    currency: item.currency,
+    unit_price_cents: price.unit_price_cents,
+    currency,
     deliverables: line.deliverables.length ? line.deliverables : item.deliverables,
     onboarding_requirements: line.onboarding_requirements.length ? line.onboarding_requirements : item.onboarding_requirements,
+    ...(price.fx ? { fx: price.fx } : {}),
   };
 }
 

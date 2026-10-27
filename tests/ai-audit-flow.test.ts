@@ -310,7 +310,21 @@ async function main() {
       NOW(),
       { allowFixtureItems: true, ownerMayPrice: true },
     );
-    assert.equal(usd.lines[0].kind, "needs_owner_price", "a CAD catalogue item never prices a USD proposal");
+    assert.equal(usd.lines[0].kind, "needs_owner_price", "a CAD catalogue item never prices a USD proposal without a rate");
+    // With CC's rate it does, converted, and a second pass (submit's re-check) gives the same content and hash.
+    const fx = { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" as const };
+    const usdContent = { ...ownerContent, currency: "USD", lines: [{ kind: "catalogue", line_id: "x1", sku: fixtureItem.sku, item_id: fixtureItem.id, item_version: fixtureItem.item_version, name: fixtureItem.name, description: "", category: fixtureItem.category, unit: fixtureItem.unit, quantity: 1, optional: false, unit_price_cents: 1, currency: "USD", deliverables: [], onboarding_requirements: [] }] } as never;
+    const once = await versions.normalizeProposal(db, OASIS, usdContent, null, USERS.cc.id, settings.tax, NOW(), { allowFixtureItems: true, ownerMayPrice: true, fx });
+    const converted = once.lines[0];
+    assert.equal(converted.kind, "catalogue");
+    assert.ok(converted.kind === "catalogue" && converted.currency === "USD" && converted.unit_price_cents === 71 && converted.fx?.from_currency === "CAD" && converted.fx.from_unit_price_cents === 100, JSON.stringify(converted));
+    const twice = await versions.normalizeProposal(db, OASIS, once, once, USERS.cc.id, settings.tax, NOW(), { allowFixtureItems: true, ownerMayPrice: true, fx });
+    const { contentHash } = await import("../lib/ai-audit/hash");
+    assert.equal(contentHash(twice), contentHash(once), "the same rate gives the same proposal, so submit does not ask for a save");
+    const reread = (await import("../lib/ai-audit/proposal")).validateProposalContent(JSON.parse(JSON.stringify(once)));
+    assert.ok(reread.ok && contentHash(reread.value) === contentHash(once), "a stored converted proposal reads back to the same hash");
+    const moved = await versions.normalizeProposal(db, OASIS, once, once, USERS.cc.id, settings.tax, NOW(), { allowFixtureItems: true, ownerMayPrice: true, fx: { ...fx, rate_ppm: 1_500_000, as_of: "2026-10-28" } });
+    assert.notEqual(contentHash(moved), contentHash(once), "a new rate is a new price, so a submitted draft must be saved again");
   });
 
   console.log("submit and the PDF");
@@ -897,6 +911,8 @@ async function main() {
 
   console.log("onboarding");
   await check("onboarding creates one client, one project, its checklist and one welcome-email approval, however often it runs", async () => {
+    // The onboarding form, seeded into the audit's own workspace (scripts/seed-client-onboarding-form.ts --tenant).
+    await db.execute({ sql: "INSERT INTO forms (tenant_id, slug, name, enabled) VALUES (?, 'client-onboarding', 'Client onboarding', 1)", args: [OASIS] });
     const alerts: unknown[] = [];
     const od = { alert: async (a: unknown) => void alerts.push(a), baseUrl: () => "https://oasisai.work" };
     const r1 = await onboarding.runOnboarding(db, { tenantId: OASIS, engagementId, now: NOW(), deps: od });
@@ -915,6 +931,14 @@ async function main() {
     assert.equal(await leadStage(db, LEAD), "onboarding");
     const welcome = await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email'", args: [OASIS] });
     assert.match(String(welcome.rows[0].payload_json), /never send passwords/i);
+    // The client's OWN link, in this workspace, signed for their lead: their answers attach to their record.
+    const welcomeBody = String((JSON.parse(String(welcome.rows[0].payload_json)) as { body?: string }).body);
+    const link = /https:\/\/oasisai\.work\/f\/oasis-ai-cc\/client-onboarding\/([A-Za-z0-9._-]+)/.exec(welcomeBody);
+    assert.ok(link, `the welcome email links the client's own form: ${welcomeBody}`);
+    const payload = JSON.parse(Buffer.from(link![1].split(".")[1], "base64url").toString("utf8")) as { lead_id?: string; tenant?: string };
+    assert.deepEqual([payload.lead_id, payload.tenant], [LEAD, "oasis-ai-cc"], "signed for this client's lead, in the audit's workspace");
+    assert.doesNotMatch(welcomeBody, /oasis-webdev/, "never the website clients' copy, where this client has no lead");
+    assert.match(onboarding.welcomeEmailBody({ contactName: "Dana Smith", businessName: "B", base: "https://oasisai.work", intakeUrl: null }), /A short onboarding form follows in a separate email/, "no form, no broken link");
   });
   await check("the engagement page finds the welcome card, and a card past its expiry reads as expired, as the Feed shows it (Codex review of #749)", async () => {
     const viewLib = await import("../lib/ai-audit/view");

@@ -215,7 +215,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const content = validateProposalContent(body.content);
       if (!content.ok) return json(400, { ok: false, error: "proposal_invalid", field: content.field, detail: content.error });
       const { settings } = await getSettings(s.db, s.tenantId);
-      const r = await saveProposalDraft(s.db, { tenantId: s.tenantId, engagementId, content: content.value, actor, now, expectedRowVersion: rv, tax: settings.tax, ownerMayPrice: s.isOwner });
+      const r = await saveProposalDraft(s.db, { tenantId: s.tenantId, engagementId, content: content.value, actor, now, expectedRowVersion: rv, tax: settings.tax, fx: settings.fx_usd_cad, ownerMayPrice: s.isOwner });
       if (!r.ok) return casError(r.error);
       const after = await getEngagement(s.db, s.tenantId, engagementId);
       return json(200, { ok: true, version_id: r.version.id, created: r.created, row_version: after?.row_version ?? null });

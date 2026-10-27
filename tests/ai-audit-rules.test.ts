@@ -299,6 +299,61 @@ async function main() {
     assert.equal(bare.quantity, 1, "a fixed-price item is one");
   });
 
+  await check("USD is the core currency; a CAD proposal converts at CC's rate, to the cent, and records it on the line (CC, 2026-10-27)", () => {
+    const fx = { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" as const };
+    assert.equal(proposal.convertCents(150_000, "USD", "CAD", fx), 210_375, "US$1,500 at 1.4025");
+    assert.equal(proposal.convertCents(210_375, "CAD", "USD", fx), 150_000, "and back");
+    assert.equal(proposal.convertCents(150_000, "USD", "USD", null), 150_000, "the same currency needs no rate");
+    assert.deepEqual([proposal.rateText(1_402_500), proposal.rateText(1_402_567), proposal.rateText(1_000_000)], ["1.4025", "1.402567", "1"], "every digit CC saved, and no more");
+    assert.equal(proposal.convertCents(150_000, "USD", "CAD", null), null, "no rate, no conversion");
+    assert.equal(proposal.convertCents(150_000, "USD", "CAD", { ...fx, rate_ppm: 14_025_000 }), null, "a rate out of range is a typo, not a quote");
+    const seed = catalogue.CATALOGUE_SEED.find((s) => s.sku === "website-growth")!;
+    assert.equal(seed.currency, "USD", "the catalogue is in USD, at the numbers CC approved");
+    assert.equal(seed.price_cents, 500_000);
+    const item = { ...seed, id: "item-g", tenant_id: "t", item_version: 1, status: "confirmed" as const, is_fixture: false, created_by: null, created_at: "", updated_at: "", confirmed_by: "u", confirmed_at: "", retired_by: null, retired_at: null };
+    assert.deepEqual(proposal.itemPriceIn(item, "USD", null), { unit_price_cents: 500_000 });
+    assert.equal(proposal.itemPriceIn(item, "CAD", null), null, "a CAD proposal without a rate cannot use the USD price");
+    const price = proposal.itemPriceIn(item, "CAD", fx)!;
+    assert.deepEqual(price, { unit_price_cents: 701_250, fx: { from_currency: "USD", from_unit_price_cents: 500_000, rate_ppm: 1_402_500, as_of: "2026-10-26" } });
+    const waiting = { kind: "needs_owner_price" as const, line_id: "l1", name: "x", description: "", category: item.category, unit: item.unit, quantity: 1, optional: false, deliverables: [], onboarding_requirements: [] };
+    const line = proposal.withConfirmedPrice(waiting, item, price, "CAD");
+    assert.deepEqual([line.currency, line.unit_price_cents, line.fx?.from_unit_price_cents], ["CAD", 701_250, 500_000]);
+    assert.equal("fx" in proposal.withConfirmedPrice(waiting, item), false, "an unconverted line carries no conversion record");
+    const content = { ...proposal.emptyProposal({ currency: "CAD", tax: { mode: "not_registered" }, to: "a@b.co", businessName: "B", contactName: "C", validUntil: "2026-12-31" }), lines: [line] };
+    const read = proposal.validateProposalContent(JSON.parse(JSON.stringify(content)));
+    assert.ok(read.ok);
+    assert.deepEqual(read.ok ? read.value.lines[0] : null, line, "the conversion record survives a read-back exactly (Gate 2 binds the hash)");
+    const bad = proposal.validateProposalContent({ ...content, lines: [{ ...line, fx: { ...line.fx, rate_ppm: 99 } }] });
+    assert.ok(!bad.ok && bad.field === "lines[0].fx", "a malformed record is refused, not dropped");
+    assert.ok(!proposal.proposalBlockers(content, "2026-10-27").some((b) => /priced in/.test(b)), "a converted line is priced in the proposal's currency");
+    const unconverted = { ...content, lines: [proposal.withConfirmedPrice(waiting, item)] };
+    assert.ok(proposal.proposalBlockers(unconverted, "2026-10-27").some((b) => /priced in USD, not CAD/.test(b)), "a USD line in a CAD proposal still blocks");
+  });
+
+  await check("the Bank of Canada's answer fills the rate; a bad answer fills nothing; the stored rate is range-checked", async () => {
+    const fxLib = await import("../lib/ai-audit/fx");
+    const store = await import("../lib/ai-audit/store");
+    // The Valet API's answer as served on 2026-10-27 (observations, newest last).
+    const answer = { terms: {}, seriesDetail: { FXUSDCAD: { label: "USD/CAD" } }, observations: [{ d: "2026-10-26", FXUSDCAD: { v: "1.4025" } }] };
+    assert.deepEqual(fxLib.parseBankOfCanadaRate(answer), { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" });
+    assert.equal(fxLib.parseBankOfCanadaRate({ observations: [] }), null);
+    assert.equal(fxLib.parseBankOfCanadaRate({ observations: [{ d: "2026-10-26", FXUSDCAD: { v: "14.025" } }] }), null, "out of range");
+    assert.equal(fxLib.parseBankOfCanadaRate("<html>"), null);
+    const ok = await fxLib.fetchBankOfCanadaRate((async () => new Response(JSON.stringify(answer), { status: 200 })) as never);
+    assert.ok(ok.ok && ok.rate.rate_ppm === 1_402_500);
+    const down = await fxLib.fetchBankOfCanadaRate((async () => new Response("no", { status: 503 })) as never);
+    assert.deepEqual(down, { ok: false, error: "unreachable" });
+    const thrown = await fxLib.fetchBankOfCanadaRate((async () => { throw new Error("offline"); }) as never);
+    assert.deepEqual(thrown, { ok: false, error: "unreachable" });
+    const garbled = await fxLib.fetchBankOfCanadaRate((async () => new Response("not json", { status: 200 })) as never);
+    assert.deepEqual(garbled, { ok: false, error: "unreadable" });
+    assert.deepEqual(store.parseFxRate({ rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" }), { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" });
+    assert.equal(store.parseFxRate({ rate_ppm: 1_402_500, as_of: "yesterday" }), null);
+    assert.equal(store.parseFxRate({ rate_ppm: 40_000_000, as_of: "2026-10-26" }), null);
+    assert.equal(store.parseSettings({ fx_usd_cad: { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "evil" } }).fx_usd_cad?.source, "owner", "an unknown source is the owner's own number");
+    assert.equal(store.DEFAULT_SETTINGS.fx_usd_cad, null, "no rate until CC sets one");
+  });
+
   console.log("catalogue");
   await check("every seed item cites a real file, and the cited line holds its price", () => {
     for (const item of catalogue.CATALOGUE_SEED) {

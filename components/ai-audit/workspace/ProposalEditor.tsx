@@ -13,9 +13,12 @@ import { useRouter } from "next/navigation";
 import {
   AUDIT_LINK_PLACEHOLDER,
   emptyProposal,
+  itemPriceIn,
   proposalBlockers,
+  rateText,
   proposalTotals,
   withConfirmedPrice,
+  type FxRate,
   type ProposalContent,
   type ProposalLine,
   type TaxRule,
@@ -31,7 +34,7 @@ type Props = {
   rowVersion: number;
   editable: boolean;
   catalogue: CatalogueItem[];
-  settings: { tax: TaxRule | null; default_currency: Currency; deposit_bps: number | null };
+  settings: { tax: TaxRule | null; default_currency: Currency; deposit_bps: number | null; fx_usd_cad: FxRate | null };
   defaults: { to: string; businessName: string; contactName: string };
   /** Only the workspace owner types a custom price (the server enforces it too). */
   isOwner: boolean;
@@ -82,18 +85,32 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
   const shown = useMemo(() => ({ ...p, tax: settings.tax }), [p, settings.tax]);
   const totals = proposalTotals(shown);
   const blockers = proposalBlockers(shown, new Date().toISOString().slice(0, 10));
-  const usable = catalogue.filter((c) => c.status === "confirmed" && c.currency === p.currency);
+  const fx = settings.fx_usd_cad;
+  /** A confirmed item's price in this proposal's currency: its own, or converted at CC's rate; null when it cannot be. */
+  const priceOf = (item: CatalogueItem, currency: Currency = p.currency) => itemPriceIn(item, currency, fx);
+  const usable = catalogue.filter((c) => c.status === "confirmed" && priceOf(c) !== null);
+  // The rate the lines were priced at (what the client sees), not the one in settings: they differ until a save.
+  const appliedFx = p.lines.flatMap((l) => (l.kind === "catalogue" && l.fx ? [l.fx] : []))[0] ?? null;
+  const rateWords = appliedFx ? `1 USD = ${rateText(appliedFx.rate_ppm)} CAD (${appliedFx.as_of})` : null;
   // What a save would change in the stored draft (lib/ai-audit/versions.ts normalizeProposal): the current tax
-  // rule, and a catalogue line whose price is no longer confirmed. Submit refuses until it is saved again.
+  // rule, and any catalogue line that would price differently now: its item no longer confirmed, a new price, or a
+  // new exchange rate (Codex review of #752). Submit refuses until it is saved again, so Save is offered.
   const taxChanged = !!initial && !sameTax(initial.tax, settings.tax);
-  const priceChanged = !!initial && initial.lines.some((l) => l.kind === "catalogue" && !catalogue.some((c) => c.id === l.item_id && c.status === "confirmed"));
+  const priceChanged =
+    !!initial &&
+    initial.lines.some((l) => {
+      if (l.kind !== "catalogue") return false;
+      const item = catalogue.find((c) => c.id === l.item_id && c.status === "confirmed");
+      const now = item ? itemPriceIn(item, initial.currency, fx) : null;
+      return !now || now.unit_price_cents !== l.unit_price_cents || (now.fx?.rate_ppm ?? null) !== (l.fx?.rate_ppm ?? null) || (now.fx?.as_of ?? null) !== (l.fx?.as_of ?? null);
+    });
   const staleWords =
     taxChanged && priceChanged
-      ? "The tax rule changed since this was saved, and so did a catalogue price: save it to apply them."
+      ? "The tax rule changed since this was saved, and so did a price or the exchange rate: save it to apply them."
       : taxChanged
         ? "The tax rule changed since this was saved: save it to apply."
         : priceChanged
-          ? "A catalogue price changed since this was saved: save it to apply."
+          ? "A price or the exchange rate changed since this was saved: save it to apply."
           : null;
   const disabled = !editable || busy;
   const money = (c: number) => formatMoney(c, p.currency);
@@ -109,33 +126,54 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
 
   /** A line waiting for a price takes its suggested item's confirmed price, in place (lib/ai-audit/proposal.ts). */
   function takeConfirmedPrice(i: number, item: CatalogueItem) {
-    update((d) => void (d.lines[i] = withConfirmedPrice(d.lines[i], item)));
+    update((d) => {
+      const price = itemPriceIn(item, d.currency, fx);
+      if (price) d.lines[i] = withConfirmedPrice(d.lines[i], item, price, d.currency);
+    });
   }
 
+  /** A new line from a confirmed item, built the way a save builds it (the item fills the description and lists). */
   function addCatalogue() {
     const item = usable.find((c) => c.id === pick);
     if (!item) return;
-    update((d) =>
-      void d.lines.push({
-        kind: "catalogue",
+    update((d) => {
+      const price = itemPriceIn(item, d.currency, fx);
+      if (!price) return;
+      const fresh: ProposalLine = {
+        kind: "needs_owner_price",
         line_id: lineId(d.lines),
-        sku: item.sku,
-        item_id: item.id,
-        item_version: item.item_version,
         name: item.name,
-        description: item.description,
+        description: "",
         category: item.category,
         unit: item.unit,
-        ...(item.unit_label ? { unit_label: item.unit_label } : {}),
         quantity: 1,
         optional: false,
-        unit_price_cents: item.price_cents ?? 0,
-        currency: item.currency,
-        deliverables: item.deliverables,
-        onboarding_requirements: item.onboarding_requirements,
-      }),
-    );
+        deliverables: [],
+        onboarding_requirements: [],
+      };
+      d.lines.push(withConfirmedPrice(fresh, item, price, d.currency));
+    });
     setPick("");
+  }
+
+  /**
+   * A switch of currency re-prices every catalogue line: converted at CC's rate, or waiting for a price when there
+   * is none. A price CC typed stays as he typed it, so he is asked to check it.
+   */
+  function changeCurrency(next: Currency) {
+    const typed = p.lines.some((l) => l.kind === "owner_set");
+    update((d) => {
+      d.currency = next;
+      d.lines = d.lines.map((l): ProposalLine => {
+        if (l.kind !== "catalogue") return l;
+        const item = catalogue.find((c) => c.id === l.item_id && c.status === "confirmed");
+        const price = item ? itemPriceIn(item, next, fx) : null;
+        if (item && price) return withConfirmedPrice(l, item, price, next);
+        const { kind: _kind, sku, item_id: _id, item_version: _v, unit_price_cents: _c, currency: _cur, fx: _fx, ...rest } = l;
+        return { ...rest, kind: "needs_owner_price", suggested_sku: sku };
+      });
+    });
+    setMessage(typed ? `Prices are now in ${next}. The prices you typed stay as typed: check them.` : `Prices are now in ${next}.`);
   }
 
   async function save() {
@@ -184,11 +222,14 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <div className="label">Currency</div>
-            <select className="select" disabled={disabled} value={p.currency} onChange={(e) => update((d) => void (d.currency = e.target.value as Currency))}>
+            <select className="select" disabled={disabled} value={p.currency} onChange={(e) => changeCurrency(e.target.value as Currency)}>
               <option value="CAD">CAD</option>
               <option value="USD">USD</option>
             </select>
           </div>
+          {p.lines.some((l) => l.kind === "catalogue" && l.fx) && rateWords ? (
+            <div className="text-[13px] text-fg-muted">Converted from the catalogue at {rateWords}.</div>
+          ) : null}
           <div className="text-[13px] text-fg-muted">
             Tax:{" "}
             {settings.tax
@@ -227,13 +268,18 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
                   </td>
                   <td className="py-2 pr-3 text-[13px] text-fg-muted">
                     {l.kind === "catalogue" ? `Catalogue (${l.sku} v${l.item_version})` : l.kind === "owner_set" ? "Your price" : "Needs your price"}
+                    {l.kind === "catalogue" && l.fx ? (
+                      <div className="mt-0.5 text-[11px] text-fg-dim">
+                        Converted from {l.fx.from_currency} {formatMoney(l.fx.from_unit_price_cents, l.fx.from_currency)} at {rateText(l.fx.rate_ppm)} ({l.fx.as_of})
+                      </div>
+                    ) : null}
                     {l.kind === "needs_owner_price" && l.suggested_sku ? (
                       (() => {
                         const match = usable.find((c) => c.sku === l.suggested_sku);
                         return match ? (
                           !disabled ? (
                             <button type="button" className="btn-secondary mt-1.5 block" onClick={() => takeConfirmedPrice(i, match)}>
-                              Use the confirmed price ({formatMoney(match.price_cents ?? 0, match.currency)})
+                              Use the confirmed price ({formatMoney(priceOf(match)?.unit_price_cents ?? 0, p.currency)})
                             </button>
                           ) : null
                         ) : (
@@ -309,24 +355,38 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
               <div className="label">Add from the confirmed catalogue ({p.currency})</div>
               <select className="select" value={pick} onChange={(e) => setPick(e.target.value)}>
                 <option value="">{usable.length ? "Choose an item" : "No confirmed items in this currency"}</option>
-                {usable.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}, {formatMoney(c.price_cents ?? 0, c.currency)}
-                    {c.unit === "per_month" ? " a month" : ""}
-                  </option>
-                ))}
+                {usable.map((c) => {
+                  const price = priceOf(c);
+                  return (
+                    <option key={c.id} value={c.id}>
+                      {c.name}, {formatMoney(price?.unit_price_cents ?? 0, p.currency)}
+                      {c.unit === "per_month" ? " a month" : ""}
+                      {price?.fx ? ` (${c.currency} ${formatMoney(c.price_cents ?? 0, c.currency)})` : ""}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <button type="button" className="btn-secondary" disabled={!pick} onClick={addCatalogue}>
               Add item
             </button>
             {!usable.length ? (
-              <span className="self-center text-[13px] text-fg-muted">
-                No confirmed prices in {p.currency} yet.{" "}
-                <Link href="/ai-audits/catalogue" className="font-medium text-fg underline underline-offset-2">
-                  Confirm prices in the catalogue
-                </Link>
-              </span>
+              catalogue.some((c) => c.status === "confirmed") && !fx ? (
+                <span className="self-center text-[13px] text-fg-muted">
+                  The catalogue is priced in another currency. To price this proposal in {p.currency}, set the exchange rate in{" "}
+                  <Link href="/ai-audits/settings" className="font-medium text-fg underline underline-offset-2">
+                    AI audit settings
+                  </Link>
+                  , or type your own prices.
+                </span>
+              ) : (
+                <span className="self-center text-[13px] text-fg-muted">
+                  No confirmed prices in {p.currency} yet.{" "}
+                  <Link href="/ai-audits/catalogue" className="font-medium text-fg underline underline-offset-2">
+                    Confirm prices in the catalogue
+                  </Link>
+                </span>
+              )
             ) : null}
             <button
               type="button"

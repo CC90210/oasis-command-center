@@ -90,7 +90,7 @@ export async function submitForFinalApproval(
   // Prices again, against the catalogue as it is now: an item retired since the
   // draft was saved must not slip through on an old copy of its price.
   const { settings } = await getSettings(db, t);
-  const renormalized = await normalizeProposal(db, t, proposal.content, proposal.content, input.actor.id ?? "", settings.tax, input.now, { allowFixtureItems: engagement.is_fixture });
+  const renormalized = await normalizeProposal(db, t, proposal.content, proposal.content, input.actor.id ?? "", settings.tax, input.now, { allowFixtureItems: engagement.is_fixture, fx: settings.fx_usd_cad });
   if (contentHash(renormalized) !== proposal.content_sha256) {
     problems.push("Proposal: a price or the tax rule changed since this draft was saved. Open the proposal and save it again.");
   }
@@ -164,7 +164,7 @@ export async function reopenForEdits(
   current = await getEngagement(db, t, engagement.id);
   if (!current) return { ok: false, error: "not_found" };
   const { settings } = await getSettings(db, t);
-  const p = await saveProposalDraft(db, { tenantId: t, engagementId: current.id, content: proposal.content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
+  const p = await saveProposalDraft(db, { tenantId: t, engagementId: current.id, content: proposal.content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax, fx: settings.fx_usd_cad });
   if (!p.ok) return { ok: false, error: `proposal_${p.error}` };
   const after = await getEngagement(db, t, engagement.id);
   return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };
@@ -281,7 +281,7 @@ async function revisionDrafts(
   const { settings } = await getSettings(db, t);
   const email = revisionEmail({ contactName: current.contact_name, businessName: current.business_name || "" });
   const content = { ...proposal.content, delivery_email: { ...proposal.content.delivery_email, ...email } };
-  const p = await saveProposalDraft(db, { tenantId: t, engagementId, content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax });
+  const p = await saveProposalDraft(db, { tenantId: t, engagementId, content, actor: input.actor, now: input.now, expectedRowVersion: current.row_version, tax: settings.tax, fx: settings.fx_usd_cad });
   if (!p.ok) return { ok: false, error: `proposal_${p.error}` };
   const after = await getEngagement(db, t, engagementId);
   return after ? { ok: true, engagement: after } : { ok: false, error: "not_found" };

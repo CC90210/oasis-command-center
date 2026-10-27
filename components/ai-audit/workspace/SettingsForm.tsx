@@ -4,11 +4,16 @@
  * The workspace's AI audit settings. The tax rule has no default on purpose:
  * whether OASIS charges GST/HST, and at what rate, is CC's to say, and no
  * proposal can be submitted until he does.
+ *
+ * The exchange rate is CC's too: USD is the core currency, and a client who
+ * pays in CAD gets the USD prices converted at the rate saved here. "Use the
+ * Bank of Canada rate" only fills the field; nothing changes until he saves.
  */
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { AiAuditSettings } from "@/lib/ai-audit/store";
-import { describeError, postJson } from "./api";
+import { rateText } from "@/lib/ai-audit/proposal";
+import { describeError, postJson, type ActionResult } from "./api";
 
 export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAuditSettings; rowVersion: number; isOwner: boolean }) {
   const router = useRouter();
@@ -19,6 +24,33 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
   const [deposit, setDeposit] = useState(settings.deposit_bps ? String(settings.deposit_bps / 100) : "");
   const [currency, setCurrency] = useState<string>(settings.default_currency);
   const [turnaround, setTurnaround] = useState(settings.turnaround);
+  // Every digit CC saved (Codex review of #752: rounding here rewrote the rate on any unrelated save).
+  const fxShown = settings.fx_usd_cad ? rateText(settings.fx_usd_cad.rate_ppm) : "";
+  const [fxRate, setFxRate] = useState(fxShown);
+  const [fxAsOf, setFxAsOf] = useState(settings.fx_usd_cad?.as_of ?? "");
+  const [fxSource, setFxSource] = useState<"bank_of_canada" | "owner">(settings.fx_usd_cad?.source ?? "owner");
+
+  async function lookUpRate() {
+    setBusy(true);
+    setMessage(null);
+    let r: ActionResult;
+    try {
+      const res = await fetch("/api/ai-audit/settings/fx", { cache: "no-store" });
+      r = (await res.json().catch(() => ({ ok: false, error: `http_${res.status}` }))) as ActionResult;
+    } catch {
+      r = { ok: false, error: "network_error" };
+    }
+    setBusy(false);
+    const rate = r.ok && r.rate && typeof r.rate === "object" ? (r.rate as { rate_ppm?: unknown; as_of?: unknown }) : null;
+    if (!rate || typeof rate.rate_ppm !== "number" || typeof rate.as_of !== "string") {
+      setMessage(describeError(r.ok ? { ok: false, error: "fx_unreadable" } : r));
+      return;
+    }
+    setFxRate(rateText(rate.rate_ppm));
+    setFxAsOf(rate.as_of);
+    setFxSource("bank_of_canada");
+    setMessage(`The Bank of Canada's rate for ${rate.as_of} is filled in. Save the settings to use it.`);
+  }
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -26,8 +58,21 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
     setBusy(true);
     setMessage(null);
     const tax = mode === "registered" ? { mode: "registered", rate_bps: Math.round(Number(rate) * 100), label, number } : mode === "not_registered" ? { mode: "not_registered" } : null;
+    const fxNumber = Number(fxRate.trim());
+    if (fxRate.trim() && !(fxNumber >= 0.5 && fxNumber <= 3)) {
+      setBusy(false);
+      setMessage("The exchange rate is CAD for one USD, between 0.5 and 3 (for example 1.4025).");
+      return;
+    }
+    // The saved rate goes back exactly as stored unless CC changed the field or pressed the Bank of Canada button.
+    const untouched = settings.fx_usd_cad && fxRate.trim() === fxShown && fxAsOf === settings.fx_usd_cad.as_of && fxSource === settings.fx_usd_cad.source;
+    const fx_usd_cad = !fxRate.trim()
+      ? null
+      : untouched
+        ? settings.fx_usd_cad
+        : { rate_ppm: Math.round(fxNumber * 1_000_000), as_of: fxAsOf || new Date().toISOString().slice(0, 10), source: fxSource };
     const r = await postJson("/api/ai-audit/settings", {
-      settings: { tax, deposit_bps: deposit ? Math.round(Number(deposit) * 100) : null, default_currency: currency, engine: settings.engine, turnaround },
+      settings: { tax, deposit_bps: deposit ? Math.round(Number(deposit) * 100) : null, default_currency: currency, engine: settings.engine, turnaround, fx_usd_cad },
       expected_row_version: rowVersion,
     });
     setBusy(false);
@@ -72,8 +117,8 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
         <div>
           <div className="label">Default currency</div>
           <select className="select" disabled={disabled} value={currency} onChange={(e) => setCurrency(e.target.value)}>
-            <option value="CAD">CAD</option>
             <option value="USD">USD</option>
+            <option value="CAD">CAD</option>
           </select>
         </div>
         <div>
@@ -83,6 +128,40 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
         <div className="md:col-span-2">
           <div className="label">Turnaround you promise (used in the handbook)</div>
           <input className="input" disabled={disabled} value={turnaround} onChange={(e) => setTurnaround(e.target.value)} placeholder="for example: within five business days" />
+        </div>
+      </section>
+      <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
+        <h2 className="text-sm font-semibold text-fg">Exchange rate for CAD proposals</h2>
+        <p className="text-[13px] text-fg-muted">
+          Prices are in USD. When a client would rather pay in CAD, switch their proposal to CAD and every catalogue price is converted at this rate. The rate used is shown on each line and to the
+          client. Leave it empty and CAD proposals use only prices you type.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <div className="label">CAD for 1 USD</div>
+            <input
+              className="input w-32 tabular-nums"
+              inputMode="decimal"
+              disabled={disabled}
+              value={fxRate}
+              placeholder="1.4025"
+              onChange={(e) => {
+                setFxRate(e.target.value);
+                setFxSource("owner");
+                setFxAsOf(new Date().toISOString().slice(0, 10));
+              }}
+            />
+          </div>
+          {isOwner ? (
+            <button type="button" className="btn-secondary" disabled={busy} onClick={() => void lookUpRate()}>
+              Use the Bank of Canada rate
+            </button>
+          ) : null}
+          {fxRate.trim() && fxAsOf ? (
+            <span className="self-center text-[12px] text-fg-dim">
+              {fxSource === "bank_of_canada" ? "Bank of Canada" : "Typed by you"}, {fxAsOf}
+            </span>
+          ) : null}
         </div>
       </section>
       {isOwner ? (

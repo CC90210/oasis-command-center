@@ -24,7 +24,9 @@ import { convertLeadToCustomer, getCustomer } from "@/lib/os/customers/store";
 import { createProject, createTask } from "@/lib/delivery/store";
 import { createApproval } from "@/lib/os/approvals/store";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
-import { CLIENT_ONBOARDING_SLUG, CLIENT_ONBOARDING_TENANT_SLUG } from "@/lib/forms/oasis-client-onboarding-seed";
+import { CLIENT_ONBOARDING_SLUG } from "@/lib/forms/oasis-client-onboarding-seed";
+import { signFormLink } from "@/lib/form-links";
+import { dbBool } from "@/lib/db-bool";
 import { deterministicUuid } from "@/lib/ai-audit/hash";
 import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
 import { advanceEngagement, moveLeadForward, leadRequestId } from "@/lib/ai-audit/lifecycle";
@@ -42,11 +44,37 @@ export const STANDARD_CHECKLIST: ReadonlyArray<{ key: string; title: string; not
   { key: "plan", title: "Share the implementation plan", notes: "The roadmap's first phase, with dates, in the client portal." },
 ];
 
-export function intakeFormUrl(base: string): string {
-  return `${base}/f/${CLIENT_ONBOARDING_TENANT_SLUG}/${CLIENT_ONBOARDING_SLUG}`;
+/**
+ * The client's own link to the onboarding form: in the engagement's workspace, signed for their lead, so their
+ * answers attach to their record. The form's bare address would file them under a new, anonymous lead, and the
+ * website clients' copy of the form lives in another workspace (oasis-webdev), where this client has no lead.
+ * Null when this workspace has no enabled onboarding form, or links cannot be signed here; the welcome email then
+ * says the form follows, which CC reads on the card before he approves it.
+ */
+export async function personalIntakeUrl(db: Client, engagement: Pick<Engagement, "tenant_id" | "lead_id" | "id">, base: string): Promise<string | null> {
+  const t = engagement.tenant_id;
+  const [tenant, form] = await Promise.all([
+    db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [t] }),
+    db.execute({ sql: "SELECT id, enabled FROM forms WHERE tenant_id = ? AND slug = ? LIMIT 1", args: [t, CLIENT_ONBOARDING_SLUG] }),
+  ]);
+  // The token carries the workspace's own slug, never a profile alias: the form page refuses a token whose tenant is
+  // not the form's tenants.slug (CodeRabbit review of #752). A workspace without one gets the fallback line.
+  const row = tenant.rows[0];
+  const slug = row && typeof row.slug === "string" ? row.slug : "";
+  const f = form.rows[0];
+  if (!slug || !f || !dbBool(f.enabled)) {
+    console.error("[ai-audit.onboarding] no onboarding form to link in this workspace: seed it with scripts/seed-client-onboarding-form.ts --tenant", { tenantId: t, engagementId: engagement.id, slug, form: !!f });
+    return null;
+  }
+  const token = signFormLink({ tenant: slug, form_id: String(f.id), lead_id: engagement.lead_id });
+  if (token === null) {
+    console.error("[ai-audit.onboarding] form links cannot be signed here (FORM_LINK_HMAC_KEY)", { engagementId: engagement.id });
+    return null;
+  }
+  return `${base}/f/${slug}/${CLIENT_ONBOARDING_SLUG}/${token}`;
 }
 
-export function welcomeEmailBody(input: { contactName: string | null; businessName: string; base: string }): string {
+export function welcomeEmailBody(input: { contactName: string | null; businessName: string; base: string; intakeUrl: string | null }): string {
   const greeting = input.contactName ? `Hi ${input.contactName.split(/\s+/)[0]},` : "Hi,";
   return [
     greeting,
@@ -54,7 +82,7 @@ export function welcomeEmailBody(input: { contactName: string | null; businessNa
     `Thank you. Your payment is confirmed and the work for ${input.businessName} is starting.`,
     "",
     "Two things to begin:",
-    `1. Fill in the short onboarding form: ${intakeFormUrl(input.base)}`,
+    input.intakeUrl ? `1. Fill in the short onboarding form: ${input.intakeUrl}` : "1. A short onboarding form follows in a separate email.",
     `2. Pick a time for our kickoff call: ${input.base}/book`,
     "",
     "Please never send passwords by email. When we need access to a system, we will send a secure connection request instead.",
@@ -202,7 +230,12 @@ export async function runOnboarding(
         payload: {
           to: engagement.contact_email,
           subject: `Welcome to OASIS AI: next steps for ${engagement.business_name || "your project"}`,
-          body: welcomeEmailBody({ contactName: engagement.contact_name, businessName: engagement.business_name || "your business", base }),
+          body: welcomeEmailBody({
+            contactName: engagement.contact_name,
+            businessName: engagement.business_name || "your business",
+            base,
+            intakeUrl: await personalIntakeUrl(db, engagement, base),
+          }),
           lead_id: engagement.lead_id,
         },
         idempotencyKey: `${WELCOME_APPROVAL_KEY_PREFIX}${engagement.id}`,

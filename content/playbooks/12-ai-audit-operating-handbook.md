@@ -110,11 +110,11 @@ When you write or change a part yourself:
 
 ## Pricing
 
-- Prices come from the **Price catalogue** only after you confirm them there. Until then an item is "proposed" and cannot be used.
+- Prices come from the **Price catalogue** only after you confirm them there. Until then an item is "proposed" and cannot be used. You confirmed the catalogue on 2026-10-27: every price is in USD, and the paid security audit is retired (the free audit replaces it).
 - For custom work, add a custom line and type the price yourself. The system records that you set it. Only the workspace owner can type a price: anyone else's line waits as "needs your price".
 - A line with no price blocks submission. That is on purpose: no proposal goes out with a guessed fee.
-- Catalogue items only price a proposal in their own currency. Switch a proposal's currency and its items wait for a price again.
-- Set the tax rule once in **AI audit settings** before the first real proposal.
+- **USD is the core currency.** A client who would rather pay in CAD gets the same prices converted: set the exchange rate once in **AI audit settings** ("Use the Bank of Canada rate" fills it in; nothing changes until you save), then switch that client's proposal to CAD. Every catalogue line converts to the cent and shows the rate it used, and the client's page says so in one line under the price table. With no rate saved, a CAD proposal can use only prices you type. Prices you typed are never converted: check them when you switch currency.
+- The tax rule is set: OASIS is not registered for HST yet (under the $30K small-supplier threshold), so proposals add no tax. When you register, change it in **AI audit settings** and add your number.
 - Monthly fees are shown beside the total and start after launch. Optional add-ons are listed outside the total.
 
 ## Submitting and Gate 2
@@ -138,7 +138,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent; the en
 
 - The client pays on Stripe's page. The engagement moves to **Payment Confirmed** only when the server has re-read the session from Stripe and the amount, currency and proposal all match.
 - Marking an engagement **declined** or **cancelled** also stops its open payment link at Stripe. If a payment still lands (the client paid moments before), it is kept, the engagement is flagged, and you get an urgent alert. Nothing is refunded automatically: you decide.
-- Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval (it links the onboarding form and the kickoff booking page).
+- Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval. It links the client's own onboarding form (a personal link, so their answers attach to their record, not to a new lead) and the kickoff booking page. If the form cannot be linked, the email says a form follows, and you see that on the card before you approve.
 - When every checklist task is done, the engagement becomes **Active Client** and the lead moves into the build. That closes the audit cycle: the delivery project carries the client from there.
 
 ---

@@ -115,6 +115,8 @@ const ERROR_WORDS: Record<string, string> = {
   not_paid: "Stripe has not confirmed a payment yet, so onboarding waits.",
   payment_not_clear: "The payment is not clear in Stripe (refunded, disputed or paid twice), so onboarding waits. Check the payment first.",
   project_failed: "The delivery project could not be made. The error was logged; press Run onboarding again.",
+  fx_unreachable: "The Bank of Canada could not be reached just now. Try again, or type the rate yourself.",
+  fx_unreadable: "The Bank of Canada's answer held no USD/CAD rate. Type the rate yourself.",
 };
 
 /** A refusal with no words of its own still reads as a sentence, with its code for a report. */

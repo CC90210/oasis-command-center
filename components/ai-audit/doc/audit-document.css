@@ -301,6 +301,24 @@
 .aa-list {
   margin: 0;
   padding-left: 20px;
+  /* The app's base styles take list markers away; a document's lists keep them. */
+  list-style: disc;
+}
+
+ol.aa-list {
+  list-style: decimal;
+}
+
+.aa-ask {
+  margin: 14px 0 0;
+  font-size: 15px;
+  color: var(--aa-ink-2);
+}
+
+.aa-ask a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .aa-list li {

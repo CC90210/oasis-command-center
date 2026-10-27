@@ -417,7 +417,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
           rowVersion={e.row_version}
           editable={proposalEditable}
           catalogue={view.catalogue}
-          settings={{ tax: view.settings.tax, default_currency: view.settings.default_currency, deposit_bps: view.settings.deposit_bps }}
+          settings={{ tax: view.settings.tax, default_currency: view.settings.default_currency, deposit_bps: view.settings.deposit_bps, fx_usd_cad: view.settings.fx_usd_cad }}
           defaults={{ to: e.contact_email ?? "", businessName: e.business_name ?? "", contactName: e.contact_name ?? "" }}
           isOwner={isOwner}
         />

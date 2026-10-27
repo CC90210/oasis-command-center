@@ -33,7 +33,17 @@ import type { BusinessType } from "@/lib/ai-audit/rules";
 import type { ResearchPack } from "@/lib/ai-audit/research";
 import { planOpportunities, planRoadmap, type PlannedOpportunity } from "@/lib/ai-audit/opportunities";
 import { CATALOGUE_SEED, type CatalogueItem } from "@/lib/ai-audit/catalogue";
-import { AUDIT_LINK_PLACEHOLDER, PROPOSAL_SCHEMA, type NeedsPriceLine, type ProposalContent, type ProposalLine, type TaxRule } from "@/lib/ai-audit/proposal";
+import {
+  AUDIT_LINK_PLACEHOLDER,
+  PROPOSAL_SCHEMA,
+  itemPriceIn,
+  withConfirmedPrice,
+  type FxRate,
+  type NeedsPriceLine,
+  type ProposalContent,
+  type ProposalLine,
+  type TaxRule,
+} from "@/lib/ai-audit/proposal";
 
 export type DraftInputs = {
   business: { name: string; type: BusinessType; location?: string; website?: string };
@@ -341,7 +351,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
       },
       next_steps: {
         steps: [
-          "Read the proposal below: what we would build first, and what it costs.",
+          "Read the proposal above: what we would build first, and what it costs.",
           "Pay securely through Stripe to start. Work begins once Stripe confirms the payment.",
           "We book a kickoff call and send a short form for what the work needs.",
           "Access to your tools is granted through secure connections, never by sharing a password.",
@@ -374,6 +384,8 @@ export function draftProposal(input: {
   roadmap: AuditDoc["sections"]["roadmap"];
   confirmed: readonly CatalogueItem[];
   currency: "CAD" | "USD";
+  /** CC's rate: an item in the other currency is priced converted at it (USD core, CAD on request). */
+  fx: FxRate | null;
   tax: TaxRule | null;
   depositBps: number | null;
   to: string;
@@ -387,9 +399,11 @@ export function draftProposal(input: {
     if (lineOfSku.has(o.sku)) continue;
     const lineId = `l-${o.sku}`.slice(0, 32).replace(/-+$/, "");
     lineOfSku.set(o.sku, lineId);
+    // The SKU's confirmed version, in the proposal's currency or convertible into it at CC's rate.
     const item = input.confirmed
-      .filter((i) => i.sku === o.sku && i.status === "confirmed" && i.currency === input.currency && i.price_cents !== null)
-      .sort((a, b) => b.item_version - a.item_version)[0];
+      .filter((i) => i.sku === o.sku && i.status === "confirmed" && i.price_cents !== null && itemPriceIn(i, input.currency, input.fx) !== null)
+      .sort((a, b) => (a.currency === input.currency ? 0 : 1) - (b.currency === input.currency ? 0 : 1) || b.item_version - a.item_version)[0];
+    const price = item ? itemPriceIn(item, input.currency, input.fx) : null;
     const seed = CATALOGUE_SEED.find((s) => s.sku === o.sku);
     const base = {
       line_id: lineId,
@@ -403,8 +417,8 @@ export function draftProposal(input: {
       deliverables: [...(item?.deliverables ?? seed?.deliverables ?? [])],
       onboarding_requirements: [...(item?.onboarding_requirements ?? seed?.onboarding_requirements ?? [])],
     };
-    if (item && item.price_cents !== null) {
-      lines.push({ ...base, kind: "catalogue", sku: item.sku, item_id: item.id, item_version: item.item_version, unit_price_cents: item.price_cents, currency: item.currency });
+    if (item && price) {
+      lines.push(withConfirmedPrice({ ...base, kind: "needs_owner_price" }, item, price, input.currency));
     } else {
       const needs: NeedsPriceLine = { ...base, kind: "needs_owner_price", suggested_sku: o.sku };
       lines.push(needs);

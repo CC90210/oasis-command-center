@@ -20,7 +20,7 @@ import {
   type EvidenceLabel,
 } from "@/lib/ai-audit/rules";
 import { SECTION_TITLES, type AuditDoc, type DocEstimate, type DocParagraph, type DocRoadmapItem } from "@/lib/ai-audit/doc";
-import type { ProposalContent, ProposalLine, ProposalTotals } from "@/lib/ai-audit/proposal";
+import { rateText, type ProposalContent, type ProposalLine, type ProposalTotals } from "@/lib/ai-audit/proposal";
 
 export type AuditDocumentProps = {
   doc: AuditDoc;
@@ -138,7 +138,10 @@ function RoadmapColumn({ title, hint, items, opportunities }: { title: string; h
 export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnavailable, pdfHref, notice }: AuditDocumentProps) {
   const refs: Refs = {
     sourceNo: new Map(doc.sources.map((s, i) => [s.id, i + 1])),
-    findingNo: new Map(doc.findings.map((f, i) => [f.id, i + 1])),
+    // In the order section 3 shows them, then any finding cited elsewhere only: the reader meets F1, F2, F3 in turn.
+    findingNo: new Map(
+      [...new Set([...doc.sections.key_findings.finding_ids.filter((id) => doc.findings.some((f) => f.id === id)), ...doc.findings.map((f) => f.id)])].map((id, i) => [id, i + 1]),
+    ),
     estimateNo: new Map(doc.estimates.map((e, i) => [e.id, i + 1])),
   };
   const findings = new Map(doc.findings.map((f) => [f.id, f]));
@@ -149,6 +152,12 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
   const monthly = proposal.lines.filter((l) => !l.optional && l.unit === "per_month");
   const optional = proposal.lines.filter((l) => l.optional);
   const deposit = proposal.payment_terms.kind === "deposit" ? proposal.payment_terms : null;
+  // Converted prices (USD core, paid in CAD on request): one plain sentence per rate used, under the price table.
+  const conversions = [
+    ...new Map(
+      proposal.lines.flatMap((l) => (l.kind === "catalogue" && l.fx ? [l.fx] : [])).map((f) => [`${f.from_currency}|${f.rate_ppm}|${f.as_of}`, f] as const),
+    ).values(),
+  ];
 
   return (
     <div className="aa" data-audit-ready="1">
@@ -165,8 +174,10 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
           <h1>Free AI Audit for {doc.business.name}</h1>
           <p className="aa-cover-meta">
             {doc.prepared_for.name ? <>Prepared for {doc.prepared_for.name}. </> : null}
-            {dateLong(doc.prepared_on)}. {BUSINESS_TYPE_LABELS[doc.business.type]}
-            {doc.business.location ? `, ${doc.business.location}` : ""}.
+            {dateLong(doc.prepared_on)}.
+            {[doc.business.type !== "other" ? BUSINESS_TYPE_LABELS[doc.business.type] : null, doc.business.location || null].filter(Boolean).length
+              ? ` ${[doc.business.type !== "other" ? BUSINESS_TYPE_LABELS[doc.business.type] : null, doc.business.location || null].filter(Boolean).join(", ")}.`
+              : ""}
           </p>
           {notice ? <p className="aa-notice">{notice}</p> : null}
           <div className="aa-legend">
@@ -251,8 +262,9 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                     </div>
                     {f.metric ? (
                       <div className="aa-finding-metric">
-                        {f.metric.display ?? plainNumber(f.metric.value)}
-                        <small>{f.metric.display ? "" : f.metric.unit}</small>
+                        {f.metric.display ??
+                          (f.metric.unit === "$" ? `$${plainNumber(f.metric.value)}` : f.metric.unit === "%" ? `${plainNumber(f.metric.value)}%` : plainNumber(f.metric.value))}
+                        <small>{f.metric.display || f.metric.unit === "$" || f.metric.unit === "%" ? "" : f.metric.unit}</small>
                       </div>
                     ) : null}
                   </div>
@@ -310,7 +322,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                 {o.integrations.length ? (
                   <>
                     <dt>Systems involved</dt>
-                    <dd>{o.integrations.join(", ")}</dd>
+                    <dd>{o.integrations.map((x, i) => (i > 0 ? x.replace(/^Your /, "your ") : x)).join(", ")}</dd>
                   </>
                 ) : null}
                 <dt>What could improve</dt>
@@ -487,6 +499,11 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </tr>
             </tfoot>
           </table>
+          {conversions.map((f) => (
+            <p key={`${f.from_currency}${f.rate_ppm}${f.as_of}`} className="aa-small" style={{ marginTop: 8 }}>
+              Prices are in {cur}, converted from our {f.from_currency} prices at 1 USD = {rateText(f.rate_ppm)} CAD, the rate of {dateLong(f.as_of)}.
+            </p>
+          ))}
           {monthly.length ? (
             <>
               <h3 style={{ marginTop: 24 }}>Ongoing costs, after launch</h3>
@@ -579,6 +596,13 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </form>
             ) : null}
           </div>
+          {mode !== "preview" ? (
+            <p className="aa-ask">
+              Questions before you decide? Reply to the email this came with, or{" "}
+              <a href="https://oasisai.work/book">book a time to talk</a>
+              {mode === "pdf" ? " at oasisai.work/book" : ""}.
+            </p>
+          ) : null}
           {doc.sections.next_steps.steps.length ? (
             <>
               <h3 style={{ marginTop: 24 }}>What happens next</h3>
