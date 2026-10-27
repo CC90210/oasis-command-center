@@ -40,6 +40,7 @@ import {
   pastedNameProblem,
   recognizeCustomKey,
   unreadablePasteLines,
+  valueCaution,
 } from "../lib/os/custom-keys";
 import { CONNECTOR_CATALOG, connectorBySlug } from "../lib/os/connectors";
 import { connectorDefaultAccess, type AgentChoice } from "../lib/os/agent-access";
@@ -84,18 +85,29 @@ check("a typed name is saved in UPPER_SNAKE_CASE; one that cannot be saved says 
 
 check("a secret where a name goes is refused, so it is never stored or listed as a name", () => {
   const secrets = [
-    shaped("sk-", "ant-", "api03-", "abcdef"),
+    shaped("sk-", "ant-", "api03-", "Ab3dE5gH7jK9mN2pQ4sT6vW8"),
+    shaped("gh", "p_", "Ab3dE5gH7jK9mN2pQ4sT6vW8yZ0a"),
+    shaped("AK", "IA", "IOSFODNN7EXAMPLE"),
     shaped("Zm9vYmFy", "YmF6cXV4", "MTIzNDU2Nzg5"),
     shaped("a3f9c2e1b4d5a6f7", "e8d9c0b1a2f3e4d5", "c6b7a8f9"),
+    shaped("8f14e45f-", "ceea-467a-", "9575-2d8f1c9a3b7e"),
   ];
   for (const s of secrets) {
     assert.equal(looksLikeSecret(s), true, `${s.slice(0, 6)}... reads as a secret`);
     assert.match(keyNameProblem(s) ?? "", /looks like the secret itself/);
     assert.match(pastedNameProblem(s, "x") ?? "", /secret without a name/);
   }
-  for (const n of ["HUBSPOT_PRIVATE_APP_TOKEN", "GA4_MEASUREMENT_ID", "N8N_API_KEY", "pipedrive api token", "googleAnalytics4MeasurementId"]) {
+  // Names that start like a key, or run long with a digit, are names (final review of #748).
+  const names = [
+    "HUBSPOT_PRIVATE_APP_TOKEN", "GA4_MEASUREMENT_ID", "N8N_API_KEY", "pipedrive api token", "googleAnalytics4MeasurementId",
+    "hf_token", "hf_api_key", "xai-api-key", "pplx-api-key", "fc-key", "gsk_prod", "ghp_token", "r8_token", "AKIA_PROD_KEY",
+    "my-company-production-webhook-url-2", "STRIPE_WEBHOOK_SECRET_2024_PRODUCTION",
+  ];
+  for (const n of names) {
     assert.equal(looksLikeSecret(n), false, `${n} is a name`);
+    assert.equal(keyNameProblem(n), null, `${n} can be saved`);
   }
+  assert.equal(pastedNameProblem("hf_token", "abc"), null, "and pasted");
   // A bare secret whose "=" padding read as KEY=value.
   const [line] = parseDotenvLines(shaped("Zm9vYmFy", "YmF6==="));
   assert.equal(line.value, "==");
@@ -221,24 +233,55 @@ check("a pick made for a saved key stays with it; one made for a new key carries
   // The vault sends what these say, for one key and for every key of a paste.
   const vault = read("components/settings/CustomCredentialsVault.tsx");
   assert.match(vault, /const touched = draftApplies\(draftScope, keyName, !!existing\);/);
-  assert.match(vault, /const toSend = agentsToSend\(\{ touched, draft, hint \}\);/);
+  assert.match(vault, /const toSend = assignable \? agentsToSend\(\{ touched, draft, hint \}\) : \{\};/);
   assert.match(vault, /body: JSON\.stringify\(\{ key: keyName, value, \.\.\.toSend \}\)/);
   assert.match(vault, /entries: pasteReady\.map\(\(p\) => \(\{ key: p\.sendKey, value: p\.value, \.\.\.p\.send \}\)\)/);
   assert.match(vault, /setEditAgents\(row\.agents_unreadable \? \[\] : row\.agents \?\? "all"\)/, "saving it unchanged must not widen it");
-  // Nothing is saved while the keys or their agents cannot be read; the list is read on each opening.
+  // Nothing is saved while the keys or their agents cannot be read, and both offer Try again.
   assert.match(vault, /const canSave = !blockedBy && /);
   assert.match(vault, /: agentsError\s*\? "Which agents may use these keys could not be read, so nothing can be saved yet\."/);
-  assert.match(vault, /if \(active\) void fetchRows\(\);/);
-  // Only the latest read lands, in the vault and in the cards' lines (CodeRabbit on #748).
+  assert.equal((vault.match(/onClick=\{\(\) => void fetchRows\(\)\}/g) ?? []).length, 2, "Try again after a failed list and after unreadable agents");
+  // The list is read on each opening, and closing clears what was typed, pasted or picked.
+  assert.match(vault, /if \(active\) \{\s*void fetchRows\(\);\s*return;\s*\}\s*setName\(""\);\s*setValue\(""\);/);
+  assert.match(vault, /setPasteText\(""\);[\s\S]{0,200}setEditingKey\(null\);\s*setErr\(null\);\s*setMsg\(null\);\s*\}, \[active, fetchRows\]\);/);
+  // Only the latest read lands, in the vault and in the cards' lines (CodeRabbit on #748), and
+  // a failed read leaves no stale line.
   assert.match(vault, /if \(mine !== latestRead\.current\) return null;/);
-  assert.match(read("components/os/connections/ConnectionsHub.tsx"), /if \(live && mine === latest && next !== null\) setValue\(next\);/);
+  const hubSrc = read("components/os/connections/ConnectionsHub.tsx");
+  assert.match(hubSrc, /if \(live && mine === latest\) setValue\(next\);/);
+  // A change to keys refreshes the keys card from the drawer's own answer; not the app cards.
+  assert.match(hubSrc, /if \(detail\?\.scope && detail\.scope !== scope\) return;/);
+  assert.match(vault, /detail: \{ scope: "custom", \.\.\.\(list \? \{ body: list \} : \{\}\) \}/);
+  assert.match(read("components/os/connections/ConnectorAgentAccess.tsx"), /detail: \{ scope: "connector" \}/);
+  // A paste keeps its unsaved lines, and says so before sending more than the route takes.
+  assert.match(vault, /setPasteText\(left\);/);
+  // Only keys that were not saved stay; comments and skipped lines leave with the saved ones (CodeRabbit on #750).
+  assert.match(vault, /return !!parsed && !savedKeys\.has\(parsed\.key\.trim\(\)\.toUpperCase\(\)\);/);
+  assert.match(vault, /const pasteTooMany = pasteReady\.length > VAULT_MAX_PASTE_ENTRIES;/);
+  assert.match(read("app/api/credentials/custom/route.ts"), /const MAX_BULK_ENTRIES = VAULT_MAX_PASTE_ENTRIES;/);
+  // A long name breaks instead of pushing the drawer sideways on a phone.
+  assert.match(vault, /const NAME = "\[overflow-wrap:anywhere\] font-mono text-fg-muted";/);
+  // The drawers sit at the top of the window: a parent's spacing gave them a 32px margin.
+  assert.match(read("components/os/connections/ConnectorDrawer.tsx"), /className=\{`fixed inset-0 z-50 !mt-0 /);
   // One column: the viewport-wide grid put the Save button past the drawer's edge.
   assert.doesNotMatch(vault, /sm:grid-cols/);
   // A key for an app with its own card opens that card; the drawer passes whether it is open.
   assert.match(read("components/os/connections/ConnectionsHub.tsx"), /<CustomCredentialsVault onOpenApp=\{openFromCustom\} active=\{customOpen\} \/>/);
 });
 
-check("the Custom keys card's line: how many keys, and who uses them", () => {
+check("a full Stripe secret key is flagged and suggested for no agents", () => {
+  const full = shaped("sk", "_live_", "Ab3dE5gH7jK9mN2pQ4sT6vW8");
+  assert.match(valueCaution(full) ?? "", /can move money/);
+  assert.equal(valueCaution(shaped("rk", "_live_", "Ab3dE5gH7jK9")), null, "a restricted key is not flagged");
+  assert.equal(valueCaution("sk_live_"), null, "nothing after the prefix");
+  // The vault drops the suggestion for it, in the form and in a paste.
+  const vault = read("components/settings/CustomCredentialsVault.tsx");
+  assert.match(vault, /return hint && valueCaution\(value\) \? \{ \.\.\.hint, access: \[\] \} : hint;/);
+  assert.match(vault, /const hint = hintFor\(name, value\);/);
+  assert.match(vault, /const lineHint = problem \? null : hintFor\(l\.key, l\.value\);/);
+});
+
+check("the Custom keys card's line: how many keys, and whom they are assigned to", () => {
   const founder: AgentChoice[] = [
     { key: "chief_of_staff", label: "Bravo (Chief of Staff)", agent: "Bravo" },
     { key: "sales", label: "SDR (Sales)", agent: "SDR" },
@@ -248,12 +291,22 @@ check("the Custom keys card's line: how many keys, and who uses them", () => {
     { key: "operations", label: "Operations" },
   ];
   assert.equal(customKeysLine([], founder), "No keys yet");
-  assert.equal(customKeysLine([{ agents: "all" }, { agents: ["sales"] }], founder), "2 keys, used by all agents");
-  assert.equal(customKeysLine([{ agents: ["sales"] }, { agents: ["marketing", "chief_of_staff"] }], founder), "2 keys, used by Bravo, SDR and Maven");
-  assert.equal(customKeysLine([{ agents: ["operations"] }], founder), "1 key, used by Operations");
-  assert.equal(customKeysLine([{ agents: null }, { agents: ["finance"] }], founder), "2 keys, used by Atlas");
-  assert.equal(customKeysLine([{ agents: [] }]), "1 key, used by no agents");
-  assert.equal(customKeysLine([{ agents: ["finance"] }]), "1 key, used by Finance", "a workspace that names no agent reads departments");
+  assert.equal(customKeysLine([{ agents: "all" }, { agents: "all" }], founder), "2 keys, each for all agents");
+  // An open key does not hide the narrow ones (final review of #748).
+  assert.equal(customKeysLine([{ agents: "all" }, { agents: ["sales"] }], founder), "2 keys, assigned to SDR; 1 for all agents");
+  assert.equal(customKeysLine([{ agents: ["sales"] }, { agents: ["marketing", "chief_of_staff"] }], founder), "2 keys, assigned to Bravo, SDR and Maven");
+  assert.equal(customKeysLine([{ agents: ["operations"] }], founder), "1 key, assigned to Operations");
+  // A key whose agents cannot be read is counted, not dropped.
+  assert.equal(customKeysLine([{ agents: null }, { agents: ["finance"] }], founder), "2 keys, assigned to Atlas; 1 can't be read");
+  assert.equal(customKeysLine([{ agents: null }], founder), "1 key, 1 can't be read");
+  assert.equal(customKeysLine([{ agents: [] }]), "1 key, assigned to no agents");
+  // A key for no agent is said beside the others, not hidden by them (CodeRabbit on #750).
+  assert.equal(customKeysLine([{ agents: [] }, { agents: "all" }], founder), "2 keys, 1 for all agents; 1 for no agents");
+  assert.equal(customKeysLine([{ agents: [] }, { agents: ["sales"] }], founder), "2 keys, assigned to SDR; 1 for no agents");
+  assert.equal(customKeysLine([{ agents: ["finance"] }]), "1 key, assigned to Finance", "a workspace that names no agent reads departments");
+  // When the choices could not be read, or the agents cannot use keys, it says only that.
+  assert.equal(customKeysLine([{ agents: null }, { agents: null }], founder, { agentsUnreadable: true }), "2 keys; whom they are assigned to can't be read right now");
+  assert.equal(customKeysLine([{ agents: "all" }], founder, { assignable: false }), "1 key");
 });
 
 console.log(failures ? `custom keys: ${failures} failure(s)` : "custom keys: all passed");
