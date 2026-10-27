@@ -1525,6 +1525,13 @@ export function secretForms(value: string, headerValue: string): string[] {
   const b64url = (t: string) => b64(t).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const json = JSON.stringify(value).slice(1, -1);
   const forms = [value, json, json.replace(/\//g, "\\/"), encodeURIComponent(value), b64(value), b64url(value), b64(headerValue), b64url(headerValue)];
+  // base64 of anything that contains the key (a JSON envelope, a header dump):
+  // at each of the three byte alignments, all but the edge characters of the
+  // key's base64 are the same whatever surrounds it.
+  for (const pad of [1, 2]) {
+    const inner = b64("\u0000".repeat(pad) + value).slice(4, -4);
+    forms.push(inner, inner.replace(/\+/g, "-").replace(/\//g, "_"));
+  }
   return [...new Set(forms.map((f) => f.replace(/=+$/, "")))].filter((f) => f.length >= 4);
 }
 
@@ -1534,6 +1541,18 @@ export function secretForms(value: string, headerValue: string): string[] {
  * by a size limit: a shorter form is hidden whole, and an end of `text` that is
  * the start of a form is hidden too.
  */
+/**
+ * JSON \\uXXXX escapes of letters, digits and - _ . + / = decoded: they never
+ * need escaping, so the text means the same, and an escaped key reads as
+ * itself for scrubSecret.
+ */
+export function unescapeKeyChars(text: string): string {
+  return text.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex: string) => {
+    const c = String.fromCharCode(parseInt(hex, 16));
+    return /[A-Za-z0-9\-_.+/=]/.test(c) ? c : m;
+  });
+}
+
 export function scrubSecret(text: string, forms: readonly string[]): string {
   // Lower-cased one UTF-16 unit at a time, so every index still points at the same character.
   const lower = (t: string) => Array.from({ length: t.length }, (_, i) => {
@@ -1572,10 +1591,12 @@ export function scrubSecret(text: string, forms: readonly string[]): string {
   return out;
 }
 
-/** The media type alone ("application/json"), or "other": a raw header could carry anything back. */
+/** The common media types use_custom_key names; any other is "other", since a server-chosen token could carry a key. */
+const MEDIA_TYPES = ["application/json", "application/xml", "text/plain", "text/html", "text/csv", "text/xml", "application/x-ndjson", "application/ld+json"];
+
 function mediaTypeOnly(contentType: string): string {
   const t = contentType.split(";")[0].trim().toLowerCase();
-  return /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,63}$/.test(t) ? t : "other";
+  return MEDIA_TYPES.find((m) => m === t) ?? "other";
 }
 
 /** Headers a key may be sent in with auth "header": a plain name, never one the request itself relies on. */
@@ -1649,7 +1670,7 @@ export async function toolUseCustomKey(
   // runtime's "invalid header value" error quotes the value it refused.
   const auth = input.auth === "header" ? "header" : "bearer";
   const forms = secretForms(value, auth === "header" ? value : `Bearer ${value}`);
-  const hide = (text: string) => scrubSecret(text, forms);
+  const hide = (text: string) => scrubSecret(unescapeKeyChars(text), forms);
   const headers: Record<string, string> = { accept: "application/json, text/plain;q=0.9, */*;q=0.5" };
   if (auth === "header") {
     const headerName = typeof input.header_name === "string" ? input.header_name.trim() : "";

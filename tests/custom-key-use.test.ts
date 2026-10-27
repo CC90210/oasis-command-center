@@ -231,12 +231,41 @@ async function main() {
       "base64url of the key": b64url(SECRET),
       "lower-case percent-encoding": encodeURIComponent(`${SECRET}/x`).toLowerCase(),
     };
+    // Codex re-check of #755: \\u-escaped, and base64 of a JSON envelope around the key.
+    echoes["JSON \\u escapes"] = [...SECRET].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    echoes["base64 of a JSON envelope"] = b64(JSON.stringify({ apiKey: SECRET }));
+    echoes["base64 of a longer envelope"] = b64(`{"user":"x","apiKey":"${SECRET}","n":1}`);
+    // A key that never repeats (a repeating one can cover an alignment by coincidence):
+    // base64 of it inside any envelope, at every byte alignment, decodes to nothing of it.
+    const NONREP = "pat-na1-7f3c9e1ab24d8065fe1c3a9b7d2e4f60";
+    const nonrepForms = runner.secretForms(NONREP, `Bearer ${NONREP}`);
+    for (const pre of ["", "a", "ab", '{"apiKey":"', '{"user":"x","apiKey":"']) {
+      const out = runner.scrubSecret(b64(`${pre}${NONREP}"}`), nonrepForms);
+      const dec = Buffer.from(out.replace(/\[key hidden\]/g, ""), "base64").toString("latin1");
+      assert.ok(!dec.includes(NONREP.slice(8, 20)), `base64 envelope at offset ${pre.length} (alignment ${pre.length % 3})`);
+    }
     for (const [what, echo] of Object.entries(echoes)) {
       const n = network(() => new Response(`{"echo":"${echo}"}`, { status: 200, headers: { "content-type": "application/json" } }));
       const re2 = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), n)) as Record<string, unknown>;
-      assert.ok(!String(re2.body).includes(echo.slice(4, 16)), `${what}: hidden`);
+      const body = String(re2.body);
+      const decodedB64 = (() => {
+        try {
+          return Buffer.from(body.replace(/^.*"echo":"|".*$/g, ""), "base64").toString("utf8");
+        } catch {
+          return "";
+        }
+      })();
+      const envelope = what.includes("envelope");
+      assert.ok(envelope || !body.includes(echo.slice(8, 20)), `${what}: its encoded form is hidden`);
+      assert.ok(!runner.unescapeKeyChars(body).includes(SECRET.slice(8, 20)) && !decodedB64.includes(SECRET.slice(8, 20)), `${what}: no key decodes out of it`);
     }
     assert.equal(rj.content_type, "text/plain", "the content type alone, never the raw header");
+    const mimeKey = network(() => new Response("{}", { status: 200, headers: { "content-type": `application/${SECRET}` } }));
+    const rm = await runner.executeTool("use_custom_key", { name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT));
+    void rm;
+    const rmt = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), mimeKey)) as Record<string, unknown>;
+    assert.equal(rmt.content_type, "other", "a media type off the fixed list is 'other', never the server's token");
+    assert.ok(!JSON.stringify(rmt).includes(SECRET));
     const bearerB64 = Buffer.from(`Bearer ${SECRET}`).toString("base64");
     const lowerPct = encodeURIComponent(SECRET + "/").toLowerCase();
     const wide = network(() => new Response(`${"x".repeat(199_990)}${SECRET}${bearerB64}${lowerPct}`, { status: 200 }));
