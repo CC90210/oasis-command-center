@@ -366,6 +366,11 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
  * `today` is a YYYY-MM-DD date. Catalogue lines are checked against the live
  * catalogue by the server (store.ts) as well.
  */
+/** A rate as people read it: every digit CC saved, and no more (1_402_500 is "1.4025", 1_402_567 is "1.402567"). */
+export function rateText(ratePpm: number): string {
+  return (ratePpm / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 /** Cents in another currency at CC's rate, to the cent; null when the pair has no rate. */
 export function convertCents(cents: number, from: Currency, to: Currency, fx: FxRate | null): number | null {
   if (from === to) return cents;

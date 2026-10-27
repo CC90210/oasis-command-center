@@ -12,6 +12,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { AiAuditSettings } from "@/lib/ai-audit/store";
+import { rateText } from "@/lib/ai-audit/proposal";
 import { describeError, postJson, type ActionResult } from "./api";
 
 export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAuditSettings; rowVersion: number; isOwner: boolean }) {
@@ -23,7 +24,9 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
   const [deposit, setDeposit] = useState(settings.deposit_bps ? String(settings.deposit_bps / 100) : "");
   const [currency, setCurrency] = useState<string>(settings.default_currency);
   const [turnaround, setTurnaround] = useState(settings.turnaround);
-  const [fxRate, setFxRate] = useState(settings.fx_usd_cad ? (settings.fx_usd_cad.rate_ppm / 1_000_000).toFixed(4) : "");
+  // Every digit CC saved (Codex review of #752: rounding here rewrote the rate on any unrelated save).
+  const fxShown = settings.fx_usd_cad ? rateText(settings.fx_usd_cad.rate_ppm) : "";
+  const [fxRate, setFxRate] = useState(fxShown);
   const [fxAsOf, setFxAsOf] = useState(settings.fx_usd_cad?.as_of ?? "");
   const [fxSource, setFxSource] = useState<"bank_of_canada" | "owner">(settings.fx_usd_cad?.source ?? "owner");
 
@@ -43,7 +46,7 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
       setMessage(describeError(r.ok ? { ok: false, error: "fx_unreadable" } : r));
       return;
     }
-    setFxRate((rate.rate_ppm / 1_000_000).toFixed(4));
+    setFxRate(rateText(rate.rate_ppm));
     setFxAsOf(rate.as_of);
     setFxSource("bank_of_canada");
     setMessage(`The Bank of Canada's rate for ${rate.as_of} is filled in. Save the settings to use it.`);
@@ -61,7 +64,13 @@ export function SettingsForm({ settings, rowVersion, isOwner }: { settings: AiAu
       setMessage("The exchange rate is CAD for one USD, between 0.5 and 3 (for example 1.4025).");
       return;
     }
-    const fx_usd_cad = fxRate.trim() ? { rate_ppm: Math.round(fxNumber * 1_000_000), as_of: fxAsOf || new Date().toISOString().slice(0, 10), source: fxSource } : null;
+    // The saved rate goes back exactly as stored unless CC changed the field or pressed the Bank of Canada button.
+    const untouched = settings.fx_usd_cad && fxRate.trim() === fxShown && fxAsOf === settings.fx_usd_cad.as_of && fxSource === settings.fx_usd_cad.source;
+    const fx_usd_cad = !fxRate.trim()
+      ? null
+      : untouched
+        ? settings.fx_usd_cad
+        : { rate_ppm: Math.round(fxNumber * 1_000_000), as_of: fxAsOf || new Date().toISOString().slice(0, 10), source: fxSource };
     const r = await postJson("/api/ai-audit/settings", {
       settings: { tax, deposit_bps: deposit ? Math.round(Number(deposit) * 100) : null, default_currency: currency, engine: settings.engine, turnaround, fx_usd_cad },
       expected_row_version: rowVersion,

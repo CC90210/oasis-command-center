@@ -15,6 +15,7 @@ import {
   emptyProposal,
   itemPriceIn,
   proposalBlockers,
+  rateText,
   proposalTotals,
   withConfirmedPrice,
   type FxRate,
@@ -88,18 +89,28 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
   /** A confirmed item's price in this proposal's currency: its own, or converted at CC's rate; null when it cannot be. */
   const priceOf = (item: CatalogueItem, currency: Currency = p.currency) => itemPriceIn(item, currency, fx);
   const usable = catalogue.filter((c) => c.status === "confirmed" && priceOf(c) !== null);
-  const rateWords = fx ? `1 USD = ${(fx.rate_ppm / 1_000_000).toFixed(4)} CAD (${fx.source === "bank_of_canada" ? "Bank of Canada, " : ""}${fx.as_of})` : null;
+  // The rate the lines were priced at (what the client sees), not the one in settings: they differ until a save.
+  const appliedFx = p.lines.flatMap((l) => (l.kind === "catalogue" && l.fx ? [l.fx] : []))[0] ?? null;
+  const rateWords = appliedFx ? `1 USD = ${rateText(appliedFx.rate_ppm)} CAD (${appliedFx.as_of})` : null;
   // What a save would change in the stored draft (lib/ai-audit/versions.ts normalizeProposal): the current tax
-  // rule, and a catalogue line whose price is no longer confirmed. Submit refuses until it is saved again.
+  // rule, and any catalogue line that would price differently now: its item no longer confirmed, a new price, or a
+  // new exchange rate (Codex review of #752). Submit refuses until it is saved again, so Save is offered.
   const taxChanged = !!initial && !sameTax(initial.tax, settings.tax);
-  const priceChanged = !!initial && initial.lines.some((l) => l.kind === "catalogue" && !catalogue.some((c) => c.id === l.item_id && c.status === "confirmed"));
+  const priceChanged =
+    !!initial &&
+    initial.lines.some((l) => {
+      if (l.kind !== "catalogue") return false;
+      const item = catalogue.find((c) => c.id === l.item_id && c.status === "confirmed");
+      const now = item ? itemPriceIn(item, initial.currency, fx) : null;
+      return !now || now.unit_price_cents !== l.unit_price_cents || (now.fx?.rate_ppm ?? null) !== (l.fx?.rate_ppm ?? null) || (now.fx?.as_of ?? null) !== (l.fx?.as_of ?? null);
+    });
   const staleWords =
     taxChanged && priceChanged
-      ? "The tax rule changed since this was saved, and so did a catalogue price: save it to apply them."
+      ? "The tax rule changed since this was saved, and so did a price or the exchange rate: save it to apply them."
       : taxChanged
         ? "The tax rule changed since this was saved: save it to apply."
         : priceChanged
-          ? "A catalogue price changed since this was saved: save it to apply."
+          ? "A price or the exchange rate changed since this was saved: save it to apply."
           : null;
   const disabled = !editable || busy;
   const money = (c: number) => formatMoney(c, p.currency);
@@ -259,7 +270,7 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
                     {l.kind === "catalogue" ? `Catalogue (${l.sku} v${l.item_version})` : l.kind === "owner_set" ? "Your price" : "Needs your price"}
                     {l.kind === "catalogue" && l.fx ? (
                       <div className="mt-0.5 text-[11px] text-fg-dim">
-                        Converted from {l.fx.from_currency} {formatMoney(l.fx.from_unit_price_cents, l.fx.from_currency)} at {(l.fx.rate_ppm / 1_000_000).toFixed(4)} ({l.fx.as_of})
+                        Converted from {l.fx.from_currency} {formatMoney(l.fx.from_unit_price_cents, l.fx.from_currency)} at {rateText(l.fx.rate_ppm)} ({l.fx.as_of})
                       </div>
                     ) : null}
                     {l.kind === "needs_owner_price" && l.suggested_sku ? (

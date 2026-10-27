@@ -58,7 +58,7 @@ const BROKEN_TEXT = /\bundefined\b|\bNaN\b|\[object Object\]|Invalid Date/;
 const RAW_CARD_TEXT = /sha256|\{\{audit_link\}\}|\btotal cents\b|\bdue now cents\b|\bengagement id\b|\blead id\b|\bprofile version id\b|\bengine (mac_claude|cloud_workspace|none)\b|\["/;
 
 type Scenario = { id: string; screen: string; props: Record<string, unknown> };
-type Expect = { stage?: string; next?: string; has?: string[]; hasNot?: RegExp[] };
+type Expect = { stage?: string; next?: string; has?: string[]; hasNot?: RegExp[]; html?: string[] };
 
 /** Draws every screen for every engagement of the tenant and checks each. Answers how many screens were drawn. */
 export async function checkAuditScreens(db: Client, tenantId: string, ownerUserId: string): Promise<number> {
@@ -129,7 +129,15 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     cadView.proposal = { ...(cadView.proposal as object), content: cad, currency: "CAD" } as never;
     cadView.settings = { ...cadView.settings, tax: { mode: "not_registered" }, fx_usd_cad: fx } as never;
     scenarios.push({ id: "workspace:proposal-cad", screen: "workspace", props: { view: json(cadView), isOwner: true, initialTab: "proposal" } });
-    expect.set("workspace:proposal-cad", { has: ["Converted from USD", "Converted from the catalogue at 1 USD = 1.4025 CAD"] });
+    expect.set("workspace:proposal-cad", { has: ["Converted from USD", "Converted from the catalogue at 1 USD = 1.4025 CAD"], hasNot: [/changed since this was saved/] });
+    // Saved at 1.4025, the rate since changed to 1.5: stale, Save offered, and the note keeps the rate the lines carry
+    // (Codex review of #752).
+    const movedRate = json(cadView);
+    movedRate.proposal = { ...(movedRate.proposal as object), content: cad } as never;
+    (movedRate as unknown as { proposal: { content: unknown } }).proposal.content = cad;
+    movedRate.settings = { ...movedRate.settings, fx_usd_cad: { rate_ppm: 1_500_000, as_of: "2026-10-28", source: "owner" } } as never;
+    scenarios.push({ id: "workspace:proposal-cad-moved", screen: "workspace", props: { view: json(movedRate), isOwner: true, initialTab: "proposal" } });
+    expect.set("workspace:proposal-cad-moved", { has: ["A price or the exchange rate changed since this was saved", "Converted from the catalogue at 1 USD = 1.4025 CAD"] });
     const firstDoc = scenarios.find((x) => x.screen === "document");
     if (firstDoc) {
       scenarios.push({
@@ -163,6 +171,9 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
   }
   const items = await catalogue.listCatalogue(db, tenantId);
   const { settings, rowVersion } = await store.getSettings(db, tenantId);
+  // A saved six-digit rate is shown whole, so an unrelated save cannot round it (Codex review of #752).
+  scenarios.push({ id: "settings:precise-rate", screen: "settings", props: { settings: json({ ...settings, fx_usd_cad: { rate_ppm: 1_402_567, as_of: "2026-10-27", source: "owner" } }), rowVersion, isOwner: true } });
+  expect.set("settings:precise-rate", { html: ['value="1.402567"'] });
   for (const isOwner of [true, false]) {
     scenarios.push({ id: `catalogue:${isOwner ? "owner" : "admin"}`, screen: "catalogue", props: { items: json(items), isOwner } });
     scenarios.push({ id: `settings:${isOwner ? "owner" : "admin"}`, screen: "settings", props: { settings: json(settings), rowVersion, isOwner } });
@@ -239,6 +250,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     if (want.stage !== undefined) assert.ok(text.includes(want.stage), `${s.id} does not say its stage (${want.stage})`);
     if (want.next !== undefined) assert.ok(want.next.trim() && text.includes(`Next: ${want.next}`), `${s.id} does not say what comes next (${want.next})`);
     for (const words of want.has ?? []) assert.ok(text.includes(words), `${s.id} does not say "${words}": ${text.slice(0, 600)}`);
+    for (const markup of want.html ?? []) assert.ok((r.html as string).includes(markup), `${s.id} has no ${markup}`);
     for (const re of want.hasNot ?? []) {
       const m = re.exec(text);
       assert.ok(!m, `${s.id} shows "${m?.[0]}" near: ${text.slice(Math.max(0, (m?.index ?? 0) - 120), (m?.index ?? 0) + 120)}`);

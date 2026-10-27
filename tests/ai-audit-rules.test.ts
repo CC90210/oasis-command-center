@@ -304,6 +304,7 @@ async function main() {
     assert.equal(proposal.convertCents(150_000, "USD", "CAD", fx), 210_375, "US$1,500 at 1.4025");
     assert.equal(proposal.convertCents(210_375, "CAD", "USD", fx), 150_000, "and back");
     assert.equal(proposal.convertCents(150_000, "USD", "USD", null), 150_000, "the same currency needs no rate");
+    assert.deepEqual([proposal.rateText(1_402_500), proposal.rateText(1_402_567), proposal.rateText(1_000_000)], ["1.4025", "1.402567", "1"], "every digit CC saved, and no more");
     assert.equal(proposal.convertCents(150_000, "USD", "CAD", null), null, "no rate, no conversion");
     assert.equal(proposal.convertCents(150_000, "USD", "CAD", { ...fx, rate_ppm: 14_025_000 }), null, "a rate out of range is a typo, not a quote");
     const seed = catalogue.CATALOGUE_SEED.find((s) => s.sku === "website-growth")!;

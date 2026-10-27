@@ -20,7 +20,7 @@ import {
   type EvidenceLabel,
 } from "@/lib/ai-audit/rules";
 import { SECTION_TITLES, type AuditDoc, type DocEstimate, type DocParagraph, type DocRoadmapItem } from "@/lib/ai-audit/doc";
-import type { ProposalContent, ProposalLine, ProposalTotals } from "@/lib/ai-audit/proposal";
+import { rateText, type ProposalContent, type ProposalLine, type ProposalTotals } from "@/lib/ai-audit/proposal";
 
 export type AuditDocumentProps = {
   doc: AuditDoc;
@@ -501,7 +501,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
           </table>
           {conversions.map((f) => (
             <p key={`${f.from_currency}${f.rate_ppm}${f.as_of}`} className="aa-small" style={{ marginTop: 8 }}>
-              Prices are in {cur}, converted from our {f.from_currency} prices at 1 USD = {(f.rate_ppm / 1_000_000).toFixed(4)} CAD, the rate of {dateLong(f.as_of)}.
+              Prices are in {cur}, converted from our {f.from_currency} prices at 1 USD = {rateText(f.rate_ppm)} CAD, the rate of {dateLong(f.as_of)}.
             </p>
           ))}
           {monthly.length ? (
