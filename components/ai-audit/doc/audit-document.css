@@ -689,6 +689,651 @@ ol.aa-list {
   }
 }
 
+/* ==========================================================================
+ * The visual layer (CC, 2026-10-27: "more visual elements ... engaging ...
+ * direct ... visually appealing", one look on the page and in the PDF).
+ * A dark OASIS cover carries the three figures a client acts on; every section
+ * opens with its icon; findings, problems, opportunities and the proposal are
+ * cards; the roadmap is a timeline and the value is a chart. The body stays
+ * paper and ink, so it reads and prints like a consulting deliverable.
+ * ========================================================================== */
+
+.aa {
+  --aa-night: #071226;
+  --aa-night-2: #0d2444;
+  --aa-signal-soft: #e6fbff;
+  --aa-signal-deep: #0a6f86;
+  --aa-warn: #b7791f;
+  --aa-warn-soft: #fff7e8;
+  --aa-radius: 10px;
+}
+
+.aa-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* The cover ------------------------------------------------------------- */
+.aa-paper {
+  border-top: none;
+  overflow: hidden;
+}
+
+.aa-cover {
+  margin: -56px -64px 0;
+  padding: 44px 64px 40px;
+  color: #ffffff;
+  background:
+    radial-gradient(120% 90% at 100% 0%, rgba(0, 212, 255, 0.22) 0%, rgba(0, 212, 255, 0) 55%),
+    radial-gradient(80% 70% at 0% 100%, rgba(0, 212, 255, 0.1) 0%, rgba(0, 212, 255, 0) 60%),
+    linear-gradient(160deg, var(--aa-night) 0%, var(--aa-night-2) 100%);
+  border-bottom: 3px solid var(--aa-signal);
+}
+
+.aa-cover-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 44px;
+}
+
+.aa-cover-logo {
+  width: 32px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.35), 0 0 18px rgba(0, 212, 255, 0.25);
+}
+
+.aa-cover .aa-brand {
+  color: #ffffff;
+  margin: 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 13px;
+}
+
+.aa-cover .aa-brand span {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.aa-eyebrow {
+  font-family: var(--font-data, "JetBrains Mono"), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--aa-signal);
+  margin: 0 0 10px !important;
+}
+
+.aa-cover h1 {
+  color: #ffffff;
+  font-size: 42px;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  max-width: 18ch;
+  text-wrap: balance;
+}
+
+.aa-cover .aa-cover-meta {
+  color: rgba(255, 255, 255, 0.72);
+  margin-top: 14px;
+}
+
+.aa-cover .aa-notice {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 212, 255, 0.4);
+  color: #ffffff;
+}
+
+.aa-glance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-top: 36px;
+}
+
+.aa-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px;
+  border-radius: var(--aa-radius);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.28);
+  min-width: 0;
+}
+
+.aa-stat-price {
+  background: rgba(0, 212, 255, 0.12);
+  border-color: rgba(0, 212, 255, 0.55);
+}
+
+.aa-stat-label {
+  font-family: var(--font-data, "JetBrains Mono"), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--aa-signal);
+}
+
+.aa-stat strong {
+  font-family: var(--font-display, "Space Grotesk"), system-ui, sans-serif;
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 600;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.aa-stat-note {
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.aa-moves {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.aa-moves-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.aa-moves ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: move;
+}
+
+.aa-moves li {
+  counter-increment: move;
+  font-size: 13px;
+  padding: 5px 12px 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+.aa-moves li::before {
+  content: counter(move);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: var(--aa-signal);
+  color: var(--aa-night);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.aa-cover-foot {
+  margin: 28px 0 0 !important;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.aa-toolbar a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--aa-night);
+  color: #ffffff;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.aa-limitations {
+  break-inside: avoid;
+}
+
+/* How to read, and the contents, side by side under the cover */
+.aa-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 24px;
+  margin-top: 36px;
+  align-items: start;
+}
+
+.aa-intro .aa-legend {
+  margin-top: 0;
+  border-radius: var(--aa-radius);
+  background: #fafbfc;
+}
+
+.aa-intro .aa-contents {
+  margin-top: 0;
+  columns: 1;
+  border-left: 1px solid var(--aa-line);
+  padding-left: 20px;
+}
+
+/* Sections -------------------------------------------------------------- */
+.aa-section {
+  border-top: none;
+  margin-top: 48px;
+  padding-top: 0;
+}
+
+.aa-section-head {
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--aa-line);
+}
+
+.aa-section-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--aa-signal-soft);
+  color: var(--aa-signal-deep);
+  box-shadow: inset 0 0 0 1px rgba(10, 111, 134, 0.14);
+}
+
+.aa-section-head .aa-section-no {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--aa-signal-deep);
+  margin-bottom: 2px;
+}
+
+.aa h2 {
+  font-size: 25px;
+}
+
+/* Cards ----------------------------------------------------------------- */
+.aa-grid {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+
+.aa-finding,
+.aa-item,
+.aa-estimate,
+.aa-package {
+  border-radius: var(--aa-radius);
+  box-shadow: 0 1px 2px rgba(11, 13, 17, 0.05);
+}
+
+.aa-finding {
+  background: #ffffff;
+}
+
+.aa-item-warn {
+  border-left: 4px solid var(--aa-warn);
+  background: linear-gradient(90deg, var(--aa-warn-soft) 0%, #ffffff 38%);
+}
+
+.aa-item-warn h3,
+.aa-opportunity-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aa-warn-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--aa-warn);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.aa-item-opportunity {
+  border-top: 3px solid var(--aa-signal);
+}
+
+.aa-opportunity-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 10px;
+}
+
+.aa-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aa-badge {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #f1f3f6;
+  color: var(--aa-ink-2);
+  border: 1px solid var(--aa-line);
+  text-transform: capitalize;
+}
+
+.aa-badge-high {
+  background: #e7f6ee;
+  color: var(--aa-verified);
+  border-color: #bfe5cf;
+}
+
+.aa-callout {
+  margin: 0 0 14px !important;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: var(--aa-signal-soft);
+  color: var(--aa-ink);
+  font-size: 15px;
+}
+
+.aa-callout strong {
+  font-family: var(--font-display, "Space Grotesk"), system-ui, sans-serif;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+
+/* The roadmap as a timeline */
+.aa-roadmap {
+  position: relative;
+}
+
+.aa-roadmap-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.aa-roadmap-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--aa-night);
+  color: var(--aa-signal);
+  font-family: var(--font-display, "Space Grotesk"), system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  box-shadow: 0 0 0 4px var(--aa-signal-soft);
+}
+
+.aa-roadmap-item {
+  border-radius: 8px;
+}
+
+/* Estimates and the value chart */
+.aa-range-value {
+  font-size: 30px;
+}
+
+.aa-payback {
+  border-color: rgba(10, 111, 134, 0.35);
+  background: linear-gradient(180deg, var(--aa-signal-soft) 0%, #ffffff 60%);
+}
+
+.aa-chart {
+  margin: 14px 0 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.aa-chart-row {
+  display: grid;
+  grid-template-columns: minmax(0, 190px) minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.aa-chart-label {
+  color: var(--aa-ink-2);
+}
+
+.aa-chart-track {
+  height: 14px;
+  border-radius: 999px;
+  background: #eef1f4;
+  overflow: hidden;
+}
+
+.aa-chart-bar {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.aa-chart-price {
+  background: var(--aa-night);
+}
+
+.aa-chart-low {
+  background: #7fe8ff;
+}
+
+.aa-chart-high {
+  background: var(--aa-signal);
+}
+
+.aa-chart-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.aa-chart figcaption {
+  margin-top: 4px;
+}
+
+/* The proposal as packages */
+.aa-packages {
+  display: grid;
+  gap: 14px;
+}
+
+.aa-package {
+  border: 1px solid var(--aa-line);
+  padding: 20px 22px;
+  background: #ffffff;
+  break-inside: avoid;
+}
+
+.aa-package-first {
+  border: 2px solid var(--aa-signal);
+  box-shadow: 0 6px 18px rgba(0, 212, 255, 0.12);
+}
+
+.aa-package-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 6px;
+}
+
+.aa-package-tag {
+  display: inline-block;
+  font-family: var(--font-data, "JetBrains Mono"), ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--aa-night);
+  color: var(--aa-signal);
+  margin-bottom: 6px;
+}
+
+.aa-package-price {
+  font-family: var(--font-display, "Space Grotesk"), system-ui, sans-serif;
+  font-size: 26px;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.aa-checks {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.aa-checks li {
+  position: relative;
+  padding-left: 26px;
+  font-size: 15px;
+  color: var(--aa-ink-2);
+}
+
+.aa-checks li::before {
+  content: "\2713";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--aa-signal-soft);
+  color: var(--aa-signal-deep);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 3px;
+}
+
+.aa-totals {
+  margin: 16px 0 0 auto;
+  max-width: 360px;
+  border-radius: var(--aa-radius);
+  border: 1px solid var(--aa-line);
+  padding: 8px 18px;
+  break-inside: avoid;
+}
+
+.aa-totals-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  font-size: 15px;
+}
+
+.aa-totals-row + .aa-totals-row {
+  border-top: 1px solid var(--aa-line);
+}
+
+.aa-totals .aa-total-row {
+  font-family: var(--font-display, "Space Grotesk"), system-ui, sans-serif;
+  font-size: 19px;
+  font-weight: 600;
+}
+
+/* Next steps as a numbered path */
+.aa-steps {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+.aa-steps li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.aa-step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 2px solid var(--aa-signal);
+  color: var(--aa-ink);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.aa-due {
+  border-radius: var(--aa-radius);
+  background: var(--aa-night);
+  color: #ffffff;
+  border: none;
+}
+
+.aa-due strong {
+  color: var(--aa-signal);
+}
+
+@media (max-width: 720px) {
+  .aa-cover {
+    margin: -32px -18px 0;
+    padding: 32px 18px 28px;
+  }
+
+  .aa-cover h1 {
+    font-size: 32px;
+  }
+
+  .aa-intro {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .aa-intro .aa-contents {
+    border-left: none;
+    padding-left: 0;
+  }
+
+  .aa-chart-row {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+
+  .aa-chart-track {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+}
+
 @page {
   size: letter;
   margin: 16mm 15mm 18mm;
@@ -749,5 +1394,82 @@ ol.aa-list {
 
   .aa a {
     text-decoration: none;
+  }
+}
+
+/* The cover is its own page, edge to edge, and the cards never split. */
+@page :first {
+  margin: 0;
+}
+
+@media print {
+  .aa,
+  .aa * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .aa-paper {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  .aa-cover {
+    margin: 0;
+    padding: 24mm 18mm 18mm;
+    min-height: 276mm;
+    display: flex;
+    flex-direction: column;
+    border-bottom: none;
+    break-after: page;
+  }
+
+  .aa-cover .aa-glance {
+    margin-top: auto;
+  }
+
+  .aa-intro {
+    margin-top: 0;
+  }
+
+  .aa-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .aa-stat,
+  .aa-roadmap-col,
+  .aa-totals,
+  .aa-chart,
+  .aa-callout,
+  .aa-steps li {
+    break-inside: avoid;
+  }
+
+  .aa-section-head {
+    break-after: avoid;
+  }
+
+  /* A long card runs on to the next page rather than leaving half of this one blank; its parts stay whole. */
+  .aa-item-opportunity,
+  .aa-estimate {
+    break-inside: auto;
+  }
+
+  .aa-opportunity-head,
+  .aa-estimate h3,
+  .aa-range,
+  .aa-pairs dt,
+  .aa-section-head + p,
+  .aa-due {
+    break-after: avoid;
+  }
+
+  .aa-callout,
+  .aa-flow,
+  .aa-pairs dd,
+  .aa-estimate tr,
+  .aa-range,
+  .aa-pay {
+    break-inside: avoid;
   }
 }

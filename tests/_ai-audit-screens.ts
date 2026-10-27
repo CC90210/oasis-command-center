@@ -164,7 +164,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
       const key = `approval:${card.id}:${card.action_kind}:${card.status}:${density}`;
       scenarios.push({ id: key, screen: "approval", props: { approval: json(card), density } });
       expect.set(key, {
-        has: ["Free AI Audit", "Open the engagement", ...(card.action_kind === "deliver_ai_audit" ? ["Price", "Read it as the client will", "Open the PDF"] : [])],
+        has: ["Free AI Audit", "Open the engagement", ...(card.action_kind === "deliver_ai_audit" ? ["Price", "Open the audit and its PDF"] : [])],
         hasNot: [RAW_CARD_TEXT, /\bUnattributed\b/],
       });
     }

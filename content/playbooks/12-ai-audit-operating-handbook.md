@@ -120,7 +120,7 @@ When you write or change a part yourself:
 ## Submitting and Gate 2
 
 - Press **Submit for final approval**. The audit and proposal freeze, and the Mac prints the PDF (the Mac must be on). If the Mac fails to print three times, the engagement is flagged and you get one alert. Fix the Mac, then press **Retry PDF**.
-- When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Open the PDF from the engagement's Delivery tab, read the email on the card, and approve only if every word is right.
+- When the PDF is ready, an **AI audit delivery** card appears in **Feed, under Needs you**. Press **Open the audit and its PDF** on the card: the page the client will see, with the PDF they get at its top (**Download the PDF**). Read both and the email on the card, and approve only if every word is right.
 - Changed your mind? **Reopen for edits** before you approve. The frozen versions are kept, and new drafts open.
 - Only the workspace owner can approve. An admin who presses Approve is told so, and the card stays waiting for you.
 - Approving checks the stored PDF file itself, not just its record. If the file is missing or altered, nothing is sent: reopen the audit and submit it again.

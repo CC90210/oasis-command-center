@@ -309,8 +309,8 @@ function AiAuditPreview({ kind, payload, clamp }: { kind: string; payload: Recor
         links={
           kind === "deliver_ai_audit"
             ? [
-                { href: `/ai-audits/${id}/preview`, label: "Read it as the client will" },
-                { href: `/api/ai-audit/${id}/pdf`, label: "Open the PDF" },
+                // One way in: the page the client will see, with the PDF it gets at its top.
+                { href: `/ai-audits/${id}/preview`, label: "Open the audit and its PDF" },
                 open,
               ]
             : [open]

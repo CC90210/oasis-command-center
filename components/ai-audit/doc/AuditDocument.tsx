@@ -93,15 +93,107 @@ function Para({ p, refs }: { p: DocParagraph; refs: Refs }) {
   );
 }
 
+/** One line icon per section, drawn inline so the web page and the PDF need nothing fetched. */
+const SECTION_ICONS: Record<number, React.ReactNode> = {
+  1: <path d="M5 3h10l4 4v14H5zM15 3v4h4M8.5 12h7M8.5 16h5" />,
+  2: <path d="M4 20V11M10 20V5M16 20v-6M22 20H2" />,
+  3: (
+    <>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m20 20-4.3-4.3" />
+    </>
+  ),
+  4: <path d="M12 3.5 21.5 20h-19zM12 10v4.5M12 17.2v.3" />,
+  5: <path d="M12 2.5l2.3 6.2 6.2 2.3-6.2 2.3L12 19.5l-2.3-6.2L3.5 11l6.2-2.3z" />,
+  6: <path d="M5 21V4M5 4h12l-2.5 4L17 12H5" />,
+  7: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" />,
+  8: <path d="M8 4h8v3H8zM6 5.5H4.5V21h15V5.5H18M8 12h8M8 16h5" />,
+  9: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M8 12h8m-3.5-3.5L16 12l-3.5 3.5" />
+    </>
+  ),
+};
+
+function SectionIcon({ n }: { n: number }) {
+  return (
+    <span className="aa-section-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" focusable="false">
+        {SECTION_ICONS[n]}
+      </svg>
+    </span>
+  );
+}
+
 function Section({ n, id, children }: { n: number; id: string; children: React.ReactNode }) {
   return (
     <section className="aa-section" id={id} aria-labelledby={`${id}-title`}>
       <div className="aa-section-head">
-        <span className="aa-section-no">{String(n).padStart(2, "0")}</span>
-        <h2 id={`${id}-title`}>{SECTION_TITLES[n - 1]}</h2>
+        <SectionIcon n={n} />
+        <div>
+          <span className="aa-section-no">Section {n}</span>
+          <h2 id={`${id}-title`}>{SECTION_TITLES[n - 1]}</h2>
+        </div>
       </div>
       {children}
     </section>
+  );
+}
+
+/**
+ * A finding's words under its own title: "Team size: 6 people." drops "Team size: ", and drops entirely when what is
+ * left is only the figure the card already shows large.
+ */
+export function findingWords(f: { title: string; statement: string; metric?: { unit: string } | null }): string | null {
+  const said = f.statement.startsWith(`${f.title}: `) ? f.statement.slice(f.title.length + 2) : f.statement;
+  if (f.metric && said.replace(f.metric.unit, "").replace(/[\d.,$%\s]/g, "") === "") return null;
+  return said ? said.charAt(0).toUpperCase() + said.slice(1) : f.statement;
+}
+
+/** "$1,370 to $3,410" for money, "2 to 4.5" otherwise: the range as the reader says it. */
+function rangeText(e: DocEstimate): string {
+  const u = e.unit === "$" || e.unit === "%" ? e.unit : null;
+  return `${withUnit(e.low, u)} to ${withUnit(e.high, u)}`;
+}
+
+function rangeTail(e: DocEstimate): string {
+  return [e.unit === "$" || e.unit === "%" ? "" : e.unit, e.period].filter(Boolean).join(" ");
+}
+
+/**
+ * Payback, from the audit's own figures only: the price due now over the monthly money estimate, so "about 3 to 7
+ * months" is a calculation the reader can redo, labelled a Reasonable estimate. None when the money estimate is not
+ * monthly, a line still needs a price, or nothing is due.
+ */
+export function paybackMonths(due: number, e: DocEstimate | undefined): { fast: number; slow: number } | null {
+  if (!e || e.unit !== "$" || !/month/.test(e.period ?? "") || due <= 0 || e.low <= 0 || e.high <= 0) return null;
+  return { fast: Math.max(1, Math.ceil(due / e.high)), slow: Math.max(1, Math.ceil(due / e.low)) };
+}
+
+function ValueChart({ due, e, cur }: { due: number; e: DocEstimate; cur: "CAD" | "USD" }) {
+  // Twelve months of the estimate's low and high against the one-time price, on one scale.
+  const rows = [
+    { label: "Investment, one time", value: due, kind: "price" },
+    { label: "Value in 12 months, low", value: e.low * 12, kind: "low" },
+    { label: "Value in 12 months, high", value: e.high * 12, kind: "high" },
+  ];
+  const top = Math.max(...rows.map((r) => r.value), 1);
+  return (
+    <figure className="aa-chart" aria-label="The one-time investment against twelve months of the estimated value">
+      {rows.map((r) => (
+        <div key={r.kind} className="aa-chart-row">
+          <span className="aa-chart-label">{r.label}</span>
+          <span className="aa-chart-track">
+            <span className={`aa-chart-bar aa-chart-${r.kind}`} style={{ width: `${Math.max(2, (r.value / top) * 100)}%` }} />
+          </span>
+          <span className="aa-chart-value">{money(Math.round(r.value * 100), cur)}</span>
+        </div>
+      ))}
+      <figcaption className="aa-small">
+        <Label label="estimate" /> Twelve times the monthly range in {e.title.toLowerCase()}, beside what the work costs once.
+      </figcaption>
+    </figure>
   );
 }
 
@@ -121,10 +213,13 @@ function lineAmount(l: ProposalLine): number | null {
   return l.kind === "needs_owner_price" ? null : l.unit_price_cents * l.quantity;
 }
 
-function RoadmapColumn({ title, hint, items, opportunities }: { title: string; hint: string; items: DocRoadmapItem[]; opportunities: Map<string, string> }) {
+function RoadmapColumn({ step, title, hint, items, opportunities }: { step: number; title: string; hint: string; items: DocRoadmapItem[]; opportunities: Map<string, string> }) {
   return (
     <div className="aa-roadmap-col">
-      <h3>{title}</h3>
+      <div className="aa-roadmap-step">
+        <span className="aa-roadmap-dot">{step}</span>
+        <h3>{title}</h3>
+      </div>
       <p className="aa-roadmap-hint">{hint}</p>
       {items.length === 0 ? <p className="aa-small">Nothing planned here.</p> : null}
       {items.map((r) => (
@@ -159,6 +254,15 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
   const monthly = proposal.lines.filter((l) => !l.optional && l.unit === "per_month");
   const optional = proposal.lines.filter((l) => l.optional);
   const deposit = proposal.payment_terms.kind === "deposit" ? proposal.payment_terms : null;
+  // The cover's figures: the largest money estimate, the time estimate, the price, and payback from those alone.
+  const topMoney = [...doc.estimates].filter((e) => e.unit === "$").sort((a, b) => b.high - a.high)[0];
+  const topHours = doc.estimates.find((e) => e.unit === "hours");
+  const priced = !proposal.lines.some((l) => l.kind === "needs_owner_price") && totals.due_now_cents > 0;
+  const payback = priced ? paybackMonths(totals.due_now_cents / 100, topMoney) : null;
+  const moves = (doc.sections.roadmap.now.length ? doc.sections.roadmap.now.map((r) => opportunityTitles.get(r.opportunity_id)) : doc.sections.opportunities.items.map((o) => o.title))
+    .filter((x): x is string => !!x)
+    .slice(0, 3);
+  const roadmapOf = new Map([...doc.sections.roadmap.now, ...doc.sections.roadmap.next, ...doc.sections.roadmap.later].map((r) => [r.opportunity_id, r]));
   // Converted prices (USD core, paid in CAD on request): one plain sentence per rate used, under the price table.
   const conversions = [
     ...new Map(
@@ -168,17 +272,25 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
 
   return (
     <div className="aa" data-audit-ready="1">
-      {mode === "web" && pdfHref ? (
+      {mode !== "pdf" && pdfHref ? (
         <div className="aa-toolbar aa-screen-only">
           <a href={pdfHref}>Download the PDF</a>
         </div>
       ) : null}
       <article className="aa-paper">
-        <header>
-          <div className="aa-brand">
-            OASIS AI <span>Solutions</span>
+        <header className="aa-cover">
+          <div className="aa-cover-top">
+            {/* eslint-disable-next-line @next/next/no-img-element -- a plain img prints in the PDF; next/image does not */}
+            <img className="aa-cover-logo" src="/oasis-logo.jpg" alt="" width="40" height="60" />
+            <div className="aa-brand">
+              OASIS AI <span>Solutions</span>
+            </div>
           </div>
-          <h1>Free AI Audit for {doc.business.name}</h1>
+          <p className="aa-eyebrow">Free AI Audit</p>
+          <h1>
+            <span className="aa-sr">Free AI Audit for </span>
+            {doc.business.name}
+          </h1>
           <p className="aa-cover-meta">
             {doc.prepared_for.name ? <>Prepared for {doc.prepared_for.name}. </> : null}
             {dateLong(doc.prepared_on)}.
@@ -187,6 +299,43 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               : ""}
           </p>
           {notice ? <p className="aa-notice">{notice}</p> : null}
+          <div className="aa-glance">
+            {topMoney ? (
+              <div className="aa-stat">
+                <span className="aa-stat-label">Revenue within reach</span>
+                <strong>{rangeText(topMoney)}</strong>
+                <span className="aa-stat-note">{rangeTail(topMoney)}, from {topMoney.title.toLowerCase()} (Estimate {refs.estimateNo.get(topMoney.id)})</span>
+              </div>
+            ) : null}
+            {topHours ? (
+              <div className="aa-stat">
+                <span className="aa-stat-label">Time back</span>
+                <strong>{rangeText(topHours)}</strong>
+                <span className="aa-stat-note">{rangeTail(topHours)} (Estimate {refs.estimateNo.get(topHours.id)})</span>
+              </div>
+            ) : null}
+            <div className="aa-stat aa-stat-price">
+              <span className="aa-stat-label">{priced ? "Investment to start" : "Investment"}</span>
+              <strong>{priced ? money(totals.due_now_cents, cur) : "To be priced"}</strong>
+              <span className="aa-stat-note">
+                {payback ? `Pays back in about ${payback.fast} to ${payback.slow} months on these estimates` : priced ? "Due to start the work" : "We confirm the price with you"}
+              </span>
+            </div>
+          </div>
+          {moves.length ? (
+            <div className="aa-moves">
+              <span className="aa-moves-label">Where we would start</span>
+              <ol>
+                {moves.map((m, i) => (
+                  <li key={i}>{m}</li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+          <p className="aa-cover-foot">Prepared by OASIS AI Solutions, oasisai.work. Private to {doc.business.name}; free, with no obligation.</p>
+        </header>
+
+        <div className="aa-intro">
           <div className="aa-legend">
             <h3>How to read this audit</h3>
             <p className="aa-small">Every finding carries one of four labels, so you can see how sure we are and why.</p>
@@ -211,7 +360,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </li>
             ))}
           </ol>
-        </header>
+        </div>
 
         <Section n={1} id="s1">
           {doc.sections.executive_overview.paragraphs.map((p, i) => (
@@ -252,7 +401,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
 
         <Section n={3} id="s3">
           {doc.sections.key_findings.intro ? <Para p={doc.sections.key_findings.intro} refs={refs} /> : null}
-          <ol className="aa-findings">
+          <ol className="aa-findings aa-grid">
             {doc.sections.key_findings.finding_ids.map((id) => {
               const f = findings.get(id);
               if (!f) return null;
@@ -275,7 +424,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                       </div>
                     ) : null}
                   </div>
-                  <p>{f.statement}</p>
+                  {findingWords(f) ? <p>{findingWords(f)}</p> : null}
                   {f.how_to_test ? <p className="aa-test">How we would check it: {f.how_to_test}</p> : null}
                 </li>
               );
@@ -301,8 +450,11 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
             <p>We found nothing here that we could confirm beyond the opportunities in the next section.</p>
           ) : null}
           {doc.sections.inefficiencies.items.map((it, i) => (
-            <div key={i} className="aa-item">
-              <h3>{it.title}</h3>
+            <div key={i} className="aa-item aa-item-warn">
+              <h3>
+                <span className="aa-warn-mark" aria-hidden="true">!</span>
+                {it.title}
+              </h3>
               <dl className="aa-pairs">
                 <dt>Why it matters</dt>
                 <dd>
@@ -319,8 +471,27 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
 
         <Section n={5} id="s5">
           {doc.sections.opportunities.items.map((o) => (
-            <div key={o.id} className="aa-item" id={`opportunity-${o.id}`}>
-              <h3>{o.title}</h3>
+            <div key={o.id} className="aa-item aa-item-opportunity" id={`opportunity-${o.id}`}>
+              <div className="aa-opportunity-head">
+                <h3>{o.title}</h3>
+                <div className="aa-badges">
+                  {roadmapOf.get(o.id) ? (
+                    <>
+                      <span className={`aa-badge aa-badge-${roadmapOf.get(o.id)!.impact}`}>Impact: {roadmapOf.get(o.id)!.impact}</span>
+                      <span className="aa-badge">Effort: {roadmapOf.get(o.id)!.effort}</span>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              {o.estimate_ids
+                .map((id) => estimates.get(id))
+                .filter((e): e is DocEstimate => !!e)
+                .slice(0, 1)
+                .map((e) => (
+                  <p key={e.id} className="aa-callout">
+                    <strong>{rangeText(e)}</strong> {rangeTail(e)} <span className="aa-small">(Estimate {refs.estimateNo.get(e.id)})</span>
+                  </p>
+                ))}
               <dl className="aa-pairs">
                 <dt>What it does</dt>
                 <dd>{o.what_it_does}</dd>
@@ -372,9 +543,9 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
 
         <Section n={6} id="s6">
           <div className="aa-roadmap">
-            <RoadmapColumn title="Now" hint="Highest impact for the effort; little to set up first." items={doc.sections.roadmap.now} opportunities={opportunityTitles} />
-            <RoadmapColumn title="Next" hint="Builds on the first changes." items={doc.sections.roadmap.next} opportunities={opportunityTitles} />
-            <RoadmapColumn title="Later" hint="Worth it once the basics run." items={doc.sections.roadmap.later} opportunities={opportunityTitles} />
+            <RoadmapColumn step={1} title="Now" hint="Highest impact for the effort; little to set up first." items={doc.sections.roadmap.now} opportunities={opportunityTitles} />
+            <RoadmapColumn step={2} title="Next" hint="Builds on the first changes." items={doc.sections.roadmap.next} opportunities={opportunityTitles} />
+            <RoadmapColumn step={3} title="Later" hint="Worth it once the basics run." items={doc.sections.roadmap.later} opportunities={opportunityTitles} />
           </div>
         </Section>
 
@@ -389,10 +560,8 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                   <span className="aa-section-no">E{refs.estimateNo.get(e.id)}</span> {e.title} <Label label="estimate" />
                 </h3>
                 <div className="aa-range">
-                  <span className="aa-range-value">
-                    {withUnit(e.low, e.unit === "$" || e.unit === "%" ? e.unit : null)} to {withUnit(e.high, e.unit === "$" || e.unit === "%" ? e.unit : null)}
-                  </span>
-                  <span className="aa-small">{[e.unit === "$" || e.unit === "%" ? "" : e.unit, e.period].filter(Boolean).join(" ")}</span>
+                  <span className="aa-range-value">{rangeText(e)}</span>
+                  <span className="aa-small">{rangeTail(e)}</span>
                 </div>
                 <RangeBar e={e} />
                 <p className="aa-small">How it is worked out: {e.formula}.</p>
@@ -436,6 +605,18 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </div>
             );
           })}
+          {topMoney && payback ? (
+            <div className="aa-estimate aa-payback">
+              <h3>
+                Value against the investment <Label label="estimate" />
+              </h3>
+              <ValueChart due={totals.due_now_cents / 100} e={topMoney} cur={cur} />
+              <p className="aa-small">
+                How it is worked out: {money(totals.due_now_cents, cur)} due to start, divided by the monthly range in Estimate {refs.estimateNo.get(topMoney.id)}. At
+                the high end the work pays for itself in about {payback.fast} {payback.fast === 1 ? "month" : "months"}, at the low end in about {payback.slow}.
+              </p>
+            </div>
+          ) : null}
           {doc.sections.impact.limitations.length ? (
             <div className="aa-limitations">
               <h3>Limits of these estimates</h3>
@@ -452,60 +633,50 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
         </Section>
 
         <Section n={8} id="s8">
-          <table className="aa-proposal-table">
-            <thead>
-              <tr>
-                <th scope="col">What we would deliver</th>
-                <th scope="col" className="aa-money">
-                  Quantity
-                </th>
-                <th scope="col" className="aa-money">
-                  Unit price
-                </th>
-                <th scope="col" className="aa-money">
-                  Amount
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {oneTime.map((l) => (
-                <tr key={l.line_id}>
-                  <td>
-                    <strong>{l.name}</strong>
-                    {l.description ? <div className="aa-small">{l.description}</div> : null}
-                    {l.deliverables.length ? (
-                      <ul className="aa-list aa-small" style={{ marginTop: 6 }}>
-                        {l.deliverables.map((d, i) => (
-                          <li key={i}>{d}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </td>
-                  <td className="aa-money">{l.quantity}</td>
-                  <td className="aa-money">{l.kind === "needs_owner_price" ? "To be priced" : money(l.unit_price_cents, cur)}</td>
-                  <td className="aa-money">{lineAmount(l) === null ? "To be priced" : money(lineAmount(l) as number, cur)}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td colSpan={3}>Subtotal</td>
-                <td className="aa-money">{money(totals.subtotal_cents, cur)}</td>
-              </tr>
-              {proposal.tax && proposal.tax.mode === "registered" ? (
-                <tr>
-                  <td colSpan={3}>
-                    {proposal.tax.label} ({plainNumber(proposal.tax.rate_bps / 100)}%){proposal.tax.number ? `, registration ${proposal.tax.number}` : ""}
-                  </td>
-                  <td className="aa-money">{money(totals.tax_cents, cur)}</td>
-                </tr>
-              ) : null}
-              <tr className="aa-total-row">
-                <td colSpan={3}>Total ({cur})</td>
-                <td className="aa-money">{money(totals.total_cents, cur)}</td>
-              </tr>
-            </tfoot>
-          </table>
+          <div className="aa-packages">
+            {oneTime.map((l, i) => (
+              <div key={l.line_id} className={`aa-package${i === 0 ? " aa-package-first" : ""}`}>
+                <div className="aa-package-head">
+                  <div>
+                    {i === 0 ? <span className="aa-package-tag">Start here</span> : null}
+                    <h3>{l.name}</h3>
+                  </div>
+                  <strong className="aa-package-price">{lineAmount(l) === null ? "To be priced" : money(lineAmount(l) as number, cur)}</strong>
+                </div>
+                {l.description ? <p className="aa-small">{l.description}</p> : null}
+                {l.deliverables.length ? (
+                  <ul className="aa-checks">
+                    {l.deliverables.map((d, j) => (
+                      <li key={j}>{d}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {l.quantity !== 1 ? (
+                  <p className="aa-small">
+                    {l.quantity} at {l.kind === "needs_owner_price" ? "a price to confirm" : money(l.unit_price_cents, cur)} each
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <div className="aa-totals">
+            <div className="aa-totals-row">
+              <span>Subtotal</span>
+              <span className="aa-money">{money(totals.subtotal_cents, cur)}</span>
+            </div>
+            {proposal.tax && proposal.tax.mode === "registered" ? (
+              <div className="aa-totals-row">
+                <span>
+                  {proposal.tax.label} ({plainNumber(proposal.tax.rate_bps / 100)}%){proposal.tax.number ? `, registration ${proposal.tax.number}` : ""}
+                </span>
+                <span className="aa-money">{money(totals.tax_cents, cur)}</span>
+              </div>
+            ) : null}
+            <div className="aa-totals-row aa-total-row">
+              <span>Total ({cur})</span>
+              <span className="aa-money">{money(totals.total_cents, cur)}</span>
+            </div>
+          </div>
           {conversions.map((f) => (
             <p key={`${f.from_currency}${f.rate_ppm}${f.as_of}`} className="aa-small" style={{ marginTop: 8 }}>
               Prices are in {cur}, converted from our {f.from_currency} prices at 1 USD = {rateText(f.rate_ppm)} CAD, the rate of {dateLong(f.as_of)}.
@@ -613,9 +784,12 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
           {doc.sections.next_steps.steps.length ? (
             <>
               <h3 style={{ marginTop: 24 }}>What happens next</h3>
-              <ol className="aa-list">
+              <ol className="aa-steps">
                 {doc.sections.next_steps.steps.map((s, i) => (
-                  <li key={i}>{s}</li>
+                  <li key={i}>
+                    <span className="aa-step-no">{i + 1}</span>
+                    <span>{s}</span>
+                  </li>
                 ))}
               </ol>
             </>

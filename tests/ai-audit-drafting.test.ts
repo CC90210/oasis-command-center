@@ -247,6 +247,20 @@ async function main() {
     assert.equal(d.sections.current_assessment.systems[0]?.name, "Jobber");
     assert.equal(opps.OPPORTUNITY_SKU.get("constructor"), undefined, "an id CC typed is never an object's own key");
   });
+  await check("the AI sales setter's tier is the catalogue's: one lead source is launch, several are scale; complete is CC's to pick", () => {
+    const tier = (said: string | null, leads?: number) => {
+      const findings = [
+        ...(said === null ? [] : [{ id: "f-sales-lead-sources", title: "Where leads come from", statement: `Where leads come from: ${said}.`, label: "client_reported", source_ids: [] }]),
+        ...(leads === undefined ? [] : [{ id: "f-sales-leads-per-month", title: "Leads per month", statement: `Leads per month: ${leads} leads/month.`, label: "client_reported", metric: { value: leads, unit: "leads/month" }, source_ids: [] }]),
+      ];
+      return opps.setterSku({ findings, estimates: [], tools: [] } as never);
+    };
+    assert.equal(tier(null), "checkout-sales-setter-launch", "nothing said: the smallest tier");
+    assert.equal(tier("Google, 40"), "checkout-sales-setter-launch");
+    assert.equal(tier("Google, 40; referrals, 10"), "checkout-sales-setter-scale");
+    assert.equal(tier("Google, 40; referrals, 10; Instagram; walk-ins"), "checkout-sales-setter-scale", "no figure picks the complete tier");
+    assert.equal(tier("Google, 40", 400), "checkout-sales-setter-launch", "volume alone is not a catalogue rule");
+  });
 
   console.log("the proposal's first draft");
   await check("a line is priced only from a confirmed catalogue version; one line per item; the rest need CC's price", () => {
@@ -287,6 +301,27 @@ async function main() {
     assert.ok(first.kind === "catalogue" && first.currency === "CAD" && first.unit_price_cents === 490_875 && first.fx?.from_unit_price_cents === 350_000, JSON.stringify(first));
     assert.ok(proposal.validateProposalContent(cad).ok);
     assert.equal(draft.draftProposal({ ...args, fx: null }).lines[0].kind, "needs_owner_price", "no rate: the line waits for CC's price");
+  });
+  await check("firm for now, open for later: a line only the Later column needs is an optional add-on outside the total", () => {
+    const confirmed = [
+      { id: "cat-a", tenant_id: OASIS, item_version: 1, status: "confirmed", is_fixture: false, sku: "checkout-sales-setter-launch", name: "AI sales setter, launch", description: "One lead source.", category: "implementation", unit: "fixed", price_cents: 150_000, currency: "CAD", deliverables: ["Setup"], onboarding_requirements: [], source_ref: { file: "x" } },
+      { id: "cat-b", tenant_id: OASIS, item_version: 1, status: "confirmed", is_fixture: false, sku: "fleet-custom-integration", name: "Custom integration", description: "One integration.", category: "implementation", unit: "fixed", price_cents: 90_000, currency: "CAD", deliverables: ["Integration"], onboarding_requirements: [], source_ref: { file: "x" } },
+    ] as never;
+    const setter = { ...built.opportunities[0], id: "o-now", sku: "checkout-sales-setter-launch" };
+    const later = { ...built.opportunities[0], id: "o-later", sku: "fleet-custom-integration" };
+    const item = (id: string) => ({ ...d.sections.roadmap.now[0], opportunity_id: id });
+    const base = { opportunities: [setter, later], confirmed, currency: "CAD" as const, tax: { mode: "not_registered" as const }, depositBps: null, to: "owner@fixture.test", businessName: "Fixture Plumbing", contactName: "Dana Smith", today: "2026-10-26" };
+    const p = draft.draftProposal({ ...base, roadmap: { now: [item("o-now")], next: [], later: [item("o-later")] } });
+    assert.ok(proposal.validateProposalContent(p).ok);
+    assert.deepEqual(p.lines.map((l) => [l.kind === "catalogue" ? l.sku : "", l.optional]), [["checkout-sales-setter-launch", false], ["fleet-custom-integration", true]]);
+    const t = proposal.proposalTotals(p);
+    assert.deepEqual([t.subtotal_cents, t.optional_cents], [150_000, 90_000], "the add-on is priced but not in the total");
+    // An item the Now column also needs is not optional, even if a Later opportunity shares it.
+    const shared = draft.draftProposal({ ...base, opportunities: [setter, { ...later, sku: "checkout-sales-setter-launch" }], roadmap: { now: [item("o-now")], next: [], later: [item("o-later")] } });
+    assert.deepEqual(shared.lines.map((l) => l.optional), [false]);
+    // Everything for later: all of it stays in, so the proposal still has something due.
+    const allLater = draft.draftProposal({ ...base, roadmap: { now: [], next: [], later: [item("o-now"), item("o-later")] } });
+    assert.deepEqual(allLater.lines.map((l) => l.optional), [false, false]);
   });
 
 

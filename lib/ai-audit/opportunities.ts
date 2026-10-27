@@ -47,6 +47,7 @@ export const F = {
   missedCalls: "f-sales-missed-calls-per-week",
   responseTime: "f-sales-response-time-hours",
   leads: "f-sales-leads-per-month",
+  leadSources: "f-sales-lead-sources",
   adminHours: "f-ops-admin-hours-per-week",
   repetitiveTasks: "f-ops-repetitive-tasks",
   manualWorkflows: "f-ops-manual-workflows",
@@ -262,6 +263,18 @@ export function rangeWords(e: DocEstimate): string {
   return `${one(e.low)} to ${one(e.high)}${e.period ? ` ${e.period}` : ""}`;
 }
 
+/**
+ * The AI sales setter's tier, by the catalogue's own words (lib/ai-audit/catalogue.ts): launch is "one lead source",
+ * scale is "multi-source intake", so two or more sources the client named draft the scale tier. The complete tier
+ * has no rule a figure can meet, so it is CC's choice on the draft, never the code's.
+ */
+export function setterSku(x: OpportunityInputs): string {
+  const named = x.findings.find((f) => f.id === F.leadSources);
+  const said = named && named.statement.includes(": ") ? named.statement.slice(named.statement.indexOf(": ") + 2) : "";
+  const sources = said.split(/;\s*/).filter((s) => s.trim().replace(/\.$/, "")).length;
+  return sources >= 2 ? "checkout-sales-setter-scale" : "checkout-sales-setter-launch";
+}
+
 /** Every opportunity the research supports, most valuable first, each citing what it rests on. */
 export function planOpportunities(x: OpportunityInputs): PlannedOpportunity[] {
   // Most impact first; among equals, the least effort first.
@@ -287,7 +300,7 @@ export function planOpportunities(x: OpportunityInputs): PlannedOpportunity[] {
       finding_ids,
       estimate_ids,
       workflow: r.workflow,
-      sku: r.sku,
+      sku: r.sku === "checkout-sales-setter-launch" ? setterSku(x) : r.sku,
       impact: r.impact,
       effort: r.effort,
       urgency: r.urgency,
