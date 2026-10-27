@@ -13,7 +13,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { AGENT_CHOICES, APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
+import { APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
+import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
 import {
   clearAgentAccess,
   defaultAccess,
@@ -22,6 +23,7 @@ import {
   saveAgentAccess,
 } from "@/lib/os/agent-access-store";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
+import { looksLikeSecret } from "@/lib/os/custom-keys";
 import { VAULT_KEY_PATTERN } from "@/lib/tenant-integration-store";
 
 export const runtime = "nodejs";
@@ -51,7 +53,8 @@ export async function GET() {
     const { access, saved } = effectiveAccess(overrides, target);
     connectors[slug] = { access, saved, suggested: defaultAccess(target), unreadable: access === null };
   }
-  return NextResponse.json({ ok: true, choices: AGENT_CHOICES, connectors });
+  // The agents as this workspace's AI Team names them ("Maven (Marketing)"), for the picker and the cards.
+  return NextResponse.json({ ok: true, choices: await agentChoicesForSession(), connectors });
 }
 
 /** The apps a choice may be saved for: every card, plus the apps agent tools use (TextTorrent, Kixie have no card). */
@@ -72,7 +75,13 @@ export async function PUT(req: NextRequest) {
   let target: AccessTarget;
   if (body.kind === "connector" && typeof body.id === "string" && knownApps().includes(body.id)) {
     target = { kind: "connector", slug: body.id };
-  } else if (body.kind === "custom" && typeof body.id === "string" && VAULT_KEY_PATTERN.test(body.id.trim().toUpperCase())) {
+  } else if (
+    body.kind === "custom" &&
+    typeof body.id === "string" &&
+    // A secret is never stored as a name, here or in the vault (lib/os/custom-keys.ts).
+    !looksLikeSecret(body.id) &&
+    VAULT_KEY_PATTERN.test(body.id.trim().toUpperCase())
+  ) {
     target = { kind: "custom", key: body.id.trim().toUpperCase() };
   } else {
     return NextResponse.json({ ok: false, error: "unknown_target" }, { status: 400 });
