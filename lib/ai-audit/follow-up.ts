@@ -44,7 +44,7 @@ const FOLLOW_UP_TTL_DAYS = 7;
 const nameOf = (name: string | null | undefined) => oneLineName(name, "your business");
 
 /** The address the audit itself went to, and the delivery's key (the link is derived from it): follow-ups go there only. */
-async function deliveredTo(db: Client, t: string, approvalId: string): Promise<{ to: string; idempotencyKey: string } | null> {
+export async function deliveredTo(db: Client, t: string, approvalId: string): Promise<{ to: string; idempotencyKey: string } | null> {
   const delivery = await getApprovalInTenant(db, t, approvalId);
   if (!delivery || delivery.action_kind !== DELIVER_AI_AUDIT_KIND) return null;
   let payload: Record<string, unknown>;

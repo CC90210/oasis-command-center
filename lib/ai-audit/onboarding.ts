@@ -11,7 +11,7 @@
  *   3. the delivery project (a UUID derived from the engagement);
  *   4. the checklist: the standard steps plus each proposal line's own
  *      onboarding requirements (UUIDs derived from the project and the step);
- *   5. the welcome email, as a one-tap send_email APPROVAL for CC (never sent
+ *   5. the welcome email, as a one-tap welcome_ai_audit APPROVAL for CC (never sent
  *      automatically). It links the intake form and the kickoff booking page;
  *      credentials are collected only through Connections or the intake form;
  *   6. one alert to CC.
@@ -31,7 +31,9 @@ import { deterministicUuid } from "@/lib/ai-audit/hash";
 import { aiAuditBaseUrl } from "@/lib/ai-audit/env";
 import { advanceEngagement, moveLeadForward, leadRequestId } from "@/lib/ai-audit/lifecycle";
 import { getProposalVersion } from "@/lib/ai-audit/versions";
-import { shortName } from "@/lib/ai-audit/rules";
+import { oneLineName, shortName } from "@/lib/ai-audit/rules";
+import { WELCOME_AI_AUDIT_KIND, type WelcomeAiAuditPayload } from "@/lib/ai-audit/welcome-payload";
+import { welcomeRecipient } from "@/lib/ai-audit/welcome";
 import { getEngagement, int, patchEngagement, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
 
 /** The welcome email's approval key, by engagement: one card per engagement, found again by the engagement page. */
@@ -215,29 +217,34 @@ export async function runOnboarding(
   }
   done.push("checklist");
 
-  // 5. The welcome email, for CC to approve with one tap (the engagement page finds it by this key).
-  if (engagement.contact_email) {
+  // 5. The welcome email, for CC to approve with one tap (the engagement page finds it by this key). Its own kind, so
+  // the audit's switch sends it (lib/ai-audit/welcome.ts), and to the address the audit went to, as the follow-ups.
+  const welcomeTo = await welcomeRecipient(db, t, engagement);
+  if (welcomeTo) {
     const base = deps.baseUrl();
+    const payload: WelcomeAiAuditPayload = {
+      engagement_id: engagement.id,
+      lead_id: engagement.lead_id,
+      business_name: oneLineName(engagement.business_name, "your business"),
+      to: welcomeTo,
+      subject: `Welcome to OASIS AI: next steps for ${oneLineName(engagement.business_name, "your project")}`,
+      body: welcomeEmailBody({
+        contactName: engagement.contact_name,
+        businessName: engagement.business_name || "your business",
+        base,
+        intakeUrl: await personalIntakeUrl(db, engagement, base),
+      }),
+    };
     const welcome = await createApproval(
       db,
       {
         tenantId: t,
         departmentKey: null,
         requestedBy: { type: "routine", id: "ai-audit" },
-        actionKind: "send_email",
+        actionKind: WELCOME_AI_AUDIT_KIND,
         title: `Welcome email for ${shortName(engagement.business_name, "the new client")}`,
         targetRef: `customer:${customerId}`,
-        payload: {
-          to: engagement.contact_email,
-          subject: `Welcome to OASIS AI: next steps for ${engagement.business_name || "your project"}`,
-          body: welcomeEmailBody({
-            contactName: engagement.contact_name,
-            businessName: engagement.business_name || "your business",
-            base,
-            intakeUrl: await personalIntakeUrl(db, engagement, base),
-          }),
-          lead_id: engagement.lead_id,
-        },
+        payload: payload as unknown as Record<string, unknown>,
         idempotencyKey: `${WELCOME_APPROVAL_KEY_PREFIX}${engagement.id}`,
       },
       input.now,
@@ -245,6 +252,8 @@ export async function runOnboarding(
     if (!welcome.ok && welcome.error !== "idempotency_key_reused") {
       console.error("[ai-audit.onboarding] the welcome email approval was not created", { engagementId: engagement.id, error: welcome.error });
     }
+  } else {
+    console.error("[ai-audit.onboarding] no welcome email: the address the audit was sent to cannot be read", { engagementId: engagement.id, shareLinkId: engagement.share_link_id });
   }
   done.push("welcome_email");
 

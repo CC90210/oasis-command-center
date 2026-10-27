@@ -125,7 +125,7 @@ When you write or change a part yourself:
 - Only the workspace owner can approve. An admin who presses Approve is told so, and the card stays waiting for you.
 - Approving checks the stored PDF file itself, not just its record. If the file is missing or altered, nothing is sent: reopen the audit and submit it again.
 
-Decision point: if the card says it ran in **dry run**, nothing was sent; the engagement's overview says so too. Audit delivery has its own live switch (LIVE_SEND_AI_AUDIT), and the client's Pay button has another (LIVE_SEND_STRIPE_CHECKOUT). The general live-send switch turns on neither. Turn them on deliberately, then use **Retry delivery**, which appears after a dry run. The overview and the Setup list say which switches are live. While payments are in test mode, a client who presses Pay is told payment is not open yet, and you get an urgent alert.
+Decision point: if the card says it ran in **dry run**, nothing was sent; the engagement's overview says so too. Audit delivery, its follow-ups and a paying client's welcome email share their own live switch (LIVE_SEND_AI_AUDIT), and the client's Pay button has another (LIVE_SEND_STRIPE_CHECKOUT). The general live-send switch turns on neither. Turn them on deliberately, then use **Retry delivery**, which appears after a dry run. The overview and the Setup list say which switches are live. While payments are in test mode, a client who presses Pay is told payment is not open yet, and you get an urgent alert.
 
 ## After delivery
 
@@ -138,7 +138,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent; the en
 
 - The client pays on Stripe's page. The engagement moves to **Payment Confirmed** only when the server has re-read the session from Stripe and the amount, currency and proposal all match.
 - Marking an engagement **declined** or **cancelled** also stops its open payment link at Stripe. If a payment still lands (the client paid moments before), it is kept, the engagement is flagged, and you get an urgent alert. Nothing is refunded automatically: you decide.
-- Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval. It links the client's own onboarding form (a personal link, so their answers attach to their record, not to a new lead) and the kickoff booking page. If the form cannot be linked, the email says a form follows, and you see that on the card before you approve.
+- Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval. It links the client's own onboarding form (a personal link, so their answers attach to their record, not to a new lead) and the kickoff booking page. If the form cannot be linked, the email says a form follows, and you see that on the card before you approve. It goes to the address the audit was sent to, under the audit's own switch, so it goes out as soon as audits do.
 - When every checklist task is done, the engagement becomes **Active Client** and the lead moves into the build. That closes the audit cycle: the delivery project carries the client from there.
 
 ---
