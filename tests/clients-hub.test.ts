@@ -842,6 +842,7 @@ async function main() {
     await mk("stamped", "owner@stamped.test", null);
     await mk("slack", "owner@slack.test", null);
     await mk("approved", "owner@approved.test", null);
+    await mk("welcome", "owner@welcome.test", null);
     await mk("unsure", "owner@unsure.test", null);
     await store.addContact(db, OASIS, made.contact.id, { name: "Ops", email: "ops@contact.test", phone: null, role: null }, new Date(ago(59)));
     await store.addContact(db, OASIS, made.inbound.id, { name: "Cell", email: null, phone: "514-555-0199", role: null }, new Date(ago(59)));
@@ -866,6 +867,20 @@ async function main() {
           args: [OASIS, `customer:${made.approved.id}`, JSON.stringify({ to: "owner@approved.test", subject: "Hi", body: "APPROVED-SEND" }), ago(7),
             JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), ago(8), ago(7)],
         },
+        // A paying AI audit client's welcome email, its own approval kind, sent; and a second one still waiting (Codex review of #754).
+        {
+          sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
+                  payload_hash, status, executed_at, execution_result, idempotency_key, created_at, updated_at)
+                VALUES ('ap-t-welcome', ?, NULL, 'routine', 'ai-audit', 'welcome_ai_audit', 'Welcome email', ?, ?, 'h', 'executed', ?, ?, 'ap-t-welcome', ?, ?)`,
+          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome", body: "WELCOME-SEND" }), ago(9),
+            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), ago(10), ago(9)],
+        },
+        {
+          sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
+                  payload_hash, status, idempotency_key, created_at, updated_at)
+                VALUES ('ap-t-welcome-waiting', ?, NULL, 'routine', 'ai-audit', 'welcome_ai_audit', 'Welcome email', ?, ?, 'h2', 'pending', 'ap-t-welcome-waiting', ?, ?)`,
+          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome again", body: "WELCOME-WAITING" }), ago(11), ago(11)],
+        },
         // A send the mail server could not confirm is the ONLY thing for this one.
         li("li-t-unsure", OASIS, { type: "email_delivery_unknown", preview: "MAYBE-SENT", to_email: "owner@unsure.test", at: ago(1), metadata: JSON.stringify({ customer_id: made.unsure.id }) }),
       ],
@@ -884,7 +899,7 @@ async function main() {
     const all = Object.values(made);
     const touch = await activity.lastTouchFor(db, OASIS, all);
     const expected: Record<string, string | null> = {
-      contact: ago(2), sms: ago(3), inbound: ago(4), stamped: ago(5), slack: ago(6), approved: ago(7), unsure: null,
+      contact: ago(2), sms: ago(3), inbound: ago(4), stamped: ago(5), slack: ago(6), approved: ago(7), welcome: ago(9), unsure: null,
     };
     for (const [key, c] of Object.entries(made)) {
       assert.equal(touch.get(c.id), expected[key], `${key}: last touch`);
@@ -892,6 +907,9 @@ async function main() {
       const thread = await conversations.loadClientConversation(db, OASIS, c, await store.listContacts(db, OASIS, c.id));
       assert.equal(thread.messages.at(-1)?.at, touch.get(c.id), `${key}: the badge and the thread agree`);
     }
+    const welcomeThread = await conversations.loadClientConversation(db, OASIS, made.welcome, []);
+    assert.ok(welcomeThread.messages.some((m) => m.preview === "WELCOME-SEND"), "a sent welcome email is in the client's thread");
+    assert.ok(welcomeThread.drafts.some((d) => d.id === "ap-t-welcome-waiting"), "a welcome email waiting for approval is listed with the drafts");
     // The finding's case: health reads the contact, not "no contact since the record was created".
     await login(USERS.cc);
     const h = await page(record(made.contact.id, "health"));

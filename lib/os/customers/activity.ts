@@ -397,10 +397,10 @@ export async function lastTouchFor(
               GROUP BY 1`,
         args: [tenantId, ...part],
       }),
-      // Agents' drafts to the client, approved and sent.
+      // Agents' drafts to the client, and an AI audit client's welcome email, approved and sent.
       db.execute({
         sql: `SELECT target_ref, MAX(executed_at) AS at FROM approvals
-              WHERE tenant_id = ? AND action_kind = 'send_email' AND status = 'executed' AND executed_at IS NOT NULL
+              WHERE tenant_id = ? AND action_kind IN ('send_email', 'welcome_ai_audit') AND status = 'executed' AND executed_at IS NOT NULL
                 AND ${metaField("outcome", "execution_result")} = 'sent'
                 AND target_ref IN (${marks})
               GROUP BY target_ref`,
