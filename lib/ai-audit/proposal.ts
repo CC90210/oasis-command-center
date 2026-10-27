@@ -27,7 +27,7 @@ import {
   type CatalogueUnit,
   type Currency,
 } from "@/lib/ai-audit/rules";
-import { PRICE_MAX_CENTS } from "@/lib/ai-audit/catalogue";
+import { PRICE_MAX_CENTS, type CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { EMAIL_RE } from "@/lib/ai-audit/delivery-payload";
 
 export const PROPOSAL_SCHEMA = "ai_audit_proposal/v1" as const;
@@ -328,6 +328,33 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
  * `today` is a YYYY-MM-DD date. Catalogue lines are checked against the live
  * catalogue by the server (store.ts) as well.
  */
+/**
+ * A line priced from a confirmed catalogue item, in place (the proposal editor's "Use the confirmed price"). It
+ * keeps what the line already says for this client (description, deliverables, onboarding needs), its quantity
+ * for a per-unit item, and whether it is optional, exactly as a save keeps them (lib/ai-audit/versions.ts
+ * normalizeProposal); the item fills only what is empty (Codex review of #749).
+ */
+export function withConfirmedPrice(line: ProposalLine, item: CatalogueItem): CatalogueLine {
+  return {
+    kind: "catalogue",
+    line_id: line.line_id,
+    sku: item.sku,
+    item_id: item.id,
+    item_version: item.item_version,
+    name: item.name,
+    description: line.description || item.description,
+    category: item.category,
+    unit: item.unit,
+    ...(item.unit_label ? { unit_label: item.unit_label } : {}),
+    quantity: item.unit === "per_unit" ? line.quantity : 1,
+    optional: line.optional,
+    unit_price_cents: item.price_cents ?? 0,
+    currency: item.currency,
+    deliverables: line.deliverables.length ? line.deliverables : item.deliverables,
+    onboarding_requirements: line.onboarding_requirements.length ? line.onboarding_requirements : item.onboarding_requirements,
+  };
+}
+
 export function proposalBlockers(p: ProposalContent, today: string): string[] {
   const out: string[] = [];
   const priced = p.lines.filter((l) => l.kind !== "needs_owner_price");

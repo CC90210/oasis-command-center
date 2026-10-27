@@ -256,7 +256,8 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
 
       {tab === "overview" ? (
         <div className="grid gap-5 lg:grid-cols-2">
-          <section className="grid gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
+          {/* content-start: the taller "Where it stands" column beside it must not stretch these rows (or the Save button). */}
+          <section className="grid content-start gap-3 rounded-xl border border-hairline bg-bg-panel p-4">
             <h2 className="text-sm font-semibold text-fg">Business and contact</h2>
             <div className="grid gap-3 md:grid-cols-2">
               <div>
@@ -319,7 +320,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
               Sending to the client:{" "}
               <span className={view.sending.auditEmailLive ? "text-fg" : "text-status-warm"}>email {view.sending.auditEmailLive ? "live" : "in test mode"}</span>,{" "}
               <span className={view.sending.paymentsLive ? "text-fg" : "text-status-warm"}>payments {view.sending.paymentsLive ? "live" : "in test mode"}</span>.{" "}
-              <Link href="/ai-audits/settings#setup" className="underline-offset-2 hover:underline">
+              <Link href="/ai-audits/settings#setup" className="underline underline-offset-2">
                 Setup
               </Link>
             </div>
@@ -517,7 +518,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
             <div className="mt-2 text-fg-muted">
               Client record:{" "}
               {e.customer_id ? (
-                <Link href={`/clients/${e.customer_id}`} className="text-fg underline-offset-2 hover:underline">
+                <Link href={`/clients/${e.customer_id}`} className="text-fg underline underline-offset-2">
                   open it
                 </Link>
               ) : (
@@ -525,7 +526,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
               )}
               . Project:{" "}
               {e.delivery_project_id ? (
-                <Link href={`/projects/${e.delivery_project_id}`} className="text-fg underline-offset-2 hover:underline">
+                <Link href={`/projects/${e.delivery_project_id}`} className="text-fg underline underline-offset-2">
                   open the checklist
                 </Link>
               ) : (
@@ -540,7 +541,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
                   {view.welcome.status === "pending" ? "waiting for your approval" : approvalWords(view.welcome)}
                 </span>
                 {view.welcome.status === "pending" ? (
-                  <Link href="/feed" className="ml-2 underline-offset-2 hover:underline">
+                  <Link href="/feed" className="ml-2 underline underline-offset-2">
                     Open it in Needs you
                   </Link>
                 ) : null}

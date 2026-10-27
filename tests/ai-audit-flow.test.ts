@@ -916,6 +916,16 @@ async function main() {
     const welcome = await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email'", args: [OASIS] });
     assert.match(String(welcome.rows[0].payload_json), /never send passwords/i);
   });
+  await check("the engagement page finds the welcome card, and a card past its expiry reads as expired, as the Feed shows it (Codex review of #749)", async () => {
+    const viewLib = await import("../lib/ai-audit/view");
+    const waiting = await viewLib.engagementView(db, OASIS, engagementId, NOW());
+    assert.equal(waiting?.welcome?.status, "pending", "filed and waiting for CC");
+    const row = await db.execute({ sql: "SELECT expires_at FROM approvals WHERE tenant_id = ? AND idempotency_key = ?", args: [OASIS, `${onboarding.WELCOME_APPROVAL_KEY_PREFIX}${engagementId}`] });
+    const expires = row.rows[0]?.expires_at;
+    assert.ok(expires, "the welcome card has an expiry");
+    const later = new Date(Date.parse(String(expires)) + 60_000);
+    assert.equal((await viewLib.engagementView(db, OASIS, engagementId, later))?.welcome?.status, "expired", "never 'waiting for your approval' once it cannot be approved");
+  });
   await check("the checklist done makes an Active Client and moves the lead into the build", async () => {
     assert.equal(await onboarding.completeOnboardingIfDone(db, { tenantId: OASIS, engagementId, now: NOW() }), false);
     await db.execute({ sql: "UPDATE delivery_tasks SET status = 'done' WHERE tenant_id = ?", args: [OASIS] });

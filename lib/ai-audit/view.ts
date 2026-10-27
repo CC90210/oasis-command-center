@@ -293,7 +293,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
   const welcomeRow = engagement.customer_id
     ? (
         await db.execute({
-          sql: "SELECT id, status, execution_result FROM approvals WHERE tenant_id = ? AND idempotency_key = ? ORDER BY revision DESC LIMIT 1",
+          sql: "SELECT id, status, expires_at, execution_result FROM approvals WHERE tenant_id = ? AND idempotency_key = ? ORDER BY revision DESC LIMIT 1",
           args: [tenantId, `${WELCOME_APPROVAL_KEY_PREFIX}${engagement.id}`],
         })
       ).rows[0]
@@ -334,7 +334,15 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
       : null,
     sending: { auditEmailLive: !isDryRun(AUDIT_EMAIL_CHANNEL), paymentsLive: !isDryRun(DRY_RUN_CHANNEL) },
     welcome: welcomeRow
-      ? { id: String(welcomeRow.id), status: String(welcomeRow.status), outcome: outcomeOf(welcomeRow.execution_result) }
+      ? {
+          id: String(welcomeRow.id),
+          // A pending card past its expiry is expired, as the Feed shows it (Codex review of #749).
+          status: effectiveStatus(
+            { status: String(welcomeRow.status) as Parameters<typeof effectiveStatus>[0]["status"], expires_at: welcomeRow.expires_at == null ? null : String(welcomeRow.expires_at) },
+            now.toISOString(),
+          ),
+          outcome: outcomeOf(welcomeRow.execution_result),
+        }
       : null,
     link,
     checkouts,

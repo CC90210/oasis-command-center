@@ -195,7 +195,7 @@ function AuditLinks({ links }: { links: Array<{ href: string; label: string }> }
   return (
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[13px]">
       {links.map((l) => (
-        <Link key={l.href} href={l.href} className="font-medium text-fg underline-offset-2 hover:underline">
+        <Link key={l.href} href={l.href} className="font-medium text-fg underline underline-offset-2">
           {l.label}
         </Link>
       ))}

@@ -282,6 +282,23 @@ async function main() {
     assert.match(proposal.proposalBlockers(p, "2026-10-25").join(" "), /priced in USD, not CAD/);
   });
 
+  await check("a waiting line takes a confirmed price in place and keeps what it says for this client (Codex review of #749)", () => {
+    const seed = catalogue.CATALOGUE_SEED[0];
+    const item = { ...seed, id: "item-1", tenant_id: "t", item_version: 2, status: "confirmed" as const, is_fixture: false, created_by: null, created_at: "", updated_at: "", confirmed_by: "u", confirmed_at: "", retired_by: null, retired_at: null, price_cents: 150000 };
+    const waiting = { kind: "needs_owner_price" as const, line_id: "l3", name: "Draft name", description: "Set up booking for the two Collingwood crews", category: seed.category, unit: "per_unit" as const, unit_label: "crew", quantity: 2, optional: true, deliverables: ["Booking page for each crew"], onboarding_requirements: ["Calendar access through Connections"], suggested_sku: seed.sku };
+    const kept = proposal.withConfirmedPrice(waiting, { ...item, unit: "per_unit", unit_label: "crew" });
+    assert.equal(kept.kind, "catalogue");
+    assert.deepEqual([kept.line_id, kept.item_id, kept.item_version, kept.unit_price_cents, kept.currency], ["l3", "item-1", 2, 150000, seed.currency]);
+    assert.equal(kept.description, "Set up booking for the two Collingwood crews", "the client's own scope stays");
+    assert.deepEqual(kept.deliverables, ["Booking page for each crew"]);
+    assert.deepEqual(kept.onboarding_requirements, ["Calendar access through Connections"], "so the onboarding checklist does not change");
+    assert.deepEqual([kept.quantity, kept.optional], [2, true]);
+    const bare = proposal.withConfirmedPrice({ ...waiting, description: "", deliverables: [], onboarding_requirements: [] }, { ...item, unit: "fixed" });
+    assert.equal(bare.description, item.description, "the item fills only what is empty");
+    assert.deepEqual([bare.deliverables, bare.onboarding_requirements], [item.deliverables, item.onboarding_requirements]);
+    assert.equal(bare.quantity, 1, "a fixed-price item is one");
+  });
+
   console.log("catalogue");
   await check("every seed item cites a real file, and the cited line holds its price", () => {
     for (const item of catalogue.CATALOGUE_SEED) {

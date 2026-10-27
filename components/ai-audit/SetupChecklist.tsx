@@ -45,7 +45,7 @@ export function SetupChecklist({ checks, open }: { checks: SetupCheck[]; open?: 
               {c.link ? (
                 <>
                   {" "}
-                  <Link href={c.link.href} className="font-medium text-fg underline-offset-2 hover:underline">
+                  <Link href={c.link.href} className="font-medium text-fg underline underline-offset-2">
                     {c.link.label}
                   </Link>
                 </>

@@ -15,6 +15,7 @@ import {
   emptyProposal,
   proposalBlockers,
   proposalTotals,
+  withConfirmedPrice,
   type ProposalContent,
   type ProposalLine,
   type TaxRule,
@@ -106,29 +107,9 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
     setDirty(true);
   }
 
-  /** A line waiting for a price takes its suggested item's confirmed price, in place (quantity and optional kept). */
+  /** A line waiting for a price takes its suggested item's confirmed price, in place (lib/ai-audit/proposal.ts). */
   function takeConfirmedPrice(i: number, item: CatalogueItem) {
-    update((d) => {
-      const old = d.lines[i];
-      d.lines[i] = {
-        kind: "catalogue",
-        line_id: old.line_id,
-        sku: item.sku,
-        item_id: item.id,
-        item_version: item.item_version,
-        name: item.name,
-        description: item.description,
-        category: item.category,
-        unit: item.unit,
-        ...(item.unit_label ? { unit_label: item.unit_label } : {}),
-        quantity: item.unit === "per_unit" ? old.quantity : 1,
-        optional: old.optional,
-        unit_price_cents: item.price_cents ?? 0,
-        currency: item.currency,
-        deliverables: item.deliverables,
-        onboarding_requirements: item.onboarding_requirements,
-      };
-    });
+    update((d) => void (d.lines[i] = withConfirmedPrice(d.lines[i], item)));
   }
 
   function addCatalogue() {
@@ -217,7 +198,7 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
               : (
                 <>
                   not set yet.{" "}
-                  <Link href="/ai-audits/settings" className="font-medium text-fg underline-offset-2 hover:underline">
+                  <Link href="/ai-audits/settings" className="font-medium text-fg underline underline-offset-2">
                     Set it in AI audit settings
                   </Link>
                 </>
@@ -258,7 +239,7 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
                         ) : (
                           <div className="mt-1 text-[11px] text-fg-dim">
                             Suggested: {l.suggested_sku}, not confirmed yet.{" "}
-                            <Link href="/ai-audits/catalogue" className="underline-offset-2 hover:underline">
+                            <Link href="/ai-audits/catalogue" className="underline underline-offset-2">
                               Confirm it
                             </Link>
                           </div>
@@ -342,7 +323,7 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
             {!usable.length ? (
               <span className="self-center text-[13px] text-fg-muted">
                 No confirmed prices in {p.currency} yet.{" "}
-                <Link href="/ai-audits/catalogue" className="font-medium text-fg underline-offset-2 hover:underline">
+                <Link href="/ai-audits/catalogue" className="font-medium text-fg underline underline-offset-2">
                   Confirm prices in the catalogue
                 </Link>
               </span>
