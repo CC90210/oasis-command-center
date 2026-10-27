@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * ConnectorAgentAccess - the "Used by" section of an app's drawer, now a
+ * ConnectorAgentAccess - the "Assigned to" section of an app's drawer, a
  * choice. CC, 2026-10-26: every app has its own use and its own agents, and the
- * built-in apps come with the agents we already know they serve.
+ * built-in apps come with the agents we already know they serve. Where the
+ * workspace's agents use no app tools at all (a client workspace today), it
+ * says so instead (assignmentsApply).
  *
- * The suggestion is the catalog's "Used by" departments plus the Chief of
+ * The suggestion is the catalog's departments for the app plus the Chief of
  * Staff (lib/os/agent-access.ts connectorDefaultAccess). An owner can change it
  * and put it back. An agent the app is not given is not offered the app's
  * agent tools (APP_TOOLS); an app no agent tool uses yet says so, so the choice
@@ -37,6 +39,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
   // The workspace's agents by name ("Maven (Marketing)"), from the route.
   const [choices, setChoices] = useState<ReadonlyArray<AgentChoice>>(AGENT_CHOICES);
   const [readOnly, setReadOnly] = useState(false);
+  // This workspace's agents use no app tools at all (the route's `assignable`): nothing to assign.
+  const [assignable, setAssignable] = useState(true);
   const [draft, setDraft] = useState<AgentAccess>(suggested);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ tone: "ok" | "bad"; text: string } | null>(null);
@@ -50,8 +54,9 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
           if (live) setReadOnly(true);
           return;
         }
-        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; connectors?: Record<string, Loaded>; choices?: AgentChoice[] };
+        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; connectors?: Record<string, Loaded>; choices?: AgentChoice[]; assignable?: boolean };
         if (live && Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
+        if (live && j.assignable === false) setAssignable(false);
         const mine = j.connectors?.[slug];
         if (!r.ok || !j.ok || !mine) throw new Error("not_loaded");
         if (!live) return;
@@ -87,8 +92,8 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
       setLoaded({ access: j.access, saved: !!j.saved, suggested });
       setDraft(j.access);
       setNote({ tone: "ok", text: agents === null ? "Back to the suggested agents." : "Saved." });
-      // Every card on the page reads its agents again.
-      window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT));
+      // Every app card on the page reads its agents again (the Custom keys card is not about apps).
+      window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT, { detail: { scope: "connector" } }));
     } catch {
       setNote({ tone: "bad", text: "Not saved: the server could not be reached." });
     } finally {
@@ -99,11 +104,20 @@ export function ConnectorAgentAccess({ slug, departments }: { slug: string; depa
   if (readOnly) {
     return <p className="text-[12.5px] text-fg-muted">Suggested: {agentAccessLabel(suggested)}. An owner can change this.</p>;
   }
+  if (!assignable) {
+    // A client workspace's agents run only client-safe tools, and no app tool is one yet
+    // (assignmentsApply): an assignment here would promise what the runner refuses.
+    return (
+      <p className="text-[12.5px] leading-5 text-fg-muted" data-testid="connector-agents-not-assignable">
+        This workspace&apos;s agents don&apos;t use this app&apos;s tools yet, so it isn&apos;t assigned to any agent.
+      </p>
+    );
+  }
   const current = loaded ? loaded.access : suggested;
   const changed = current === null || !sameAgentAccess(draft, current);
   return (
     <div className="space-y-2" data-testid="connector-agent-access">
-      <AgentPicker value={draft} onChange={setDraft} disabled={busy || !loaded} label="Agents that use this app" choices={choices} />
+      <AgentPicker value={draft} onChange={setDraft} disabled={busy || !loaded} label="Agents assigned to this app" choices={choices} />
       <p className="text-[11.5px] leading-4 text-fg-dim">
         {loaded?.saved && loaded.access !== null ? "Your choice." : "Suggested: the agents this app is built for, plus the Chief of Staff."}{" "}
         {tools

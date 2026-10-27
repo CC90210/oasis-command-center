@@ -51,15 +51,15 @@ import {
 } from "@/lib/tenant-integration-store";
 import { normalizeAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
 import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
-import { looksLikeSecret, parseDotenvLines, VAULT_MAX_VALUE_LENGTH } from "@/lib/os/custom-keys";
-import { accessField, clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
+import { looksLikeSecret, parseDotenvLines, VAULT_MAX_PASTE_ENTRIES, VAULT_MAX_VALUE_LENGTH } from "@/lib/os/custom-keys";
+import { accessField, assignmentsApply, clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_KEY_LEN = 64;
 const MAX_VALUE_LEN = VAULT_MAX_VALUE_LENGTH; // 8 KB per value, shared with the vault's own check
-const MAX_BULK_ENTRIES = 100;
+const MAX_BULK_ENTRIES = VAULT_MAX_PASTE_ENTRIES; // shared with the vault, which says so before sending more
 
 
 function normalizeKey(raw: unknown): string | null {
@@ -126,8 +126,10 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     entries: rows,
-    // The agents as this workspace's AI Team names them, for the picker and each key's "Used by".
+    // The agents as this workspace's AI Team names them, for the picker and each key's "Assigned to".
     choices,
+    // Whether this workspace's agents can read custom keys at all (assignmentsApply).
+    assignable: assignmentsApply(sess.tenantId, "custom"),
     ...(overrides.ok ? {} : { agents_error: "Could not read which agents may use these keys." }),
   });
 }

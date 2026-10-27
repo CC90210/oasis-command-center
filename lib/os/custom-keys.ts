@@ -27,8 +27,15 @@ import type { DepartmentKey } from "@/lib/os/types";
 /** A saved key's name: VAULT_KEY_PATTERN in lib/tenant-integration-store.ts (a test keeps the two equal). */
 export const VAULT_KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-/** The longest value the vault keeps: 8 KB, enough for a private key. The route refuses longer. */
+/**
+ * The longest value the vault keeps: 8 KB. The route refuses longer. A value is
+ * one line (the form's box and a pasted KEY=value line), so a multi-line PEM
+ * key does not keep its line breaks.
+ */
 export const VAULT_MAX_VALUE_LENGTH = 8192;
+
+/** The most keys one save takes; the vault says so before the route refuses more. */
+export const VAULT_MAX_PASTE_ENTRIES = 100;
 
 /**
  * What a typed name is saved as: upper case, with every run of other
@@ -369,12 +376,40 @@ export function recognizeCustomKey(name: string, value = ""): KeyHint | null {
  */
 export function looksLikeSecret(raw: string): boolean {
   const t = raw.trim();
-  if (!t) return false;
-  if (appByValue(t)) return true;
-  if (/\s/.test(t) || !/\d/.test(t)) return false;
-  if (t.length >= 32 && /^[A-Za-z0-9+/=._-]+$/.test(t) && !t.includes("_")) return true;
+  // Words joined by _ - or . are a name, even one that starts like a key: hf_token,
+  // xai-api-key and AKIA_PROD_KEY were refused before (final review of OCC #748).
+  if (!t || /\s/.test(t) || readsAsWords(t)) return false;
+  // A known key's start with a key's worth after it.
+  const prefixed = KNOWN_APPS.some((app) => (app.prefixes ?? []).some((p) => t.startsWith(p) && t.length - p.length >= 16));
+  if (prefixed) return true;
+  if (!/\d/.test(t)) return false;
+  if (t.length >= 32 && /^[A-Za-z0-9+/=._-]+$/.test(t)) return true;
   const digits = (t.match(/\d/g) || []).length;
   return t.length >= 24 && digits >= 2 && /^[A-Za-z0-9+/=]+$/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t);
+}
+
+/**
+ * Does it read as words joined by _ - or . (a name), rather than one random run
+ * (a token)? At least two parts are plain words, and the words are at least
+ * half of its letters and digits. A UUID has one word-like part at most.
+ */
+function readsAsWords(t: string): boolean {
+  const parts = t.split(/[_.-]+/).filter(Boolean);
+  const words = parts.filter((s) => /^[A-Za-z]{2,}$/.test(s));
+  return words.length >= 2 && words.join("").length * 2 >= parts.join("").length;
+}
+
+/**
+ * A warning for a value that can move money: a full Stripe secret key (sk_).
+ * Stripe's card connects with a read-only restricted key (rk_), and a key saved
+ * here goes to whichever agents it is assigned, so the vault suggests no agents
+ * for it: the owner picks, knowing.
+ */
+export function valueCaution(value: string): string | null {
+  const v = value.trim();
+  return /^sk_(live|test)_./.test(v)
+    ? "This is a full Stripe secret key: it can move money, and so can any agent given it. Stripe's own card connects with a read-only restricted key (rk_live_...)."
+    : null;
 }
 
 /** Where a picker choice was made: for which name, and whether that name was a saved key. */
@@ -420,15 +455,32 @@ export function pastedNameProblem(rawKey: string, value: string): string | null 
 
 /**
  * The Custom keys card's line on Settings > Connections: how many keys, and
- * who uses them ("3 keys, used by SDR, Maven and Bravo"). One key open to all
- * agents makes it all agents. A key whose agents cannot be read adds no one.
+ * whom they are assigned to ("3 keys, assigned to Bravo and SDR; 1 for all
+ * agents"). Each part is said, so an open key does not hide the narrow ones and
+ * a key whose agents cannot be read is counted as such (final review of OCC
+ * #748). Where the workspace's agents cannot use custom keys, or the choices
+ * could not be read, it says only that.
  */
-export function customKeysLine(entries: ReadonlyArray<{ agents: AgentAccess | null }>, choices?: ReadonlyArray<AgentChoice>): string {
+export function customKeysLine(
+  entries: ReadonlyArray<{ agents: AgentAccess | null }>,
+  choices?: ReadonlyArray<AgentChoice>,
+  opts: { assignable?: boolean; agentsUnreadable?: boolean } = {},
+): string {
   if (entries.length === 0) return "No keys yet";
   const count = `${entries.length} key${entries.length === 1 ? "" : "s"}`;
-  if (entries.some((e) => e.agents === "all")) return `${count}, used by all agents`;
+  if (opts.assignable === false) return count;
+  if (opts.agentsUnreadable) return `${count}; whom they are assigned to can't be read right now`;
+  const forAll = entries.filter((e) => e.agents === "all").length;
+  const unreadable = entries.filter((e) => e.agents === null).length;
   const departments = orderedDepartments(entries.flatMap((e) => (e.agents && e.agents !== "all" ? e.agents : [])));
-  return departments.length === 0 ? `${count}, used by no agents` : `${count}, used by ${agentNamesSentence(departments, choices)}`;
+  const parts: string[] = [];
+  if (departments.length > 0) parts.push(`assigned to ${agentNamesSentence(departments, choices)}`);
+  if (forAll > 0) parts.push(forAll === entries.length ? "each for all agents" : `${forAll} for all agents`);
+  // A key for no agent is the narrowest of all: it is said too, not hidden by the others (CodeRabbit, #750).
+  const none = entries.filter((e) => Array.isArray(e.agents) && e.agents.length === 0).length;
+  if (none > 0) parts.push(none === entries.length ? "assigned to no agents" : `${none} for no agents`);
+  if (unreadable > 0) parts.push(`${unreadable} can't be read`);
+  return `${count}, ${parts.join("; ")}`;
 }
 
 /**

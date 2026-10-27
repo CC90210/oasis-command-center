@@ -229,7 +229,7 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     name: "add_credential",
     description:
-      "Save a new credential to the vault (admin only — same gate as Settings → Custom credentials). Use this when the operator gives you a secret in chat that future chats will need (an API key they just generated, a webhook URL for a new integration, etc.). After saving, tell the operator what KEY name you saved it as so they can find it under Settings if they need to edit or delete. NEVER call this for the operator's PERSONAL transient secrets (one-time tokens, OTP codes, passwords); only evergreen workflow credentials.",
+      "Save a new credential to the vault (admin only — same gate as Settings > Connections > Custom keys). Use this when the operator gives you a secret in chat that future chats will need (an API key they just generated, a webhook URL for a new integration, etc.). After saving, tell the operator what KEY name you saved it as so they can find it under Settings if they need to edit or delete. NEVER call this for the operator's PERSONAL transient secrets (one-time tokens, OTP codes, passwords); only evergreen workflow credentials.",
     input_schema: {
       type: "object",
       properties: {
@@ -249,7 +249,7 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     name: "get_credential",
     description:
-      "Retrieve a secret credential (API key, webhook URL, access token) the operator saved in Settings → Custom credentials. Use this BEFORE asking the operator for a credential they may have already stored. The value is returned but you should NEVER echo it back to the operator in chat — pass it directly to the action that needs it (e.g., http_post Authorization header) and tell the operator what you did, not what the value was. If the credential doesn't exist, you'll get {found:false} — at that point, tell the operator the credential is missing and which exact KEY name to add under Settings → Custom credentials.",
+      "Retrieve a secret credential (API key, webhook URL, access token) the operator saved in Settings > Connections > Custom keys. Use this BEFORE asking the operator for a credential they may have already stored. The value is returned but you should NEVER echo it back to the operator in chat — pass it directly to the action that needs it (e.g., http_post Authorization header) and tell the operator what you did, not what the value was. If the credential doesn't exist, you'll get {found:false} — at that point, tell the operator the credential is missing and which exact KEY name to add under Settings > Connections > Custom keys.",
     input_schema: {
       type: "object",
       properties: {
@@ -1358,9 +1358,25 @@ function auditCredentialAccess(args: {
   );
 }
 
+/**
+ * A credential name as the audit log and the activity chip show it: the name
+ * itself only when it is one (VAULT_KEY_PATTERN), otherwise a placeholder, so
+ * neither a secret given as a name nor text that is no name at all ("Bearer
+ * ey...") reaches a log (CodeRabbit on #750).
+ */
+function credentialNameForLog(raw: string): string {
+  const name = raw.trim();
+  if (!name) return "(empty)";
+  if (looksLikeSecret(name)) return "(a secret without a name)";
+  const upper = name.toUpperCase();
+  return VAULT_KEY_PATTERN.test(upper) ? upper : "(not a credential name)";
+}
+
 async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
   const raw = typeof input.name === "string" ? input.name.trim() : "";
-  const targetForAudit = raw ? raw.toUpperCase().slice(0, 64) : "(empty)";
+  // A secret given as the name is refused, and never logged or echoed (as in add_credential).
+  const secretName = looksLikeSecret(raw);
+  const targetForAudit = credentialNameForLog(raw);
   // ADMIN-ONLY (Codex P1 finding, 2026-05-24). The Settings UI for the
   // vault is gated on canManageTenant; the tool must enforce the same
   // gate or a non-admin member (loan_officer, processor, etc.) could
@@ -1394,6 +1410,18 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
       errorMessage: "name_required",
     });
     throw new Error("name_required");
+  }
+  if (secretName) {
+    auditCredentialAccess({
+      action: "get_credential",
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentKey: ctx.agentKey,
+      target: targetForAudit,
+      result: "invalid",
+      errorMessage: "credential_name_looks_like_a_secret",
+    });
+    throw new Error("credential_name_looks_like_a_secret: ask for a credential by its NAME, like ACME_API_KEY");
   }
   // Same regex as the upload route — refuses anything that wouldn't
   // round-trip with the stored field_key.
@@ -1448,7 +1476,7 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
       found: false,
       name: raw.toUpperCase(),
       hint:
-        "Credential not in vault. Tell the operator to add it under Settings → Custom credentials using this exact KEY name.",
+        "Credential not in vault. Tell the operator to add it under Settings > Connections > Custom keys using this exact KEY name.",
     };
   }
   auditCredentialAccess({
@@ -1478,7 +1506,7 @@ async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContex
   // A secret given as the name is never stored or logged as one: names are kept in the clear
   // (lib/os/custom-keys.ts looksLikeSecret; the vault and its route refuse the same).
   const secretName = looksLikeSecret(rawName);
-  const targetForAudit = secretName ? "(a secret without a name)" : rawName ? rawName.toUpperCase().slice(0, 64) : "(empty)";
+  const targetForAudit = credentialNameForLog(rawName);
   if (!ctx.isAdmin) {
     auditCredentialAccess({
       action: "add_credential",
@@ -2473,7 +2501,7 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
     }
     case "get_credential": {
       const d = data as { found?: boolean; forbidden?: boolean };
-      const name = String(input.name || "?").toUpperCase();
+      const name = credentialNameForLog(String(input.name || ""));
       if (d.forbidden) return `credential ${name} access denied (admin only)`;
       return d.found
         ? `retrieved credential ${name} (value masked)`
@@ -2481,7 +2509,7 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
     }
     case "add_credential": {
       const d = data as { ok?: boolean; forbidden?: boolean };
-      const name = String(input.name || "?").toUpperCase();
+      const name = credentialNameForLog(String(input.name || ""));
       if (d.forbidden) return `add credential ${name} denied (admin only)`;
       return d.ok ? `saved credential ${name} to vault` : `add credential ${name} failed`;
     }

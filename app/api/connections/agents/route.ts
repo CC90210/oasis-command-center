@@ -16,6 +16,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { APP_TOOLS, normalizeAgentAccess, sameAgentAccess, type AccessTarget } from "@/lib/os/agent-access";
 import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
 import {
+  assignmentsApply,
   clearAgentAccess,
   defaultAccess,
   effectiveAccess,
@@ -54,7 +55,14 @@ export async function GET() {
     connectors[slug] = { access, saved, suggested: defaultAccess(target), unreadable: access === null };
   }
   // The agents as this workspace's AI Team names them ("Maven (Marketing)"), for the picker and the cards.
-  return NextResponse.json({ ok: true, choices: await agentChoicesForSession(), connectors });
+  return NextResponse.json({
+    ok: true,
+    choices: await agentChoicesForSession(),
+    connectors,
+    // Whether this workspace's agents use the apps' tools at all (assignmentsApply): where they
+    // do not, the cards and drawers say so instead of naming agents.
+    assignable: assignmentsApply(auth.sess.tenantId, "apps"),
+  });
 }
 
 /** The apps a choice may be saved for: every card, plus the apps agent tools use (TextTorrent, Kixie have no card). */

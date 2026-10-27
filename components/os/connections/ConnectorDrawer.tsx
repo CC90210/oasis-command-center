@@ -98,7 +98,9 @@ export function DrawerSheet({
 
   return (
     <div
-      className={`fixed inset-0 z-50 ${open ? "" : "pointer-events-none"}`}
+      // !mt-0: a parent's space-y gave this fixed layer a top margin, so the
+      // sheet sat 32px low with an undimmed strip above it (final review of #748).
+      className={`fixed inset-0 z-50 !mt-0 ${open ? "" : "pointer-events-none"}`}
       // inert, not just aria-hidden: the sheet keeps its content while it
       // slides out, and a closed sheet must not be reachable by Tab.
       inert={!open}
@@ -390,7 +392,7 @@ export function ConnectorDrawer({
           </section>
 
           <section>
-            <h3 className="mb-2 text-xs font-medium text-fg-dim">Used by</h3>
+            <h3 className="mb-2 text-xs font-medium text-fg-dim">Assigned to</h3>
             <ConnectorAgentAccess key={def.slug} slug={def.slug} departments={def.departments} />
           </section>
 
