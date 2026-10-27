@@ -21,7 +21,7 @@ import {
 } from "@/lib/ai-audit/rules";
 import { SECTION_TITLES, type AuditDoc, type DocEstimate, type DocParagraph, type DocRoadmapItem } from "@/lib/ai-audit/doc";
 import { REVENUE_ESTIMATES } from "@/lib/ai-audit/impact";
-import { paybackFor, type Payback } from "@/lib/ai-audit/payback";
+import { monthsWords, paybackFor, type Payback } from "@/lib/ai-audit/payback";
 import { rateText, type ProposalContent, type ProposalLine, type ProposalTotals } from "@/lib/ai-audit/proposal";
 
 export type AuditDocumentProps = {
@@ -265,7 +265,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
   const priceNote = [
     deposit && priced ? `${money(totals.due_now_cents, cur)} to start` : null,
     totals.monthly_cents > 0 ? `plus ${money(totals.monthly_cents, cur)} a month after launch` : null,
-    payback ? `pays back in about ${payback.fast} to ${payback.slow} months on Estimate ${refs.estimateNo.get(payback.estimate.id)}` : null,
+    payback ? `pays back in about ${monthsWords(payback.fast, payback.slow)} on Estimate ${refs.estimateNo.get(payback.estimate.id)}` : null,
   ].filter(Boolean).join("; ");
   const moves = (doc.sections.roadmap.now.length ? doc.sections.roadmap.now.map((r) => opportunityTitles.get(r.opportunity_id)) : doc.sections.opportunities.items.map((o) => o.title))
     .filter((x): x is string => !!x)
@@ -626,8 +626,10 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               <p className="aa-small">
                 How it is worked out: {money(totals.total_cents, cur)}, the full one-time price, divided by the monthly range in Estimate{" "}
                 {refs.estimateNo.get(payback.estimate.id)}
-                {payback.monthlyFees > 0 ? `, less ${money(totals.monthly_cents, cur)} a month in fees` : ""}. It counts only revenue from work in the price. At the
-                high end the work pays for itself in about {payback.fast} {payback.fast === 1 ? "month" : "months"}, at the low end in about {payback.slow}.
+                {payback.monthlyFees > 0 ? `, less ${money(totals.monthly_cents, cur)} a month in fees` : ""}. It counts only revenue from work in the price.{" "}
+                {payback.fast === payback.slow
+                  ? `At either end of the range the work pays for itself in about ${monthsWords(payback.fast, payback.slow)}.`
+                  : `At the high end the work pays for itself in about ${monthsWords(payback.fast, payback.fast)}, at the low end in about ${monthsWords(payback.slow, payback.slow)}.`}
               </p>
             </div>
           ) : null}

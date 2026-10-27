@@ -364,6 +364,9 @@ async function main() {
     const v = doc.validateAuditDoc(dc);
     assert.ok(v.ok && v.doc.business.currency === "CAD");
     assert.equal(doc.validateAuditDoc({ ...d, business: { ...d.business, currency: "EUR" } }).ok, false);
+    // Both ends said once when they round to the same month (CodeRabbit, #759).
+    const { monthsWords } = await import("../lib/ai-audit/payback");
+    assert.deepEqual([monthsWords(1, 1), monthsWords(2, 2), monthsWords(3, 7)], ["1 month", "2 months", "3 to 7 months"]);
     // A line still waiting for CC's price: no payback yet.
     assert.equal(pay(prop([line(), { ...line({ line_id: "l4" }), kind: "needs_owner_price", suggested_sku: "website-starter" }])), null);
   });
