@@ -39,8 +39,21 @@ import { OASIS_LEAD_STAGE_KEYS } from "../lib/oasis-stage-meta";
 const apply = process.argv.includes("--apply");
 // --tenant <slug>: the workspace to seed. Website clients use oasis-webdev (the default); a paying Free AI Audit client
 // is onboarded in the audit's own workspace (oasis-ai-cc), where their lead is, so their minted link attaches to it.
-const tenantArg = process.argv.indexOf("--tenant");
-const TENANT_SLUG = tenantArg > 0 && process.argv[tenantArg + 1] ? process.argv[tenantArg + 1] : CLIENT_ONBOARDING_TENANT_SLUG;
+// A --tenant with no slug stops here, before the database opens: falling back to the default would seed the wrong
+// workspace (CodeRabbit review of #752).
+function tenantSlugArg(argv: string[]): string | null {
+  const joined = argv.find((a) => a.startsWith("--tenant="));
+  if (joined !== undefined) return joined.slice("--tenant=".length).trim() || null;
+  const at = argv.indexOf("--tenant");
+  if (at < 0) return CLIENT_ONBOARDING_TENANT_SLUG;
+  const value = argv[at + 1];
+  return value && !value.startsWith("-") ? value : null;
+}
+function refuseTenantArg(): never {
+  console.error("ERROR: --tenant needs a workspace slug, for example --tenant oasis-ai-cc.");
+  process.exit(2);
+}
+const TENANT_SLUG: string = tenantSlugArg(process.argv) ?? refuseTenantArg();
 
 type FormRow = {
   id: string;

@@ -54,19 +54,13 @@ export const STANDARD_CHECKLIST: ReadonlyArray<{ key: string; title: string; not
 export async function personalIntakeUrl(db: Client, engagement: Pick<Engagement, "tenant_id" | "lead_id" | "id">, base: string): Promise<string | null> {
   const t = engagement.tenant_id;
   const [tenant, form] = await Promise.all([
-    db.execute({ sql: "SELECT slug, custom_fields FROM tenants WHERE id = ? LIMIT 1", args: [t] }),
+    db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [t] }),
     db.execute({ sql: "SELECT id, enabled FROM forms WHERE tenant_id = ? AND slug = ? LIMIT 1", args: [t, CLIENT_ONBOARDING_SLUG] }),
   ]);
+  // The token carries the workspace's own slug, never a profile alias: the form page refuses a token whose tenant is
+  // not the form's tenants.slug (CodeRabbit review of #752). A workspace without one gets the fallback line.
   const row = tenant.rows[0];
-  let slug = row && typeof row.slug === "string" ? row.slug : "";
-  if (!slug && row && typeof row.custom_fields === "string") {
-    try {
-      const cf = JSON.parse(row.custom_fields) as { command_center_profile_slug?: unknown };
-      slug = typeof cf.command_center_profile_slug === "string" ? cf.command_center_profile_slug : "";
-    } catch (err) {
-      console.error("[ai-audit.onboarding] the workspace's custom fields are not JSON", { tenantId: t, error: err instanceof Error ? err.message : String(err) });
-    }
-  }
+  const slug = row && typeof row.slug === "string" ? row.slug : "";
   const f = form.rows[0];
   if (!slug || !f || !dbBool(f.enabled)) {
     console.error("[ai-audit.onboarding] no onboarding form to link in this workspace: seed it with scripts/seed-client-onboarding-form.ts --tenant", { tenantId: t, engagementId: engagement.id, slug, form: !!f });
