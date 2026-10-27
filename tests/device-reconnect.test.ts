@@ -336,6 +336,10 @@ async function main() {
     assert.match(card, /reconnectWords\(reconnectOutcome\(reconnect\.ids, devices, now\), reconnect\.done\)/, "the line reads the rows on screen");
     assert.match(card, /<span role="status"[^>]*data-testid="computers-reconnect-status">\s*\{reconnectLine\}/, "one live region, always there");
     assert.match(card, /window\.setTimeout\(\(\) => setReconnect\(null\), 15_000\)/, "a success line does not outlive the moment");
+    // A slow read never overwrites a fresher one, and never ends the watch (CodeRabbit on #751).
+    assert.match(card, /if \(seq !== readSeq\.current\) return \{ rows, newest: false \};/, "only the newest read writes the card");
+    assert.match(card, /if \(reading\) return;/, "the watch never stacks reads");
+    assert.match(card, /const waiting = rows && newest \? reconnectWaiting/, "only the newest read decides");
   });
 
   console.log(failures ? `device reconnect: ${failures} failure(s)` : "device reconnect: all passed");

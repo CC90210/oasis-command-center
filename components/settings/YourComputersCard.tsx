@@ -21,7 +21,7 @@
  * pairing controls remain in the verified-operator-only DevicesEditor.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, Clock, Copy, Loader2, Monitor, RefreshCw } from "lucide-react";
 import {
   bestComputerAnswerState,
@@ -160,6 +160,8 @@ export function YourComputersCard() {
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   // Refresh's reconnect of your offline computers, while it is watched and after.
   const [reconnect, setReconnect] = useState<Reconnect | null>(null);
+  // Each read of the computers is numbered; only the newest one writes the card.
+  const readSeq = useRef(0);
 
   async function rename(id: string, value: string) {
     const problem = deviceLabelProblem(value);
@@ -193,24 +195,34 @@ export function YourComputersCard() {
     }
   }
 
-  /** Read the computers again; the rows, or null when they could not be read. */
-  async function load(): Promise<DeviceRow[] | null> {
+  /**
+   * Read the computers again: the rows (null when they could not be read), and
+   * whether this read is still the newest. Only the newest read writes the
+   * card, so a slow response never puts older rows over fresher ones.
+   */
+  async function read(): Promise<{ rows: DeviceRow[] | null; newest: boolean }> {
+    const seq = ++readSeq.current;
     setError(null);
     try {
       // readEngine never throws: an unread AI setup leaves the app lines off
       // (as an unread inventory did), it never invents a status.
       const [dr, er] = await Promise.all([fetch("/api/devices").then((r) => r.json()), readEngine()]);
+      const rows = dr.ok ? (dr.devices as DeviceRow[]) : null;
+      if (seq !== readSeq.current) return { rows, newest: false };
       setEngine(er.ok ? { devices: er.state.devices, oasis: er.state.oasis } : null);
-      if (dr.ok) {
-        setDevices(dr.devices as DeviceRow[]);
-        return dr.devices as DeviceRow[];
-      }
-      setError(dr.error || "load_failed");
-      return null;
+      if (rows) setDevices(rows);
+      else setError(dr.error || "load_failed");
+      return { rows, newest: true };
     } catch (e) {
-      setError(e instanceof Error ? e.message : "load_failed");
-      return null;
+      const newest = seq === readSeq.current;
+      if (newest) setError(e instanceof Error ? e.message : "load_failed");
+      return { rows: null, newest };
     }
+  }
+
+  /** Read the computers again; the rows, or null when they could not be read. */
+  async function load(): Promise<DeviceRow[] | null> {
+    return (await read()).rows;
   }
 
   /**
@@ -256,12 +268,21 @@ export function YourComputersCard() {
   useEffect(() => {
     if (!reconnect || reconnect.done) return;
     let live = true;
+    let reading = false;
     const timer = window.setInterval(async () => {
-      const rows = await load();
-      if (!live) return;
-      const nowMs = Date.now();
-      const waiting = rows ? reconnectWaiting(reconnectOutcome(reconnect.ids, rows, nowMs)) : true;
-      if (!waiting || nowMs - reconnect.since >= RECONNECT_WATCH_MS) setReconnect({ ...reconnect, done: true });
+      // One read at a time: on a slow network reads never stack up and overtake each other.
+      if (reading) return;
+      reading = true;
+      try {
+        const { rows, newest } = await read();
+        if (!live) return;
+        const nowMs = Date.now();
+        // Only the newest read decides: an older one can show a computer that has since come back.
+        const waiting = rows && newest ? reconnectWaiting(reconnectOutcome(reconnect.ids, rows, nowMs)) : true;
+        if (!waiting || nowMs - reconnect.since >= RECONNECT_WATCH_MS) setReconnect({ ...reconnect, done: true });
+      } finally {
+        reading = false;
+      }
     }, 5_000);
     return () => {
       live = false;
@@ -279,7 +300,7 @@ export function YourComputersCard() {
   }, [reconnect, devices]);
 
   useEffect(() => {
-    load();
+    void read();
   }, []);
 
   async function approve(id: string) {
