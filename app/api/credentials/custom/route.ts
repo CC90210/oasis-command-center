@@ -17,7 +17,11 @@
  *                 it) is saved only for a key with no saved value and no saved
  *                 choice when it is written; whether a key is new is never
  *                 taken from the browser (review of OCC #748).
- *   DELETE  — remove one entry (and its agent choice). Body: { key }.
+ *   DELETE  — remove one entry (and its agent choice and website). Body: { key }.
+ *
+ * Website (CC, 2026-10-27): each row also says the one website the key may be
+ * sent to (`host`, lib/os/custom-key-hosts.ts), set at
+ * /api/credentials/custom/host. use_custom_key sends a key only there.
  *
  * Agents (CC, 2026-10-26): `agents` is "all" or a list of departments
  * (lib/os/agent-access.ts). A key with no choice saved is for every agent. A
@@ -53,6 +57,7 @@ import { normalizeAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
 import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
 import { looksLikeSecret, parseDotenvLines, VAULT_MAX_PASTE_ENTRIES, VAULT_MAX_VALUE_LENGTH } from "@/lib/os/custom-keys";
 import { accessField, assignmentsApply, clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
+import { clearKeyHost, readKeyHosts } from "@/lib/os/custom-key-hosts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -79,6 +84,8 @@ type CustomCredentialRow = {
   agents_saved: boolean;
   /** True when this key's saved choice cannot be read: no agent may use it until it is saved again. */
   agents_unreadable: boolean;
+  /** The one website use_custom_key may send it to; null when none is set or they could not be read. */
+  host: string | null;
 };
 
 export async function GET() {
@@ -89,8 +96,8 @@ export async function GET() {
   if (!sess.isAdmin) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
-  // Three reads that do not depend on each other, at once (review of OCC #748).
-  const [r, overrides, choices] = await Promise.all([
+  // Four reads that do not depend on each other, at once (review of OCC #748).
+  const [r, overrides, choices, hosts] = await Promise.all([
     getServiceSupabase()
       .from("tenant_integration_credentials")
       .select("field_key, encrypted_value, updated_at")
@@ -99,6 +106,7 @@ export async function GET() {
       .order("field_key", { ascending: true }),
     readAgentAccessOverrides(sess.tenantId),
     agentChoicesForSession(),
+    readKeyHosts(sess.tenantId),
   ]);
   // A read that failed is an error, never an empty list: the vault would say "No keys yet"
   // and treat every saved key as new (review of OCC #748).
@@ -108,6 +116,9 @@ export async function GET() {
   }
   if (!overrides.ok) {
     console.error("[credentials.custom] agent choices unreadable", { tenantId: sess.tenantId, error: overrides.error });
+  }
+  if (!hosts.ok) {
+    console.error("[credentials.custom] key websites unreadable", { tenantId: sess.tenantId, error: hosts.error });
   }
   const rows: CustomCredentialRow[] = (
     (r.data || []) as { field_key: string; encrypted_value: string; updated_at: string | null }[]
@@ -121,6 +132,7 @@ export async function GET() {
       agents: choice ? choice.access : null,
       agents_saved: choice ? choice.saved : false,
       agents_unreadable: !!choice && choice.access === null,
+      host: hosts.ok ? hosts.hosts.get(key) ?? null : null,
     };
   });
   return NextResponse.json({
@@ -131,6 +143,7 @@ export async function GET() {
     // Whether this workspace's agents can read custom keys at all (assignmentsApply).
     assignable: assignmentsApply(sess.tenantId, "custom"),
     ...(overrides.ok ? {} : { agents_error: "Could not read which agents may use these keys." }),
+    ...(hosts.ok ? {} : { hosts_error: "Could not read which website each key is for." }),
   });
 }
 
@@ -345,8 +358,15 @@ export async function DELETE(req: NextRequest) {
   if (!r.ok) {
     return NextResponse.json({ ok: false, error: r.error }, { status: 500 });
   }
-  // Its agent choice goes with it, so a new key of the same name starts from the default.
-  const cleared = await clearAgentAccess({ tenantId: sess.tenantId, target: { kind: "custom", key: normalizedKey } });
+  // Its agent choice and its website go with it, so a new key of the same name starts from the default.
+  const [cleared, hostCleared] = await Promise.all([
+    clearAgentAccess({ tenantId: sess.tenantId, target: { kind: "custom", key: normalizedKey } }),
+    clearKeyHost({ tenantId: sess.tenantId, key: normalizedKey }),
+  ]);
+  if (!hostCleared.ok) {
+    console.error("[credentials.custom] website not removed with its key", { tenantId: sess.tenantId, key: normalizedKey, error: hostCleared.error });
+    return NextResponse.json({ ok: true, warning: "The key is removed, but the website it was for is still saved." });
+  }
   if (!cleared.ok) {
     console.error("[credentials.custom] agent choice not removed with its key", { tenantId: sess.tenantId, key: normalizedKey, error: cleared.error });
     return NextResponse.json({ ok: true, warning: "The key is removed, but its agent choice is still saved." });

@@ -45,6 +45,8 @@ import {
 import {
   agentsShown,
   agentsToSend,
+  keyHost,
+  keyHostProblemWords,
   draftApplies,
   keyNameProblem,
   looksLikeSecret,
@@ -69,6 +71,8 @@ type CustomCredentialRow = {
   agents_saved: boolean;
   /** Its saved choice cannot be read: no agent may use it until it is saved again. */
   agents_unreadable?: boolean;
+  /** The one website an agent's use_custom_key may send it to (CC, 2026-10-27); null when none is set. */
+  host?: string | null;
 };
 
 /** GET /api/credentials/custom, as the drawer and the Connections page's card read it. */
@@ -76,6 +80,7 @@ type KeysList = {
   ok?: boolean;
   entries?: CustomCredentialRow[];
   agents_error?: string;
+  hosts_error?: string;
   choices?: AgentChoice[];
   assignable?: boolean;
   error?: string;
@@ -122,6 +127,11 @@ export function CustomCredentialsVault({
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [hostsError, setHostsError] = useState<string | null>(null);
+  // One key's website being edited at a time: its name and the text in the box.
+  const [editingHost, setEditingHost] = useState<{ key: string; value: string } | null>(null);
+  const [hostBusy, setHostBusy] = useState(false);
+  const [hostProblem, setHostProblem] = useState<string | null>(null);
   // The workspace's agents by name ("Maven (Marketing)"), from the route.
   const [choices, setChoices] = useState<ReadonlyArray<AgentChoice>>(AGENT_CHOICES);
   // Whether this workspace's agents can read custom keys at all (the route's `assignable`).
@@ -170,6 +180,7 @@ export function CustomCredentialsVault({
       setListed(true);
       setListError(null);
       setAgentsError(j.agents_error || null);
+      setHostsError(j.hosts_error || null);
       setAssignable(j.assignable !== false);
       if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
       return j;
@@ -201,6 +212,8 @@ export function CustomCredentialsVault({
     setPasteAgents({});
     setPasteEditing(null);
     setPasteResults(null);
+    setEditingHost(null);
+    setHostProblem(null);
     setEditingKey(null);
     setErr(null);
     setMsg(null);
@@ -415,6 +428,43 @@ export function CustomCredentialsVault({
     }
   }
 
+  /**
+   * Set or clear the one website a key may be sent to. An agent reads from it
+   * with use_custom_key without ever seeing the key; with none set, it cannot.
+   */
+  async function onSaveHost(key: string, host: string | null) {
+    if (host !== null) {
+      const checked = keyHost(host);
+      if (!checked.ok) {
+        setHostProblem(keyHostProblemWords(checked.problem));
+        return;
+      }
+    }
+    setHostBusy(true);
+    setHostProblem(null);
+    setErr(null);
+    setMsg(null);
+    try {
+      const r = await fetch("/api/credentials/custom/host", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, host }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; host?: string | null; message?: string; error?: string };
+      if (!r.ok || !j.ok) {
+        setHostProblem(j.message || "Couldn't save the website. Try again.");
+        return;
+      }
+      setEditingHost(null);
+      setMsg(j.host ? `${key} can now be sent only to ${j.host}.` : `${key} is no longer sent to any website.`);
+      await fetchRows();
+    } catch {
+      setHostProblem("Couldn't save the website. Check your connection and try again.");
+    } finally {
+      setHostBusy(false);
+    }
+  }
+
   async function applySuggestion(key: string, suggestion: KeyHint) {
     setApplyingKey(key);
     setErr(null);
@@ -435,6 +485,14 @@ export function CustomCredentialsVault({
           This workspace&apos;s agents can&apos;t read custom keys yet, so a key here is not assigned to any agent. It is kept
           encrypted, and no one sees its value again.
         </p>
+      )}
+      {hostsError && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-status-hot/30 bg-status-hot/10 px-3 py-2 text-xs text-status-hot" role="alert">
+          <span>{hostsError} Agents can&apos;t send these keys anywhere until it can be read.</span>
+          <button type="button" onClick={() => void fetchRows()} className={LINK}>
+            Try again
+          </button>
+        </div>
       )}
       {agentsError && (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-status-hot/30 bg-status-hot/10 px-3 py-2 text-xs text-status-hot" role="alert">
@@ -671,6 +729,91 @@ export function CustomCredentialsVault({
                         <span className="text-[11px] text-fg-dim">couldn&apos;t read</span>
                       ) : (
                         <AgentChips access={row.agents} choices={choices} />
+                      )}
+                    </div>
+                  )}
+                  {assignable && (
+                    <div className="space-y-1.5" data-testid={`custom-key-host-${row.key}`}>
+                      {editingHost?.key === row.key ? (
+                        <form
+                          className="space-y-1.5"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void onSaveHost(row.key, editingHost.value);
+                          }}
+                        >
+                          <label htmlFor={`custom-key-host-input-${row.key}`} className="block text-[11px] text-fg-dim">
+                            The website {row.key} is for. Agents read from it with this key without ever seeing it, and the key is never sent anywhere else.
+                          </label>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              id={`custom-key-host-input-${row.key}`}
+                              type="text"
+                              value={editingHost.value}
+                              onChange={(e) => {
+                                setEditingHost({ key: row.key, value: e.target.value });
+                                setHostProblem(null);
+                              }}
+                              placeholder="api.example.com"
+                              className={`${INPUT} min-w-0 flex-1 basis-48 py-1.5`}
+                              autoComplete="off"
+                              spellCheck={false}
+                              aria-invalid={!!hostProblem}
+                              disabled={hostBusy}
+                            />
+                            <button type="submit" disabled={hostBusy} className="rounded-md bg-accent-muted px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-accent disabled:opacity-50">
+                              {hostBusy ? "Saving…" : "Save website"}
+                            </button>
+                            {row.host && (
+                              <button type="button" disabled={hostBusy} onClick={() => void onSaveHost(row.key, null)} className="text-xs text-fg-muted hover:text-fg disabled:opacity-50">
+                                Remove
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingHost(null);
+                                setHostProblem(null);
+                              }}
+                              className="text-xs text-fg-muted hover:text-fg"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          {hostProblem && (
+                            <p className="text-[11.5px] leading-5 text-status-hot" role="alert">
+                              {hostProblem}
+                            </p>
+                          )}
+                        </form>
+                      ) : row.host ? (
+                        <p className="text-[11px] text-fg-dim">
+                          Sent only to <span className="font-mono text-fg-muted">{row.host}</span>{" "}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingHost({ key: row.key, value: row.host ?? "" });
+                              setHostProblem(null);
+                            }}
+                            className={LINK}
+                          >
+                            Change
+                          </button>
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-fg-dim">
+                          No website set, so agents can&apos;t read from an app with it.{" "}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingHost({ key: row.key, value: "" });
+                              setHostProblem(null);
+                            }}
+                            className={LINK}
+                          >
+                            Set the website
+                          </button>
+                        </p>
                       )}
                     </div>
                   )}

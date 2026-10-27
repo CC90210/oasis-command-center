@@ -61,6 +61,13 @@ export const AGENT_ACCESS_SERVICE = "agent_access";
  */
 export const BRIDGE_RECONNECT_SERVICE = "bridge_reconnect";
 
+/**
+ * The one website each custom key may be sent to (lib/os/custom-key-hosts.ts,
+ * use_custom_key in lib/cloud-tool-runner.ts): one row per key, field = the key
+ * name lowercased, value = the host. Not a credential: listTenantIntegrationStatus skips it.
+ */
+export const CUSTOM_KEY_HOST_SERVICE = "custom_key_host";
+
 type StoreRow = {
   id: string;
   tenant_id: string;
@@ -615,7 +622,7 @@ export async function listTenantIntegrationStatus(
   for (const row of (r.data || []) as StoreRow[]) {
     // An owner's agent choices are not credentials: one that will not decrypt
     // must not blank every card's status (review of OCC #743).
-    if (row.service === AGENT_ACCESS_SERVICE || row.service === BRIDGE_RECONNECT_SERVICE) continue;
+    if (row.service === AGENT_ACCESS_SERVICE || row.service === BRIDGE_RECONNECT_SERVICE || row.service === CUSTOM_KEY_HOST_SERVICE) continue;
     const envPresent = envAllowed && envKeysFor(row.service, row.field_key).some((envKey) =>
       Boolean(process.env[envKey]?.trim()),
     );

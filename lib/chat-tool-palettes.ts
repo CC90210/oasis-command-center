@@ -52,6 +52,8 @@ export const SAFE_TENANT_TOOL_PALETTE: string[] = [
   // Custom credentials vault — admin-gated inside each tool (ctx.isAdmin).
   "get_credential",
   "add_credential",
+  // A custom key used without being seen: GET only, to its one website.
+  "use_custom_key",
 ];
 
 /**

@@ -240,7 +240,7 @@ check("a pick made for a saved key stays with it; one made for a new key carries
   // Nothing is saved while the keys or their agents cannot be read, and both offer Try again.
   assert.match(vault, /const canSave = !blockedBy && /);
   assert.match(vault, /: agentsError\s*\? "Which agents may use these keys could not be read, so nothing can be saved yet\."/);
-  assert.equal((vault.match(/onClick=\{\(\) => void fetchRows\(\)\}/g) ?? []).length, 2, "Try again after a failed list and after unreadable agents");
+  assert.equal((vault.match(/onClick=\{\(\) => void fetchRows\(\)\}/g) ?? []).length, 3, "Try again after a failed list, unreadable agents and unreadable websites");
   // The list is read on each opening, and closing clears what was typed, pasted or picked.
   assert.match(vault, /if \(active\) \{\s*void fetchRows\(\);\s*return;\s*\}\s*setName\(""\);\s*setValue\(""\);/);
   assert.match(vault, /setPasteText\(""\);[\s\S]{0,200}setEditingKey\(null\);\s*setErr\(null\);\s*setMsg\(null\);\s*\}, \[active, fetchRows\]\);/);

@@ -537,7 +537,7 @@ async function main() {
     assert.ok(seen2.some((l) => l.includes("(not a credential name)")), "the audit line names it as no name");
   });
 
-  await check("a workspace whose agents cannot use custom keys or app tools is told so, not shown agents", async () => {
+  await check("a client workspace: custom keys are assignable (use_custom_key, CC 2026-10-27); app tools still are not, and it is told so", async () => {
     session = OWNER;
     const ours = await (await customRoute.GET()).json();
     const oursApps = await (await agentsRoute.GET()).json();
@@ -546,13 +546,13 @@ async function main() {
     try {
       const theirs = await (await customRoute.GET()).json();
       const theirApps = await (await agentsRoute.GET()).json();
-      assert.deepEqual([theirs.assignable, theirApps.assignable], [false, false], "a client's agents run only client-safe tools, and these are not");
+      assert.deepEqual([theirs.assignable, theirApps.assignable], [true, false], "a client's agents use a key through use_custom_key; no app tool is client-safe");
     } finally {
       session = OWNER;
     }
     const { assignmentsApply } = store;
     const { isClientSafeTool } = await import("../lib/ai/tools/client-safe-registry");
-    assert.equal(assignmentsApply("client-x", "custom"), isClientSafeTool("get_credential"), "follows the registry, not a hard-coded no");
+    assert.equal(assignmentsApply("client-x", "custom"), isClientSafeTool("get_credential") || isClientSafeTool("use_custom_key"), "follows the registry, not a hard-coded answer");
     const vault = read("components/settings/CustomCredentialsVault.tsx");
     assert.match(vault, /const toSend = assignable \? agentsToSend\(\{ touched, draft, hint \}\) : \{\};/);
     assert.match(vault, /\{assignable && \(\s*<div className="space-y-1\.5">\s*<div className="flex flex-wrap items-baseline/, "no picker where nothing can be assigned");

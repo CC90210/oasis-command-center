@@ -54,6 +54,7 @@ import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } fro
 import { agentMayUse, judgeAccess, readAgentAccessOverrides } from "./os/agent-access-store";
 import { APP_TOOLS, appForTool, refusalSentence } from "./os/agent-access";
 import { looksLikeSecret } from "./os/custom-keys";
+import { keyHostFor } from "./os/custom-key-hosts";
 import { openDepartmentsFor } from "./os/approvals/scope";
 import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
@@ -260,6 +261,25 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "use_custom_key",
+    description:
+      "Read from an API with one of the workspace's custom keys (Settings > Connections > Custom keys) without ever seeing the key. The server sends a GET request to `url` with the key attached, and only to the one website the owner set for that key; any other website is refused. Returns the status, content type and body, with the key itself hidden if the API echoes it. Read-only: there is no POST. If the key has no website set, or this agent is not assigned the key, the result says so: tell the operator what to set in Settings > Connections > Custom keys.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The key's name, UPPER_SNAKE_CASE, as saved in Settings (e.g. 'HUBSPOT_PRIVATE_APP_TOKEN')." },
+        url: { type: "string", description: "The https:// URL to read, on the website the owner set for this key." },
+        auth: {
+          type: "string",
+          enum: ["bearer", "header"],
+          description: "How the API takes the key: 'bearer' (Authorization: Bearer <key>, the default) or 'header' (the key alone in the header named by header_name).",
+        },
+        header_name: { type: "string", description: "With auth 'header': the header the API reads the key from, e.g. 'X-API-Key'." },
+      },
+      required: ["name", "url"],
     },
   },
   {
@@ -997,6 +1017,8 @@ async function dispatch(
       return await toolGetCredential(input, ctx);
     case "add_credential":
       return await toolAddCredential(input, ctx);
+    case "use_custom_key":
+      return await toolUseCustomKey(input, ctx);
     case "web_fetch":
       return await toolHttpGet(input);
     case "list_records":
@@ -1341,7 +1363,7 @@ function scrubStrings<T>(value: T, scrub: (text: string) => string): T {
  * result, timestamp_iso).
  */
 function auditCredentialAccess(args: {
-  action: "get_credential" | "add_credential";
+  action: "get_credential" | "add_credential" | "use_custom_key";
   tenantId: string;
   userId: string;
   agentKey: string;
@@ -1488,6 +1510,105 @@ async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContex
     result: "ok",
   });
   return { found: true, name: raw.toUpperCase(), value };
+}
+
+/** Headers a key may be sent in with auth "header": a plain name, never one the request itself relies on. */
+const KEY_HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
+const KEY_HEADER_REFUSED = new Set(["host", "connection", "content-length", "cookie", "transfer-encoding", "te", "upgrade", "proxy-authorization"]);
+
+/**
+ * use_custom_key (CC, 2026-10-27: client workspaces' agents get their custom
+ * keys). The safe way to let an agent use a key: the server attaches it to ONE
+ * GET request, only to the host the owner set for that key
+ * (lib/os/custom-key-hosts.ts), and the model never sees it. In order:
+ *   - the name is a key name, not a secret pasted as one;
+ *   - the owner assigned this key to this agent (agentMayUse, as get_credential);
+ *   - the key exists and has a website set;
+ *   - the URL is https on exactly that host, passes assertSafeUrl, and resolves
+ *     to a public address (fetchWithCap); a redirect is never followed, so the
+ *     key cannot be carried to another host;
+ *   - the key's value is hidden in whatever comes back.
+ * Read-only on purpose: a client agent never takes an outward action
+ * (lib/ai/tools/client-safe-registry.ts), so there is no POST. Any member may
+ * use it through an agent the owner assigned the key to; only an admin can see
+ * or change the key in Settings.
+ */
+export async function toolUseCustomKey(
+  input: Record<string, unknown>,
+  ctx: ToolContext,
+  deps: { fetchImpl?: typeof fetch; resolver?: AddressResolver } = {},
+) {
+  const raw = typeof input.name === "string" ? input.name.trim() : "";
+  const target = credentialNameForLog(raw);
+  const audit = (result: "ok" | "not_found" | "forbidden" | "invalid" | "error", errorMessage?: string) =>
+    auditCredentialAccess({ action: "use_custom_key", tenantId: ctx.tenantId, userId: ctx.userId, agentKey: ctx.agentKey, target, result, errorMessage });
+  if (!raw || looksLikeSecret(raw) || !VAULT_KEY_PATTERN.test(raw.toUpperCase())) {
+    audit("invalid", "invalid_credential_name");
+    return { ok: false, refused: "invalid_name", hint: "Give the key by its NAME as saved in Settings, like ACME_API_KEY, never its value." };
+  }
+  const name = raw.toUpperCase();
+  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.agentKey);
+  if (!access.allowed) {
+    audit("forbidden", `agent_access: ${access.code}`);
+    return { ok: false, refused: "not_assigned", name, hint: refusalSentence(access.code, name, access.access, "Settings > Connections > Custom keys") };
+  }
+  const value = await getTenantIntegrationValue(ctx.tenantId, VAULT_CUSTOM_SERVICE, raw.toLowerCase());
+  if (value === null) {
+    audit("not_found");
+    return { ok: false, refused: "not_found", name, hint: "That key is not saved. Tell the operator to add it under Settings > Connections > Custom keys with this exact name." };
+  }
+  const host = await keyHostFor(ctx.tenantId, name);
+  if (!host) {
+    audit("forbidden", "no_host");
+    return {
+      ok: false,
+      refused: "no_website",
+      name,
+      hint: `${name} has no website set, so it cannot be sent anywhere. Ask the operator to set the website it is for under Settings > Connections > Custom keys.`,
+    };
+  }
+  let url: URL;
+  try {
+    url = assertSafeUrl(String(input.url || ""));
+  } catch (err) {
+    audit("invalid", "unsafe_url");
+    return { ok: false, refused: "unsafe_url", name, hint: `That URL cannot be fetched (${err instanceof Error ? err.message : "invalid"}).` };
+  }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== host || url.port || url.username || url.password) {
+    audit("forbidden", "wrong_host");
+    return { ok: false, refused: "wrong_website", name, website: host, hint: `${name} may only be sent to https://${host}. Use a URL on that website.` };
+  }
+  const auth = input.auth === "header" ? "header" : "bearer";
+  const headers: Record<string, string> = { accept: "application/json, text/plain;q=0.9, */*;q=0.5" };
+  if (auth === "header") {
+    const headerName = typeof input.header_name === "string" ? input.header_name.trim() : "";
+    if (!KEY_HEADER_NAME.test(headerName) || KEY_HEADER_REFUSED.has(headerName.toLowerCase())) {
+      audit("invalid", "bad_header_name");
+      return { ok: false, refused: "bad_header_name", name, hint: "With auth 'header', give the header the API reads the key from, like X-API-Key." };
+    }
+    headers[headerName] = value;
+  } else {
+    headers.authorization = `Bearer ${value}`;
+  }
+  let r: Awaited<ReturnType<typeof fetchWithCap>>;
+  try {
+    r = await fetchWithCap(url, { method: "GET", headers }, deps);
+  } catch (err) {
+    audit("error", err instanceof Error ? err.message : "fetch_failed");
+    return { ok: false, refused: "fetch_failed", name, hint: `The request to ${host} failed (${err instanceof Error ? err.message : "error"}).` };
+  }
+  audit("ok");
+  const hide = (text: string) => (value.length >= 4 ? text.split(value).join("[key hidden]") : text);
+  return {
+    ok: true,
+    name,
+    website: host,
+    status: r.status,
+    content_type: r.contentType,
+    body: hide(r.body.slice(0, 200_000)),
+    truncated: r.truncated,
+    ...(r.location ? { redirect_not_followed: hide(r.location) } : {}),
+  };
 }
 
 /**
@@ -2405,12 +2526,13 @@ function sanitizeHeaders(input: unknown): Record<string, string> {
 export async function fetchWithCap(
   url: URL,
   init: RequestInit,
+  deps: { fetchImpl?: typeof fetch; resolver?: AddressResolver } = {},
 ): Promise<{ status: number; contentType: string; body: string; truncated: boolean; location: string | null }> {
   // DNS-aware SSRF guard — resolves the hostname and rejects if it
   // points at a private / loopback / IMDS address. Defends against
   // attacker-controlled hostnames like `evil.com` that resolve to
   // 169.254.169.254. 2026-05-16 Codex review hardening.
-  await assertResolvedIpIsPublic(url.hostname.toLowerCase());
+  await assertResolvedIpIsPublic(url.hostname.toLowerCase(), deps.resolver);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
@@ -2419,7 +2541,7 @@ export async function fetchWithCap(
     // address. 3xx responses surface to the model as-is; if the
     // operator/agent wants to follow, they make a new tool call with
     // the new URL (which re-runs SSRF checks).
-    const res = await fetch(url.toString(), { ...init, signal: controller.signal, redirect: "manual" });
+    const res = await (deps.fetchImpl ?? fetch)(url.toString(), { ...init, signal: controller.signal, redirect: "manual" });
     const contentType = res.headers.get("content-type") || "";
     const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
     const reader = res.body?.getReader();
@@ -2498,6 +2620,11 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       if (d.deduped) return `known fact already saved (deduped)`;
       const preview = (d.saved || String(input.fact || "")).slice(0, 80);
       return `saved known fact: "${preview}${preview.length >= 80 ? "…" : ""}"`;
+    }
+    case "use_custom_key": {
+      const d = data as { ok?: boolean; website?: string; status?: number; refused?: string };
+      const keyName = credentialNameForLog(String(input.name || ""));
+      return d.ok ? `read ${d.website} with ${keyName} (key hidden), status ${d.status}` : `did not use ${keyName}: ${d.refused || "refused"}`;
     }
     case "get_credential": {
       const d = data as { found?: boolean; forbidden?: boolean };
