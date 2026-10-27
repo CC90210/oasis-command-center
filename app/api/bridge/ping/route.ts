@@ -46,8 +46,11 @@
  *     lib/integrations/presence-heartbeat.ts BRIDGE_REPORT_KEY), so no paired
  *     computer can post a result that reads as OASIS's own email sender's
  *     (PR #558 review).
+ *   - Answers reconnect: true when the owner pressed Refresh in Settings >
+ *     Devices and this is the bridge process that was running then (the body's
+ *     started_at; lib/devices/reconnect.ts). The bridge starts fresh once idle.
  *
- * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded }
+ * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded, reconnect }
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -65,6 +68,7 @@ import {
   isPresenceOnlyHeartbeat,
 } from "@/lib/integrations/presence-heartbeat";
 import { parseRuntimeClaimState } from "@/lib/bridge/runtime-jobs";
+import { processStamp, reconnectForCheckIn } from "@/lib/devices/reconnect";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -133,6 +137,8 @@ export async function POST(req: NextRequest) {
     tool_capabilities?: string[];
     claim_protocols?: string[];
     runtime_state?: unknown;
+    /** When this bridge process started: a reconnect request is answered to the process it told (lib/devices/reconnect.ts). */
+    started_at?: unknown;
     capacity?: unknown;
     in_flight?: unknown;
     blocked_reason?: unknown;
@@ -288,6 +294,8 @@ export async function POST(req: NextRequest) {
     tool_capabilities_recorded: toolCapsRecorded,
     runtime_state_recorded: runtimeState.state !== null,
     claim_state_recorded: hasClaimState,
+    // Refresh in Settings > Devices asked this computer to start fresh (lib/devices/reconnect.ts).
+    reconnect: await reconnectForCheckIn(pairing.tenantId, pairing.pairingId, processStamp(body.started_at)),
   });
 }
 
