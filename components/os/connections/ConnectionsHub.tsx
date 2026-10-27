@@ -365,7 +365,7 @@ export function ConnectionsHub({
           Apps already set up for this workspace, with the status OASIS last measured.
         </p>
         {yours.length > 0 ? (
-          <ul className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {yours.map((def) => (
               <ConnectorCard
                 key={def.slug}
@@ -406,7 +406,7 @@ export function ConnectionsHub({
                 <h3 id={`cat-${cat.key}`} className="text-xs font-medium text-fg-dim">
                   {cat.label}
                 </h3>
-                <ul aria-labelledby={`cat-${cat.key}`} className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <ul aria-labelledby={`cat-${cat.key}`} className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
                   {items.map((def) => (
                     <ConnectorCard
                       key={def.slug}
@@ -427,7 +427,7 @@ export function ConnectionsHub({
               <h3 id="cat-other" className="text-xs font-medium text-fg-dim">
                 Anything else
               </h3>
-              <ul aria-labelledby="cat-other" className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              <ul aria-labelledby="cat-other" className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
                 <li className="group relative flex items-center gap-3 rounded-xl border border-hairline bg-bg-panel px-3 py-3 transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover">
                   <button
                     type="button"

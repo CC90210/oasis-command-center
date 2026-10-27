@@ -990,6 +990,13 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   assert.match(hub, /<CustomCredentialsVault onOpenApp=\{openFromCustom\} active=\{customOpen\} \/>/);
   assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
 
+  // On a phone every card grid is one column that can shrink (grid-cols-1 is
+  // minmax(0, 1fr)). Without it the track took a card's one-line summary as its
+  // minimum, and Cloudflare's card was 469px wide on a 390px screen (2026-10-27).
+  const cardGrids = hub.match(/className="[^"]*\bgrid\b[^"]*sm:grid-cols-2[^"]*"/g) ?? [];
+  assert.ok(cardGrids.length >= 3, "the tools, category and Anything else grids");
+  for (const g of cardGrids) assert.match(g, /\bgrid-cols-1\b/, `${g} has a phone column`);
+
   // Every app with a way to connect has its own card in its own category, even
   // while OASIS's app for it is not set up here (the card says so); only an app
   // with nothing built is one compact row (CC, 2026-10-10: no "One click, once
