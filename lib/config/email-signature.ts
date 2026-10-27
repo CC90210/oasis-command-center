@@ -43,13 +43,11 @@ export const SUNBIZ_LEGAL_FOOTER =
   "\n\n---\nSunBiz Funding LLC\n221 W Hallandale Beach Blvd, Suite 518\nHallandale, FL 33009\n\n" +
   "You received this email because you submitted a funding inquiry. To stop receiving emails, reply UNSUBSCRIBE.";
 
-// OASIS's identification block. Street address supplied by CC 2026-09-09;
-// until then it said only "OASIS AI Solutions, Montreal, QC, Canada" (no
-// street), an incomplete CASL s.6(2) identification on every commercial email
-// OASIS sent. Laid out name / street / city-postal to match the SunBiz footer
+// OASIS's identification block. Collingwood street address confirmed by CC on
+// 2026-10-27. Laid out name / street / city-postal to match the SunBiz footer
 // above. One copy, shared by the outreach footer (BRAND_FOOTERS.oasis) and the
 // support footer (oasisSupportFooter).
-const OASIS_IDENTITY = "OASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada";
+const OASIS_IDENTITY = "OASIS AI Solutions\n141 Sixth Street\nCollingwood, ON L9Y 1Z1, Canada";
 
 /**
  * Append the rep's sign-off + the legal footer to an outbound body.

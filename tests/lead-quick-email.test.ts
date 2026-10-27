@@ -191,7 +191,7 @@ run("an OASIS email never carries SunBiz's legal footer", () => {
   // The STREET too, not just the city. A CASL s.6(2) identification without a
   // mailing address is incomplete, and that is exactly what shipped until
   // 2026-09-09 while this assertion passed.
-  assert.match(oasis, /6993 Decarie Blvd/, "OASIS identification has no street address");
+  assert.match(oasis, /141 Sixth Street/, "OASIS identification has no street address");
   assert.match(oasis, /UNSUBSCRIBE/, "no opt-out instruction");
   assert.ok(!oasis.includes("—"), "the OASIS footer carries an em dash");
 

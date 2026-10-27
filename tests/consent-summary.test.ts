@@ -30,7 +30,7 @@ function check(name: string, fn: () => void): void {
 
 const identity: ConsentIdentity = {
   businessName: "OASIS AI Solutions",
-  address: "6993 Decarie Blvd, Montreal, QC H3W 0B5",
+  address: "141 Sixth Street, Collingwood, ON L9Y 1Z1",
   privacyUrl: "https://oasisai.work/privacy",
 };
 
@@ -75,9 +75,9 @@ async function main(): Promise<void> {
     }
   });
 
-  check("the ledger version marks the collapsed presentation; the recorded wording is unchanged", () => {
+  check("the ledger version marks the collapsed presentation; the disclosure uses the current address", () => {
     assert.equal(CONSENT_DISCLOSURE_VERSION, "occ-ledger-v2-2026-10-16");
-    assert.match(consentDisclosureText("email", identity), /^I agree that OASIS AI Solutions \(6993 Decarie Blvd/);
+    assert.match(consentDisclosureText("email", identity), /^I agree that OASIS AI Solutions \(141 Sixth Street/);
   });
 
   check("each box shows the summary and keeps the full terms in the page, collapsed and tied to the box", () => {

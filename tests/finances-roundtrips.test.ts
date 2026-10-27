@@ -417,6 +417,34 @@ async function main() {
     assert.match(readFileSync(join(financesDir, "(overview)", "loading.tsx"), "utf8"), /export \{ default \} from "@\/app\/money\/loading";/);
   });
 
+  await check("bravo__244 moves the invoice address off the old Montreal seed and bravo__245 records it; an address a founder typed is kept", async () => {
+    const file = (name: string) => readFileSync(join(root, "database/turso", name), "utf8");
+    const move = file("bravo__244_oasis_invoice_address_collingwood.sql");
+    const record = file("bravo__245_oasis_invoice_address_audit.sql");
+    const row = async () => (await raw.execute({ sql: "SELECT address_line1, city, region, postal_code, updated_by FROM fin_settings WHERE entity_id = ?", args: [B] })).rows[0];
+    const audits = async () => Number((await raw.execute({ sql: "SELECT COUNT(*) AS n FROM fin_audit_log WHERE entity_id = ? AND actor = 'migration bravo__244' AND action = 'settings.updated'", args: [B] })).rows[0].n);
+    // Production on 2026-10-27: the old seed, last edited by bravo__199.
+    const oldSeed = "UPDATE fin_settings SET address_line1 = '6993 Decarie Blvd', address_line2 = '', city = 'Montreal', region = 'QC', postal_code = ?, country = 'Canada', updated_by = 'migration bravo__199' WHERE entity_id = ?";
+    await raw.execute({ sql: oldSeed, args: ["H3W 0B5", B] });
+    await raw.executeMultiple(move);
+    await raw.executeMultiple(record);
+    await raw.executeMultiple(record);
+    const moved = await row();
+    assert.deepEqual(
+      [moved.address_line1, moved.city, moved.region, moved.postal_code, moved.updated_by],
+      ["141 Sixth Street", "Collingwood", "ON", "L9Y 1Z1", "migration bravo__244"],
+      "the old seed moves, and the row names the migration that moved it",
+    );
+    assert.equal(await audits(), 1, "one audit entry, however often it runs");
+    // An address a founder typed is never moved, and nothing is recorded for it.
+    await raw.execute({ sql: oldSeed, args: ["H3W 0B6", B] });
+    await raw.executeMultiple(move);
+    await raw.executeMultiple(record);
+    const kept = await row();
+    assert.deepEqual([kept.address_line1, kept.postal_code], ["6993 Decarie Blvd", "H3W 0B6"], "an address that is not exactly the old seed is kept");
+    assert.equal(await audits(), 1, "no audit entry for an address the migration did not move");
+  });
+
   if (failures) {
     console.error(`finances-roundtrips: ${failures} check(s) failed`);
     process.exit(1);

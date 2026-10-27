@@ -247,8 +247,8 @@ run("rep-typed markup is escaped, and only http(s) is ever linked", () => {
 run("the HTML identifies OASIS, and no other company", () => {
   const html = renderQuickEmailHtml("Hi Simon,\n\nShort note.");
   assert.match(html, /OASIS AI Solutions/);
-  assert.match(html, /Montreal, QC H3W 0B5, Canada/);
-  assert.match(html, /6993 Decarie Blvd/, "CASL identification needs the street address");
+  assert.match(html, /Collingwood, ON L9Y 1Z1, Canada/);
+  assert.match(html, /141 Sixth Street/, "CASL identification needs the street address");
   assert.match(html, /reply UNSUBSCRIBE/, "CASL: a working opt-out must be stated");
   // The other business on this codebase must never appear on an OASIS email.
   assert.ok(!/sunbiz/i.test(html), "another company's identity leaked into OASIS mail");
@@ -269,7 +269,7 @@ run("the sign-off is the rep, above the OASIS identification block", () => {
     signerName: "Conaugh",
     signerEmail: REP,
   });
-  assert.ok(html.indexOf("Conaugh") < html.indexOf("Montreal"), "signature sits above the footer");
+  assert.ok(html.indexOf("Conaugh") < html.indexOf("Collingwood"), "signature sits above the footer");
   assert.match(html, /mailto:schneur@oasisai\.work/, "the reader can see who to answer");
 });
 
@@ -323,7 +323,7 @@ run("both parts are on the wire, and only the text part is signed", () => {
   // times legitimately (title, logo alt, wordmark, sign-off), so counting that
   // would assert nothing.
   assert.equal(
-    (msg.html!.match(/OASIS AI Solutions, 6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada/g) || []).length,
+    (msg.html!.match(/OASIS AI Solutions, 141 Sixth Street, Collingwood, ON L9Y 1Z1, Canada/g) || []).length,
     1,
     "the identification block must appear exactly once",
   );

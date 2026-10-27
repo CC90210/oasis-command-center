@@ -43,11 +43,11 @@ export const LEGAL_ENTITY = "OASIS AI Solutions";
 /** Public ownership facts. Keep About, Team, and legal copy on this source. */
 export const LEGAL_OWNER_NAME = "Conaugh McKenna";
 export const LEGAL_OWNERSHIP_STRUCTURE = "sole proprietorship";
-export const LEGAL_JURISDICTION = "Province of Quebec, Canada";
-export const LEGAL_PRINCIPAL_PLACE = "Montreal, Quebec, Canada";
+export const LEGAL_JURISDICTION = "Province of Ontario, Canada";
+export const LEGAL_PRINCIPAL_PLACE = "Collingwood, Ontario, Canada";
 
 /** Effective date shown on all three legal pages. */
-export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
+export const LEGAL_EFFECTIVE_DATE = "October 27, 2026";
 
 /**
  * Date the privacy policy's content last changed. Shown on /privacy only.
@@ -57,7 +57,7 @@ export const LEGAL_EFFECTIVE_DATE = "July 27, 2026";
  * changed when they did not. /privacy promises to update this date whenever
  * it changes, so bump it in the same commit as any edit to the policy.
  */
-export const PRIVACY_LAST_UPDATED = "October 26, 2026";
+export const PRIVACY_LAST_UPDATED = "October 27, 2026";
 
 /**
  * OASIS's one published contact address: support@oasisai.work.

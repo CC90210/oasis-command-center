@@ -77,12 +77,7 @@ export default async function UnsubscribePage({
 
         <div className="mt-10 pt-6 border-t border-[rgba(255,255,255,0.06)] text-center">
           <p className="text-[11px] text-[#6b7280] leading-relaxed">
-            {/* Montreal, not Collingwood (CC confirmed 2026-09-09). Every OASIS
-                email footer already said Montreal while this page said
-                Collingwood, so the opt-out page a recipient lands on disagreed
-                with the message that sent them there — on the one page whose
-                whole job is a legally-required identification. */}
-            OASIS AI Solutions · 6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada<br />
+            OASIS AI Solutions · 141 Sixth Street, Collingwood, ON L9Y 1Z1, Canada<br />
             Questions? <a href={`mailto:${CONTACT_EMAIL}`} className="text-[#00d4ff] underline">{CONTACT_EMAIL}</a>
           </p>
         </div>
