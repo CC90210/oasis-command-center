@@ -54,6 +54,13 @@ export const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
  */
 export const AGENT_ACCESS_SERVICE = "agent_access";
 
+/**
+ * Where a computer's reconnect request waits for its next check-in
+ * (lib/devices/reconnect.ts): one row per pairing, field = the pairing id.
+ * Not a credential either: listTenantIntegrationStatus skips it.
+ */
+export const BRIDGE_RECONNECT_SERVICE = "bridge_reconnect";
+
 type StoreRow = {
   id: string;
   tenant_id: string;
@@ -608,7 +615,7 @@ export async function listTenantIntegrationStatus(
   for (const row of (r.data || []) as StoreRow[]) {
     // An owner's agent choices are not credentials: one that will not decrypt
     // must not blank every card's status (review of OCC #743).
-    if (row.service === AGENT_ACCESS_SERVICE) continue;
+    if (row.service === AGENT_ACCESS_SERVICE || row.service === BRIDGE_RECONNECT_SERVICE) continue;
     const envPresent = envAllowed && envKeysFor(row.service, row.field_key).some((envKey) =>
       Boolean(process.env[envKey]?.trim()),
     );

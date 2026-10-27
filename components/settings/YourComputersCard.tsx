@@ -21,7 +21,7 @@
  * pairing controls remain in the verified-operator-only DevicesEditor.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, Clock, Copy, Loader2, Monitor, RefreshCw } from "lucide-react";
 import {
   bestComputerAnswerState,
@@ -35,6 +35,14 @@ import { runtimeStatusWords } from "@/lib/bridge-cli-status";
 import { CLI_ENGINE_LABEL, type CliEngine } from "@/lib/ai/agent-engine";
 import { readEngine, runtimeStatusLabel, type EngineDevice } from "@/components/settings/agent-engine-client";
 import { DEVICE_LABEL_MAX, deviceLabelProblem, deviceLabelProblemWords } from "@/lib/devices/label";
+import {
+  RECONNECT_WATCH_MS,
+  namesSentence,
+  readsOffline,
+  reconnectOutcome,
+  reconnectWaiting,
+  reconnectWords,
+} from "@/lib/devices/reconnect-words";
 
 type DeviceRow = {
   id: string;
@@ -53,6 +61,9 @@ type DeviceRow = {
    * leaves this null for the viewer's own rows, which never need it). */
   owner_name: string | null;
 };
+
+/** A reconnect Refresh asked for: the computers asked, since when, and whether the watch has ended. */
+type Reconnect = { ids: string[]; since: number; done: boolean };
 
 /** What GET /api/ai/engine says about the viewer's computers: the inputs AI brain's app labels read. */
 type EngineInventory = { devices: EngineDevice[]; oasis: boolean };
@@ -147,6 +158,10 @@ export function YourComputersCard() {
   const [notice, setNotice] = useState<string | null>(null);
   // One computer being renamed at a time: its id and the text in the box.
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
+  // Refresh's reconnect of your offline computers, while it is watched and after.
+  const [reconnect, setReconnect] = useState<Reconnect | null>(null);
+  // Each read of the computers is numbered; only the newest one writes the card.
+  const readSeq = useRef(0);
 
   async function rename(id: string, value: string) {
     const problem = deviceLabelProblem(value);
@@ -180,22 +195,120 @@ export function YourComputersCard() {
     }
   }
 
-  async function load() {
+  /**
+   * Read the computers again: the rows (null when they could not be read), and
+   * whether this read is still the newest. Only the newest read writes the
+   * card, so a slow response never puts older rows over fresher ones.
+   */
+  async function read(): Promise<{ rows: DeviceRow[] | null; newest: boolean }> {
+    const seq = ++readSeq.current;
     setError(null);
     try {
       // readEngine never throws: an unread AI setup leaves the app lines off
       // (as an unread inventory did), it never invents a status.
       const [dr, er] = await Promise.all([fetch("/api/devices").then((r) => r.json()), readEngine()]);
-      if (dr.ok) setDevices(dr.devices as DeviceRow[]);
-      else setError(dr.error || "load_failed");
+      const rows = dr.ok ? (dr.devices as DeviceRow[]) : null;
+      if (seq !== readSeq.current) return { rows, newest: false };
       setEngine(er.ok ? { devices: er.state.devices, oasis: er.state.oasis } : null);
+      if (rows) setDevices(rows);
+      else setError(dr.error || "load_failed");
+      return { rows, newest: true };
     } catch (e) {
-      setError(e instanceof Error ? e.message : "load_failed");
+      const newest = seq === readSeq.current;
+      if (newest) setError(e instanceof Error ? e.message : "load_failed");
+      return { rows: null, newest };
     }
   }
 
+  /** Read the computers again; the rows, or null when they could not be read. */
+  async function load(): Promise<DeviceRow[] | null> {
+    return (await read()).rows;
+  }
+
+  /**
+   * Refresh (CC, 2026-10-27): read the computers again, and ask each of your
+   * own that reads Offline to reconnect. A computer cannot be reached from
+   * here; its bridge checks in about once a minute, and that check-in's reply
+   * tells it to start fresh (POST /api/devices/[id]/reconnect,
+   * lib/devices/reconnect.ts). The card then watches for it to come back.
+   */
+  async function refresh() {
+    setNotice(null);
+    // Act on the newest read only: an older one can show Offline a computer
+    // that a newer read shows Ready, and asking it would restart it for nothing.
+    let { rows, newest } = await read();
+    if (rows && !newest) ({ rows, newest } = await read());
+    if (!rows || !newest) return;
+    const offline = rows.filter((d) => d.mine && !d.revoked_at && readsOffline(d, Date.now()));
+    if (offline.length === 0) {
+      setReconnect(null);
+      return;
+    }
+    const asked: string[] = [];
+    const missed: string[] = [];
+    for (const d of offline) {
+      let ok = false;
+      try {
+        ok = (await fetch(`/api/devices/${encodeURIComponent(d.id)}/reconnect`, { method: "POST" })).ok;
+      } catch {
+        // Named below: a computer that was not asked is not watched.
+      }
+      if (ok) asked.push(d.id);
+      else missed.push(d.label || "your computer");
+    }
+    if (missed.length) setNotice(`Couldn't ask ${namesSentence(missed)} to reconnect. Check your connection and try again.`);
+    if (asked.length === 0) {
+      setReconnect(null);
+      return;
+    }
+    // Nothing to watch for when no computer asked is checking in: the line says to wake it.
+    const now = Date.now();
+    setReconnect({ ids: asked, since: now, done: !reconnectWaiting(reconnectOutcome(asked, rows, now)) });
+  }
+
+  // While a reconnect is watched: read again every few seconds until no computer
+  // asked is still checking in and Offline, or RECONNECT_WATCH_MS passes.
   useEffect(() => {
-    load();
+    if (!reconnect || reconnect.done) return;
+    let live = true;
+    let reading = false;
+    const timer = window.setInterval(async () => {
+      // The watch ends on time even when a read has stalled.
+      if (Date.now() - reconnect.since >= RECONNECT_WATCH_MS) {
+        setReconnect({ ...reconnect, done: true });
+        return;
+      }
+      // One read at a time: on a slow network reads never stack up and overtake each other.
+      if (reading) return;
+      reading = true;
+      try {
+        const { rows, newest } = await read();
+        if (!live) return;
+        const nowMs = Date.now();
+        // Only the newest read decides: an older one can show a computer that has since come back.
+        const waiting = rows && newest ? reconnectWaiting(reconnectOutcome(reconnect.ids, rows, nowMs)) : true;
+        if (!waiting || nowMs - reconnect.since >= RECONNECT_WATCH_MS) setReconnect({ ...reconnect, done: true });
+      } finally {
+        reading = false;
+      }
+    }, 5_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [reconnect]);
+
+  // A reconnect that brought every computer back says so for a moment; then the rows speak for themselves.
+  useEffect(() => {
+    if (!reconnect?.done || !devices) return;
+    const outcome = reconnectOutcome(reconnect.ids, devices, Date.now());
+    if (outcome.checkingIn.length || outcome.quiet.length) return;
+    const timer = window.setTimeout(() => setReconnect(null), 15_000);
+    return () => window.clearTimeout(timer);
+  }, [reconnect, devices]);
+
+  useEffect(() => {
+    void read();
   }, []);
 
   async function approve(id: string) {
@@ -262,6 +375,8 @@ export function YourComputersCard() {
   const mine = devices.filter((d) => d.mine && !d.revoked_at);
   const theirs = devices.filter((d) => !d.mine && !d.revoked_at);
   const now = Date.now();
+  const reconnectLine = reconnect ? reconnectWords(reconnectOutcome(reconnect.ids, devices, now), reconnect.done) : "";
+  const reconnecting = !!reconnect && !reconnect.done;
 
   const inventoryFor = (id: string): string[] => {
     const device = engine?.devices.find((x) => x.pairingId === id);
@@ -279,9 +394,17 @@ export function YourComputersCard() {
       {notice && (
         <div className="rounded-md border border-bg-border bg-bg-elev/40 p-3 text-xs text-fg-muted">{notice}</div>
       )}
-      <div className="flex items-center justify-end">
-        <button onClick={load} className="text-fg-dim hover:text-accent text-xs inline-flex items-center gap-1" title="Refresh">
-          <RefreshCw className="w-3 h-3" /> refresh
+      {/* The button stays where it was clicked; the line wraps beside it. */}
+      <div className="flex items-start justify-between gap-3">
+        <span role="status" className="min-w-0 flex-1 text-xs text-fg-muted" data-testid="computers-reconnect-status">
+          {reconnectLine}
+        </span>
+        <button
+          onClick={() => void refresh()}
+          className="shrink-0 text-fg-dim hover:text-accent text-xs inline-flex items-center gap-1"
+          title="Read your computers again, and ask any that reads Offline to reconnect"
+        >
+          <RefreshCw className={`w-3 h-3 ${reconnecting ? "animate-spin" : ""}`} aria-hidden="true" /> refresh
         </button>
       </div>
       {mine.length === 0 ? (
