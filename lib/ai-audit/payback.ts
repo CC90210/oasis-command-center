@@ -14,6 +14,12 @@ const MONTHLY = /^\s*(?:(?:per|a|each|every) month|monthly)\s*$/i;
 
 export type Payback = { estimate: DocEstimate; investment: number; monthlyFees: number; fast: number; slow: number };
 
+/** "1 month", "3 months", "3 to 7 months": both ends said once when they round to the same month (CodeRabbit, #759). */
+export function monthsWords(fast: number, slow: number): string {
+  const n = (m: number) => `${m} ${m === 1 ? "month" : "months"}`;
+  return fast === slow ? n(slow) : `${fast} to ${n(slow)}`;
+}
+
 export function paybackFor(doc: AuditDoc, proposal: ProposalContent, totals: ProposalTotals): Payback | null {
   if (proposal.lines.some((l) => l.kind === "needs_owner_price") || totals.total_cents <= 0) return null;
   // The client's "$450 a job" is in their currency, the price in the proposal's: no ratio without both the same.
