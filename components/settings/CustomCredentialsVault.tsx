@@ -49,6 +49,10 @@ import {
   recognizeCustomKey,
   unreadablePasteLines,
   VAULT_MAX_VALUE_LENGTH,
+  draftApplies,
+  looksLikeSecret,
+  pastedNameProblem,
+  type DraftScope,
   type KeyHint,
 } from "@/lib/os/custom-keys";
 
@@ -78,23 +82,33 @@ function valueProblem(value: string): string | null {
   return value.length > VAULT_MAX_VALUE_LENGTH ? "Too long: 8 KB at most." : null;
 }
 
-export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: string) => void } = {}) {
+export function CustomCredentialsVault({
+  onOpenApp,
+  active = true,
+}: {
+  /** Opens a recognised app's own card (the Connections page passes it). */
+  onOpenApp?: (slug: string) => void;
+  /** The drawer is open: the keys are read again each time it opens, so the list is never an old one. */
+  active?: boolean;
+} = {}) {
   const [rows, setRows] = useState<CustomCredentialRow[]>([]);
   const [loading, setLoading] = useState(true);
-  // The saved keys have been read. Until then a typed name may be a saved key,
-  // and saving it would replace its agents with a guess, so nothing is saved.
+  // The saved keys have been read. Until then the page cannot say which names
+  // are saved or who uses them, so nothing is saved.
   const [listed, setListed] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [agentsError, setAgentsError] = useState<string | null>(null);
   // The workspace's agents by name ("Maven (Marketing)"), from the route.
   const [choices, setChoices] = useState<ReadonlyArray<AgentChoice>>(AGENT_CHOICES);
 
-  // Add a key. `draft` counts only once the owner touches the picker.
+  // Add a key. The owner's pick, and the name it was made for: a pick made for
+  // a saved key never carries to another name (custom-keys.ts draftApplies).
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [draft, setDraft] = useState<AgentAccess>("all");
-  const [touched, setTouched] = useState(false);
+  const [draftScope, setDraftScope] = useState<DraftScope | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Paste several: the agents the owner chose per key, by its saved name.
@@ -110,7 +124,8 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
   const [editAgents, setEditAgents] = useState<AgentAccess>("all");
   const [editBusy, setEditBusy] = useState(false);
 
-  const fetchRows = useCallback(async () => {
+  /** Read the saved keys; the rows, or null when they could not be read. */
+  const fetchRows = useCallback(async (): Promise<CustomCredentialRow[] | null> => {
     setLoading(true);
     try {
       const r = await fetch("/api/credentials/custom", { cache: "no-store" });
@@ -122,27 +137,33 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
         error?: string;
       };
       if (!r.ok || !j.ok) {
-        setErr(j.error || `http_${r.status}`);
+        setListError(j.error || `http_${r.status}`);
         setRows([]);
         setListed(false);
-      } else {
-        setRows(j.entries || []);
-        setListed(true);
-        setAgentsError(j.agents_error || null);
-        if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
+        return null;
       }
+      const entries = j.entries || [];
+      setRows(entries);
+      setListed(true);
+      setListError(null);
+      setAgentsError(j.agents_error || null);
+      if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
+      return entries;
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "fetch_failed");
+      setListError(e instanceof Error ? e.message : "fetch_failed");
       setRows([]);
       setListed(false);
+      return null;
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Read on every opening: the drawer stays mounted while closed, and another
+  // admin, tab or agent may have changed the keys since (review of OCC #748).
   useEffect(() => {
-    void fetchRows();
-  }, [fetchRows]);
+    if (active) void fetchRows();
+  }, [active, fetchRows]);
 
   // The Connections page's cards read their agents again (ConnectionsHub).
   const announce = () => window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT));
@@ -153,27 +174,44 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
   const keyName = normalizeVaultKeyName(name);
   const nameProblem = keyNameProblem(name);
   const existing = keyName ? byKey.get(keyName) : undefined;
+  const touched = draftApplies(draftScope, keyName, !!existing);
   const hint = recognizeCustomKey(name, value);
-  const shown = touched ? draft : agentsShown({ existing: existing?.agents, unreadable: existing?.agents_unreadable, hint });
-  const toSend = agentsToSend({ exists: !!existing, touched, draft, hint });
+  const shown = touched ? draft : agentsShown({ saved: !!existing, existing: existing?.agents ?? null, hint });
+  const toSend = agentsToSend({ touched, draft, hint });
   const tooLong = valueProblem(value);
-  const canSave = listed && !!keyName && !nameProblem && !!value.trim() && !tooLong && !busy;
+  // Why nothing can be saved yet, or null. Agents that cannot be read would make
+  // every line about them a guess (review of OCC #748).
+  const blockedBy = !listed
+    ? loading
+      ? "Reading your saved keys first."
+      : "Your saved keys could not be read, so nothing can be saved yet."
+    : agentsError
+      ? "Which agents may use these keys could not be read, so nothing can be saved yet."
+      : null;
+  const canSave = !blockedBy && !!keyName && !nameProblem && !!value.trim() && !tooLong && !busy;
+  const pick = (next: AgentAccess) => {
+    setDraft(next);
+    setDraftScope({ key: keyName, saved: !!existing });
+  };
 
   // The keys in a paste, each once (a key pasted twice keeps its last value).
+  // A paste is saved as written: its names are never reshaped (pastedNameProblem).
   const pasted = useMemo(() => {
     const lines = parseDotenvLines(pasteText);
     const lastAt = new Map<string, number>();
-    lines.forEach((l, i) => lastAt.set(normalizeVaultKeyName(l.key) || `#${i}`, i));
+    lines.forEach((l, i) => lastAt.set(l.key.trim().toUpperCase() || `#${i}`, i));
     return lines.flatMap((l, i) => {
-      const key = normalizeVaultKeyName(l.key);
+      const key = l.key.trim().toUpperCase();
       if (lastAt.get(key || `#${i}`) !== i) return [];
-      const problem = keyNameProblem(l.key) ?? (!l.value.trim() ? "No value." : valueProblem(l.value));
-      const row = key ? byKey.get(key) : undefined;
-      const lineHint = recognizeCustomKey(l.key, l.value);
-      const chosen = key ? pasteAgents[key] : undefined;
-      const agents = chosen ?? agentsShown({ existing: row?.agents, unreadable: row?.agents_unreadable, hint: lineHint });
-      const send = agentsToSend({ exists: !!row, touched: chosen !== undefined, draft: chosen ?? "all", hint: lineHint });
-      return [{ id: `${key || l.key}-${i}`, key: key || l.key, value: l.value, problem, exists: !!row, hint: lineHint, agents, send }];
+      const problem = pastedNameProblem(l.key, l.value) ?? (!l.value.trim() ? "No value." : valueProblem(l.value));
+      // A secret pasted without a name is never shown as one.
+      const secret = looksLikeSecret(l.key) || /^=+$/.test(l.value.trim());
+      const row = byKey.get(key);
+      const lineHint = problem ? null : recognizeCustomKey(l.key, l.value);
+      const chosen = pasteAgents[key];
+      const agents = chosen ?? agentsShown({ saved: !!row, existing: row?.agents ?? null, hint: lineHint });
+      const send = agentsToSend({ touched: chosen !== undefined, draft: chosen ?? "all", hint: lineHint });
+      return [{ id: `${i}`, key: secret ? "(a secret without a name)" : key, sendKey: l.key.trim(), value: l.value, problem, exists: !!row, hint: lineHint, agents, send }];
     });
   }, [pasteText, pasteAgents, byKey]);
   const pasteReady = pasted.filter((p) => !p.problem);
@@ -190,19 +228,27 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
       const r = await fetch("/api/credentials/custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: keyName, value, ...(toSend !== undefined ? { agents: toSend } : {}) }),
+        body: JSON.stringify({ key: keyName, value, ...toSend }),
       });
       const j = (await r.json().catch(() => ({}))) as { ok?: boolean; results?: UpsertResult[]; error?: string };
       if (!j.ok) {
         setErr(j.results?.[0]?.error || j.error || `http_${r.status}`);
         return;
       }
-      setMsg(`Saved ${keyName} for ${sentence(shown)}.`);
+      const saved = keyName;
       setName("");
       setValue("");
       setDraft("all");
-      setTouched(false);
-      await fetchRows();
+      setDraftScope(null);
+      // Say who uses it as the server now holds it: the route decides whether a suggestion applied.
+      const row = (await fetchRows())?.find((x) => x.key === saved);
+      setMsg(
+        !row
+          ? `Saved ${saved}.`
+          : row.agents === null
+            ? `Saved ${saved}. Its agents could not be read, so no agent may use it until they are saved again.`
+            : `Saved ${saved} for ${sentence(row.agents)}.`,
+      );
       announce();
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "save_failed");
@@ -223,7 +269,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          entries: pasteReady.map((p) => ({ key: p.key, value: p.value, ...(p.send !== undefined ? { agents: p.send } : {}) })),
+          entries: pasteReady.map((p) => ({ key: p.sendKey, value: p.value, ...p.send })),
         }),
       });
       const j = (await r.json().catch(() => ({}))) as { ok?: boolean; saved?: number; failed?: number; results?: UpsertResult[]; error?: string };
@@ -359,12 +405,13 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
             {nameProblem ? (
               <span className="text-status-hot">{nameProblem}</span>
             ) : existing ? (
-              existing.agents_unreadable ? (
-                "Already saved, and its agents could not be read: pick them below to fix it."
+              touched ? (
+                "Already saved: a new value replaces it, for the agents you picked below."
+              ) : existing.agents === null ? (
+                "Already saved, and its agents could not be read: no agent may use it. Pick them below to fix it."
               ) : (
                 <>
-                  Already saved: a new value replaces it, and it stays with {existing.agents === null ? "its agents" : sentence(existing.agents)} unless you
-                  change them below.
+                  Already saved: a new value replaces it, and it stays with {sentence(existing.agents)} unless you change them below.
                 </>
               )
             ) : hint?.from === "name" ? (
@@ -422,10 +469,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
             {hint && !sameAgentAccess(shown, hint.access) && (
               <button
                 type="button"
-                onClick={() => {
-                  setDraft(hint.access);
-                  setTouched(true);
-                }}
+                onClick={() => pick(hint.access)}
                 className={`text-[12px] ${LINK}`}
               >
                 Use the {hint.app} suggestion
@@ -434,10 +478,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
           </div>
           <AgentPicker
             value={shown}
-            onChange={(next) => {
-              setDraft(next);
-              setTouched(true);
-            }}
+            onChange={pick}
             disabled={busy}
             label="Agents that may use the new key"
             choices={choices}
@@ -462,8 +503,8 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
 
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <p className="min-w-0 text-[12px] text-fg-dim" data-testid="custom-key-summary">
-            {!listed ? (
-              loading ? "Reading your saved keys first." : "Your saved keys could not be read, so nothing can be saved yet."
+            {blockedBy ? (
+              blockedBy
             ) : keyName && !nameProblem ? (
               <>
                 Saves <span className="font-mono text-fg-muted">{keyName}</span> for {sentence(shown)}.
@@ -501,7 +542,17 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
           </h3>
           {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-fg-dim" />}
         </div>
-        {!loading && rows.length === 0 && (
+        {!loading && listError && (
+          <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-3 py-6 text-center text-xs text-status-hot" role="alert">
+            <span>
+              Couldn&apos;t read your saved keys (<span className="font-mono">{listError}</span>).
+            </span>
+            <button type="button" onClick={() => void fetchRows()} className={LINK}>
+              Try again
+            </button>
+          </div>
+        )}
+        {!loading && !listError && rows.length === 0 && (
           <div className="px-3 py-6 text-center text-xs text-fg-dim">No keys yet. Add one above, or paste several below.</div>
         )}
         {rows.length > 0 && (
@@ -621,7 +672,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
                             <>
                               {p.hint ? `${p.hint.app} · ` : ""}
                               {p.exists
-                                ? p.send === undefined
+                                ? p.send.agents === undefined
                                   ? `replaces its value, stays with ${sentence(p.agents)}`
                                   : `replaces its value, for ${sentence(p.agents)}`
                                 : `for ${sentence(p.agents)}`}
@@ -659,7 +710,8 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
                 {pasteRepeats > 0 && `${pasteRepeats} repeated key${pasteRepeats === 1 ? "" : "s"}: the last value is kept.`}
               </p>
             )}
-            <button type="submit" disabled={!listed || pasteBusy || pasteReady.length === 0} className={PRIMARY}>
+            {blockedBy && <p className="text-[11px] text-fg-dim">{blockedBy}</p>}
+            <button type="submit" disabled={!!blockedBy || pasteBusy || pasteReady.length === 0} className={PRIMARY}>
               {pasteBusy ? "Saving…" : pasteReady.length > 1 ? `Save ${pasteReady.length} keys` : "Save key"}
             </button>
             {pasteResults && pasteResults.length > 0 && (

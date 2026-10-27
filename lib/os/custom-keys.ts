@@ -46,6 +46,7 @@ export function normalizeVaultKeyName(raw: string): string {
 
 /** Why a typed name cannot be saved, in a few words; null when it can. */
 export function keyNameProblem(raw: string): string | null {
+  if (looksLikeSecret(raw)) return "That looks like the secret itself. Paste it under Value, and give the key a name.";
   const name = normalizeVaultKeyName(raw);
   if (!name) return raw.trim() ? "Use letters, numbers and underscores." : null;
   if (!/^[A-Z]/.test(name)) return "Start the name with a letter.";
@@ -101,7 +102,8 @@ export type KnownApp = {
 
 /** The apps with a card: their words. Names and departments come from the catalog. */
 export const CARD_WORDS: Readonly<Record<string, Omit<KnownApp, "name" | "departments" | "card">>> = {
-  stripe: { words: ["STRIPE"], prefixes: ["sk_live_", "sk_test_", "rk_live_", "rk_test_", "whsec_"], usualName: "STRIPE_SECRET_KEY" },
+  // Not "whsec_": Clerk, Svix and Resend webhook secrets start that way too.
+  stripe: { words: ["STRIPE"], prefixes: ["sk_live_", "sk_test_", "rk_live_", "rk_test_"], usualName: "STRIPE_SECRET_KEY" },
   quickbooks: { words: ["QUICKBOOKS", "QBO", "INTUIT"] },
   xero: { words: ["XERO"] },
   plaid: { words: ["PLAID"] },
@@ -119,8 +121,12 @@ export const CARD_WORDS: Readonly<Record<string, Omit<KnownApp, "name" | "depart
   quo: { words: ["QUO", "OPENPHONE"] },
   whatsapp: { words: ["WHATSAPP"] },
   discord: { words: ["DISCORD"], prefixes: ["https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/"], usualName: "DISCORD_WEBHOOK_URL" },
-  "microsoft-teams": { words: ["TEAMS", "MSTEAMS", "MICROSOFT_TEAMS"] },
-  meta: { words: ["META", "FACEBOOK", "FB", "INSTAGRAM", "IG"], prefixes: ["EAA"], usualName: "META_ACCESS_TOKEN" },
+  // Not TEAMS alone: LINEAR_TEAMS_ID is Linear's.
+  "microsoft-teams": { words: ["MSTEAMS", "MS_TEAMS", "MICROSOFT_TEAMS", "TEAMS_WEBHOOK"] },
+  // Not META alone: META_LLAMA_API_KEY is a model key, not the Facebook app.
+  meta: {
+    words: ["FACEBOOK", "FB", "INSTAGRAM", "IG", "META_ACCESS", "META_APP", "META_ADS", "META_AD", "META_PIXEL", "META_PAGE", "META_GRAPH", "META_BUSINESS", "META_SYSTEM_USER", "META_CAPI"],
+  },
   zernio: { words: ["ZERNIO", "LATE"] },
   "constant-contact": { words: ["CONSTANT_CONTACT", "CTCT"] },
   cloudflare: { words: ["CLOUDFLARE", "CF"] },
@@ -144,8 +150,10 @@ const OPERATIONS: readonly DepartmentKey[] = ["operations"];
 /** Common apps with no card, and who each is for. An AI model is for every agent. */
 const OTHER_APPS: readonly KnownApp[] = [
   // AI models
-  { name: "OpenAI", departments: "all", words: ["OPENAI"], prefixes: ["sk-proj-", "sk-svcacct-", "sk-"], usualName: "OPENAI_API_KEY" },
+  // Not a bare "sk-": DeepSeek and many other model APIs start their keys that way.
+  { name: "OpenAI", departments: "all", words: ["OPENAI"], prefixes: ["sk-proj-", "sk-svcacct-"], usualName: "OPENAI_API_KEY" },
   { name: "Anthropic", departments: "all", words: ["ANTHROPIC", "CLAUDE"], prefixes: ["sk-ant-"], usualName: "ANTHROPIC_API_KEY" },
+  { name: "Llama", departments: "all", words: ["LLAMA"] },
   { name: "Gemini", departments: "all", words: ["GEMINI", "GOOGLE_AI", "GOOGLE_GENERATIVE_AI"] },
   { name: "Groq", departments: "all", words: ["GROQ"], prefixes: ["gsk_"], usualName: "GROQ_API_KEY" },
   { name: "Mistral", departments: "all", words: ["MISTRAL"] },
@@ -165,7 +173,8 @@ const OTHER_APPS: readonly KnownApp[] = [
   { name: "Close", departments: SALES, words: ["CLOSEIO", "CLOSE_IO", "CLOSE_CRM"] },
   { name: "Attio", departments: SALES, words: ["ATTIO"] },
   { name: "Zoho", departments: SALES, words: ["ZOHO"] },
-  { name: "Apollo", departments: SALES, words: ["APOLLO"] },
+  // Not APOLLO alone: APOLLO_KEY and APOLLO_GRAPH_REF are Apollo GraphQL's.
+  { name: "Apollo.io", departments: SALES, words: ["APOLLO_IO", "APOLLOIO"] },
   { name: "Clay", departments: SALES, words: ["CLAY"] },
   { name: "Hunter", departments: SALES, words: ["HUNTER"] },
   { name: "ZoomInfo", departments: SALES, words: ["ZOOMINFO"] },
@@ -210,7 +219,7 @@ const OTHER_APPS: readonly KnownApp[] = [
   { name: "Bitly", departments: MARKETING, words: ["BITLY"] },
   { name: "PostHog", departments: MARKETING, words: ["POSTHOG"], prefixes: ["phc_", "phx_"], usualName: "POSTHOG_API_KEY" },
   { name: "Mixpanel", departments: MARKETING, words: ["MIXPANEL"] },
-  { name: "Segment", departments: MARKETING, words: ["SEGMENT"] },
+  { name: "Segment", departments: MARKETING, words: ["SEGMENT_WRITE", "SEGMENT_IO", "SEGMENTIO"] },
   { name: "Amplitude", departments: MARKETING, words: ["AMPLITUDE"] },
   { name: "Hotjar", departments: MARKETING, words: ["HOTJAR"] },
   { name: "ElevenLabs", departments: MARKETING, words: ["ELEVENLABS", "ELEVEN_LABS"] },
@@ -258,7 +267,7 @@ const OTHER_APPS: readonly KnownApp[] = [
     usualName: "MAKE_WEBHOOK_URL",
   },
   { name: "n8n", departments: OPERATIONS, words: ["N8N"] },
-  { name: "AWS", departments: OPERATIONS, words: ["AWS", "AMAZON"], prefixes: ["AKIA"], usualName: "AWS_ACCESS_KEY_ID" },
+  { name: "AWS", departments: OPERATIONS, words: ["AWS"], prefixes: ["AKIA"], usualName: "AWS_ACCESS_KEY_ID" },
   { name: "Google Cloud", departments: OPERATIONS, words: ["GCP", "GOOGLE_CLOUD"] },
   { name: "Azure", departments: OPERATIONS, words: ["AZURE"] },
   { name: "Vercel", departments: OPERATIONS, words: ["VERCEL"] },
@@ -266,7 +275,7 @@ const OTHER_APPS: readonly KnownApp[] = [
   { name: "Supabase", departments: OPERATIONS, words: ["SUPABASE"], prefixes: ["sbp_"], usualName: "SUPABASE_ACCESS_TOKEN" },
   { name: "Turso", departments: OPERATIONS, words: ["TURSO", "LIBSQL"] },
   { name: "Railway", departments: OPERATIONS, words: ["RAILWAY"] },
-  { name: "Render", departments: OPERATIONS, words: ["RENDER"] },
+  { name: "Render", departments: OPERATIONS, words: ["RENDER_COM"] },
   { name: "DigitalOcean", departments: OPERATIONS, words: ["DIGITALOCEAN"], prefixes: ["dop_v1_"], usualName: "DIGITALOCEAN_TOKEN" },
   { name: "Docker", departments: OPERATIONS, words: ["DOCKER", "DOCKERHUB"] },
   { name: "Sentry", departments: OPERATIONS, words: ["SENTRY"], prefixes: ["sntrys_"], usualName: "SENTRY_AUTH_TOKEN" },
@@ -308,53 +317,105 @@ function hintFor(app: KnownApp, from: KeyHint["from"]): KeyHint {
   return { app: app.name, access, from, ...(app.card ? { card: app.card } : {}), ...(app.usualName ? { usualName: app.usualName } : {}) };
 }
 
-/** Does `words` (a name's words) hold `phrase` (one or more words) in a row? */
-function holds(words: readonly string[], phrase: readonly string[]): boolean {
+/** Where `words` (a name's words) first holds `phrase` (one or more words) in a row, or -1. */
+function positionOf(words: readonly string[], phrase: readonly string[]): number {
   for (let i = 0; i + phrase.length <= words.length; i++) {
-    if (phrase.every((p, j) => words[i + j] === p)) return true;
+    if (phrase.every((p, j) => words[i + j] === p)) return i;
   }
-  return false;
+  return -1;
+}
+
+/** The app whose well-known value start `value` has (the longest prefix wins), or null. */
+function appByValue(value: string): KnownApp | null {
+  const v = value.trim();
+  let best: { app: KnownApp; length: number } | null = null;
+  for (const app of KNOWN_APPS) {
+    for (const p of app.prefixes ?? []) {
+      if (v.startsWith(p) && v.length > p.length && (!best || p.length > best.length)) best = { app, length: p.length };
+    }
+  }
+  return best?.app ?? null;
 }
 
 /**
- * What a key is for: its name first (the longest matching phrase wins, so a
- * two-word phrase like GOOGLE_ADS beats any one-word match; at equal length
- * the first app listed wins, cards first), then its value's start
- * (the longest prefix wins, so "sk-ant-" is Anthropic before "sk-" is OpenAI).
- * Null when neither says.
+ * What a key is for: its name first, then its value's start. In the name the
+ * longest phrase wins (GOOGLE_ADS beats any one-word match); at equal length
+ * the one that comes first in the name wins (LINEAR_TEAMS_ID is Linear's),
+ * then the first app listed, cards first. In the value the longest prefix wins
+ * ("sk-ant-" is Anthropic's). Null when neither says.
  */
 export function recognizeCustomKey(name: string, value = ""): KeyHint | null {
   const words = normalizeVaultKeyName(name).split("_").filter(Boolean);
-  let best: { app: KnownApp; length: number } | null = null;
-  if (words.length > 0) {
-    for (const app of KNOWN_APPS) {
-      for (const w of app.words) {
-        const phrase = w.split("_");
-        if (holds(words, phrase) && (!best || phrase.length > best.length)) best = { app, length: phrase.length };
-      }
+  let best: { app: KnownApp; length: number; at: number } | null = null;
+  for (const app of KNOWN_APPS) {
+    for (const w of app.words) {
+      const phrase = w.split("_");
+      const at = positionOf(words, phrase);
+      if (at < 0) continue;
+      if (!best || phrase.length > best.length || (phrase.length === best.length && at < best.at)) best = { app, length: phrase.length, at };
     }
   }
   if (best) return hintFor(best.app, "name");
-  const v = value.trim();
-  if (!v) return null;
-  let byValue: { app: KnownApp; length: number } | null = null;
-  for (const app of KNOWN_APPS) {
-    for (const p of app.prefixes ?? []) {
-      if (v.startsWith(p) && v.length > p.length && (!byValue || p.length > byValue.length)) byValue = { app, length: p.length };
-    }
-  }
-  return byValue ? hintFor(byValue.app, "value") : null;
+  const byValue = appByValue(value);
+  return byValue ? hintFor(byValue, "value") : null;
 }
 
 /**
- * The agents a save sends for a key. A choice the owner made is sent. A new
- * value for a key already saved sends none, so the key keeps its agents. A new
- * key takes its suggestion, and with none it is for all agents (nothing sent).
+ * Does this read as a secret rather than a name? A known key's start
+ * ("sk-ant-..."), or one long unbroken run of letters and digits (a token,
+ * base64). Pasted into the name box, or a bare secret in a paste whose "="
+ * padding looked like KEY=value, it would otherwise be saved as a key's name,
+ * which is stored and listed in the clear.
  */
-export function agentsToSend(input: { exists: boolean; touched: boolean; draft: AgentAccess; hint: KeyHint | null }): AgentAccess | undefined {
-  if (input.touched) return input.draft;
-  if (input.exists) return undefined;
-  return input.hint ? input.hint.access : undefined;
+export function looksLikeSecret(raw: string): boolean {
+  const t = raw.trim();
+  if (!t) return false;
+  if (appByValue(t)) return true;
+  if (/\s/.test(t) || !/\d/.test(t)) return false;
+  if (t.length >= 32 && /^[A-Za-z0-9+/=._-]+$/.test(t) && !t.includes("_")) return true;
+  const digits = (t.match(/\d/g) || []).length;
+  return t.length >= 24 && digits >= 2 && /^[A-Za-z0-9+/=]+$/.test(t) && /[a-z]/.test(t) && /[A-Z]/.test(t);
+}
+
+/** Where a picker choice was made: for which name, and whether that name was a saved key. */
+export type DraftScope = { key: string; saved: boolean };
+
+/**
+ * Does a picker choice still apply once the name has changed? One made for a
+ * saved key is for that key alone: typing another name must not carry it to a
+ * different saved key (review of OCC #748). One made for a new key, or before
+ * any name, carries to any new name, so an owner can pick first and type after.
+ */
+export function draftApplies(scope: DraftScope | null, keyName: string, saved: boolean): boolean {
+  if (!scope) return false;
+  return scope.saved ? scope.key === keyName : !saved;
+}
+
+/**
+ * What a save sends about agents. The owner's choice goes as `agents` and is
+ * saved as it is. Untouched, the app's suggestion goes as `suggested_agents`,
+ * which the route applies only to a key with no saved value and no saved
+ * choice at the moment it writes (review of OCC #748): the browser's list can
+ * be stale, so the browser never decides that a key is new. With neither,
+ * nothing is sent: a saved key keeps its agents, a new one is for all agents.
+ */
+export function agentsToSend(input: { touched: boolean; draft: AgentAccess; hint: KeyHint | null }): {
+  agents?: AgentAccess;
+  suggested_agents?: AgentAccess;
+} {
+  if (input.touched) return { agents: input.draft };
+  return input.hint ? { suggested_agents: input.hint.access } : {};
+}
+
+/**
+ * Why a pasted line's name cannot be saved, or null. Stricter than the name
+ * box: a paste is saved as written (letters, numbers, underscores), never
+ * reshaped, so a secret's fragment cannot become a name.
+ */
+export function pastedNameProblem(rawKey: string, value: string): string | null {
+  if (looksLikeSecret(rawKey) || /^=+$/.test(value.trim())) return "This looks like a secret without a name. Write it as NAME=secret.";
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(rawKey.trim())) return "Use letters, numbers and underscores, starting with a letter.";
+  return rawKey.trim().length > 64 ? "64 characters at most." : null;
 }
 
 /**
@@ -370,9 +431,12 @@ export function customKeysLine(entries: ReadonlyArray<{ agents: AgentAccess | nu
   return departments.length === 0 ? `${count}, used by no agents` : `${count}, used by ${agentNamesSentence(departments, choices)}`;
 }
 
-/** What the picker shows before the owner touches it: the key's agents, its suggestion, or all agents. */
-export function agentsShown(input: { existing: AgentAccess | null | undefined; unreadable?: boolean; hint: KeyHint | null }): AgentAccess {
-  if (input.unreadable) return [];
-  if (input.existing !== undefined && input.existing !== null) return input.existing;
+/**
+ * What the picker shows before the owner touches it: a saved key's agents
+ * (no agents when they cannot be read, which is what is enforced), a new
+ * key's suggestion, or all agents.
+ */
+export function agentsShown(input: { saved: boolean; existing: AgentAccess | null | undefined; hint: KeyHint | null }): AgentAccess {
+  if (input.saved) return input.existing ?? [];
   return input.hint ? input.hint.access : "all";
 }

@@ -508,7 +508,7 @@ export function ConnectionsHub({
           it is for are picked from the app it belongs to; change them before you save. An agent uses a key by name for a
           request it makes, and the value never enters the chat.
         </p>
-        <CustomCredentialsVault onOpenApp={openFromCustom} />
+        <CustomCredentialsVault onOpenApp={openFromCustom} active={customOpen} />
       </DrawerSheet>
     </div>
   );

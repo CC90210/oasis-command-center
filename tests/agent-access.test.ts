@@ -328,11 +328,20 @@ async function main() {
   await check("the agents are named as the workspace's AI Team names them (CC: connected to a specific AI)", async () => {
     const { namedAgentChoices } = await import("../lib/os/agent-access-names");
     const founder = namedAgentChoices({ oasis: true, manifest: null, internal: true });
+    // Operations reads as a department: Bravo leads it on the AI Team, but the runner checks
+    // Bravo as the Chief of Staff, and a name must not promise access it refuses (review of #748).
     assert.deepEqual(founder.map((c) => c.label), [
-      "Bravo (Chief of Staff)", "SDR (Sales)", "Maven (Marketing)", "Customer Support (Client Success)", "Atlas (Finance)", "Bravo (Operations)",
+      "Bravo (Chief of Staff)", "SDR (Sales)", "Maven (Marketing)", "Customer Support (Client Success)", "Atlas (Finance)", "Operations",
     ]);
-    assert.equal(rules.agentNamesSentence(["chief_of_staff", "operations", "sales"], founder), "Bravo and SDR", "each agent once");
+    const { departmentForAgent } = await import("../lib/os/approvals/rules");
+    const leads: Record<string, string> = { chief_of_staff: "bravo", sales: "sdr", marketing: "maven", client_success: "customer-support", finance: "atlas" };
+    for (const c of founder.filter((x) => x.agent)) {
+      assert.equal(departmentForAgent(leads[c.key]), c.key, `${c.label}: the runner checks its agent as this department`);
+    }
+    assert.equal(rules.agentNamesSentence(["chief_of_staff", "operations", "sales"], founder), "Bravo, Operations and SDR");
     assert.equal(rules.agentNamesSentence(["sales", "marketing", "finance"], founder), "SDR, Maven and Atlas");
+    const twoForOne = [{ key: "chief_of_staff" as const, label: "Bravo (Chief of Staff)", agent: "Bravo" }, { key: "operations" as const, label: "Bravo (Operations)", agent: "Bravo" }];
+    assert.equal(rules.agentNamesSentence(["chief_of_staff", "operations"], twoForOne), "Bravo", "each agent once");
     assert.equal(rules.agentAccessLabel(["marketing", "finance"], founder), "Maven (Marketing), Atlas (Finance)");
     assert.equal(rules.agentNamesSentence("all", founder), "all agents");
     assert.equal(rules.agentNamesSentence([], founder), "no agents");
@@ -349,6 +358,13 @@ async function main() {
       internal: false,
     });
     assert.equal(withRiley.find((c) => c.key === "sales")!.label, "Riley (Sales)");
+    // A teammate the runner does not know reads as its department: ticking Sales would not reach it.
+    const withOwnSlug = namedAgentChoices({
+      oasis: false,
+      manifest: { agents: [{ slug: "riley", display_name: "Riley", enabled: true, departments: ["sales"] }] } as never,
+      internal: false,
+    });
+    assert.equal(withOwnSlug.find((c) => c.key === "sales")!.label, "Sales");
     // The picker shows the names it is given.
     const React = await import("react");
     (globalThis as unknown as { React: typeof React }).React = React;
@@ -384,10 +400,17 @@ async function main() {
 
   await check("a paste saves each key with its own agents; one bad choice saves nothing", async () => {
     const before = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows[0].n;
+    const choicesBefore = await accessRows();
     const bad = await customRoute.POST(json({ entries: [{ key: "P_ONE", value: "1", agents: ["sales"] }, { key: "P_TWO", value: "2", agents: ["salse"] }] }));
     assert.equal(bad.status, 400);
     assert.equal((await bad.json()).error, "invalid_agents");
-    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows[0].n, before, "nothing saved");
+    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows[0].n, before, "no value saved");
+    assert.deepEqual(await accessRows(), choicesBefore, "no agent choice saved either");
+    assert.equal(
+      (await customRoute.POST(json({ entries: [{ key: "P_ONE", value: "1", suggested_agents: "everyone" }] }))).status,
+      400,
+      "a bad suggestion is refused the same way",
+    );
     const ok = await (await customRoute.POST(json({
       agents: ["finance"],
       entries: [
@@ -401,6 +424,71 @@ async function main() {
     assert.deepEqual(listed.find((e) => e.key === "P_TWO")?.agents, ["finance"], "the request's agents otherwise");
     assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "P_ONE" }, ctx("atlas"))).content).forbidden, true);
     for (const key of ["P_ONE", "P_TWO"]) await customRoute.DELETE(json({ key }, "DELETE"));
+  });
+
+  await check("a suggestion applies only to a key that is new when it is written, whatever the browser believed", async () => {
+    const agentsOf = async (key: string) =>
+      ((await (await customRoute.GET()).json()).entries as Array<{ key: string; agents: unknown; agents_saved: boolean }>).find((e) => e.key === key);
+    const SUGGEST = ["chief_of_staff", "sales", "marketing"];
+    // New: the suggestion is saved before the value.
+    await customRoute.POST(json({ key: "S_NEW", value: "v", suggested_agents: SUGGEST }));
+    assert.deepEqual((await agentsOf("S_NEW"))?.agents, SUGGEST);
+    // Saved for Sales by an owner: a stale browser's suggestion does not replace it.
+    await customRoute.POST(json({ key: "S_OWNED", value: "v1", agents: ["sales"] }));
+    await customRoute.POST(json({ key: "S_OWNED", value: "v2", suggested_agents: SUGGEST }));
+    assert.deepEqual((await agentsOf("S_OWNED"))?.agents, ["sales"]);
+    // Saved for Finance, then a model's suggestion ("all"): not widened, not cleared.
+    await customRoute.POST(json({ key: "S_NARROW", value: "v1", agents: ["finance"] }));
+    await customRoute.POST(json({ key: "S_NARROW", value: "v2", suggested_agents: "all" }));
+    assert.deepEqual((await agentsOf("S_NARROW"))?.agents, ["finance"]);
+    // A value saved with no choice (all agents) stays as it is: a suggestion is for new keys only.
+    await customRoute.POST(json({ key: "S_OPEN", value: "v1" }));
+    await customRoute.POST(json({ key: "S_OPEN", value: "v2", suggested_agents: ["finance"] }));
+    assert.deepEqual([(await agentsOf("S_OPEN"))?.agents, (await agentsOf("S_OPEN"))?.agents_saved], ["all", false]);
+    // A choice saved for a name with no value yet is the owner's too.
+    await agentsRoute.PUT(json({ kind: "custom", id: "S_CHOSEN", agents: ["marketing"] }, "PUT"));
+    await customRoute.POST(json({ key: "S_CHOSEN", value: "v", suggested_agents: SUGGEST }));
+    assert.deepEqual((await agentsOf("S_CHOSEN"))?.agents, ["marketing"]);
+    // An explicit choice always applies.
+    await customRoute.POST(json({ key: "S_OWNED", value: "v3", agents: ["finance"], suggested_agents: SUGGEST }));
+    assert.deepEqual((await agentsOf("S_OWNED"))?.agents, ["finance"]);
+    // Twice in one paste: the second does not see the first as new.
+    await customRoute.POST(json({ entries: [{ key: "S_TWICE", value: "a", agents: ["finance"] }, { key: "S_TWICE", value: "b", suggested_agents: SUGGEST }] }));
+    assert.deepEqual((await agentsOf("S_TWICE"))?.agents, ["finance"]);
+    for (const key of ["S_NEW", "S_OWNED", "S_NARROW", "S_OPEN", "S_CHOSEN", "S_TWICE"]) await customRoute.DELETE(json({ key }, "DELETE"));
+  });
+
+  await check("when the keys cannot be read: GET fails loudly and a suggestion is refused, never applied blind", async () => {
+    const realError = console.error;
+    console.error = () => undefined;
+    await db.execute("ALTER TABLE tenant_integration_credentials RENAME TO tic_moved");
+    try {
+      const listed = await customRoute.GET();
+      assert.equal(listed.status, 500, "an error, never an empty list");
+      assert.equal((await listed.json()).error, "keys_unreadable");
+      const saved = await (await customRoute.POST(json({ key: "S_BLIND", value: "v", suggested_agents: ["sales"] }))).json();
+      assert.equal(saved.ok, false);
+      assert.match(saved.results[0].error, /^agents_unknown/);
+    } finally {
+      await db.execute("ALTER TABLE tic_moved RENAME TO tenant_integration_credentials");
+      console.error = realError;
+    }
+  });
+
+  await check("a secret where a name goes is refused and never echoed back", async () => {
+    const bare = ["Zm9vYmFy", "YmF6cXV4", "MTIzNDU2Nzg5"].join("");
+    const r = await (await customRoute.POST(json({ dotenv: `${bare}==\nGOOD_KEY=v` }))).json();
+    assert.deepEqual(r.results.map((x: { key: string; ok: boolean }) => [x.key, x.ok]), [["(a secret without a name)", false], ["GOOD_KEY", true]]);
+    assert.ok(!JSON.stringify(r).toLowerCase().includes(bare.slice(0, 8).toLowerCase()), "no part of it in the answer");
+    const one = await (await customRoute.POST(json({ key: ["sk-", "ant-", "api03-", "abcdef"].join(""), value: "v" }))).json();
+    assert.equal(one.results[0].error, "key_looks_like_a_secret");
+    // A short one reads as a name, but "=" padding alone is never a value.
+    const short = await (await customRoute.POST(json({ dotenv: "Qk9C==" }))).json();
+    assert.deepEqual([short.ok, short.results[0].error], [false, "empty_value"]);
+    assert.equal((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE field_key = 'qk9c'", args: [] })).rows[0].n, 0);
+    const keys = (await db.execute({ sql: "SELECT field_key FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows.map((x) => String(x.field_key));
+    assert.ok(!keys.some((k) => k.startsWith("zm9v") || k.startsWith("sk")), "neither was stored as a name");
+    await customRoute.DELETE(json({ key: "GOOD_KEY" }, "DELETE"));
   });
 
   await check("APP_TOOLS is whole: every credential read in the runner belongs to a mapped tool", () => {
@@ -439,8 +527,8 @@ async function main() {
 
   await check("the vault sends agents only when chosen or suggested (tests/custom-keys.test.ts); the drawer says what an app's tools are", () => {
     const vault = read("components/settings/CustomCredentialsVault.tsx");
-    assert.match(vault, /\.\.\.\(toSend !== undefined \? \{ agents: toSend \} : \{\}\)/);
-    assert.match(vault, /\.\.\.\(p\.send !== undefined \? \{ agents: p\.send \} : \{\}\)/);
+    assert.match(vault, /body: JSON\.stringify\(\{ key: keyName, value, \.\.\.toSend \}\)/);
+    assert.match(vault, /\(\{ key: p\.sendKey, value: p\.value, \.\.\.p\.send \}\)/);
     const drawer = read("components/os/connections/ConnectorDrawer.tsx");
     assert.match(drawer, /Used by<\/h3>\s*<ConnectorAgentAccess key=\{def\.slug\} slug=\{def\.slug\} departments=\{def\.departments\} \/>/);
     const access = read("components/os/connections/ConnectorAgentAccess.tsx");
