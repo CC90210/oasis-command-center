@@ -194,6 +194,27 @@ async function main() {
       assert.equal(b.sent.length, 0);
     }
 
+    // An API that echoes the key URL-encoded or in base64, and a runtime error that quotes it: hidden every way.
+    const encoded = network(() => new Response(`a=${encodeURIComponent(SECRET + "/")}&b=${Buffer.from(SECRET).toString("base64")}`, { status: 200 }));
+    const re = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), encoded)) as Record<string, unknown>;
+    assert.ok(!String(re.body).includes(Buffer.from(SECRET).toString("base64")), "base64 hidden");
+    const quoting = network();
+    quoting.deps.fetchImpl = (async (_u: string, init: RequestInit) => {
+      throw new TypeError(`Headers.append: "${(init.headers as Record<string, string>).authorization}" is an invalid header value.`);
+    }) as unknown as typeof fetch;
+    const logged: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+    let rq: Record<string, unknown>;
+    try {
+      rq = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), quoting)) as Record<string, unknown>;
+    } finally {
+      console.warn = realWarn;
+    }
+    assert.equal(rq.refused, "fetch_failed");
+    assert.ok(!JSON.stringify(rq).includes(SECRET), "an error that quotes the key does not reach the model");
+    assert.ok(logged.length > 0 && logged.every((l) => !l.includes(SECRET)), "nor the audit log");
+
     const redirect = network(() => new Response("", { status: 302, headers: { location: `https://evil.example.com/?k=${SECRET}` } }));
     const rr = (await use({ name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://api.hubapi.com/x" }, ctx(CLIENT), redirect)) as Record<string, unknown>;
     assert.equal(redirect.sent.length, 1, "a redirect is reported, never followed");

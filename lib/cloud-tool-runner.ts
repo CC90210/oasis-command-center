@@ -1578,6 +1578,11 @@ export async function toolUseCustomKey(
     audit("forbidden", "wrong_host");
     return { ok: false, refused: "wrong_website", name, website: host, hint: `${name} may only be sent to https://${host}. Use a URL on that website.` };
   }
+  // The key, as text, URL-encoded and in base64, is hidden in everything that
+  // leaves this function: the result, the error words, the audit line. A
+  // runtime's "invalid header value" error quotes the value it refused.
+  const forms = [...new Set([value, encodeURIComponent(value), Buffer.from(value).toString("base64")])].filter((f) => f.length >= 4);
+  const hide = (text: string) => forms.reduce((t, f) => t.split(f).join("[key hidden]"), text);
   const auth = input.auth === "header" ? "header" : "bearer";
   const headers: Record<string, string> = { accept: "application/json, text/plain;q=0.9, */*;q=0.5" };
   if (auth === "header") {
@@ -1594,11 +1599,11 @@ export async function toolUseCustomKey(
   try {
     r = await fetchWithCap(url, { method: "GET", headers }, deps);
   } catch (err) {
-    audit("error", err instanceof Error ? err.message : "fetch_failed");
-    return { ok: false, refused: "fetch_failed", name, hint: `The request to ${host} failed (${err instanceof Error ? err.message : "error"}).` };
+    const why = hide(err instanceof Error ? err.message : "fetch_failed").slice(0, 300);
+    audit("error", why);
+    return { ok: false, refused: "fetch_failed", name, hint: `The request to ${host} failed (${why}).` };
   }
   audit("ok");
-  const hide = (text: string) => (value.length >= 4 ? text.split(value).join("[key hidden]") : text);
   return {
     ok: true,
     name,
