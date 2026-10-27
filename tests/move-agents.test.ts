@@ -104,6 +104,10 @@ async function main() {
       ok: true,
       selection: { mode: "local", pairingId: "pair-mac", modelRef: "ollama/llama3.3", fallback: "workspace_api" },
     });
+    // No local model there: refused, never switched to a signed-in hosted app (Claude Code and Codex are signed in on this device).
+    const none = move.selectionFor(device() as never, local, true);
+    assert.equal(none.ok, false);
+    assert.match(!none.ok ? none.reason : "", /has no local model/);
   });
 
   const realFetch = globalThis.fetch;

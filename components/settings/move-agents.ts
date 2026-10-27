@@ -61,6 +61,9 @@ export function selectionFor(
   if (current.mode === "local") {
     const model = device.localModels.find((m) => m.ref === current.modelRef) ?? device.localModels.find((m) => m.state !== "unavailable");
     if (model) return { ok: true, selection: { mode: "local", pairingId: device.pairingId, modelRef: model.ref, fallback } };
+    // Pure local never becomes a hosted app by a move (Codex review of #758):
+    // leaving local is the owner's choice, made in AI brain.
+    return { ok: false, reason: `${device.label} has no local model. Start Ollama or LM Studio there, or choose another setup in Settings > AI brain.` };
   }
   const usable = (provider: CliEngine) => {
     if (subscriptionRolloutError(provider, oasisWorkspace) !== null) return false;
