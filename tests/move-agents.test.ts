@@ -187,7 +187,18 @@ async function main() {
     const panel = readFileSync(join(ROOT, "components/settings/AgentEnginePanel.tsx"), "utf8");
     assert.match(panel, /if \(hasStateRef\.current\) setRefreshWarning\(`\$\{result\.message\} Showing the last reading\.`\);\n\s+else setReadError\(result\.message\);/);
     assert.match(panel, /ENGINE_AUTO_REFRESH_MS = 30_000/);
-    assert.match(panel, /activityRef\.current === null && document\.visibilityState === "visible"\) void load\(\{ keepDraft: true \}\)/, "never during a Test, Save or sign-in, and never over the viewer's edit");
+    assert.match(panel, /hasStateRef\.current && activityRef\.current === null && document\.visibilityState === "visible"\) void refreshComputers\(\)/, "only when idle and in view");
+    // Codex review of #758: the background read must not move the Save's version
+    // or key receipts under an unsaved draft, nor clear a running Test's activity.
+    const background = panel.slice(panel.indexOf("async function refreshComputers"), panel.indexOf("async function load("));
+    assert.ok(background.length > 100, "refreshComputers exists before load");
+    assert.match(background, /if \(seq !== readSeq\.current \|\| activityRef\.current !== null\) return;/, "a stale or overtaken read is discarded");
+    assert.match(background, /setState\(\(current\) => \(current \? \{ \.\.\.current, devices: result\.state\.devices, bridgeReachable: result\.state\.bridgeReachable \} : current\)\)/);
+    for (const banned of ["setActivity", "setStagedKeyReceipts", "setDraft", "engineVersions", "setScopeState"]) {
+      assert.equal(background.includes(banned), false, `the background read must not touch ${banned}`);
+    }
+    const load = panel.slice(panel.indexOf("async function load("), panel.indexOf("useEffect(() => {"));
+    assert.match(load, /\+\+readSeq\.current;/, "an explicit read overtakes any background read in flight");
   });
 
   await check("a failed agents-owner read is retried, then fails loudly instead of hiding every computer", () => {

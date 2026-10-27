@@ -11,6 +11,8 @@ import { enqueueRuntimeJob, hasOnlyKeys, isPlainObject, validRequestId } from "@
 import { pairingCanClaim, type PairedVia } from "@/lib/bridge/pairing-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext } from "@/lib/team";
+import { isOasisWorkspace } from "@/lib/ai/agent-engine-store";
+import { CODEX_OASIS_ROLLOUT_MESSAGE, subscriptionRolloutError } from "@/lib/ai/engine-rollout";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -61,6 +63,11 @@ export async function POST(req: Request) {
   }
 
   try {
+    // The same workspace gate Test, Save and dispatch apply: no sign-in is
+    // queued for an app this workspace cannot use (Codex review of #758).
+    if (subscriptionRolloutError(raw.provider, await isOasisWorkspace(session.tenantId))) {
+      return fail(409, "codex_oasis_rollout_only", CODEX_OASIS_ROLLOUT_MESSAGE);
+    }
     const { data, error } = await getServiceSupabase()
       .from("bridge_pairings")
       .select("id, label, claim_enabled_at, paired_via, claim_protocols")

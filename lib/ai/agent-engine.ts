@@ -32,8 +32,9 @@
 export const ENGINE_AGENT_KEY = "__engine__";
 
 // Gemini CLI was removed on 2026-10-27 (Google refuses personal sign-ins, so it
-// could never pass Test); OpenCode took its place. A stored "gemini" row now
-// reads as unreadable, which engineFromRow treats as the API default.
+// could never pass Test); OpenCode took its place. A stored "gemini" row is
+// read by engineFromRow as OpenCode with no computer: it cannot run until its
+// owner picks a computer and passes Test, and it never falls to API credits.
 export const CLI_ENGINES = ["claude", "codex", "opencode"] as const;
 export type CliEngine = (typeof CLI_ENGINES)[number];
 
@@ -102,6 +103,12 @@ export function engineFromRow(
   const fallback = isEngineFallback(row.fallback_policy) ? row.fallback_policy : undefined;
   if (row.provider === "cli" && isCliEngine(row.model)) {
     return { kind: "cli", cli: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };
+  }
+  if (row.provider === "cli" && row.model === "gemini") {
+    // Retired app (Codex review of #758): reading it as the API default would
+    // spend credits the owner never agreed to. No computer and no fallback make
+    // it "choose a computer", the same unavailable state as any unbound row.
+    return { kind: "cli", cli: "opencode", fallback: "none" };
   }
   if (row.provider === "local" && isLocalModelName(row.model)) {
     return { kind: "local", model: row.model, ...(pairingId ? { pairingId } : {}), ...(fallback ? { fallback } : {}) };

@@ -62,6 +62,13 @@ test("the shared accessors behave on a server render", () => {
   assert.equal(readCliRuntime(), "claude");
 });
 
+test("a saved Gemini CLI choice reads as OpenCode with no computer and no fallback, never the API account", async () => {
+  const { engineFromRow, harnessRouteFor } = await import("../lib/ai/agent-engine");
+  const retired = engineFromRow({ provider: "cli", model: "gemini", computer_pairing_id: "pair-ccpc", fallback_policy: "workspace_api" });
+  assert.deepEqual(retired, { kind: "cli", cli: "opencode", fallback: "none" });
+  assert.equal(harnessRouteFor(retired).mode, "unavailable", "it runs nowhere until a computer is chosen and tested");
+});
+
 test("only the three real runtimes validate", () => {
   for (const ok of ["claude", "codex", "opencode"]) assert.ok(isCliRuntime(ok));
   // Gemini CLI was removed on 2026-10-27; a stored "gemini" choice must not validate.

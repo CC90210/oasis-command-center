@@ -99,10 +99,15 @@ async function main() {
     assert.equal(rollout.subscriptionRolloutError("codex", false), "codex_oasis_rollout_only");
     assert.equal(rollout.subscriptionRolloutError("codex", true), null);
     assert.equal(rollout.subscriptionRolloutError("claude", false), null);
+    assert.equal(rollout.subscriptionRolloutError("opencode", false), "codex_oasis_rollout_only");
+    assert.equal(rollout.subscriptionRolloutError("opencode", true), null);
     const route = readFileSync(join(ROOT, "app/api/ai/engine/route.ts"), "utf8");
     assert.match(route, /subscriptionRolloutError\(selection\.provider, oasis\)/, "probe and save use the server-side rollout gate");
     assert.match(route, /pairingForSelection/, "the rollout gate is followed by exact-pairing approval checks");
     const runSession = readFileSync(join(ROOT, "lib/os/runs/session.ts"), "utf8");
+    // Dispatch re-checks every held app, not only Codex (Codex review of #758: a saved OpenCode row in a client workspace).
+    assert.match(runSession, /selectedEngine\.kind === "cli" && subscriptionRolloutError\(selectedEngine\.cli, false\) !== null/);
+    assert.doesNotMatch(runSession, /selectedEngine\.cli === "codex"/);
     assert.match(
       runSession,
       /subscriptionRolloutError\(selectedEngine\.cli, oasisWorkspace\)/,

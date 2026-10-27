@@ -165,7 +165,30 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   // "Choose your own" takes a person who inherits the workspace default.
   const choicesRef = useRef<HTMLDivElement | null>(null);
 
+  // Every read is numbered. A background re-read applies only if no other read
+  // started after it and no Test, Save or sign-in started meanwhile.
+  const readSeq = useRef(0);
+
+  /**
+   * The 30 s background re-read: each computer's presence and app lines only.
+   * It never touches the draft, the saved choice, its version or the staged
+   * key receipts (they are what a Save is checked against, Codex review of
+   * #758), and never the activity state of a Test, Save or sign-in.
+   */
+  async function refreshComputers() {
+    const seq = ++readSeq.current;
+    const result = await readEngine();
+    if (seq !== readSeq.current || activityRef.current !== null) return;
+    if (!result.ok) {
+      setRefreshWarning(`${result.message} Showing the last reading.`);
+      return;
+    }
+    setRefreshWarning(null);
+    setState((current) => (current ? { ...current, devices: result.state.devices, bridgeReachable: result.state.bridgeReachable } : current));
+  }
+
   async function load(options: { keepDraft?: boolean; show?: boolean } = {}) {
+    ++readSeq.current;
     if (!options.keepDraft || options.show) setActivity("reading");
     const result = await readEngine();
     if (!result.ok) {
@@ -210,7 +233,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     // is open, without touching what the viewer is editing: only when no Test,
     // Save or sign-in is running and the tab is in view.
     const timer = setInterval(() => {
-      if (activityRef.current === null && document.visibilityState === "visible") void load({ keepDraft: true });
+      if (hasStateRef.current && activityRef.current === null && document.visibilityState === "visible") void refreshComputers();
     }, ENGINE_AUTO_REFRESH_MS);
     return () => {
       clearInterval(timer);
