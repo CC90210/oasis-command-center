@@ -127,7 +127,7 @@ async function main() {
       decisions: [{ channel: "sms", ticked: true, subject: "+15145550123" }],
       identity: {
         businessName: "OASIS AI Solutions",
-        address: "6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada",
+        address: "141 Sixth Street, Collingwood, ON L9Y 1Z1, Canada",
         privacyUrl: "https://oasisai.work/privacy",
       },
       identitySource: "brand",

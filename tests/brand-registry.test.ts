@@ -122,7 +122,7 @@ const oa = getBrand("oasis");
 assert.equal(oa.legalName, "OASIS AI Solutions");
 assert.equal(oa.sendingDomain, "oasisai.work");
 assert.equal(oa.credentialService, "oasis_gmail", "must NOT be 'gws' — that is SunBiz's");
-assert.match(oa.postalAddress, /Montreal/, "Montreal, not Collingwood (CC, 2026-09-09)");
+assert.match(oa.postalAddress, /Collingwood/, "Collingwood address confirmed by CC, 2026-10-27");
 
 // SunBiz values are the previously-hardcoded ones. An unconfigured environment
 // must send byte-identically to what it sent before this registry existed.

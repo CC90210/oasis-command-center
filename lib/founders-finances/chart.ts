@@ -195,7 +195,7 @@ export function seedStatements(): SeedStatement[] {
                gst_qst_registered, invoice_prefix, invoice_next_number, payment_terms_days)
             VALUES (?, ?, ?, ?, ?, ?, 'Canada', ?, 0, ?, 1, 14)`,
       args: business
-        ? [e.id, "OASIS AI Solutions", "6993 Decarie Blvd", "Montreal", "QC", "H3W 0B5", OASIS_SUPPORT_EMAIL, "OASIS"]
+        ? [e.id, "OASIS AI Solutions", "141 Sixth Street", "Collingwood", "ON", "L9Y 1Z1", OASIS_SUPPORT_EMAIL, "OASIS"]
         : [e.id, e.name, "", "", "", "", e.ownerKey ? HISTORICAL_OWNER_EMAILS[e.ownerKey] : "", "INV"],
     });
     for (const a of chartFor(e.kind)) {

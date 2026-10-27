@@ -9,7 +9,7 @@
  * rather than measured, "Privacy policy" said stub while /privacy was live,
  * Terms and DMCA were missing, and its facts were wrong for OASIS: Ontario law,
  * GST/HST without QST, "Q2 2026", "$5K MRR" and a database-policy isolation
- * claim. OASIS AI Solutions is in Montreal, Quebec (GST/QST, Revenu Quebec),
+ * claim. OASIS AI Solutions is in Collingwood, Ontario (GST/HST with the CRA; not registered yet, a small supplier),
  * on Turso.
  *
  * THREE KINDS OF SOURCE
@@ -370,7 +370,7 @@ export function askPromptFor(doc: CatalogDoc): string {
   return (
     `Help me with OASIS AI Solutions' "${doc.title}" (Playbook > Business documentation). ` +
     `It covers: ${doc.summary}${need} ` +
-    "OASIS is in Montreal, Quebec. Use only facts I confirm or that are in the document; " +
+    "OASIS is in Collingwood, Ontario. Use only facts I confirm or that are in the document; " +
     "write [[CC to confirm: ...]] for anything you do not know, and never invent a name, email, amount, date or legal rule."
   );
 }

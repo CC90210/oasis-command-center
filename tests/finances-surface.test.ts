@@ -106,7 +106,7 @@ async function main() {
 
   // ── invoice PDF ─────────────────────────────────────────────────────────
   const base: InvoicePdfInput = {
-    seller: { legalName: "OASIS AI Solutions", addressLines: ["6993 Decarie Blvd", "Montreal, QC  H3W 0B5"], email: "conaugh@oasisai.work", gstNumber: "123456789RT0001", qstNumber: "1234567890TQ0001" },
+    seller: { legalName: "OASIS AI Solutions", addressLines: ["141 Sixth Street", "Collingwood, ON L9Y 1Z1"], email: "conaugh@oasisai.work", gstNumber: "123456789RT0001", qstNumber: "1234567890TQ0001" },
     invoice: {
       number: "OASIS-2026-0007",
       status: "sent",

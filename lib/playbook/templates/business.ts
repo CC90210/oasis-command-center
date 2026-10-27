@@ -38,7 +38,7 @@ export const foundersAgreement: DocTemplate = (ctx) =>
     section("Money", `- Owner draws and reinvestment: see the capital allocation policy. ${confirm("any owner-specific draw or reinvestment rule")}`),
     section("Continuity", `- ${confirm("who may act if CC is temporarily unable to work, where the authority is documented, and how it expires")}`, `- ${confirm("the succession or estate plan if CC dies or permanently cannot operate the business")}`),
     section("Intellectual property", "- CC records and assigns business IP to the operating business or its future successor entity (see the IP assignment)."),
-    section("Governing law", `- ${confirm("the governing law (the business is in Montreal, Quebec; both Drive drafts say Ontario)")}`),
+    section("Governing law", "- Province of Ontario, Canada (CC confirmed 2026-10-27)."),
   );
 
 export const enterpriseRegistration: DocTemplate = (ctx) =>
