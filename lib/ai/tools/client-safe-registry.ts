@@ -100,6 +100,11 @@ export const CLIENT_SAFE_TOOLS: ReadonlyMap<string, ClientSafeToolClass> = new M
   ["http_get", "read"],
   // read: this agent's own approval rows in the session's workspace.
   ["list_proposals", "read"],
+  // read: a GET with one of the workspace's own custom keys, attached by the
+  // server and sent only to the one website its owner set; the model never
+  // sees the key (lib/cloud-tool-runner.ts toolUseCustomKey, CC 2026-10-27).
+  // get_credential, which hands the value to the model, stays OASIS-only.
+  ["use_custom_key", "read"],
   // draft: writes that stay inside the tenant's own workspace.
   ["create_record", "draft"],
   ["update_record", "draft"],

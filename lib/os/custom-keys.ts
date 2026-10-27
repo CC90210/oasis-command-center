@@ -492,3 +492,66 @@ export function agentsShown(input: { saved: boolean; existing: AgentAccess | nul
   if (input.saved) return input.existing ?? [];
   return input.hint ? input.hint.access : "all";
 }
+
+/**
+ * The one website a custom key may be sent to (CC, 2026-10-27: client
+ * workspaces' agents get their custom keys). An agent never sees a key's
+ * value through use_custom_key (lib/cloud-tool-runner.ts): the server attaches
+ * it to a GET request, and only to this host, so a key cannot be sent anywhere
+ * the owner did not name, whatever a web page tells the agent.
+ *
+ * A host name, or a URL to take it from: "api.example.com" and
+ * "https://api.example.com/crm/v3" are both api.example.com. Refused: an IP
+ * address, a name without a dot, a local or internal name, a port, and
+ * anything that is not a plain public host name.
+ */
+export type KeyHostProblem = "empty" | "not_a_host" | "ip_address" | "local_name" | "has_port" | "too_long";
+
+const HOST_LABEL = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/;
+const LOCAL_SUFFIXES = ["localhost", "local", "internal", "intranet", "lan", "home", "corp", "test", "invalid", "example"];
+
+/** The host a key may be sent to, or why `raw` is not one. */
+export function keyHost(raw: string): { ok: true; host: string } | { ok: false; problem: KeyHostProblem } {
+  let text = (raw ?? "").trim().toLowerCase();
+  if (!text) return { ok: false, problem: "empty" };
+  if (/^[a-z][a-z0-9+.-]*:\/\//.test(text)) {
+    let url: URL;
+    try {
+      url = new URL(text);
+    } catch {
+      return { ok: false, problem: "not_a_host" };
+    }
+    if (url.protocol !== "https:" || url.username || url.password) return { ok: false, problem: "not_a_host" };
+    if (url.port) return { ok: false, problem: "has_port" };
+    text = url.hostname;
+  } else if (/[/?#@\s]/.test(text)) {
+    return { ok: false, problem: "not_a_host" };
+  }
+  text = text.replace(/\.$/, "");
+  if (/:\d*$/.test(text) && !text.includes("[")) return { ok: false, problem: "has_port" };
+  if (text.startsWith("[") || /^[\d.]+$/.test(text) || text.includes(":")) return { ok: false, problem: "ip_address" };
+  if (text.length > 253) return { ok: false, problem: "too_long" };
+  const labels = text.split(".");
+  if (labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l))) return { ok: false, problem: "not_a_host" };
+  if (/^\d+$/.test(labels[labels.length - 1])) return { ok: false, problem: "ip_address" };
+  if (LOCAL_SUFFIXES.includes(labels[labels.length - 1])) return { ok: false, problem: "local_name" };
+  return { ok: true, host: text };
+}
+
+/** keyHost's refusal, in the words the vault shows. */
+export function keyHostProblemWords(problem: KeyHostProblem): string {
+  switch (problem) {
+    case "empty":
+      return "Type the website this key is for, like api.example.com.";
+    case "ip_address":
+      return "Use the website's name, like api.example.com, not an IP address.";
+    case "local_name":
+      return "That name is for a private network. Agents can only send a key to a public website.";
+    case "has_port":
+      return "Leave out the port: type just the website, like api.example.com.";
+    case "too_long":
+      return "That website name is too long.";
+    default:
+      return "That doesn't look like a website. Type its name, like api.example.com, or paste an https:// link to it.";
+  }
+}

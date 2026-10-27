@@ -248,8 +248,8 @@ async function main() {
   await check("the capped fetch runs the resolved-address check before every request, and the Worker's redirects stay manual", () => {
     const src = readFileSync(join(root, "lib/cloud-tool-runner.ts"), "utf8");
     const fetchWithCapAt = src.indexOf("export async function fetchWithCap(");
-    const checkAt = src.indexOf("await assertResolvedIpIsPublic(url.hostname", fetchWithCapAt);
-    const fetchAt = src.indexOf("await fetch(url.toString()", fetchWithCapAt);
+    const checkAt = src.indexOf("await assertResolvedIpIsPublic(url.hostname.toLowerCase(), deps.resolver)", fetchWithCapAt);
+    const fetchAt = src.indexOf("await (deps.fetchImpl ?? fetch)(url.toString()", fetchWithCapAt);
     assert.ok(fetchWithCapAt > 0 && checkAt > fetchWithCapAt && fetchAt > checkAt, "the check sits between the function's start and its fetch");
     assert.match(src.slice(fetchWithCapAt, fetchAt + 200), /redirect: "manual"/);
     assert.doesNotMatch(src, /dns module unavailable/, "no silent pass when dns is missing");

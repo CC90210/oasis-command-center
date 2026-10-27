@@ -117,15 +117,17 @@ export async function agentMayUse(tenantId: string, target: AccessTarget, agentK
 
 /**
  * Do this workspace's agents use what an owner assigns? Custom keys reach an
- * agent through get_credential, apps through their tools (APP_TOOLS). Outside
- * OASIS only the client-safe tools run (lib/ai/tools/client-safe-registry.ts),
- * and none of these is one today, so in a client workspace an assignment would
- * promise what the runner refuses (final review of OCC #748). The pages show
- * the picker only where it is true, and say so where it is not.
+ * agent through get_credential (OASIS) and use_custom_key (every workspace,
+ * CC 2026-10-27), apps through their tools (APP_TOOLS). Outside OASIS only the
+ * client-safe tools run (lib/ai/tools/client-safe-registry.ts), so an
+ * assignment is offered only where a client-safe tool honours it (final review
+ * of OCC #748). The pages show the picker only where it is true.
  */
 export function assignmentsApply(tenantId: string, what: "custom" | "apps"): boolean {
   if (isOasisInternalTenant(tenantId)) return true;
-  return what === "custom" ? isClientSafeTool("get_credential") : Object.keys(APP_TOOLS).some((tool) => isClientSafeTool(tool));
+  return what === "custom"
+    ? isClientSafeTool("get_credential") || isClientSafeTool("use_custom_key")
+    : Object.keys(APP_TOOLS).some((tool) => isClientSafeTool(tool));
 }
 
 /** Save the owner's choice. Saving the default itself clears the row, so a later change to the default applies. */

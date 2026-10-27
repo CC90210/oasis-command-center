@@ -353,6 +353,7 @@ for (const d of label.dataCollected) {
  * re-enabled for a live tenant it must move to SUBPROCESSORS instead.
  */
 const EXEMPT_HOSTS: Record<string, string> = {
+  "api.example.com": "Placeholder in the custom key website help text (RFC 2606 reserved); never called",
   "api.texttorrent.com": "SunBiz only (retired tenant): SMS provider",
   "apig.kixie.com": "SunBiz only (retired tenant): dialer",
   "api.cc.email": "SunBiz only (retired tenant): Constant Contact blasts",
