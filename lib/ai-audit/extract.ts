@@ -985,9 +985,9 @@ const NOT_USING =
 const NOT_USING_AFTER = /^\s*(?:(?:was|were|got|has been|have been|is|are)\s+)?(?:cancelled|canceled|dropped|discontinued|replaced|retired|gone|turned off|shut off|switched off)\b/;
 const NEGATION_RESET = new Set(["to", "and", "but", "now", "then", "so", "also", "with", "about", "of"]);
 /** An item is negated when any of its words is mentioned by the client only where they say they do not, or no longer. */
-/** A denial or a plan, which a past attempt must not be said with ("never tried", "want to try"). */
+/** A denial or a plan, which a past attempt must not be said with ("never tried", "want to try"). An outcome is not one: "tried it without success" is the fact (Codex review of #756). */
 const DENIAL_OR_PLAN =
-  /\b(?:don't|do not|doesn't|does not|didn't|did not|haven't|have not|hasn't|has not|never|not|might try|want to try|wanted to try|going to try|plan to|planning to|hope to|hoping to|want to|wants to|would like to|thinking about|thinking of|considering|considered|looking at|looked at|looking into|looked into|instead of|rather than|without)\b/;
+  /\b(?:don't|do not|doesn't|does not|didn't|did not|haven't|have not|hasn't|has not|never|not|might try|want to try|wanted to try|going to try|plan to|planning to|hope to|hoping to|want to|wants to|would like to|thinking about|thinking of|considering|considered|looking at|looked at|looking into|looked into)\b/;
 
 /**
  * Is every mention of the item's words said as not used? `history` is for what the client tried before: an

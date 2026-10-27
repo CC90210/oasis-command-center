@@ -1174,6 +1174,14 @@ async function main() {
       );
       assert.equal(r2.kept.length, 0, `${said}: not a past attempt`);
     }
+    // A failed attempt is still an attempt: its outcome is part of the fact (Codex review of #756).
+    const failedTry = tr.parseTranscriptText("Dana: I tried an answering service without success.");
+    const ft = ex.checkFacts(
+      { facts: [{ key: "decision.past_attempts", value: "Tried an answering service without success.", from: 1, to: 1, quote: "I tried an answering service without success." }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } },
+      failedTry.ok ? failedTry.value.lines : [],
+      { from: 1, to: 1 },
+    );
+    assert.equal(ft.kept.length, 1, JSON.stringify(ft.dropped));
   });
   await check("figures are read as written: digits in a word are no figure, scales multiply, and object names are not numbers (review of phase 2b)", () => {
     assert.deepEqual(ex.numbersIn("a constructor and a prototype"), []);
