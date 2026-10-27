@@ -212,12 +212,13 @@ async function main() {
     assert.equal(rule.processStamp("x".repeat(65)), null);
     assert.equal(rule.processStamp(12), null);
     assert.equal(rule.processStamp(S1), S1);
-    // Refresh clicked again: renewed, still the process told; an expired one starts over.
+    // Refresh clicked again while a request is live: nothing is written; an expired one starts over.
     const told = { requested_at: "2026-10-27T05:59:00.000Z", told: S1 };
-    assert.deepEqual(rule.renewedRequest(told, now), { requested_at: new Date(now).toISOString(), told: S1 });
-    assert.deepEqual(rule.renewedRequest(null, now), { requested_at: new Date(now).toISOString(), told: null });
+    assert.equal(rule.requestToStore(told, now), null);
+    assert.equal(rule.requestToStore({ ...told, told: null }, now), null, "live and not yet told: left alone too");
+    assert.deepEqual(rule.requestToStore(null, now), { requested_at: new Date(now).toISOString(), told: null });
     const lapsed = now + rule.RECONNECT_EXPIRES_MS + 61_000;
-    assert.deepEqual(rule.renewedRequest(told, lapsed), { requested_at: new Date(lapsed).toISOString(), told: null });
+    assert.deepEqual(rule.requestToStore(told, lapsed), { requested_at: new Date(lapsed).toISOString(), told: null });
   });
 
   await check("the route: signed out 401, unknown 404, someone else's 403, disconnected 409, your own 200", async () => {
@@ -252,7 +253,11 @@ async function main() {
     await login(OWNER_ID, "owner@client-r.test");
     assert.equal((await ask("bp-mac")).status, 200);
     assert.equal((await ping({ services: {}, started_at: S1 })).reconnect, true);
+    const raw = async () =>
+      (await db.execute({ sql: "SELECT encrypted_value FROM tenant_integration_credentials WHERE service = 'bridge_reconnect'", args: [] })).rows[0]?.encrypted_value;
+    const before = await raw();
     assert.equal((await ask("bp-mac")).status, 200, "clicked again while S1 is restarting");
+    assert.equal(await raw(), before, "nothing written: a check-in in between can never be undone");
     assert.equal((await stored()).told, S1, "still S1");
     assert.equal((await ping({ services: {}, started_at: S2 })).reconnect, false, "S2 is the restart, not a new target");
     assert.equal(await stored(), null);
@@ -340,6 +345,9 @@ async function main() {
     assert.match(card, /if \(seq !== readSeq\.current\) return \{ rows, newest: false \};/, "only the newest read writes the card");
     assert.match(card, /if \(reading\) return;/, "the watch never stacks reads");
     assert.match(card, /const waiting = rows && newest \? reconnectWaiting/, "only the newest read decides");
+    // Codex review of #751: Refresh asks from the newest read; the watch ends on time even when a read stalls.
+    assert.match(card, /if \(rows && !newest\) \(\{ rows, newest \} = await read\(\)\);\s*if \(!rows \|\| !newest\) return;/);
+    assert.match(card, /if \(Date\.now\(\) - reconnect\.since >= RECONNECT_WATCH_MS\) \{\s*setReconnect\(\{ \.\.\.reconnect, done: true \}\);\s*return;\s*\}\s*\/\/ One read at a time/);
   });
 
   console.log(failures ? `device reconnect: ${failures} failure(s)` : "device reconnect: all passed");

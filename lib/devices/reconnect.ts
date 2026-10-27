@@ -69,15 +69,15 @@ export function reconnectDecision(request: ReconnectRequest | null, startedAt: s
 }
 
 /**
- * PURE. The request Refresh stores, given the one already pending. Clicked
- * again before the computer reconnected, it is renewed for another
- * RECONNECT_EXPIRES_MS but keeps the process it told: starting over would
- * tell the freshly restarted process to restart a second time.
+ * PURE. The request Refresh stores, given the one already pending: null (store
+ * nothing) while that one is live. Clicked again before the computer
+ * reconnected, starting over would tell the freshly restarted process to
+ * restart a second time, and writing the pending request back could undo a
+ * check-in that recorded its process in between (Codex review of #751).
  */
-export function renewedRequest(pending: ReconnectRequest | null, nowMs: number): ReconnectRequest {
-  const requested_at = new Date(nowMs).toISOString();
+export function requestToStore(pending: ReconnectRequest | null, nowMs: number): ReconnectRequest | null {
   const live = pending !== null && nowMs - Date.parse(pending.requested_at) <= RECONNECT_EXPIRES_MS;
-  return { requested_at, told: live ? pending.told : null };
+  return live ? null : { requested_at: new Date(nowMs).toISOString(), told: null };
 }
 
 /** Refresh: ask this pairing's bridge to reconnect at its next check-in. */
@@ -97,7 +97,8 @@ export async function requestReconnect(input: {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  const request = renewedRequest(pending, Date.now());
+  const request = requestToStore(pending, Date.now());
+  if (!request) return { ok: true, requestedAt: pending!.requested_at };
   const r = await setTenantIntegrationValue({
     tenantId: input.tenantId,
     service: BRIDGE_RECONNECT_SERVICE,

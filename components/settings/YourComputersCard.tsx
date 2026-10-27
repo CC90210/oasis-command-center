@@ -234,8 +234,11 @@ export function YourComputersCard() {
    */
   async function refresh() {
     setNotice(null);
-    const rows = await load();
-    if (!rows) return;
+    // Act on the newest read only: an older one can show Offline a computer
+    // that a newer read shows Ready, and asking it would restart it for nothing.
+    let { rows, newest } = await read();
+    if (rows && !newest) ({ rows, newest } = await read());
+    if (!rows || !newest) return;
     const offline = rows.filter((d) => d.mine && !d.revoked_at && readsOffline(d, Date.now()));
     if (offline.length === 0) {
       setReconnect(null);
@@ -270,6 +273,11 @@ export function YourComputersCard() {
     let live = true;
     let reading = false;
     const timer = window.setInterval(async () => {
+      // The watch ends on time even when a read has stalled.
+      if (Date.now() - reconnect.since >= RECONNECT_WATCH_MS) {
+        setReconnect({ ...reconnect, done: true });
+        return;
+      }
       // One read at a time: on a slow network reads never stack up and overtake each other.
       if (reading) return;
       reading = true;
