@@ -31,7 +31,7 @@ import { Info, KeyRound, Search } from "lucide-react";
 import { ConnectorIcon } from "@/components/os/connections/ConnectorIcon";
 import { ConnectorDrawer, DrawerSheet } from "@/components/os/connections/ConnectorDrawer";
 import { CustomCredentialsVault } from "@/components/settings/CustomCredentialsVault";
-import { AGENT_ACCESS_CHANGED_EVENT, agentNamesLine, type AgentAccess, type AgentChoice } from "@/lib/os/agent-access";
+import { AGENT_ACCESS_CHANGED_EVENT, agentNamesSentence, type AgentAccess, type AgentChoice } from "@/lib/os/agent-access";
 import { customKeysLine } from "@/lib/os/custom-keys";
 import { watchPopup } from "@/components/os/connections/popup-watch";
 import { StatusLine } from "@/components/os/connections/StatusLine";
@@ -182,9 +182,9 @@ export function ConnectionsHub({
 }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
-  // Which agents use each app, as a short line on its card ("Bravo, SDR, Customer Support").
+  // Which agents use each app, as a line on its card ("Used by Bravo, SDR and Customer Support").
   // Owners and admins only (the route says no to anyone else, and the cards then show none).
-  const agentLines = useAgentLines();
+  const agentLines = useConnectionsRead("/api/connections/agents", readAgentLines);
   // A full-window sign-in that FAILED (the popup was blocked) must show WHY:
   // the banner below (role=status, the same words the popup would have
   // shown) is the thing to see. An auto-opened drawer has nothing in it to
@@ -243,7 +243,7 @@ export function ConnectionsHub({
     [openDrawer],
   );
   // How many custom keys, and who uses them, for the Custom keys card.
-  const customLine = useCustomKeysLine();
+  const customLine = useConnectionsRead("/api/credentials/custom", readCustomKeysLine);
 
   useEffect(() => {
     if (!deepLinkOpensDrawer) return;
@@ -374,7 +374,7 @@ export function ConnectionsHub({
                 busy={busySlug === def.slug}
                 onConnect={connect}
                 onDetails={openDrawer}
-                agents={agentLines[def.slug]}
+                agents={agentLines?.[def.slug]}
               />
             ))}
           </ul>
@@ -415,7 +415,7 @@ export function ConnectionsHub({
                       busy={busySlug === def.slug}
                       onConnect={connect}
                       onDetails={openDrawer}
-                      agents={agentLines[def.slug]}
+                      agents={agentLines?.[def.slug]}
                     />
                   ))}
                 </ul>
@@ -528,32 +528,24 @@ function CustomKeysIcon({ size = "md" }: { size?: "md" | "lg" }) {
 }
 
 /**
- * Which agents use each app, as a short line per card, read once from
- * /api/connections/agents and again whenever a drawer saves a choice
- * (AGENT_ACCESS_CHANGED_EVENT). Nothing to show (a member, or a read that
- * failed) is an empty map: a card without the line, never a wrong one.
+ * A line for the cards from an owner-only Connections route, read on arrival
+ * and again whenever a key or an app's agents change
+ * (AGENT_ACCESS_CHANGED_EVENT, sent by the drawers). Null for someone the
+ * route says no to, or a read that failed: the cards then keep their own
+ * words, never a wrong line. `read` must be a module-level function.
  */
-function useAgentLines(): Record<string, string> {
-  const [lines, setLines] = useState<Record<string, string>>({});
+function useConnectionsRead<T>(url: string, read: (body: unknown) => T | null): T | null {
+  const [value, setValue] = useState<T | null>(null);
   useEffect(() => {
     let live = true;
     const load = async () => {
       try {
-        const r = await fetch("/api/connections/agents", { cache: "no-store" });
+        const r = await fetch(url, { cache: "no-store" });
         if (!r.ok) return;
-        const j = (await r.json().catch(() => ({}))) as {
-          ok?: boolean;
-          choices?: AgentChoice[];
-          connectors?: Record<string, { access: AgentAccess | null; unreadable?: boolean }>;
-        };
-        if (!j.ok || !j.connectors || !live) return;
-        const next: Record<string, string> = {};
-        for (const [slug, c] of Object.entries(j.connectors)) {
-          next[slug] = c.access === null ? "Agents unreadable: open to fix" : agentNamesLine(c.access, j.choices);
-        }
-        setLines(next);
+        const next = read(await r.json().catch(() => null));
+        if (live && next !== null) setValue(next);
       } catch {
-        // No line is shown; the drawer still reads and saves the choice.
+        // Nothing is shown; the drawers still read and save.
       }
     };
     void load();
@@ -563,44 +555,25 @@ function useAgentLines(): Record<string, string> {
       live = false;
       window.removeEventListener(AGENT_ACCESS_CHANGED_EVENT, again);
     };
-  }, []);
+  }, [url, read]);
+  return value;
+}
+
+/** Each app's "Used by" line, from /api/connections/agents ("Used by Bravo, SDR and Customer Support"). */
+function readAgentLines(body: unknown): Record<string, string> | null {
+  const j = body as { ok?: boolean; choices?: AgentChoice[]; connectors?: Record<string, { access: AgentAccess | null }> } | null;
+  if (!j?.ok || !j.connectors) return null;
+  const lines: Record<string, string> = {};
+  for (const [slug, c] of Object.entries(j.connectors)) {
+    lines[slug] = c.access === null ? "Agents unreadable: open to fix" : `Used by ${agentNamesSentence(c.access, j.choices)}`;
+  }
   return lines;
 }
 
-/**
- * The Custom keys card's line ("3 keys, used by SDR, Maven and Bravo"), read
- * from /api/credentials/custom and again whenever a key or its agents change
- * (AGENT_ACCESS_CHANGED_EVENT). Null, so the card keeps its own words, for
- * someone the route says no to or a read that failed.
- */
-function useCustomKeysLine(): string | null {
-  const [line, setLine] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    const load = async () => {
-      try {
-        const r = await fetch("/api/credentials/custom", { cache: "no-store" });
-        if (!r.ok) return;
-        const j = (await r.json().catch(() => ({}))) as {
-          ok?: boolean;
-          choices?: AgentChoice[];
-          entries?: Array<{ agents: AgentAccess | null }>;
-        };
-        if (!j.ok || !Array.isArray(j.entries) || !live) return;
-        setLine(customKeysLine(j.entries, j.choices));
-      } catch {
-        // The card keeps its own words; the drawer still lists the keys.
-      }
-    };
-    void load();
-    const again = () => void load();
-    window.addEventListener(AGENT_ACCESS_CHANGED_EVENT, again);
-    return () => {
-      live = false;
-      window.removeEventListener(AGENT_ACCESS_CHANGED_EVENT, again);
-    };
-  }, []);
-  return line;
+/** The Custom keys card's line, from /api/credentials/custom ("3 keys, used by SDR, Maven and Bravo"). */
+function readCustomKeysLine(body: unknown): string | null {
+  const j = body as { ok?: boolean; choices?: AgentChoice[]; entries?: Array<{ agents: AgentAccess | null }> } | null;
+  return j?.ok && Array.isArray(j.entries) ? customKeysLine(j.entries, j.choices) : null;
 }
 
 function ConnectorCard({
@@ -616,7 +589,7 @@ function ConnectorCard({
   busy: boolean;
   onConnect: (def: ConnectorDef) => void;
   onDetails: (slug: string) => void;
-  /** The agents that use this app, in a few words; absent when not known. */
+  /** Its "Used by" line ("Used by Bravo and SDR"); absent when not known. */
   agents?: string;
 }) {
   const live = !!def.live;
@@ -645,8 +618,8 @@ function ConnectorCard({
         <div className="truncate text-sm font-medium text-fg">{def.name}</div>
         <div className="truncate text-[12px] leading-4 text-fg-dim">{def.summary}</div>
         {agents && (
-          <div className="truncate text-[11.5px] leading-4 text-fg-muted" title={`Used by ${agents}`} data-testid={`connector-agents-${def.slug}`}>
-            Used by {agents}
+          <div className="truncate text-[11.5px] leading-4 text-fg-muted" title={agents} data-testid={`connector-agents-${def.slug}`}>
+            {agents}
           </div>
         )}
         <StatusLine status={busy ? { kind: "configured", label: "Waiting for the provider…" } : shown} className="mt-1" />

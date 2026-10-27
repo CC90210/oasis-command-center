@@ -331,9 +331,12 @@ async function main() {
     assert.deepEqual(founder.map((c) => c.label), [
       "Bravo (Chief of Staff)", "SDR (Sales)", "Maven (Marketing)", "Customer Support (Client Success)", "Atlas (Finance)", "Bravo (Operations)",
     ]);
-    assert.equal(rules.agentNamesLine(["chief_of_staff", "operations", "sales"], founder), "Bravo, SDR", "each agent once");
+    assert.equal(rules.agentNamesSentence(["chief_of_staff", "operations", "sales"], founder), "Bravo and SDR", "each agent once");
+    assert.equal(rules.agentNamesSentence(["sales", "marketing", "finance"], founder), "SDR, Maven and Atlas");
     assert.equal(rules.agentAccessLabel(["marketing", "finance"], founder), "Maven (Marketing), Atlas (Finance)");
-    assert.equal(rules.agentNamesLine("all", founder), "All agents");
+    assert.equal(rules.agentNamesSentence("all", founder), "all agents");
+    assert.equal(rules.agentNamesSentence([], founder), "no agents");
+    assert.equal(rules.agentNamesSentence(["finance"]), "Finance", "a workspace that names no agent reads departments");
     // Anyone but OASIS's founders reads a house agent as its department (lib/os/agent-names.ts).
     const oasisRep = namedAgentChoices({ oasis: true, manifest: null, internal: false });
     assert.equal(oasisRep.find((c) => c.key === "chief_of_staff")!.label, "Chief of Staff");
@@ -373,8 +376,8 @@ async function main() {
     assert.equal(logged.length, 1);
     // The cards and every saved custom key show them.
     const hub = read("components/os/connections/ConnectionsHub.tsx");
-    assert.match(hub, /Used by \{agents\}/);
-    assert.match(hub, /agents=\{agentLines\[def\.slug\]\}/);
+    assert.match(hub, /`Used by \$\{agentNamesSentence\(c\.access, j\.choices\)\}`/);
+    assert.match(hub, /agents=\{agentLines\?\.\[def\.slug\]\}/);
     assert.match(hub, /\{customLine \?\? "Each key names the agents that may use it"\}/);
     assert.match(read("components/settings/CustomCredentialsVault.tsx"), /<AgentChips access=\{row\.agents\} choices=\{choices\} \/>/);
   });

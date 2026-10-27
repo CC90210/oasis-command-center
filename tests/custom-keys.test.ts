@@ -89,6 +89,9 @@ check("a paste reads like a .env file, and the route parses it the same way", ()
   const route = read("app/api/credentials/custom/route.ts");
   assert.match(route, /pending = parseDotenvLines\(body\.dotenv\)/);
   assert.doesNotMatch(route, /function parseDotenv\(/, "one parser, not two that can drift");
+  // One size limit too: the vault says "too long" exactly where the route refuses.
+  assert.match(route, /const MAX_VALUE_LEN = VAULT_MAX_VALUE_LENGTH;/);
+  assert.match(read("components/settings/CustomCredentialsVault.tsx"), /value\.length > VAULT_MAX_VALUE_LENGTH/);
 });
 
 check("a key's app comes from its name: whole words, the longest phrase wins", () => {
@@ -172,6 +175,9 @@ check("what a save sends, and what the picker shows before the owner touches it"
   assert.match(vault, /const send = agentsToSend\(\{ exists: !!row, touched: chosen !== undefined, draft: chosen \?\? "all", hint: lineHint \}\);/);
   assert.match(vault, /\.\.\.\(p\.send !== undefined \? \{ agents: p\.send \} : \{\}\)/);
   assert.match(vault, /setEditAgents\(row\.agents_unreadable \? \[\] : row\.agents \?\? "all"\)/, "saving it unchanged must not widen it");
+  // Nothing is saved before the saved keys are read: a name typed early could be a saved key.
+  assert.match(vault, /const canSave = listed && /);
+  assert.match(vault, /disabled=\{!listed \|\| pasteBusy \|\| pasteReady\.length === 0\}/);
   // One column: the viewport-wide grid put the Save button past the drawer's edge.
   assert.doesNotMatch(vault, /sm:grid-cols/);
   // A key for an app with its own card opens that card.

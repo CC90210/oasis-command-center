@@ -42,16 +42,11 @@ export type AccessTarget = { kind: "custom"; key: string } | { kind: "connector"
 export type AgentChoice = { key: DepartmentKey; label: string; agent?: string };
 
 /**
- * A choice as a card's short line: the agents' names, each once (Bravo leads
- * two of OASIS's departments), or the departments where a workspace names no
- * agent. "All agents" and "No agents" as agentAccessLabel says them.
+ * A choice in a sentence, for a card's "Used by" line and the vault's notes:
+ * the agents' names, each once (Bravo leads two of OASIS's departments), or a
+ * department's label where the workspace names no agent. "SDR, Maven and
+ * Bravo", "all agents", "no agents".
  */
-export function agentNamesLine(access: AgentAccess, choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string {
-  if (access === "all" || access.length === 0) return agentAccessLabel(access, choices);
-  return agentNames(access, choices).join(", ");
-}
-
-/** A choice in a sentence: "SDR, Maven and Bravo", "all agents", "no agents". */
 export function agentNamesSentence(access: AgentAccess, choices: ReadonlyArray<AgentChoice> = AGENT_CHOICES): string {
   if (access === "all") return "all agents";
   const names = agentNames(access, choices);

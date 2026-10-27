@@ -27,6 +27,9 @@ import type { DepartmentKey } from "@/lib/os/types";
 /** A saved key's name: VAULT_KEY_PATTERN in lib/tenant-integration-store.ts (a test keeps the two equal). */
 export const VAULT_KEY_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
+/** The longest value the vault keeps: 8 KB, enough for a private key. The route refuses longer. */
+export const VAULT_MAX_VALUE_LENGTH = 8192;
+
 /**
  * What a typed name is saved as: upper case, with every run of other
  * characters turned into one underscore ("hubspot api-key" is HUBSPOT_API_KEY).

@@ -48,6 +48,7 @@ import {
   parseDotenvLines,
   recognizeCustomKey,
   unreadablePasteLines,
+  VAULT_MAX_VALUE_LENGTH,
   type KeyHint,
 } from "@/lib/os/custom-keys";
 
@@ -68,20 +69,21 @@ type UpsertResult = {
   error?: string;
 };
 
-/** The longest value the route keeps (app/api/credentials/custom MAX_VALUE_LEN). */
-const MAX_VALUE_LEN = 8192;
 const INPUT =
   "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 font-mono text-sm text-fg placeholder:text-fg-dim focus:border-accent focus:outline-none";
 const PRIMARY = "btn-primary";
 const LINK = "text-accent hover:underline";
 
 function valueProblem(value: string): string | null {
-  return value.length > MAX_VALUE_LEN ? "Too long: 8 KB at most." : null;
+  return value.length > VAULT_MAX_VALUE_LENGTH ? "Too long: 8 KB at most." : null;
 }
 
 export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: string) => void } = {}) {
   const [rows, setRows] = useState<CustomCredentialRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // The saved keys have been read. Until then a typed name may be a saved key,
+  // and saving it would replace its agents with a guess, so nothing is saved.
+  const [listed, setListed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [agentsError, setAgentsError] = useState<string | null>(null);
@@ -122,14 +124,17 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
       if (!r.ok || !j.ok) {
         setErr(j.error || `http_${r.status}`);
         setRows([]);
+        setListed(false);
       } else {
         setRows(j.entries || []);
+        setListed(true);
         setAgentsError(j.agents_error || null);
         if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : "fetch_failed");
       setRows([]);
+      setListed(false);
     } finally {
       setLoading(false);
     }
@@ -152,7 +157,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
   const shown = touched ? draft : agentsShown({ existing: existing?.agents, unreadable: existing?.agents_unreadable, hint });
   const toSend = agentsToSend({ exists: !!existing, touched, draft, hint });
   const tooLong = valueProblem(value);
-  const canSave = !!keyName && !nameProblem && !!value.trim() && !tooLong && !busy;
+  const canSave = listed && !!keyName && !nameProblem && !!value.trim() && !tooLong && !busy;
 
   // The keys in a paste, each once (a key pasted twice keeps its last value).
   const pasted = useMemo(() => {
@@ -457,7 +462,9 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
 
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <p className="min-w-0 text-[12px] text-fg-dim" data-testid="custom-key-summary">
-            {keyName && !nameProblem ? (
+            {!listed ? (
+              loading ? "Reading your saved keys first." : "Your saved keys could not be read, so nothing can be saved yet."
+            ) : keyName && !nameProblem ? (
               <>
                 Saves <span className="font-mono text-fg-muted">{keyName}</span> for {sentence(shown)}.
               </>
@@ -652,7 +659,7 @@ export function CustomCredentialsVault({ onOpenApp }: { onOpenApp?: (slug: strin
                 {pasteRepeats > 0 && `${pasteRepeats} repeated key${pasteRepeats === 1 ? "" : "s"}: the last value is kept.`}
               </p>
             )}
-            <button type="submit" disabled={pasteBusy || pasteReady.length === 0} className={PRIMARY}>
+            <button type="submit" disabled={!listed || pasteBusy || pasteReady.length === 0} className={PRIMARY}>
               {pasteBusy ? "Saving…" : pasteReady.length > 1 ? `Save ${pasteReady.length} keys` : "Save key"}
             </button>
             {pasteResults && pasteResults.length > 0 && (

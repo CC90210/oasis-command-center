@@ -48,14 +48,14 @@ import {
 } from "@/lib/tenant-integration-store";
 import { normalizeAgentAccess, type AgentAccess } from "@/lib/os/agent-access";
 import { agentChoicesForSession } from "@/lib/os/agent-access-names-session";
-import { parseDotenvLines } from "@/lib/os/custom-keys";
+import { parseDotenvLines, VAULT_MAX_VALUE_LENGTH } from "@/lib/os/custom-keys";
 import { clearAgentAccess, effectiveAccess, readAgentAccessOverrides, saveAgentAccess } from "@/lib/os/agent-access-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_KEY_LEN = 64;
-const MAX_VALUE_LEN = 8192; // 8 KB per value — enough for private keys
+const MAX_VALUE_LEN = VAULT_MAX_VALUE_LENGTH; // 8 KB per value, shared with the vault's own check
 const MAX_BULK_ENTRIES = 100;
 
 
