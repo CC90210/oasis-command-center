@@ -20,6 +20,8 @@ import {
   type EvidenceLabel,
 } from "@/lib/ai-audit/rules";
 import { SECTION_TITLES, type AuditDoc, type DocEstimate, type DocParagraph, type DocRoadmapItem } from "@/lib/ai-audit/doc";
+import { REVENUE_ESTIMATES } from "@/lib/ai-audit/impact";
+import { paybackFor, type Payback } from "@/lib/ai-audit/payback";
 import { rateText, type ProposalContent, type ProposalLine, type ProposalTotals } from "@/lib/ai-audit/proposal";
 
 export type AuditDocumentProps = {
@@ -166,17 +168,13 @@ function rangeTail(e: DocEstimate): string {
  * months" is a calculation the reader can redo, labelled a Reasonable estimate. None when the money estimate is not
  * monthly, a line still needs a price, or nothing is due.
  */
-export function paybackMonths(due: number, e: DocEstimate | undefined): { fast: number; slow: number } | null {
-  if (!e || e.unit !== "$" || !/month/.test(e.period ?? "") || due <= 0 || e.low <= 0 || e.high <= 0) return null;
-  return { fast: Math.max(1, Math.ceil(due / e.high)), slow: Math.max(1, Math.ceil(due / e.low)) };
-}
-
-function ValueChart({ due, e, cur }: { due: number; e: DocEstimate; cur: "CAD" | "USD" }) {
-  // Twelve months of the estimate's low and high against the one-time price, on one scale.
+function ValueChart({ p, cur }: { p: Payback; cur: "CAD" | "USD" }) {
+  // Twelve months of the estimate's low and high, less any monthly fee, against the full one-time price, on one scale.
+  const after = p.monthlyFees > 0 ? " after fees" : "";
   const rows = [
-    { label: "Investment, one time", value: due, kind: "price" },
-    { label: "Value in 12 months, low", value: e.low * 12, kind: "low" },
-    { label: "Value in 12 months, high", value: e.high * 12, kind: "high" },
+    { label: "Investment, one time", value: p.investment, kind: "price" },
+    { label: `Value in 12 months${after}, low`, value: (p.estimate.low - p.monthlyFees) * 12, kind: "low" },
+    { label: `Value in 12 months${after}, high`, value: (p.estimate.high - p.monthlyFees) * 12, kind: "high" },
   ];
   const top = Math.max(...rows.map((r) => r.value), 1);
   return (
@@ -191,7 +189,7 @@ function ValueChart({ due, e, cur }: { due: number; e: DocEstimate; cur: "CAD" |
         </div>
       ))}
       <figcaption className="aa-small">
-        <Label label="estimate" /> Twelve times the monthly range in {e.title.toLowerCase()}, beside what the work costs once.
+        <Label label="estimate" /> Twelve times the monthly range in {p.estimate.title.toLowerCase()}{p.monthlyFees > 0 ? ", less the monthly fees" : ""}, beside what the work costs once.
       </figcaption>
     </figure>
   );
@@ -254,11 +252,19 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
   const monthly = proposal.lines.filter((l) => !l.optional && l.unit === "per_month");
   const optional = proposal.lines.filter((l) => l.optional);
   const deposit = proposal.payment_terms.kind === "deposit" ? proposal.payment_terms : null;
-  // The cover's figures: the largest money estimate, the time estimate, the price, and payback from those alone.
-  const topMoney = [...doc.estimates].filter((e) => e.unit === "$").sort((a, b) => b.high - a.high)[0];
+  // The cover's figures: the largest revenue estimate (else the largest money one, named for what it is), the time
+  // estimate, the full price, and payback only where lib/ai-audit/payback.ts can show it.
+  const byHigh = [...doc.estimates].filter((e) => e.unit === "$").sort((a, b) => b.high - a.high);
+  const topMoney = byHigh.find((e) => REVENUE_ESTIMATES.has(e.id)) ?? byHigh[0];
+  const topIsRevenue = !!topMoney && REVENUE_ESTIMATES.has(topMoney.id);
   const topHours = doc.estimates.find((e) => e.unit === "hours");
-  const priced = !proposal.lines.some((l) => l.kind === "needs_owner_price") && totals.due_now_cents > 0;
-  const payback = priced ? paybackMonths(totals.due_now_cents / 100, topMoney) : null;
+  const priced = !proposal.lines.some((l) => l.kind === "needs_owner_price") && totals.total_cents > 0;
+  const payback = paybackFor(doc, proposal, totals);
+  const priceNote = [
+    deposit && priced ? `${money(totals.due_now_cents, cur)} to start` : null,
+    totals.monthly_cents > 0 ? `plus ${money(totals.monthly_cents, cur)} a month after launch` : null,
+    payback ? `pays back in about ${payback.fast} to ${payback.slow} months on Estimate ${refs.estimateNo.get(payback.estimate.id)}` : null,
+  ].filter(Boolean).join("; ");
   const moves = (doc.sections.roadmap.now.length ? doc.sections.roadmap.now.map((r) => opportunityTitles.get(r.opportunity_id)) : doc.sections.opportunities.items.map((o) => o.title))
     .filter((x): x is string => !!x)
     .slice(0, 3);
@@ -302,9 +308,12 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
           <div className="aa-glance">
             {topMoney ? (
               <div className="aa-stat">
-                <span className="aa-stat-label">Revenue within reach</span>
+                <span className="aa-stat-label">{topIsRevenue ? "Revenue within reach" : topMoney.title}</span>
                 <strong>{rangeText(topMoney)}</strong>
-                <span className="aa-stat-note">{rangeTail(topMoney)}, from {topMoney.title.toLowerCase()} (Estimate {refs.estimateNo.get(topMoney.id)})</span>
+                <span className="aa-stat-note">
+                  {rangeTail(topMoney)}
+                  {topIsRevenue ? `, from ${topMoney.title.toLowerCase()}` : ""} (Estimate {refs.estimateNo.get(topMoney.id)})
+                </span>
               </div>
             ) : null}
             {topHours ? (
@@ -315,10 +324,10 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </div>
             ) : null}
             <div className="aa-stat aa-stat-price">
-              <span className="aa-stat-label">{priced ? "Investment to start" : "Investment"}</span>
-              <strong>{priced ? money(totals.due_now_cents, cur) : "To be priced"}</strong>
+              <span className="aa-stat-label">Investment</span>
+              <strong>{priced ? money(totals.total_cents, cur) : "To be priced"}</strong>
               <span className="aa-stat-note">
-                {payback ? `Pays back in about ${payback.fast} to ${payback.slow} months on these estimates` : priced ? "Due to start the work" : "We confirm the price with you"}
+                {priceNote ? priceNote.charAt(0).toUpperCase() + priceNote.slice(1) : priced ? "Due to start the work" : "We confirm the price with you"}
               </span>
             </div>
           </div>
@@ -605,15 +614,17 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
               </div>
             );
           })}
-          {topMoney && payback ? (
+          {payback ? (
             <div className="aa-estimate aa-payback">
               <h3>
                 Value against the investment <Label label="estimate" />
               </h3>
-              <ValueChart due={totals.due_now_cents / 100} e={topMoney} cur={cur} />
+              <ValueChart p={payback} cur={cur} />
               <p className="aa-small">
-                How it is worked out: {money(totals.due_now_cents, cur)} due to start, divided by the monthly range in Estimate {refs.estimateNo.get(topMoney.id)}. At
-                the high end the work pays for itself in about {payback.fast} {payback.fast === 1 ? "month" : "months"}, at the low end in about {payback.slow}.
+                How it is worked out: {money(totals.total_cents, cur)}, the full one-time price, divided by the monthly range in Estimate{" "}
+                {refs.estimateNo.get(payback.estimate.id)}
+                {payback.monthlyFees > 0 ? `, less ${money(totals.monthly_cents, cur)} a month in fees` : ""}. It counts only revenue from work in the price. At the
+                high end the work pays for itself in about {payback.fast} {payback.fast === 1 ? "month" : "months"}, at the low end in about {payback.slow}.
               </p>
             </div>
           ) : null}

@@ -13,6 +13,9 @@
 import type { DocEstimate, DocEstimateInput } from "@/lib/ai-audit/doc";
 import type { EvidenceLabel } from "@/lib/ai-audit/rules";
 
+/** The estimates that are revenue. The staff-cost one is time returned, money only if it is reused or no longer paid. */
+export const REVENUE_ESTIMATES: ReadonlySet<string> = new Set(["est-missed-calls", "est-fast-replies"]);
+
 /** A month's weeks, as an average (52 / 12): a constant, not an assumption. */
 export const WEEKS_PER_MONTH = 52 / 12;
 

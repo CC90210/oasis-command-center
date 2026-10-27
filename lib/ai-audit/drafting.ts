@@ -17,7 +17,7 @@ import type { Client } from "@libsql/client";
 import { auditDocIssues, validateAuditDoc, type DocIssue } from "@/lib/ai-audit/doc";
 import { draftAuditDoc, draftProposal } from "@/lib/ai-audit/draft";
 import { validateProposalContent } from "@/lib/ai-audit/proposal";
-import { OPPORTUNITY_SKU, type PlannedOpportunity } from "@/lib/ai-audit/opportunities";
+import { skuForOpportunity, type PlannedOpportunity } from "@/lib/ai-audit/opportunities";
 import { estimateImpact } from "@/lib/ai-audit/impact";
 import { assumptionOverrides, latestResearch, RESEARCH_STAGES } from "@/lib/ai-audit/research";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
@@ -109,7 +109,8 @@ export async function draftProposalFromAudit(db: Client, input: { tenantId: stri
 
   // The audit's opportunities as they stand now (CC may have removed some); one CC added himself has no catalogue item.
   const planned: PlannedOpportunity[] = audit.doc.sections.opportunities.items.flatMap((o) => {
-    const sku = OPPORTUNITY_SKU.get(o.id);
+    // The same item the audit planned, the setter's tier sized from the audit's own findings (review of #759).
+    const sku = skuForOpportunity(o.id, audit.doc!);
     return sku ? [{ ...o, sku, impact: "medium" as const, effort: "medium" as const, urgency: "" }] : [];
   });
   const [settings, catalogue, lead] = await Promise.all([getSettings(db, t), listCatalogue(db, t, { includeFixture: e.is_fixture }), readLead(db, t, e.lead_id)]);

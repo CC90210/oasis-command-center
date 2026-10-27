@@ -323,6 +323,35 @@ async function main() {
     const allLater = draft.draftProposal({ ...base, roadmap: { now: [], next: [], later: [item("o-now"), item("o-later")] } });
     assert.deepEqual(allLater.lines.map((l) => l.optional), [false, false]);
   });
+  await check("review of #759: payback is the full price against revenue the priced work makes, less fees, or nothing", async () => {
+    const { paybackFor } = await import("../lib/ai-audit/payback");
+    const est = d.estimates.find((e) => e.id === "est-missed-calls")!;
+    assert.deepEqual([est.low, est.high], [1300, 3250]);
+    const line = (over: Record<string, unknown> = {}) => ({ line_id: "l1", kind: "catalogue", sku: "checkout-sales-setter-launch", item_id: "cat-a", item_version: 1, name: "AI sales setter", description: "x", category: "implementation", unit: "fixed", quantity: 1, optional: false, unit_price_cents: 150_000, currency: "CAD", deliverables: [], onboarding_requirements: [], ...over });
+    const prop = (lines: unknown[], terms: unknown = { kind: "full" }) => ({ ...draft.draftProposal({ opportunities: [], roadmap: d.sections.roadmap, confirmed: [] as never, currency: "CAD", tax: { mode: "not_registered" }, depositBps: null, to: "owner@fixture.test", businessName: "Fixture Plumbing", contactName: "Dana Smith", today: "2026-10-26" }), lines, payment_terms: terms }) as never;
+    const pay = (p: never) => paybackFor(d, p, proposal.proposalTotals(p));
+    const full = pay(prop([line()]));
+    assert.ok(full && full.estimate.id === "est-missed-calls" && full.investment === 1500, JSON.stringify(full));
+    assert.deepEqual([full!.fast, full!.slow], [1, 2]);
+    // A 25% deposit is what is due to start, not what the work costs: payback still counts all of it.
+    const deposit = pay(prop([line({ unit_price_cents: 1_000_000 })], { kind: "deposit", deposit_bps: 2500, balance_due: "on launch" }));
+    assert.deepEqual([deposit!.investment, deposit!.fast, deposit!.slow], [10_000, 4, 8]);
+    // A monthly fee comes off the monthly value; one larger than the low end leaves nothing to claim.
+    const fee = (cents: number) => line({ line_id: "l2", sku: "command-managed-monthly", unit: "per_month", unit_price_cents: cents });
+    assert.deepEqual(((p) => [p!.monthlyFees, p!.fast, p!.slow])(pay(prop([line(), fee(30_000)]))), [300, 1, 2]);
+    assert.equal(pay(prop([line(), fee(140_000)])), null);
+    // The setter left out of the total (an optional add-on), or not in the proposal at all: no payback from its revenue.
+    assert.equal(pay(prop([line({ optional: true }), line({ line_id: "l3", sku: "fleet-custom-integration" })])), null);
+    assert.equal(pay(prop([line({ sku: "fleet-custom-integration" })])), null);
+    // A tier CC changed is still the same setter.
+    assert.ok(pay(prop([line({ sku: "checkout-sales-setter-complete" })])));
+    // Staff time is not revenue: an opportunity resting on a money estimate that is not revenue claims no payback.
+    const costOnly = { ...d, estimates: d.estimates.map((e) => (e.id === "est-missed-calls" ? { ...e, id: "est-admin-cost" } : e)), sections: { ...d.sections, opportunities: { ...d.sections.opportunities, items: d.sections.opportunities.items.map((o) => ({ ...o, estimate_ids: o.estimate_ids.map((x) => (x === "est-missed-calls" ? "est-admin-cost" : x)) })) } } };
+    const p0 = prop([line()]);
+    assert.equal(paybackFor(costOnly as never, p0, proposal.proposalTotals(p0)), null);
+    // A line still waiting for CC's price: no payback yet.
+    assert.equal(pay(prop([line(), { ...line({ line_id: "l4" }), kind: "needs_owner_price", suggested_sku: "website-starter" }])), null);
+  });
 
 
   console.log("the opening, rewritten by a model and checked");
@@ -609,7 +638,7 @@ async function main() {
     return route.POST(r as never, { params: Promise.resolve({ engagementId: eid }) });
   };
   let leadN = 0;
-  const authorized = async (name: string, engine: "mac_claude" | "cloud_workspace" | "none" = "mac_claude") => {
+  const authorized = async (name: string, engine: "mac_claude" | "cloud_workspace" | "none" = "mac_claude", extra: Array<[string, unknown]> = []) => {
     leadN += 1;
     const lead = `7d000000-0000-4000-8000-0000000000${String(leadN).padStart(2, "0")}`;
     await db.execute({
@@ -629,6 +658,7 @@ async function main() {
     await f("sales.avg_job_value", 500);
     await f("consent.recording", true);
     await f("consent.ai_processing", true);
+    for (const [key, value] of extra) await f(key, value);
     const card = await authorize.requestAuthorization(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), engine });
     assert.ok(card.ok, !card.ok ? card.error : "");
     await db.execute({ sql: "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", args: [USERS.cc.id, new Date().toISOString(), card.ok ? card.approvalId : ""] });
@@ -893,6 +923,26 @@ async function main() {
     await login(null);
     const events = await db.execute({ sql: "SELECT event FROM ai_audit_events WHERE engagement_id = ? AND event IN ('audit_drafted', 'proposal_drafted') ORDER BY rowid", args: [eid] });
     assert.deepEqual(events.rows.map((r) => String(r.event)), ["audit_drafted", "proposal_drafted", "audit_drafted", "proposal_drafted"]);
+  });
+  await check("review of #759: the saved proposal drafts the setter tier the client's lead sources call for", async () => {
+    const eid = await authorized("Many Sources Co", "mac_claude", [["sales.lead_sources", [{ source: "Google", "per month": 40 }, { source: "Referrals", "per month": 10 }]]]);
+    const r = await research.startResearch(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(r.ok);
+    const stepId = r.ok ? r.stepId : "";
+    let state = "";
+    for (let i = 0; i < 12 && state !== "finished"; i++) {
+      state = await research.advanceResearch(db, { tenantId: OASIS, stepId, now: NOW(), deps });
+      await answerSearch();
+    }
+    assert.equal(state, "finished");
+    assert.ok((await drafting.draftAuditFromResearch(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() })).ok);
+    const drafted = await drafting.draftProposalFromAudit(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(drafted.ok, JSON.stringify(drafted));
+    const e = (await store.getEngagement(db, OASIS, eid))!;
+    const prop = (await versions.getProposalVersion(db, OASIS, e.current_proposal_version_id!))!;
+    const skus = prop.content!.lines.map((l) => (l.kind === "catalogue" ? l.sku : l.kind === "needs_owner_price" ? (l.suggested_sku ?? "") : ""));
+    assert.ok(skus.includes("checkout-sales-setter-scale") && !skus.includes("checkout-sales-setter-launch"), JSON.stringify(skus));
+    assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "cancelled", actor: cc, now: NOW() })).ok);
   });
   await check("a run that ends without the authorization drafts nothing", async () => {
     const eid = await authorized("Voided Draft Co");
