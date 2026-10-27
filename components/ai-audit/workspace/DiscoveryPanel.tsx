@@ -22,6 +22,7 @@ import { AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payloa
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
+import { approvalStatusWords } from "./words";
 import { BriefPanel } from "./BriefPanel";
 
 function when(iso: string | null | undefined): string {
@@ -95,17 +96,6 @@ function wayBack(stage: string): string {
 /** Stages before the call is held: Gate 1 waits for Discovery Call Completed. */
 const BEFORE_THE_CALL: readonly string[] = ["new_lead", "pre_call_research", "call_scheduled"];
 
-/** Where the authorization card stands, in words. */
-const AUTH_STATUS_WORDS: Record<string, string> = {
-  pending: "waiting for you in Needs you",
-  approved: "approved, being carried out",
-  executing: "being carried out",
-  failed: "failed",
-  sent_back: "sent back",
-  expired: "expired before anyone decided",
-  cancelled: "withdrawn: a newer card replaced it",
-  voided: "no longer holds",
-};
 
 export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwner: boolean }) {
   const router = useRouter();
@@ -491,7 +481,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           <div className="text-fg-muted">
             Authorization:{" "}
             <span className="text-fg">
-              {auth.status === "executed" && auth.outcome === "authorized" ? "authorized" : (AUTH_STATUS_WORDS[auth.status] ?? auth.status.replace(/_/g, " "))}
+              {approvalStatusWords(auth)}
             </span>
             {auth.engine_label ? <span>, processed by {auth.engine_label}</span> : null}
             {auth.message ? <div className="text-[13px] text-status-warm">{auth.message}</div> : null}

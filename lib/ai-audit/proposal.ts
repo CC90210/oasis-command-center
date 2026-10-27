@@ -329,10 +329,11 @@ export function validateProposalContent(raw: unknown): V<ProposalContent> {
  * catalogue by the server (store.ts) as well.
  */
 /**
- * A line priced from a confirmed catalogue item, in place (the proposal editor's "Use the confirmed price"). It
- * keeps what the line already says for this client (description, deliverables, onboarding needs), its quantity
- * for a per-unit item, and whether it is optional, exactly as a save keeps them (lib/ai-audit/versions.ts
- * normalizeProposal); the item fills only what is empty (Codex review of #749).
+ * A line priced from a confirmed catalogue item. One function for both places that do it: a save
+ * (lib/ai-audit/versions.ts normalizeProposal) and the proposal editor's "Use the confirmed price", so the two
+ * cannot drift (Codex review of #749). It keeps what the line already says for this client (description,
+ * deliverables, onboarding needs), its quantity for a per-unit item, and whether it is optional; the item fills
+ * only what is empty. A confirmed item always has a price (lib/ai-audit/catalogue-store.ts confirms only one).
  */
 export function withConfirmedPrice(line: ProposalLine, item: CatalogueItem): CatalogueLine {
   return {

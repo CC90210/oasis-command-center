@@ -31,6 +31,7 @@ import { ProposalEditor } from "./ProposalEditor";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { ResearchPanel } from "./ResearchPanel";
 import { describeError, postAction } from "./api";
+import { approvalStatusWords } from "./words";
 
 type Tab = "overview" | "call" | "profile" | "research" | "audit" | "proposal" | "delivery" | "history";
 
@@ -44,21 +45,6 @@ const TABS: Array<{ key: Tab; label: string }> = [
   { key: "delivery", label: "Delivery and payment" },
   { key: "history", label: "History" },
 ];
-
-/** Where the final approval card stands, in words (an executed card says what its run recorded). */
-function approvalWords(a: { status: string; outcome: string | null }): string {
-  if (a.status === "executed") return a.outcome === "dry_run" ? "approved as a test run: nothing was sent" : a.outcome === "sent" ? "approved and sent" : "carried out";
-  const words: Record<string, string> = {
-    pending: "waiting for you in Needs you",
-    approved: "approved, being carried out",
-    executing: "sending now",
-    failed: "failed",
-    sent_back: "sent back",
-    expired: "expired before anyone decided",
-    cancelled: "withdrawn: a newer card replaced it",
-  };
-  return words[a.status] ?? a.status.replace(/_/g, " ");
-}
 
 const CHECKOUT_WORDS: Record<string, string> = {
   creating: "opening",
@@ -464,7 +450,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
               </button>
             ) : null}
             <div className="text-fg-muted">
-              Final approval: <span className="text-fg">{view.deliveryApproval ? approvalWords(view.deliveryApproval) : "not filed yet"}</span>
+              Final approval: <span className="text-fg">{view.deliveryApproval ? approvalStatusWords(view.deliveryApproval) : "not filed yet"}</span>
               {view.deliveryApproval?.message ? <div className="text-[13px] text-status-warm">{view.deliveryApproval.message}</div> : null}
             </div>
             {view.deliveryApproval?.status === "pending" ? (
@@ -538,7 +524,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
               <div className="text-fg-muted">
                 Welcome email:{" "}
                 <span className="text-fg">
-                  {view.welcome.status === "pending" ? "waiting for your approval" : approvalWords(view.welcome)}
+                  {view.welcome.status === "pending" ? "waiting for your approval" : approvalStatusWords(view.welcome)}
                 </span>
                 {view.welcome.status === "pending" ? (
                   <Link href="/feed" className="ml-2 underline underline-offset-2">
