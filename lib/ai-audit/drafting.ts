@@ -118,6 +118,7 @@ export async function draftProposalFromAudit(db: Client, input: { tenantId: stri
     roadmap: audit.doc.sections.roadmap,
     confirmed: catalogue.filter((i) => i.status === "confirmed"),
     currency: settings.settings.default_currency,
+    fx: settings.settings.fx_usd_cad,
     tax: settings.settings.tax,
     depositBps: settings.settings.deposit_bps,
     to: e.contact_email ?? lead?.email ?? "",
@@ -129,7 +130,7 @@ export async function draftProposalFromAudit(db: Client, input: { tenantId: stri
   // Checked before it is saved: a draft that would read back as nothing is never stored.
   const valid = validateProposalContent(content);
   if (!valid.ok) return { ok: false, error: "invalid", detail: `${valid.field}: ${valid.error}` };
-  const saved = await saveProposalDraft(db, { tenantId: t, engagementId: e.id, content, actor: input.actor, now: input.now, expectedRowVersion: e.row_version, tax: settings.settings.tax });
+  const saved = await saveProposalDraft(db, { tenantId: t, engagementId: e.id, content, actor: input.actor, now: input.now, expectedRowVersion: e.row_version, tax: settings.settings.tax, fx: settings.settings.fx_usd_cad });
   if (!saved.ok) return { ok: false, error: saved.error };
   await db.execute(
     eventStatement({

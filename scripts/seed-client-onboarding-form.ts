@@ -11,6 +11,7 @@
  * Run (dry run first — it prints the plan and writes nothing):
  *   node --conditions=react-server --env-file=.env.local --import tsx scripts/seed-client-onboarding-form.ts
  *   node --conditions=react-server --env-file=.env.local --import tsx scripts/seed-client-onboarding-form.ts --apply
+ *   ... --apply --tenant oasis-ai-cc    (the Free AI Audit's workspace: its paying clients' welcome email links here)
  *
  * WHICH DATABASE. It writes wherever getServiceSupabase() points, which is
  * Turso when EMPIRE_DATA_BACKEND=turso_cloud — production, since the 2026-08-09
@@ -36,6 +37,10 @@ import {
 import { OASIS_LEAD_STAGE_KEYS } from "../lib/oasis-stage-meta";
 
 const apply = process.argv.includes("--apply");
+// --tenant <slug>: the workspace to seed. Website clients use oasis-webdev (the default); a paying Free AI Audit client
+// is onboarded in the audit's own workspace (oasis-ai-cc), where their lead is, so their minted link attaches to it.
+const tenantArg = process.argv.indexOf("--tenant");
+const TENANT_SLUG = tenantArg > 0 && process.argv[tenantArg + 1] ? process.argv[tenantArg + 1] : CLIENT_ONBOARDING_TENANT_SLUG;
 
 type FormRow = {
   id: string;
@@ -98,7 +103,7 @@ async function main(): Promise<void> {
   const direct = await db
     .from("tenants")
     .select("id, slug, custom_fields")
-    .eq("slug", CLIENT_ONBOARDING_TENANT_SLUG)
+    .eq("slug", TENANT_SLUG)
     .limit(1)
     .maybeSingle();
   if (direct.error) {
@@ -116,7 +121,7 @@ async function main(): Promise<void> {
     }
     for (const t of (all.data || []) as TenantRow[]) {
       const cf = (t.custom_fields || {}) as Record<string, unknown>;
-      if (cf.command_center_profile_slug === CLIENT_ONBOARDING_TENANT_SLUG) {
+      if (cf.command_center_profile_slug === TENANT_SLUG) {
         tenantId = t.id;
         break;
       }
@@ -124,7 +129,7 @@ async function main(): Promise<void> {
   }
   if (!tenantId) {
     console.error(
-      `ERROR: tenant "${CLIENT_ONBOARDING_TENANT_SLUG}" not found in this backend ` +
+      `ERROR: tenant "${TENANT_SLUG}" not found in this backend ` +
         `(EMPIRE_DATA_BACKEND=${process.env.EMPIRE_DATA_BACKEND}).`,
     );
     process.exit(5);
@@ -145,11 +150,11 @@ async function main(): Promise<void> {
   }
   const live = (existing.data as FormRow | null) ?? null;
 
-  console.log(`tenant:  ${CLIENT_ONBOARDING_TENANT_SLUG} (${tenantId})`);
+  console.log(`tenant:  ${TENANT_SLUG} (${tenantId})`);
   console.log(`form:    ${CLIENT_ONBOARDING_SLUG} — ${live ? `EXISTS (schema update, id ${live.id.slice(0, 8)})` : "NEW (insert)"}`);
-  console.log(`public:  ${origin}/f/${CLIENT_ONBOARDING_TENANT_SLUG}/${CLIENT_ONBOARDING_SLUG}`);
+  console.log(`public:  ${origin}/f/${TENANT_SLUG}/${CLIENT_ONBOARDING_SLUG}`);
   console.log(
-    `client:  ${origin}/f/${CLIENT_ONBOARDING_TENANT_SLUG}/${CLIENT_ONBOARDING_SLUG}/<lead_token>  ` +
+    `client:  ${origin}/f/${TENANT_SLUG}/${CLIENT_ONBOARDING_SLUG}/<lead_token>  ` +
       `(mint via /api/forms/<id>/mint-link — prefills business_name, email, phone, industry)`,
   );
   console.log(

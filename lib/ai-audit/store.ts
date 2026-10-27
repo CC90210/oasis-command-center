@@ -28,7 +28,7 @@ import {
   type OnboardingStatus,
   type PaymentStatus,
 } from "@/lib/ai-audit/rules";
-import { validateTaxRule, type TaxRule } from "@/lib/ai-audit/proposal";
+import { FX_RATE_MAX_PPM, FX_RATE_MIN_PPM, validateTaxRule, type FxRate, type TaxRule } from "@/lib/ai-audit/proposal";
 import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { researchPurgeStatements, researchTablesInstalled } from "@/lib/ai-audit/research-purge";
 
@@ -591,6 +591,11 @@ export type AiAuditSettings = {
   engine: "mac_claude" | "cloud_workspace";
   /** The promise the handbook and email make, in CC's words. Empty until set. */
   turnaround: string;
+  /**
+   * CAD for one USD, set by CC. USD is the core currency (CC, 2026-10-27); with a rate, a proposal in CAD prices
+   * the USD catalogue at it, and records the conversion on each line. Null: CAD proposals use only typed prices.
+   */
+  fx_usd_cad: FxRate | null;
 };
 
 export const DEFAULT_SETTINGS: AiAuditSettings = {
@@ -599,7 +604,18 @@ export const DEFAULT_SETTINGS: AiAuditSettings = {
   default_currency: "CAD",
   engine: "mac_claude",
   turnaround: "",
+  fx_usd_cad: null,
 };
+
+/** A rate as stored or as sent by the settings form; null unless every part is in range. */
+export function parseFxRate(raw: unknown): FxRate | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const ppm = Number(r.rate_ppm);
+  const asOf = typeof r.as_of === "string" ? r.as_of.trim() : "";
+  if (!Number.isInteger(ppm) || ppm < FX_RATE_MIN_PPM || ppm > FX_RATE_MAX_PPM || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return null;
+  return { rate_ppm: ppm, as_of: asOf, source: r.source === "bank_of_canada" ? "bank_of_canada" : "owner" };
+}
 
 export function parseSettings(raw: Record<string, unknown>): AiAuditSettings {
   const tax = raw.tax ? validateTaxRule(raw.tax) : null;
@@ -610,6 +626,7 @@ export function parseSettings(raw: Record<string, unknown>): AiAuditSettings {
     default_currency: raw.default_currency === "USD" ? "USD" : "CAD",
     engine: raw.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude",
     turnaround: typeof raw.turnaround === "string" ? raw.turnaround.trim().slice(0, 200) : "",
+    fx_usd_cad: parseFxRate(raw.fx_usd_cad),
   };
 }
 

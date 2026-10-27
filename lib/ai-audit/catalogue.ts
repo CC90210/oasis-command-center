@@ -66,7 +66,11 @@ const COMMON_ACCESS = [
   "Access to the systems this connects, granted through Connections (never by sharing a password)",
 ];
 
-/** The seed, from the files that held prices on 2026-10-25. Every item is proposed. */
+/**
+ * The seed, from the files that held prices on 2026-10-25. Every item is proposed until CC confirms it.
+ * Every price is in USD, the core currency (CC, 2026-10-27); the items that were CAD in their source files keep
+ * the same numbers. CC approved all of them except the paid audit, which the free audit replaces.
+ */
 export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
   // content/offers/oasis/fleet.json, "One audit, then only what pays back" (USD).
   {
@@ -178,7 +182,8 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     onboarding_requirements: [],
     source_ref: { file: "content/offers/oasis/command.json", line: 220 },
   },
-  // lib/checkout/catalog.ts CHECKOUT_OFFERS (CAD, public checkout).
+  // lib/checkout/catalog.ts CHECKOUT_OFFERS (CAD in the public checkout). Priced here in USD at the same
+  // numbers: CC, 2026-10-27, "our core price is USD"; a client may pay in CAD, converted from USD.
   {
     sku: "checkout-conversion-sprint-focused",
     name: "Conversion audit and optimisation sprint, focused",
@@ -186,7 +191,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 150_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["One conversion path reviewed", "Prioritised repair plan"],
     onboarding_requirements: COMMON_ACCESS,
     source_ref: { file: "lib/checkout/catalog.ts", line: 35 },
@@ -198,7 +203,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 200_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Two conversion paths reviewed", "Implementation support"],
     onboarding_requirements: COMMON_ACCESS,
     source_ref: { file: "lib/checkout/catalog.ts", line: 36 },
@@ -210,7 +215,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 250_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Full-funnel review", "Fixes", "Measurement handoff"],
     onboarding_requirements: COMMON_ACCESS,
     source_ref: { file: "lib/checkout/catalog.ts", line: 37 },
@@ -222,7 +227,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 350_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["One lead source connected", "Qualification and booking workflow"],
     onboarding_requirements: ["Calendar connected through Connections", ...COMMON_ACCESS],
     source_ref: { file: "lib/checkout/catalog.ts", line: 49 },
@@ -234,7 +239,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 425_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Several lead sources connected", "Follow-up and CRM routing"],
     onboarding_requirements: ["Calendar and CRM connected through Connections", ...COMMON_ACCESS],
     source_ref: { file: "lib/checkout/catalog.ts", line: 50 },
@@ -246,13 +251,13 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "implementation",
     unit: "fixed",
     price_cents: 500_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["End-to-end setter system", "Reporting and tuning"],
     onboarding_requirements: ["Calendar and CRM connected through Connections", ...COMMON_ACCESS],
     source_ref: { file: "lib/checkout/catalog.ts", line: 51 },
   },
   // lib/website-sales.ts WEBSITE_PACKAGES floors (the deal's currency, CAD by
-  // default) and lib/website-sales-comp.ts PRICE_BOOK book prices.
+  // default) and lib/website-sales-comp.ts PRICE_BOOK book prices. In USD here at the same numbers (CC, 2026-10-27).
   {
     sku: "website-starter",
     name: "Website, Starter",
@@ -260,7 +265,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "website",
     unit: "fixed",
     price_cents: 50_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Starter website"],
     onboarding_requirements: ["Logo, photos and service list", "Domain access through Connections"],
     source_ref: { file: "lib/website-sales.ts", line: 71, note: "Setup floor $500, monthly floor $150; book price $500 (lib/website-sales-comp.ts:166)." },
@@ -272,7 +277,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "website",
     unit: "fixed",
     price_cents: 300_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Essential website"],
     onboarding_requirements: ["Logo, photos and service list", "Domain access through Connections"],
     source_ref: { file: "lib/website-sales-comp.ts", line: 167, note: "Book price $3,000; floor $2,000 (lib/website-sales.ts:75); monthly floor $250." },
@@ -284,7 +289,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "website",
     unit: "fixed",
     price_cents: 500_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Growth website", "Booking or review integration", "One standard automation"],
     onboarding_requirements: ["Logo, photos and service list", "Domain access through Connections"],
     source_ref: { file: "lib/website-sales-comp.ts", line: 168, note: "Book price $5,000; floor $3,500 (lib/website-sales.ts:79); monthly floor $350." },
@@ -296,7 +301,7 @@ export const CATALOGUE_SEED: readonly CatalogueDraft[] = [
     category: "website",
     unit: "fixed",
     price_cents: 800_000,
-    currency: "CAD",
+    currency: "USD",
     deliverables: ["Authority website", "Advanced SEO", "Two standard automations"],
     onboarding_requirements: ["Logo, photos and service list", "Domain access through Connections"],
     source_ref: { file: "lib/website-sales-comp.ts", line: 169, note: "Book price $8,000; floor $5,000 (lib/website-sales.ts:83); monthly floor $500." },

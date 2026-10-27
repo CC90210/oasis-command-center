@@ -278,6 +278,15 @@ async function main() {
     assert.equal(p.delivery_email.body.split(proposal.AUDIT_LINK_PLACEHOLDER).length, 2, "exactly one link placeholder");
     assert.ok(proposal.proposalBlockers(p, "2026-10-26").length >= 1, "a line without a price blocks submission");
     assert.equal(p.phases[0]?.name, "Start now");
+    // USD core (CC, 2026-10-27): the same item priced in USD drafts into a CAD proposal converted at CC's rate,
+    // and into nothing without one.
+    const usdItem = [{ ...(confirmed as unknown as Array<Record<string, unknown>>)[0], currency: "USD", price_cents: 350_000 }] as never;
+    const args = { opportunities: planned, roadmap: d.sections.roadmap, confirmed: usdItem, currency: "CAD" as const, tax: { mode: "not_registered" as const }, depositBps: null, to: "owner@fixture.test", businessName: "Fixture Plumbing", contactName: "Dana Smith", today: "2026-10-26" };
+    const cad = draft.draftProposal({ ...args, fx: { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "bank_of_canada" as const } });
+    const first = cad.lines[0];
+    assert.ok(first.kind === "catalogue" && first.currency === "CAD" && first.unit_price_cents === 490_875 && first.fx?.from_unit_price_cents === 350_000, JSON.stringify(first));
+    assert.ok(proposal.validateProposalContent(cad).ok);
+    assert.equal(draft.draftProposal({ ...args, fx: null }).lines[0].kind, "needs_owner_price", "no rate: the line waits for CC's price");
   });
 
 
