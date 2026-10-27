@@ -296,6 +296,10 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
         </Section>
 
         <Section n={4} id="s4">
+          {doc.sections.inefficiencies.items.length === 0 ? (
+            // Never a bare heading: the opportunities below still answer what to change.
+            <p>We found nothing here that we could confirm beyond the opportunities in the next section.</p>
+          ) : null}
           {doc.sections.inefficiencies.items.map((it, i) => (
             <div key={i} className="aa-item">
               <h3>{it.title}</h3>

@@ -63,10 +63,18 @@ const CLIENT_FACING_PROFILE = /^f-(?:business|goals|ops|tech|sales)-|^f-finance-
 /** The client's version of each likely problem: a short title, what it costs them, and how it would be checked together. */
 /** "Where customers are lost: none" answers the question without naming a problem (Codex review of #757). */
 const NO_PROBLEM = /^(?:none|none at all|no|nope|nothing|n\/?a|not really|not that i know of|nothing comes to mind|no problems?|no issues?|never|it is fine|it's fine|all good)\.?$/i;
-function namesAProblem(statement: string): boolean {
+/** An answer that opens by denying the problem: "No delays", "Not much", "Never". */
+const OPENS_WITH_DENIAL = /^(?:no|not|none|never|nothing|zero|nobody|hardly|rarely)\b/i;
+/** "All our systems are connected": the tools question answered with no problem, unless it also says they are not. */
+const ALL_CONNECTED = /\b(?:connected|integrated|synced|talk to each other|work together)\b/i;
+const SAYS_NOT = /\b(?:not|don't|do not|doesn't|does not|aren't|are not|isn't|is not|never|no)\b/i;
+
+function namesAProblem(id: string, statement: string): boolean {
   // Research writes "<title>: <answer>." and may add a period to one that had it ("Not really.."): strip them all.
   const said = (statement.includes(": ") ? statement.slice(statement.indexOf(": ") + 2) : statement).trim().replace(/[.!\s]+$/, "");
-  return said.length > 0 && !NO_PROBLEM.test(said);
+  if (!said || NO_PROBLEM.test(said) || OPENS_WITH_DENIAL.test(said)) return false;
+  if (id === "f-tech-disconnected" && ALL_CONNECTED.test(said) && !SAYS_NOT.test(said)) return false;
+  return true;
 }
 
 /** A problem the client named, as section 4 frames it (no figure: the finding carries the client's own words). */
@@ -332,7 +340,7 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
   // copy with no figure; the finding itself is the client's words.
   for (const [id, copy] of Object.entries(CLIENT_PROBLEM_COPY)) {
     const f = byId.get(id);
-    if (!f || (f.label !== "client_reported" && f.label !== "verified") || !namesAProblem(f.statement) || inefficiencies.length >= 15) continue;
+    if (!f || (f.label !== "client_reported" && f.label !== "verified") || !namesAProblem(id, f.statement) || inefficiencies.length >= 15) continue;
     inefficiencies.push({ title: copy.title, why_it_matters: { text: f.statement, cites: [f.id] }, consequence: { text: copy.consequence, cites: [f.id] }, finding_ids: [f.id] });
   }
 

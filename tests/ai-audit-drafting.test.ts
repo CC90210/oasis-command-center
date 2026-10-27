@@ -487,12 +487,14 @@ async function main() {
         findings: [
           { id: "f-sales-lost-points", title: "Where customers are lost", statement: "Where customers are lost: none.", label: "client_reported", source_ids: ["s-client-sales-lost-points"] },
           { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: Not really..", label: "client_reported", source_ids: ["s-client-ops-delays"] },
+          { id: "f-ops-manual-workflows", title: "Work done by hand", statement: "Work done by hand: No delays.", label: "client_reported", source_ids: ["s-client-ops-manual-workflows"] },
+          { id: "f-tech-disconnected", title: "Systems that do not talk to each other", statement: "Systems that do not talk to each other: All our systems are connected.", label: "client_reported", source_ids: ["s-client-tech-disconnected"] },
         ],
       } as never,
       estimates: [],
       tools: [],
     }).doc;
-    assert.deepEqual(saidNone.sections.inefficiencies.items, [], "none and not really (with research's extra period) name no problem");
+    assert.deepEqual(saidNone.sections.inefficiencies.items, [], "none, not really (with research's extra period), no delays and all connected name no problem");
     // A short answer is still an answer, and a problem CC verified stays (Codex review of #757).
     const shortAndVerified = draft.draftAuditDoc({
       business: { name: "Fixture Heating", type: "local_service", location: "Collingwood" },
