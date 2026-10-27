@@ -327,9 +327,11 @@ async function main() {
     const { paybackFor } = await import("../lib/ai-audit/payback");
     const est = d.estimates.find((e) => e.id === "est-missed-calls")!;
     assert.deepEqual([est.low, est.high], [1300, 3250]);
+    // CC records what the client's figures are in; this client spoke in Canadian dollars, as the proposal is priced.
+    const dc = { ...d, business: { ...d.business, currency: "CAD" as const } };
     const line = (over: Record<string, unknown> = {}) => ({ line_id: "l1", kind: "catalogue", sku: "checkout-sales-setter-launch", item_id: "cat-a", item_version: 1, name: "AI sales setter", description: "x", category: "implementation", unit: "fixed", quantity: 1, optional: false, unit_price_cents: 150_000, currency: "CAD", deliverables: [], onboarding_requirements: [], ...over });
     const prop = (lines: unknown[], terms: unknown = { kind: "full" }) => ({ ...draft.draftProposal({ opportunities: [], roadmap: d.sections.roadmap, confirmed: [] as never, currency: "CAD", tax: { mode: "not_registered" }, depositBps: null, to: "owner@fixture.test", businessName: "Fixture Plumbing", contactName: "Dana Smith", today: "2026-10-26" }), lines, payment_terms: terms }) as never;
-    const pay = (p: never) => paybackFor(d, p, proposal.proposalTotals(p));
+    const pay = (p: never, base: typeof d = dc) => paybackFor(base, p, proposal.proposalTotals(p));
     const full = pay(prop([line()]));
     assert.ok(full && full.estimate.id === "est-missed-calls" && full.investment === 1500, JSON.stringify(full));
     assert.deepEqual([full!.fast, full!.slow], [1, 2]);
@@ -346,9 +348,22 @@ async function main() {
     // A tier CC changed is still the same setter.
     assert.ok(pay(prop([line({ sku: "checkout-sales-setter-complete" })])));
     // Staff time is not revenue: an opportunity resting on a money estimate that is not revenue claims no payback.
-    const costOnly = { ...d, estimates: d.estimates.map((e) => (e.id === "est-missed-calls" ? { ...e, id: "est-admin-cost" } : e)), sections: { ...d.sections, opportunities: { ...d.sections.opportunities, items: d.sections.opportunities.items.map((o) => ({ ...o, estimate_ids: o.estimate_ids.map((x) => (x === "est-missed-calls" ? "est-admin-cost" : x)) })) } } };
+    const costOnly = { ...dc, estimates: d.estimates.map((e) => (e.id === "est-missed-calls" ? { ...e, id: "est-admin-cost" } : e)), sections: { ...d.sections, opportunities: { ...d.sections.opportunities, items: d.sections.opportunities.items.map((o) => ({ ...o, estimate_ids: o.estimate_ids.map((x) => (x === "est-missed-calls" ? "est-admin-cost" : x)) })) } } };
     const p0 = prop([line()]);
     assert.equal(paybackFor(costOnly as never, p0, proposal.proposalTotals(p0)), null);
+    // Round two: no currency recorded, or another currency than the proposal's, and nothing is claimed.
+    assert.equal(pay(prop([line()]), d), null, "the client's currency is not recorded");
+    assert.equal(pay({ ...(prop([line()]) as object), currency: "USD" } as never), null, "CAD figures against a USD price");
+    // Only a monthly period, and only an estimate section 7 shows.
+    const per = (period: string) => ({ ...dc, estimates: dc.estimates.map((e) => (e.id === "est-missed-calls" ? { ...e, period } : e)) });
+    assert.equal(pay(prop([line()]), per("per 3 months")), null);
+    assert.ok(pay(prop([line()]), per("Monthly")));
+    const hidden = { ...dc, sections: { ...dc.sections, impact: { ...dc.sections.impact, estimate_ids: dc.sections.impact.estimate_ids.filter((x) => x !== "est-missed-calls") } } };
+    assert.equal(pay(prop([line()]), hidden), null, "an estimate CC took off the page is not on the cover either");
+    // The recorded currency survives validation, and anything else is refused.
+    const v = doc.validateAuditDoc(dc);
+    assert.ok(v.ok && v.doc.business.currency === "CAD");
+    assert.equal(doc.validateAuditDoc({ ...d, business: { ...d.business, currency: "EUR" } }).ok, false);
     // A line still waiting for CC's price: no payback yet.
     assert.equal(pay(prop([line(), { ...line({ line_id: "l4" }), kind: "needs_owner_price", suggested_sku: "website-starter" }])), null);
   });

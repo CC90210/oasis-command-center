@@ -29,9 +29,11 @@
  */
 import {
   BUSINESS_TYPES,
+  CURRENCIES,
   EVIDENCE_LABELS,
   isOneOf,
   type BusinessType,
+  type Currency,
   type EvidenceLabel,
 } from "@/lib/ai-audit/rules";
 
@@ -135,7 +137,8 @@ export type DocRoadmapItem = {
 
 export type AuditDoc = {
   schema: typeof AUDIT_DOC_SCHEMA;
-  business: { name: string; type: BusinessType; location?: string; website?: string };
+  /** currency: what the client's own money figures are in, set by CC; payback is claimed only in that currency. */
+  business: { name: string; type: BusinessType; location?: string; website?: string; currency?: Currency };
   prepared_for: { name: string };
   prepared_on: string;
   sections: {
@@ -476,6 +479,7 @@ export function validateAuditDoc(raw: unknown): { ok: true; doc: AuditDoc } | { 
   const site = str(b.website, "business.website", 500, false);
   if (!site.ok) return site;
   if (site.value && !/^https?:\/\/[^\s]+$/i.test(site.value)) return { ok: false, path: "business.website", message: "must be a web address" };
+  if (b.currency !== undefined && !isOneOf(CURRENCIES, b.currency)) return { ok: false, path: "business.currency", message: "must be CAD or USD" };
   const pf = obj(raw.prepared_for) ? raw.prepared_for : {};
   const pfName = str(pf.name, "prepared_for.name", DOC_LIMITS.short, false);
   if (!pfName.ok) return pfName;
@@ -622,6 +626,7 @@ export function validateAuditDoc(raw: unknown): { ok: true; doc: AuditDoc } | { 
         type: b.type,
         ...(loc.value ? { location: loc.value } : {}),
         ...(site.value ? { website: site.value } : {}),
+        ...(b.currency !== undefined ? { currency: b.currency as Currency } : {}),
       },
       prepared_for: { name: pfName.value },
       prepared_on: on.value,

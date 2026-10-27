@@ -968,8 +968,9 @@ ol.aa-list {
 }
 
 /* Cards ----------------------------------------------------------------- */
+/* Two columns where 320px each fit; one column, never wider than the page, on a narrow phone. */
 .aa-grid {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
 }
 
 .aa-finding,

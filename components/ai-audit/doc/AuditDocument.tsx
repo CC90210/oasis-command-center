@@ -254,10 +254,12 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
   const deposit = proposal.payment_terms.kind === "deposit" ? proposal.payment_terms : null;
   // The cover's figures: the largest revenue estimate (else the largest money one, named for what it is), the time
   // estimate, the full price, and payback only where lib/ai-audit/payback.ts can show it.
-  const byHigh = [...doc.estimates].filter((e) => e.unit === "$").sort((a, b) => b.high - a.high);
+  // Only estimates section 7 shows, so every "Estimate N" on the cover has its inputs and assumptions beside it.
+  const shownEstimates = doc.sections.impact.estimate_ids.map((id) => estimates.get(id)).filter((e): e is DocEstimate => !!e);
+  const byHigh = shownEstimates.filter((e) => e.unit === "$").sort((a, b) => b.high - a.high);
   const topMoney = byHigh.find((e) => REVENUE_ESTIMATES.has(e.id)) ?? byHigh[0];
   const topIsRevenue = !!topMoney && REVENUE_ESTIMATES.has(topMoney.id);
-  const topHours = doc.estimates.find((e) => e.unit === "hours");
+  const topHours = shownEstimates.find((e) => e.unit === "hours");
   const priced = !proposal.lines.some((l) => l.kind === "needs_owner_price") && totals.total_cents > 0;
   const payback = paybackFor(doc, proposal, totals);
   const priceNote = [
@@ -493,6 +495,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                 </div>
               </div>
               {o.estimate_ids
+                .filter((id) => doc.sections.impact.estimate_ids.includes(id))
                 .map((id) => estimates.get(id))
                 .filter((e): e is DocEstimate => !!e)
                 .slice(0, 1)
