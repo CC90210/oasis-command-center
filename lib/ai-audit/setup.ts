@@ -165,7 +165,7 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
           key: "audit_email",
           label: "Emails to clients",
           state: "test_mode",
-          detail: "Test mode: approving the final card records a test run and emails nobody. It goes live when LIVE_SEND_AI_AUDIT=1 is set on the server.",
+          detail: "Test mode: approving the final card records a test run and emails nobody. It goes live when LIVE_SEND_AI_AUDIT=1 is set on the server and the BRAVO_FORCE_DRY_RUN kill switch is off.",
         }
       : { key: "audit_email", label: "Emails to clients", state: "ready", detail: "Live: an approved audit is emailed to the client." },
   );
@@ -175,7 +175,7 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
           key: "payments",
           label: "Client payments",
           state: "test_mode",
-          detail: "Test mode: the Pay button opens no checkout, so no client can pay yet. It goes live when LIVE_SEND_STRIPE_CHECKOUT=1 is set on the server. Until then a client who presses Pay is told payment is not open yet, and you get an alert.",
+          detail: "Test mode: the Pay button opens no checkout, so no client can pay yet. It goes live when LIVE_SEND_STRIPE_CHECKOUT=1 is set on the server and the BRAVO_FORCE_DRY_RUN kill switch is off. Until then a client who presses Pay is told payment is not open yet, and you get an alert.",
         }
       : { key: "payments", label: "Client payments", state: "ready", detail: "Live: the Pay button opens Stripe's checkout." },
   );
