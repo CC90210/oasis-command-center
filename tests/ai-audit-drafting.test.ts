@@ -511,6 +511,23 @@ async function main() {
       tools: [],
     }).doc;
     assert.deepEqual(shortAndVerified.sections.inefficiencies.items.map((i) => i.finding_ids[0]), ["f-sales-lost-points", "f-ops-delays"]);
+    // An answer that names something, even in the negative, is a problem (Codex review of #757).
+    const negativeButReal = draft.draftAuditDoc({
+      business: { name: "Fixture Heating", type: "local_service", location: "Collingwood" },
+      contactName: "Dana Test",
+      today: "2026-10-27",
+      pack: {
+        ...(pack as Record<string, unknown>),
+        findings: [
+          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: No follow-up after quotes.", label: "client_reported", source_ids: ["s-client-ops-delays"] },
+          { id: "f-tech-disconnected", title: "Systems that do not talk to each other", statement: "Systems that do not talk to each other: None of our tools talk to each other.", label: "verified", source_ids: ["s-client-tech-disconnected"] },
+          { id: "f-ops-manual-workflows", title: "Work done by hand", statement: "Work done by hand: Our CRM needs to be integrated with QuickBooks.", label: "client_reported", source_ids: ["s-client-ops-manual-workflows"] },
+        ],
+      } as never,
+      estimates: [],
+      tools: [],
+    }).doc;
+    assert.equal(negativeButReal.sections.inefficiencies.items.length, 3);
   });
   await check("review of phase 4: a step never comes before what it depends on", () => {
     const base = { title: "x", what_it_does: "x", problem: "x", how_it_works: "x", integrations: [], expected_improvement: { text: "x", cites: [] }, finding_ids: [], estimate_ids: [], sku: "s", urgency: "" };
