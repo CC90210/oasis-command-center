@@ -285,15 +285,16 @@ export default function PrivacyPage() {
 
       <LegalSection n={7} title="International transfers">
         <p>
-          We are based in Quebec, Canada. Our database and most of our processors
-          are located in the United States, and our application runs on
-          Cloudflare&rsquo;s global network; section 6 lists each
+          We are based in {LEGAL_PRINCIPAL_PLACE}. Our database and most of our
+          processors are located in the United States, and our application runs
+          on Cloudflare&rsquo;s global network; section 6 lists each
           processor&rsquo;s region. Your information is therefore transferred
-          outside Quebec, and in most cases outside Canada.
+          outside your province, and in most cases outside Canada.
         </p>
         <p>
-          Before personal information is communicated outside Quebec, Law 25
-          requires a privacy impact assessment that takes into account the
+          For people in Quebec: before personal information is communicated
+          outside Quebec, Law 25 requires a privacy impact assessment that takes
+          into account the
           sensitivity of the information, the purposes for which it will be used,
           the protection measures (including contractual ones) that would apply
           to it, and the legal framework of the destination, and it permits the

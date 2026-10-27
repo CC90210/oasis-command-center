@@ -1096,6 +1096,11 @@ async function main() {
     assert.ok(taxFailed.includes("[[CC to confirm: GST/QST registration status"), "a failed finance read is a placeholder, not 'not registered'");
     const taxOk = tpl.renderTemplate({ slug: "quebec-tax-calendar" }, ctxOk);
     assert.ok(taxOk.includes("TP-1") && taxOk.includes("TP-80") && taxOk.includes("T2125") && taxOk.includes("Not registered for GST or QST"));
+    // OASIS moved to Ontario (CC, 2026-10-27): the calendar follows the province of residence, the accountant confirms 2026.
+    assert.ok(taxOk.includes("A year CC lived in Ontario on December 31") && taxOk.includes("A year CC lived in Quebec on December 31") && taxOk.includes("[[CC to confirm: the province for 2026"), "the tax calendar follows where CC lives");
+    assert.ok(!taxOk.includes("CC files with Revenu Quebec and the CRA"), "no Quebec-only filing position for an Ontario business");
+    const marketing = tpl.renderTemplate({ slug: "contractor-agreement-marketing" }, ctxOk);
+    assert.ok(marketing.includes("governed by the laws of the Province of Ontario, Canada"), "the marketing draft follows the confirmed governing law");
     const fa = tpl.renderTemplate({ slug: "founders-agreement" }, ctxOk);
     assert.ok(fa.includes("sole proprietor and sole owner") && !fa.includes("Adon") && !fa.includes("ownership split"), "the ownership record stays sole-proprietor only");
   });
@@ -1108,6 +1113,7 @@ async function main() {
     assert.match(pricebook.markdown, /\| Starter \| \$500 \| \$150 \|/);
     const opener = await live.renderLiveSource("contract_opener", db);
     assert.ok(opener.markdown.includes("[Contractor legal name]") && opener.markdown.includes("Governing law"));
+    assert.ok(opener.markdown.includes(`governed by the laws of the ${legal.LEGAL_JURISDICTION}.`), "contractor agreements follow the confirmed governing law");
     const gst = await live.renderLiveSource("gst_qst_status", db);
     assert.ok(gst.markdown.includes("Not registered for GST or QST"));
     assert.equal(gst.sourceDate, "2026-09-24T00:00:00.000Z");

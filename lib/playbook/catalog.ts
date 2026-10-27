@@ -88,7 +88,7 @@ export type CatalogDoc = {
 export const DOC_CATEGORIES: ReadonlyArray<{ key: DocCategory; label: string; blurb: string }> = [
   { key: "legal_privacy", label: "Legal and privacy", blurb: "Published policies, the Law 25 register and assessments, the client data agreement." },
   { key: "corporate", label: "Corporate", blurb: "Ownership, registration, insurance and the record of decisions." },
-  { key: "tax_finance", label: "Tax and finance", blurb: "The Quebec and federal filing calendar, GST/QST, the accountant and capital policy." },
+  { key: "tax_finance", label: "Tax and finance", blurb: "The federal and provincial filing calendar, GST/QST, the accountant and capital policy." },
   { key: "sales_delivery", label: "Sales and delivery", blurb: "Client contracts, the offer, and how a client is sold and delivered." },
   { key: "security", label: "Security", blurb: "How client data is protected and what to do when something goes wrong." },
   { key: "people", label: "People", blurb: "Contractor agreements and how contractors are classified." },
@@ -198,8 +198,8 @@ export const CATALOG: readonly CatalogDoc[] = [
 
   // Tax and finance -------------------------------------------------------------
   {
-    slug: "quebec-tax-calendar", title: "Tax calendar (Quebec and federal)", kind: "plan", category: "tax_finance", visibility: "founders",
-    summary: "Every filing and payment date for the founders and the business: TP-1 with TP-80, T1 with T2125 per partner, instalments, and GST/QST once registered.",
+    slug: "quebec-tax-calendar", title: "Tax calendar (federal and provincial)", kind: "plan", category: "tax_finance", visibility: "founders",
+    summary: "Every filing and payment date for the owner and the business: T1 with T2125, the provincial return for the year CC lived in Ontario or Quebec, instalments, and GST/QST once registered.",
     required: true, requiredBy: "Revenu Quebec and CRA filing obligations", owner: "cfo",
     source: STORED, reviewEveryDays: QUARTER, legal: false, needsFromCc: "Confirm the filing position with the accountant.",
   },

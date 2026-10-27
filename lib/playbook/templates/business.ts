@@ -97,9 +97,9 @@ export const orgChart: DocTemplate = (ctx) =>
 export const quebecTaxCalendar: DocTemplate = (ctx) =>
   doc(
     header(
-      "Tax calendar (Quebec and federal)",
+      "Tax calendar (federal and provincial)",
       ctx,
-      `Every filing and payment date for ${ctx.legal.entity} and its owner. OASIS is in ${ctx.legal.principalPlace}: CC files with Revenu Quebec and the CRA.`,
+      `Every filing and payment date for ${ctx.legal.entity} and its owner. OASIS is in ${ctx.legal.principalPlace}. CC's provincial return for a year follows where he lived on December 31 of that year: ${confirm("the province for 2026 (Ontario after the October 2026 move from Quebec) and whether any 2026 business income is still taxed in Quebec, from the accountant")}.`,
     ),
     section(
       "Filing position",
@@ -108,14 +108,14 @@ export const quebecTaxCalendar: DocTemplate = (ctx) =>
     ),
     section(
       "Owner, every year (self-employed individual)",
-      "- Quebec: TP-1 return with form TP-80 (business or professional income) for OASIS income.",
-      "- Federal: T1 return with form T2125 (statement of business or professional activities) for the same income.",
+      "- Federal: T1 return with form T2125 (statement of business or professional activities) for OASIS income.",
+      "- A year CC lived in Ontario on December 31: Ontario tax is calculated on the same T1 and filed with the CRA only, and Canada Pension Plan contributions on self-employment income are calculated on the T1.",
+      "- A year CC lived in Quebec on December 31: also a TP-1 return with form TP-80 (business or professional income) to Revenu Quebec, and Quebec Pension Plan contributions and QPIP premiums are calculated on the TP-1.",
       "- Filing deadline: June 15. Any balance owing is due April 30.",
-      "- Quebec Pension Plan contributions and QPIP premiums on self-employment income are calculated on the TP-1.",
     ),
     section(
       "Instalments",
-      "- When required, instalments are due March 15, June 15, September 15 and December 15, to both Revenu Quebec and the CRA.",
+      "- When required, instalments are due March 15, June 15, September 15 and December 15, to the CRA, and also to Revenu Quebec for a year CC lived in Quebec.",
       `- Whether CC must pay instalments this year: ${confirm("the accountant's answer, from prior years' tax owing")}`,
     ),
     section(
@@ -169,7 +169,7 @@ export const marketingContractorAgreement: DocTemplate = (ctx) =>
     section("Pay", `- ${confirm("the pay structure: retainer, per campaign, salary or day rate, with the amount and when it is paid")}`),
     section(
       "Common terms",
-      "- The same clauses as the other contractor agreements: independent contractor status, confidentiality and non-solicitation, IP assigned to OASIS on creation, 14 days' notice, governed by Quebec law.",
+      `- The same clauses as the other contractor agreements: independent contractor status, confidentiality and non-solicitation, IP assigned to OASIS on creation, 14 days' notice, governed by the laws of the ${ctx.legal.jurisdiction}.`,
     ),
   );
 

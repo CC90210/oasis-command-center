@@ -38,6 +38,7 @@ import {
   type Bps,
 } from "@/lib/website-sales-comp";
 import { CLAWBACK_WINDOW_DAYS } from "@/lib/turso-rpc-shim";
+import { LEGAL_JURISDICTION } from "@/lib/legal/constants";
 
 /**
  * ⚠ `marketing` IS DELIBERATELY ABSENT, AND THAT IS A GAP, NOT A DESIGN.
@@ -78,7 +79,8 @@ const usd = (cents: number) =>
   `$${(cents / 100).toLocaleString("en-CA", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
 const DEFAULT_COMPANY = "OASIS AI Solutions";
-const DEFAULT_LAW = "the Province of Québec, Canada";
+// The governing law CC confirmed (lib/legal/constants.ts), so new agreements cannot drift from the terms of service.
+const DEFAULT_LAW = `the ${LEGAL_JURISDICTION}`;
 
 /**
  * The clauses EVERY agreement carries, so a term cannot be present in one and

@@ -46,7 +46,7 @@ const SECTIONS: PlaybookSection[] = [
     title: "Business Documentation",
     subtitle: "Legal - corporate - tax - sales - security - people - strategy",
     body:
-      "Every document OASIS AI Solutions keeps, each one open to read, copy and download: the live privacy policy and terms, the contractor agreements, the Law 25 register, the Quebec tax calendar and more. A missing one shows what is needed and can be drafted from verified facts.",
+      "Every document OASIS AI Solutions keeps, each one open to read, copy and download: the live privacy policy and terms, the contractor agreements, the Law 25 register, the tax calendar and more. A missing one shows what is needed and can be drafted from verified facts.",
   },
   {
     href: "/playbook/prompts",
