@@ -486,13 +486,29 @@ async function main() {
         ...(pack as Record<string, unknown>),
         findings: [
           { id: "f-sales-lost-points", title: "Where customers are lost", statement: "Where customers are lost: none.", label: "client_reported", source_ids: ["s-client-sales-lost-points"] },
-          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: Not really.", label: "client_reported", source_ids: ["s-client-ops-delays"] },
+          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: Not really..", label: "client_reported", source_ids: ["s-client-ops-delays"] },
         ],
       } as never,
       estimates: [],
       tools: [],
     }).doc;
-    assert.deepEqual(saidNone.sections.inefficiencies.items, [], "none and not really name no problem");
+    assert.deepEqual(saidNone.sections.inefficiencies.items, [], "none and not really (with research's extra period) name no problem");
+    // A short answer is still an answer, and a problem CC verified stays (Codex review of #757).
+    const shortAndVerified = draft.draftAuditDoc({
+      business: { name: "Fixture Heating", type: "local_service", location: "Collingwood" },
+      contactName: "Dana Test",
+      today: "2026-10-27",
+      pack: {
+        ...(pack as Record<string, unknown>),
+        findings: [
+          { id: "f-sales-lost-points", title: "Where customers are lost", statement: "Where customers are lost: Quotes.", label: "client_reported", source_ids: ["s-client-sales-lost-points"] },
+          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: renewals lapse.", label: "verified", source_ids: ["s-client-ops-delays"] },
+        ],
+      } as never,
+      estimates: [],
+      tools: [],
+    }).doc;
+    assert.deepEqual(shortAndVerified.sections.inefficiencies.items.map((i) => i.finding_ids[0]), ["f-sales-lost-points", "f-ops-delays"]);
   });
   await check("review of phase 4: a step never comes before what it depends on", () => {
     const base = { title: "x", what_it_does: "x", problem: "x", how_it_works: "x", integrations: [], expected_improvement: { text: "x", cites: [] }, finding_ids: [], estimate_ids: [], sku: "s", urgency: "" };
