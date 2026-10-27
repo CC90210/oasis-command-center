@@ -727,10 +727,7 @@ ol.aa-list {
   margin: -56px -64px 0;
   padding: 44px 64px 40px;
   color: #ffffff;
-  background:
-    radial-gradient(120% 90% at 100% 0%, rgba(0, 212, 255, 0.22) 0%, rgba(0, 212, 255, 0) 55%),
-    radial-gradient(80% 70% at 0% 100%, rgba(0, 212, 255, 0.1) 0%, rgba(0, 212, 255, 0) 60%),
-    linear-gradient(160deg, var(--aa-night) 0%, var(--aa-night-2) 100%);
+  background: linear-gradient(160deg, var(--aa-night) 0%, var(--aa-night-2) 100%);
   border-bottom: 3px solid var(--aa-signal);
 }
 
@@ -746,7 +743,7 @@ ol.aa-list {
   height: 48px;
   object-fit: cover;
   border-radius: 6px;
-  box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.35), 0 0 18px rgba(0, 212, 255, 0.25);
+  border: 1px solid rgba(0, 212, 255, 0.35);
 }
 
 .aa-cover .aa-brand {
