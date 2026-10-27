@@ -197,7 +197,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     .split(/\s+/)
     .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
     .join(" ");
-  const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: nodeOptions };
   if (!nodeOptions) delete env.NODE_OPTIONS;
   const run = spawnSync(process.execPath, ["--import", "tsx", "tests/ai-audit-ui.render.ts"], {
     input: JSON.stringify(scenarios),
