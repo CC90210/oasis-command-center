@@ -457,6 +457,27 @@ async function main() {
     assert.match(shelf.why_it_matters.text, /^Tools bought before may not be in use/);
     assert.deepEqual(doc.auditDocIssues(b).filter((i) => i.severity === "block"), []);
   });
+  await check("self-test of 2026-10-27: with no website, section 4 holds the problems the client named, in their words, with no figure added", () => {
+    const noSite = draft.draftAuditDoc({
+      business: { name: "Fixture Heating", type: "local_service", location: "Collingwood" },
+      contactName: "Dana Test",
+      today: "2026-10-27",
+      pack: {
+        ...(pack as Record<string, unknown>),
+        findings: [
+          { id: "f-sales-lost-points", title: "Where customers are lost", statement: "Where customers are lost: calls go to voicemail when the techs are out.", label: "client_reported", source_ids: ["s-client-sales-lost-points"] },
+          { id: "f-ops-delays", title: "Where work waits", statement: "Where work waits: quotes are not followed up after they go out.", label: "client_reported", source_ids: ["s-client-ops-delays"] },
+        ],
+      } as never,
+      estimates: [],
+      tools: [],
+    }).doc;
+    const items = noSite.sections.inefficiencies.items;
+    assert.deepEqual(items.map((i) => i.finding_ids[0]), ["f-sales-lost-points", "f-ops-delays"], "each problem the client named, once, in order");
+    assert.equal(items[0].why_it_matters.text, "Where customers are lost: calls go to voicemail when the techs are out.", "in the client's words");
+    for (const i of items) assert.deepEqual(ex.numbersIn(i.consequence.text), [], "the consequence adds no figure");
+    assert.ok(doc.validateAuditDoc(noSite).ok);
+  });
   await check("review of phase 4: a step never comes before what it depends on", () => {
     const base = { title: "x", what_it_does: "x", problem: "x", how_it_works: "x", integrations: [], expected_improvement: { text: "x", cites: [] }, finding_ids: [], estimate_ids: [], sku: "s", urgency: "" };
     const r = opps.planRoadmap([

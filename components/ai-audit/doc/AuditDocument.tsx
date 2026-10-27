@@ -45,6 +45,13 @@ function money(cents: number, currency: "CAD" | "USD"): string {
   }).format(cents / 100);
 }
 
+/** A figure with its unit as people write it: $450, 50%, 7 calls (the self-test PDF read "450 $" and "50 %"). */
+function withUnit(n: number, unit: string | null | undefined): string {
+  if (unit === "$") return `$${plainNumber(n)}`;
+  if (unit === "%") return `${plainNumber(n)}%`;
+  return unit ? `${plainNumber(n)} ${unit}` : plainNumber(n);
+}
+
 function plainNumber(n: number): string {
   return new Intl.NumberFormat("en-CA", { maximumFractionDigits: 2 }).format(n);
 }
@@ -379,12 +386,9 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                 </h3>
                 <div className="aa-range">
                   <span className="aa-range-value">
-                    {plainNumber(e.low)} to {plainNumber(e.high)}
+                    {withUnit(e.low, e.unit === "$" || e.unit === "%" ? e.unit : null)} to {withUnit(e.high, e.unit === "$" || e.unit === "%" ? e.unit : null)}
                   </span>
-                  <span className="aa-small">
-                    {e.unit}
-                    {e.period ? ` ${e.period}` : ""}
-                  </span>
+                  <span className="aa-small">{[e.unit === "$" || e.unit === "%" ? "" : e.unit, e.period].filter(Boolean).join(" ")}</span>
                 </div>
                 <RangeBar e={e} />
                 <p className="aa-small">How it is worked out: {e.formula}.</p>
@@ -403,8 +407,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                       <tr key={i}>
                         <td>{inp.name}</td>
                         <td className="aa-money">
-                          {plainNumber(inp.value)}
-                          {inp.unit ? ` ${inp.unit}` : ""}
+                          {withUnit(inp.value, inp.unit)}
                         </td>
                         <td>
                           <Label label={inp.label} />

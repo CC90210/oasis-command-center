@@ -61,6 +61,14 @@ export type DraftInputs = {
 const CLIENT_FACING_PROFILE = /^f-(?:business|goals|ops|tech|sales)-|^f-finance-(?:staff|kpis)/;
 
 /** The client's version of each likely problem: a short title, what it costs them, and how it would be checked together. */
+/** A problem the client named, as section 4 frames it (no figure: the finding carries the client's own words). */
+const CLIENT_PROBLEM_COPY: Readonly<Record<string, { title: string; consequence: string }>> = {
+  "f-sales-lost-points": { title: "Where customers are lost", consequence: "That is work going to someone else, and it is usually the easiest revenue to win back." },
+  "f-ops-delays": { title: "Where work waits", consequence: "Waiting slows cash and leaves customers unsure; most of these steps can be carried by a reminder or an automation." },
+  "f-tech-disconnected": { title: "Tools that do not talk to each other", consequence: "The same details are typed again and again, which costs time and lets mistakes in." },
+  "f-ops-manual-workflows": { title: "Work done by hand", consequence: "Steps copied by hand take time every week and are where details get lost." },
+};
+
 const HYPOTHESIS_COPY: Readonly<Record<string, { title: string; statement: string; consequence: string; test: string }>> = {
   "h-no-own-site": {
     title: "New customers find the business only through platforms it does not control",
@@ -310,6 +318,15 @@ export function draftAuditDoc(input: DraftInputs): { doc: AuditDoc; opportunitie
       finding_ids: [h.id],
     };
   });
+
+  // The problems the client named on the call are inefficiencies too, after the website's likely ones. Without them
+  // a business with no website got section 4 as a bare heading (self-test, 2026-10-27). Their consequence is fixed
+  // copy with no figure; the finding itself is the client's words.
+  for (const [id, copy] of Object.entries(CLIENT_PROBLEM_COPY)) {
+    const f = byId.get(id);
+    if (!f || f.label !== "client_reported" || inefficiencies.length >= 15) continue;
+    inefficiencies.push({ title: copy.title, why_it_matters: { text: f.statement, cites: [f.id] }, consequence: { text: copy.consequence, cites: [f.id] }, finding_ids: [f.id] });
+  }
 
   const keyFindings = [...measured, ...fromWeb, ...clientFigures, ...findings.filter((f) => f.label !== "hypothesis" && !measured.includes(f) && !fromWeb.includes(f) && !clientFigures.includes(f))]
     .slice(0, 15)
