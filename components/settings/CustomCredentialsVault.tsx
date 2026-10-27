@@ -2,7 +2,7 @@
 
 /**
  * CustomCredentialsVault - the Custom keys drawer on Settings > Connections:
- * add a key, see each key with the agents it is for, paste several at once.
+ * add a key, see each key with the agents it is assigned to, paste several.
  *
  * A custom key is any KEY=value secret an agent needs for an app with no
  * card: a client's API token, a webhook URL, an internal key. It is stored
@@ -20,11 +20,13 @@
  * its app and agents, each changeable before anything is saved. A saved key
  * still open to all agents shows its app's suggestion, one click to apply.
  *
- * Agents are sent only when chosen, or suggested for a new key
- * (custom-keys.ts agentsToSend): a new value must not widen or narrow a
- * choice the owner made earlier (review of OCC #743). The form is one column
- * so nothing is pushed out of the drawer: the viewport-wide `sm:` grid it had
- * put the Save button off the drawer's edge.
+ * Agents are sent only when chosen; an untouched suggestion goes as a
+ * suggestion, which the route applies only to a key that is new when it
+ * writes (custom-keys.ts agentsToSend; review of OCC #748). Where this
+ * workspace's agents cannot read custom keys at all (the route's
+ * `assignable`), nothing is assigned and the drawer says so. Closing the
+ * drawer clears what was typed, pasted or picked, so no secret waits in a
+ * hidden field (final review of OCC #748).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -43,15 +45,17 @@ import {
 import {
   agentsShown,
   agentsToSend,
+  draftApplies,
   keyNameProblem,
+  looksLikeSecret,
   normalizeVaultKeyName,
   parseDotenvLines,
+  pastedNameProblem,
   recognizeCustomKey,
   unreadablePasteLines,
+  valueCaution,
+  VAULT_MAX_PASTE_ENTRIES,
   VAULT_MAX_VALUE_LENGTH,
-  draftApplies,
-  looksLikeSecret,
-  pastedNameProblem,
   type DraftScope,
   type KeyHint,
 } from "@/lib/os/custom-keys";
@@ -67,6 +71,16 @@ type CustomCredentialRow = {
   agents_unreadable?: boolean;
 };
 
+/** GET /api/credentials/custom, as the drawer and the Connections page's card read it. */
+type KeysList = {
+  ok?: boolean;
+  entries?: CustomCredentialRow[];
+  agents_error?: string;
+  choices?: AgentChoice[];
+  assignable?: boolean;
+  error?: string;
+};
+
 type UpsertResult = {
   key: string;
   ok: boolean;
@@ -77,20 +91,28 @@ const INPUT =
   "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 font-mono text-sm text-fg placeholder:text-fg-dim focus:border-accent focus:outline-none";
 const PRIMARY = "btn-primary";
 const LINK = "text-accent hover:underline";
+// A long name breaks anywhere rather than pushing the drawer sideways on a phone.
+const NAME = "[overflow-wrap:anywhere] font-mono text-fg-muted";
 
 function valueProblem(value: string): string | null {
   return value.length > VAULT_MAX_VALUE_LENGTH ? "Too long: 8 KB at most." : null;
 }
 
+/** A recognised key, with no agents suggested where its value can move money (valueCaution). */
+function hintFor(name: string, value: string): KeyHint | null {
+  const hint = recognizeCustomKey(name, value);
+  return hint && valueCaution(value) ? { ...hint, access: [] } : hint;
+}
+
 export function CustomCredentialsVault({
   onOpenApp,
-  active = true,
+  active,
 }: {
-  /** Opens a recognised app's own card (the Connections page passes it). */
-  onOpenApp?: (slug: string) => void;
-  /** The drawer is open: the keys are read again each time it opens, so the list is never an old one. */
-  active?: boolean;
-} = {}) {
+  /** Opens a recognised app's own card. */
+  onOpenApp: (slug: string) => void;
+  /** The drawer is open: the keys are read each time it opens, and what was typed is cleared when it closes. */
+  active: boolean;
+}) {
   const [rows, setRows] = useState<CustomCredentialRow[]>([]);
   const [loading, setLoading] = useState(true);
   // The saved keys have been read. Until then the page cannot say which names
@@ -102,6 +124,8 @@ export function CustomCredentialsVault({
   const [agentsError, setAgentsError] = useState<string | null>(null);
   // The workspace's agents by name ("Maven (Marketing)"), from the route.
   const [choices, setChoices] = useState<ReadonlyArray<AgentChoice>>(AGENT_CHOICES);
+  // Whether this workspace's agents can read custom keys at all (the route's `assignable`).
+  const [assignable, setAssignable] = useState(true);
 
   // Add a key. The owner's pick, and the name it was made for: a pick made for
   // a saved key never carries to another name (custom-keys.ts draftApplies).
@@ -119,27 +143,22 @@ export function CustomCredentialsVault({
   const [pasteBusy, setPasteBusy] = useState(false);
   const [pasteResults, setPasteResults] = useState<UpsertResult[] | null>(null);
 
-  // Change a saved key's agents, one key at a time.
+  // Change a saved key's agents, one key at a time; or apply its app's suggestion.
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editAgents, setEditAgents] = useState<AgentAccess>("all");
   const [editBusy, setEditBusy] = useState(false);
+  const [applyingKey, setApplyingKey] = useState<string | null>(null);
 
   // Only the latest read may land: an opening and a save can overlap (CodeRabbit, #748).
   const latestRead = useRef(0);
 
-  /** Read the saved keys; the rows, or null when they could not be read (or a newer read took over). */
-  const fetchRows = useCallback(async (): Promise<CustomCredentialRow[] | null> => {
+  /** Read the saved keys; the answer, or null when they could not be read (or a newer read took over). */
+  const fetchRows = useCallback(async (): Promise<KeysList | null> => {
     const mine = ++latestRead.current;
     setLoading(true);
     try {
       const r = await fetch("/api/credentials/custom", { cache: "no-store" });
-      const j = (await r.json().catch(() => ({}))) as {
-        ok?: boolean;
-        entries?: CustomCredentialRow[];
-        agents_error?: string;
-        choices?: AgentChoice[];
-        error?: string;
-      };
+      const j = (await r.json().catch(() => ({}))) as KeysList;
       if (mine !== latestRead.current) return null;
       if (!r.ok || !j.ok) {
         setListError(j.error || `http_${r.status}`);
@@ -147,13 +166,13 @@ export function CustomCredentialsVault({
         setListed(false);
         return null;
       }
-      const entries = j.entries || [];
-      setRows(entries);
+      setRows(j.entries || []);
       setListed(true);
       setListError(null);
       setAgentsError(j.agents_error || null);
+      setAssignable(j.assignable !== false);
       if (Array.isArray(j.choices) && j.choices.length > 0) setChoices(j.choices);
-      return entries;
+      return j;
     } catch (e) {
       if (mine !== latestRead.current) return null;
       setListError(e instanceof Error ? e.message : "fetch_failed");
@@ -167,12 +186,30 @@ export function CustomCredentialsVault({
 
   // Read on every opening: the drawer stays mounted while closed, and another
   // admin, tab or agent may have changed the keys since (review of OCC #748).
+  // On closing, nothing typed, pasted or picked waits in the hidden drawer.
   useEffect(() => {
-    if (active) void fetchRows();
+    if (active) {
+      void fetchRows();
+      return;
+    }
+    setName("");
+    setValue("");
+    setDraft("all");
+    setDraftScope(null);
+    setPasteOpen(false);
+    setPasteText("");
+    setPasteAgents({});
+    setPasteEditing(null);
+    setPasteResults(null);
+    setEditingKey(null);
+    setErr(null);
+    setMsg(null);
   }, [active, fetchRows]);
 
-  // The Connections page's cards read their agents again (ConnectionsHub).
-  const announce = () => window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT));
+  // The Custom keys card reads its line from this answer, not from another request
+  // (ConnectionsHub useConnectionsRead); the app cards are not about keys.
+  const announce = (list: KeysList | null) =>
+    window.dispatchEvent(new CustomEvent(AGENT_ACCESS_CHANGED_EVENT, { detail: { scope: "custom", ...(list ? { body: list } : {}) } }));
   const byKey = useMemo(() => new Map(rows.map((r) => [r.key, r])), [rows]);
   const sentence = (access: AgentAccess) => agentNamesSentence(access, choices);
 
@@ -181,9 +218,10 @@ export function CustomCredentialsVault({
   const nameProblem = keyNameProblem(name);
   const existing = keyName ? byKey.get(keyName) : undefined;
   const touched = draftApplies(draftScope, keyName, !!existing);
-  const hint = recognizeCustomKey(name, value);
+  const caution = valueCaution(value);
+  const hint = hintFor(name, value);
   const shown = touched ? draft : agentsShown({ saved: !!existing, existing: existing?.agents ?? null, hint });
-  const toSend = agentsToSend({ touched, draft, hint });
+  const toSend = assignable ? agentsToSend({ touched, draft, hint }) : {};
   const tooLong = valueProblem(value);
   // Why nothing can be saved yet, or null. Agents that cannot be read would make
   // every line about them a guess (review of OCC #748).
@@ -213,14 +251,16 @@ export function CustomCredentialsVault({
       // A secret pasted without a name is never shown as one.
       const secret = looksLikeSecret(l.key) || /^=+$/.test(l.value.trim());
       const row = byKey.get(key);
-      const lineHint = problem ? null : recognizeCustomKey(l.key, l.value);
+      const lineHint = problem ? null : hintFor(l.key, l.value);
       const chosen = pasteAgents[key];
       const agents = chosen ?? agentsShown({ saved: !!row, existing: row?.agents ?? null, hint: lineHint });
-      const send = agentsToSend({ touched: chosen !== undefined, draft: chosen ?? "all", hint: lineHint });
-      return [{ id: `${i}`, key: secret ? "(a secret without a name)" : key, sendKey: l.key.trim(), value: l.value, problem, exists: !!row, hint: lineHint, agents, send }];
+      const send = assignable ? agentsToSend({ touched: chosen !== undefined, draft: chosen ?? "all", hint: lineHint }) : {};
+      const lineCaution = problem ? null : valueCaution(l.value);
+      return [{ id: `${i}`, key: secret ? "(a secret without a name)" : key, sendKey: l.key.trim(), value: l.value, problem, exists: !!row, hint: lineHint, agents, send, caution: lineCaution }];
     });
-  }, [pasteText, pasteAgents, byKey]);
+  }, [pasteText, pasteAgents, byKey, assignable]);
   const pasteReady = pasted.filter((p) => !p.problem);
+  const pasteTooMany = pasteReady.length > VAULT_MAX_PASTE_ENTRIES;
   const pasteSkipped = unreadablePasteLines(pasteText);
   const pasteRepeats = parseDotenvLines(pasteText).length - pasted.length;
 
@@ -247,15 +287,16 @@ export function CustomCredentialsVault({
       setDraft("all");
       setDraftScope(null);
       // Say who uses it as the server now holds it: the route decides whether a suggestion applied.
-      const row = (await fetchRows())?.find((x) => x.key === saved);
+      const list = await fetchRows();
+      const row = list?.entries?.find((x) => x.key === saved);
       setMsg(
-        !row
+        !row || list?.assignable === false
           ? `Saved ${saved}.`
           : row.agents === null
             ? `Saved ${saved}. Its agents could not be read, so no agent may use it until they are saved again.`
             : `Saved ${saved} for ${sentence(row.agents)}.`,
       );
-      announce();
+      announce(list);
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "save_failed");
     } finally {
@@ -265,7 +306,7 @@ export function CustomCredentialsVault({
 
   async function onPaste(e: React.FormEvent) {
     e.preventDefault();
-    if (pasteReady.length === 0) return;
+    if (pasteReady.length === 0 || pasteTooMany) return;
     setPasteBusy(true);
     setErr(null);
     setMsg(null);
@@ -286,18 +327,26 @@ export function CustomCredentialsVault({
       setPasteResults(j.results || []);
       const saved = j.saved || 0;
       const failed = j.failed || 0;
-      if (failed === 0 && saved > 0) {
-        setMsg(`Saved ${saved} key${saved === 1 ? "" : "s"}.`);
-        setPasteText("");
-        setPasteAgents({});
-        setPasteEditing(null);
+      // The lines that were saved leave the box; the ones that were not stay, to be fixed.
+      const savedKeys = new Set((j.results || []).filter((x) => x.ok).map((x) => x.key.toUpperCase()));
+      const left = pasteText
+        .split(/\r?\n/)
+        .filter((line) => {
+          const parsed = parseDotenvLines(line)[0];
+          return line.trim() && !(parsed && savedKeys.has(parsed.key.trim().toUpperCase()));
+        })
+        .join("\n");
+      setPasteText(left);
+      setPasteAgents({});
+      setPasteEditing(null);
+      if (saved > 0 && failed === 0) {
+        setMsg(`Saved ${saved} key${saved === 1 ? "" : "s"}.${left ? " The lines left in the box were not saved." : ""}`);
       } else if (saved > 0) {
         setMsg(`Saved ${saved}; ${failed} not saved (below).`);
       } else {
         setErr("Nothing saved (below).");
       }
-      await fetchRows();
-      announce();
+      announce(await fetchRows());
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "save_failed");
     } finally {
@@ -321,8 +370,7 @@ export function CustomCredentialsVault({
         return;
       }
       setMsg(j.warning ? `Removed ${key}. ${j.warning}` : `Removed ${key}.`);
-      await fetchRows();
-      announce();
+      announce(await fetchRows());
     } catch (e) {
       setErr(e instanceof Error ? e.message : "delete_failed");
     }
@@ -349,8 +397,7 @@ export function CustomCredentialsVault({
       return false;
     }
     setMsg(`${key} is now for ${sentence(agents)}.`);
-    await fetchRows();
-    announce();
+    announce(await fetchRows());
     return true;
   }
 
@@ -368,20 +415,32 @@ export function CustomCredentialsVault({
   }
 
   async function applySuggestion(key: string, suggestion: KeyHint) {
+    setApplyingKey(key);
     setErr(null);
     setMsg(null);
     try {
       await saveAgents(key, suggestion.access);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "save_failed");
+    } finally {
+      setApplyingKey(null);
     }
   }
 
   return (
     <div className="space-y-5">
+      {!assignable && (
+        <p className="rounded-md border border-bg-border bg-bg-elev/40 px-3 py-2 text-[12px] leading-5 text-fg-muted" data-testid="custom-keys-not-assignable">
+          This workspace&apos;s agents can&apos;t read custom keys yet, so a key here is not assigned to any agent. It is kept
+          encrypted, and no one sees its value again.
+        </p>
+      )}
       {agentsError && (
-        <div className="rounded-md border border-status-hot/30 bg-status-hot/10 px-3 py-2 text-xs text-status-hot">
-          {agentsError} Agents are refused these keys until it can be read.
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-status-hot/30 bg-status-hot/10 px-3 py-2 text-xs text-status-hot" role="alert">
+          <span>{agentsError} Agents are refused these keys until it can be read.</span>
+          <button type="button" onClick={() => void fetchRows()} className={LINK}>
+            Try again
+          </button>
         </div>
       )}
 
@@ -411,24 +470,35 @@ export function CustomCredentialsVault({
             {nameProblem ? (
               <span className="text-status-hot">{nameProblem}</span>
             ) : existing ? (
-              touched ? (
+              !assignable ? (
+                "Already saved: a new value replaces it."
+              ) : touched ? (
                 "Already saved: a new value replaces it, for the agents you picked below."
               ) : existing.agents === null ? (
                 "Already saved, and its agents could not be read: no agent may use it. Pick them below to fix it."
               ) : (
-                <>
-                  Already saved: a new value replaces it, and it stays with {sentence(existing.agents)} unless you change them below.
-                </>
+                <>Already saved: a new value replaces it, and it stays with {sentence(existing.agents)} unless you change them below.</>
               )
             ) : hint?.from === "name" ? (
               <>
-                <span className="font-medium text-fg">{hint.app}</span> key, suggested for {sentence(hint.access)}.
-                {keyName !== name.trim().toUpperCase() && <> Saved as <span className="font-mono text-fg-muted">{keyName}</span>.</>}
+                <span className="font-medium text-fg">{hint.app}</span> key{assignable ? <>, suggested for {sentence(hint.access)}</> : null}.
+                {keyName !== name.trim().toUpperCase() && (
+                  <>
+                    {" "}
+                    Saved as <span className={NAME}>{keyName}</span>.
+                  </>
+                )}
               </>
             ) : keyName ? (
               <>
-                {keyName !== name.trim().toUpperCase() && <>Saved as <span className="font-mono text-fg-muted">{keyName}</span>. </>}
-                No app recognised from the name, so it is for all agents unless you pick.
+                {keyName !== name.trim().toUpperCase() && (
+                  <>
+                    Saved as <span className={NAME}>{keyName}</span>.{" "}
+                  </>
+                )}
+                {hint?.from === "value" || !assignable
+                  ? "No app recognised from the name."
+                  : "No app recognised from the name, so it is for all agents unless you pick."}
               </>
             ) : (
               "The name an app's docs give it, like ZAPIER_WEBHOOK_URL. The agents it is for are picked from the name."
@@ -455,7 +525,8 @@ export function CustomCredentialsVault({
           ) : (
             hint?.from === "value" && (
               <p className="text-[12px] leading-5 text-fg-dim" data-testid="custom-key-value-note">
-                This looks like a key for <span className="font-medium text-fg">{hint.app}</span>, suggested for {sentence(hint.access)}.
+                This looks like a key for <span className="font-medium text-fg">{hint.app}</span>
+                {assignable ? <>, suggested for {sentence(hint.access)}</> : null}.
                 {!keyName && hint.usualName && (
                   <>
                     {" "}
@@ -467,43 +538,34 @@ export function CustomCredentialsVault({
               </p>
             )
           )}
+          {caution && (
+            <p className="text-[12px] leading-5 text-status-warm" data-testid="custom-key-caution">
+              {caution}
+            </p>
+          )}
         </div>
 
-        <div className="space-y-1.5">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <span className="text-[12px] text-fg-muted">Agents that may use it</span>
-            {hint && !sameAgentAccess(shown, hint.access) && (
-              <button
-                type="button"
-                onClick={() => pick(hint.access)}
-                className={`text-[12px] ${LINK}`}
-              >
-                Use the {hint.app} suggestion
-              </button>
-            )}
+        {assignable && (
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <span className="text-[12px] text-fg-muted">Agents that may use it</span>
+              {hint && !sameAgentAccess(shown, hint.access) && (
+                <button type="button" onClick={() => pick(hint.access)} className={`text-[12px] ${LINK}`}>
+                  Use the {hint.app} suggestion
+                </button>
+              )}
+            </div>
+            <AgentPicker value={shown} onChange={pick} disabled={busy} label="Agents that may use the new key" choices={choices} />
           </div>
-          <AgentPicker
-            value={shown}
-            onChange={pick}
-            disabled={busy}
-            label="Agents that may use the new key"
-            choices={choices}
-          />
-        </div>
+        )}
 
         {hint?.card && (
           <p className="rounded-md border border-bg-border bg-bg-elev/40 px-2.5 py-2 text-[12px] leading-5 text-fg-muted">
-            {hint.app} has its own card, with a connection test and the agents&apos; built-in tools for it.{" "}
-            {onOpenApp ? (
-              <button type="button" onClick={() => onOpenApp(hint.card ?? "")} className={LINK}>
-                Open {hint.app}
-              </button>
-            ) : (
-              <a href={`/settings/connections?app=${encodeURIComponent(hint.card)}`} className={LINK}>
-                Open {hint.app}
-              </a>
-            )}
-            . A key saved here is used only when an agent calls {hint.app} itself.
+            {hint.app} has its own card on this page.{" "}
+            <button type="button" onClick={() => onOpenApp(hint.card ?? "")} className={LINK}>
+              Open {hint.app}
+            </button>
+            . A key saved here is only for an agent&apos;s own requests to {hint.app}.
           </p>
         )}
 
@@ -513,7 +575,8 @@ export function CustomCredentialsVault({
               blockedBy
             ) : keyName && !nameProblem ? (
               <>
-                Saves <span className="font-mono text-fg-muted">{keyName}</span> for {sentence(shown)}.
+                Saves <span className={NAME}>{keyName}</span>
+                {assignable ? <> for {sentence(shown)}</> : null}.
               </>
             ) : (
               "Stored encrypted. Never shown again, never in the chat."
@@ -528,13 +591,13 @@ export function CustomCredentialsVault({
       {err && (
         <div className="flex items-start gap-2 rounded-md border border-status-hot/30 bg-status-hot/10 px-3 py-2 text-sm text-status-hot">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="font-mono text-xs">{err}</span>
+          <span className="break-all font-mono text-xs">{err}</span>
         </div>
       )}
       {msg && (
         <div className="flex items-start gap-2 rounded-md border border-status-engaged/30 bg-status-engaged/10 px-3 py-2 text-sm text-status-engaged" role="status">
           <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{msg}</span>
+          <span className="min-w-0 [overflow-wrap:anywhere]">{msg}</span>
         </div>
       )}
 
@@ -565,7 +628,7 @@ export function CustomCredentialsVault({
           <ul className="divide-y divide-bg-border">
             {rows.map((row) => {
               const rowHint = recognizeCustomKey(row.key);
-              const nudge = !row.agents_saved && row.agents === "all" && rowHint && rowHint.access !== "all" ? rowHint : null;
+              const nudge = assignable && !row.agents_saved && row.agents === "all" && rowHint && rowHint.access !== "all" ? rowHint : null;
               return (
                 <li key={row.key} className="space-y-2 px-3 py-2.5">
                   <div className="flex items-start justify-between gap-3">
@@ -576,15 +639,17 @@ export function CustomCredentialsVault({
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => (editingKey === row.key ? setEditingKey(null) : startEditingAgents(row))}
-                        disabled={row.agents === null && !row.agents_unreadable}
-                        className="rounded-md border border-bg-border px-2 py-1 text-[11px] text-fg-muted hover:text-fg disabled:opacity-50"
-                        aria-expanded={editingKey === row.key}
-                      >
-                        Agents
-                      </button>
+                      {assignable && (
+                        <button
+                          type="button"
+                          onClick={() => (editingKey === row.key ? setEditingKey(null) : startEditingAgents(row))}
+                          disabled={row.agents === null && !row.agents_unreadable}
+                          className="rounded-md border border-bg-border px-2 py-1 text-[11px] text-fg-muted hover:text-fg disabled:opacity-50"
+                          aria-expanded={editingKey === row.key}
+                        >
+                          Agents
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => void onDelete(row.key)}
@@ -596,21 +661,28 @@ export function CustomCredentialsVault({
                       </button>
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-1.5" data-testid={`custom-key-agents-${row.key}`}>
-                    <span className="text-[11px] text-fg-dim">Used by</span>
-                    {row.agents_unreadable ? (
-                      <span className="text-[11px] text-status-hot">no agent: its saved choice could not be read. Pick agents and save to fix it.</span>
-                    ) : row.agents === null ? (
-                      <span className="text-[11px] text-fg-dim">couldn&apos;t read</span>
-                    ) : (
-                      <AgentChips access={row.agents} choices={choices} />
-                    )}
-                  </div>
+                  {assignable && (
+                    <div className="flex flex-wrap items-center gap-1.5" data-testid={`custom-key-agents-${row.key}`}>
+                      <span className="text-[11px] text-fg-dim">Assigned to</span>
+                      {row.agents_unreadable ? (
+                        <span className="text-[11px] text-status-hot">no agent: its saved choice could not be read. Pick agents and save to fix it.</span>
+                      ) : row.agents === null ? (
+                        <span className="text-[11px] text-fg-dim">couldn&apos;t read</span>
+                      ) : (
+                        <AgentChips access={row.agents} choices={choices} />
+                      )}
+                    </div>
+                  )}
                   {nudge && editingKey !== row.key && (
                     <p className="text-[11.5px] leading-5 text-fg-muted" data-testid={`custom-key-suggestion-${row.key}`}>
                       Suggested for {nudge.app}: {sentence(nudge.access)}.{" "}
-                      <button type="button" onClick={() => void applySuggestion(row.key, nudge)} className={LINK}>
-                        Apply
+                      <button
+                        type="button"
+                        onClick={() => void applySuggestion(row.key, nudge)}
+                        disabled={applyingKey !== null}
+                        className={`${LINK} disabled:opacity-50`}
+                      >
+                        {applyingKey === row.key ? "Applying…" : "Apply"}
                       </button>
                     </p>
                   )}
@@ -674,6 +746,11 @@ export function CustomCredentialsVault({
                         <div className="text-[11px] leading-4 text-fg-dim">
                           {p.problem ? (
                             <span className="text-status-hot">{p.problem} Not saved.</span>
+                          ) : !assignable ? (
+                            <>
+                              {p.hint ? `${p.hint.app} · ` : ""}
+                              {p.exists ? "replaces its value" : "new"}
+                            </>
                           ) : (
                             <>
                               {p.hint ? `${p.hint.app} · ` : ""}
@@ -685,8 +762,9 @@ export function CustomCredentialsVault({
                             </>
                           )}
                         </div>
+                        {p.caution && <div className="text-[11px] leading-4 text-status-warm">{p.caution}</div>}
                       </div>
-                      {!p.problem && (
+                      {!p.problem && assignable && (
                         <button
                           type="button"
                           onClick={() => setPasteEditing(pasteEditing === p.key ? null : p.key)}
@@ -716,8 +794,13 @@ export function CustomCredentialsVault({
                 {pasteRepeats > 0 && `${pasteRepeats} repeated key${pasteRepeats === 1 ? "" : "s"}: the last value is kept.`}
               </p>
             )}
+            {pasteTooMany && (
+              <p className="text-[11px] text-status-hot">
+                {VAULT_MAX_PASTE_ENTRIES} keys at most in one paste; this one has {pasteReady.length}.
+              </p>
+            )}
             {blockedBy && <p className="text-[11px] text-fg-dim">{blockedBy}</p>}
-            <button type="submit" disabled={!!blockedBy || pasteBusy || pasteReady.length === 0} className={PRIMARY}>
+            <button type="submit" disabled={!!blockedBy || pasteBusy || pasteReady.length === 0 || pasteTooMany} className={PRIMARY}>
               {pasteBusy ? "Saving…" : pasteReady.length > 1 ? `Save ${pasteReady.length} keys` : "Save key"}
             </button>
             {pasteResults && pasteResults.length > 0 && (

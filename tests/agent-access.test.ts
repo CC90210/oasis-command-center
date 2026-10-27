@@ -392,9 +392,9 @@ async function main() {
     assert.equal(logged.length, 1);
     // The cards and every saved custom key show them.
     const hub = read("components/os/connections/ConnectionsHub.tsx");
-    assert.match(hub, /`Used by \$\{agentNamesSentence\(c\.access, j\.choices\)\}`/);
+    assert.match(hub, /`Assigned to \$\{agentNamesSentence\(c\.access, j\.choices\)\}`/);
     assert.match(hub, /agents=\{agentLines\?\.\[def\.slug\]\}/);
-    assert.match(hub, /\{customLine \?\? "Each key names the agents that may use it"\}/);
+    assert.match(hub, /\{customLine \?\? "Keys for apps with no card"\}/);
     assert.match(read("components/settings/CustomCredentialsVault.tsx"), /<AgentChips access=\{row\.agents\} choices=\{choices\} \/>/);
   });
 
@@ -480,7 +480,7 @@ async function main() {
     const r = await (await customRoute.POST(json({ dotenv: `${bare}==\nGOOD_KEY=v` }))).json();
     assert.deepEqual(r.results.map((x: { key: string; ok: boolean }) => [x.key, x.ok]), [["(a secret without a name)", false], ["GOOD_KEY", true]]);
     assert.ok(!JSON.stringify(r).toLowerCase().includes(bare.slice(0, 8).toLowerCase()), "no part of it in the answer");
-    const one = await (await customRoute.POST(json({ key: ["sk-", "ant-", "api03-", "abcdef"].join(""), value: "v" }))).json();
+    const one = await (await customRoute.POST(json({ key: ["sk-", "ant-", "api03-", "Ab3dE5gH7jK9mN2pQ4sT6vW8"].join(""), value: "v" }))).json();
     assert.equal(one.results[0].error, "key_looks_like_a_secret");
     // An agent's add_credential refuses one too, and its audit line does not carry it.
     const seen: string[] = [];
@@ -506,6 +506,46 @@ async function main() {
     const keys = (await db.execute({ sql: "SELECT field_key FROM tenant_integration_credentials WHERE service = 'custom'", args: [] })).rows.map((x) => String(x.field_key));
     assert.ok(!keys.some((k) => k.startsWith("zm9v") || k.startsWith("sk")), "neither was stored as a name");
     await customRoute.DELETE(json({ key: "GOOD_KEY" }, "DELETE"));
+  });
+
+  await check("get_credential refuses a secret given as the name, and neither logs nor echoes it", async () => {
+    const token = ["Zm9vYmFy", "YmF6cXV4", "MTIzNDU2Nzg5"].join("");
+    const seen: string[] = [];
+    const real = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+    console.log = console.info = console.warn = console.error = (...a: unknown[]) => void seen.push(a.map(String).join(" "));
+    let got: { content: string; summary?: string } = { content: "" };
+    try {
+      got = (await runner.executeTool("get_credential", { name: token }, ctx("bravo"))) as typeof got;
+    } finally {
+      Object.assign(console, real);
+    }
+    assert.match(got.content, /credential_name_looks_like_a_secret/);
+    assert.ok(!(JSON.stringify(got) + seen.join("\n")).toLowerCase().includes(token.slice(0, 8).toLowerCase()), "not in the answer, the chip or the audit");
+    // An ordinary name that starts like a key is still a name (final review of #748).
+    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "hf_token" }, ctx("bravo"))).content).found, false);
+  });
+
+  await check("a workspace whose agents cannot use custom keys or app tools is told so, not shown agents", async () => {
+    session = OWNER;
+    const ours = await (await customRoute.GET()).json();
+    const oursApps = await (await agentsRoute.GET()).json();
+    assert.deepEqual([ours.assignable, oursApps.assignable], [true, true], "OASIS's agents use them");
+    session = { ...OWNER, tenantId: "client-tenant-for-agent-access-test" };
+    try {
+      const theirs = await (await customRoute.GET()).json();
+      const theirApps = await (await agentsRoute.GET()).json();
+      assert.deepEqual([theirs.assignable, theirApps.assignable], [false, false], "a client's agents run only client-safe tools, and these are not");
+    } finally {
+      session = OWNER;
+    }
+    const { assignmentsApply } = store;
+    const { isClientSafeTool } = await import("../lib/ai/tools/client-safe-registry");
+    assert.equal(assignmentsApply("client-x", "custom"), isClientSafeTool("get_credential"), "follows the registry, not a hard-coded no");
+    const vault = read("components/settings/CustomCredentialsVault.tsx");
+    assert.match(vault, /const toSend = assignable \? agentsToSend\(\{ touched, draft, hint \}\) : \{\};/);
+    assert.match(vault, /\{assignable && \(\s*<div className="space-y-1\.5">\s*<div className="flex flex-wrap items-baseline/, "no picker where nothing can be assigned");
+    assert.match(read("components/os/connections/ConnectorAgentAccess.tsx"), /if \(!assignable\) \{/);
+    assert.match(read("components/os/connections/ConnectionsHub.tsx"), /if \(j\.assignable === false\) return \{\};/);
   });
 
   await check("APP_TOOLS is whole: every credential read in the runner belongs to a mapped tool", () => {
@@ -547,7 +587,7 @@ async function main() {
     assert.match(vault, /body: JSON\.stringify\(\{ key: keyName, value, \.\.\.toSend \}\)/);
     assert.match(vault, /\(\{ key: p\.sendKey, value: p\.value, \.\.\.p\.send \}\)/);
     const drawer = read("components/os/connections/ConnectorDrawer.tsx");
-    assert.match(drawer, /Used by<\/h3>\s*<ConnectorAgentAccess key=\{def\.slug\} slug=\{def\.slug\} departments=\{def\.departments\} \/>/);
+    assert.match(drawer, /Assigned to<\/h3>\s*<ConnectorAgentAccess key=\{def\.slug\} slug=\{def\.slug\} departments=\{def\.departments\} \/>/);
     const access = read("components/os/connections/ConnectorAgentAccess.tsx");
     assert.match(access, /No agent tool uses this app yet; your choice applies to any that does\./);
   });
