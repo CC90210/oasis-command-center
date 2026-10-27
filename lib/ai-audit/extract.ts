@@ -94,7 +94,7 @@ const SYSTEM = [
   "1. Extract only what the client said. A question, a guess or a suggestion from the interviewer is not a fact.",
   "2. For every fact give the line numbers it comes from (from, to) and a quote: ONE unbroken run of the client's words, copied character for character from those lines (at most 25 words). Never skip, join or shorten sentences inside a quote. If a fact needs two sentences, quote the one that states it.",
   "3. Write a text value, and every list item, in the client's own words, as close to the quote as you can. Use only the field keys listed, exactly as written, and for rows the column names exactly as listed, spaces included.",
-  "4. A number is a fact only if the client said that number. Turn number words into digits (forty is 40, half is 50 for a share). One number said with about, around, roughly, maybe or I'd guess is still the client's number: give it, and the quote keeps their word. If the client gave a range (6,000 to 9,000) or different numbers for the same thing, do not give a value: leave the fact out and put the question in open_questions. Never change a figure's period or unit.",
+  "4. A number is a fact only if the client said that number. Turn number words into digits (forty is 40, half is 50 for a share). One number said with about, around or roughly is still the client's number: give it, and the quote keeps their word. If the client was unsure (maybe, I'd guess, probably), gave a range (6,000 to 9,000), or gave different numbers for the same thing or by season, do not give a value: leave the fact out and put the question in open_questions. Never change a figure's period or unit.",
   "5. Never infer, estimate, average or calculate. Never fill a field the call does not answer.",
   "6. Never copy a password, a login, a card number or any other credential, even if one appears.",
   "7. Answer with JSON only, in exactly this shape:",
@@ -985,7 +985,16 @@ const NOT_USING =
 const NOT_USING_AFTER = /^\s*(?:(?:was|were|got|has been|have been|is|are)\s+)?(?:cancelled|canceled|dropped|discontinued|replaced|retired|gone|turned off|shut off|switched off)\b/;
 const NEGATION_RESET = new Set(["to", "and", "but", "now", "then", "so", "also", "with", "about", "of"]);
 /** An item is negated when any of its words is mentioned by the client only where they say they do not, or no longer. */
-function negatedIn(item: string, ctx: readonly LineCtx[]): boolean {
+/** A denial or a plan, which a past attempt must not be said with ("never tried", "want to try"). */
+const DENIAL_OR_PLAN =
+  /\b(?:don't|do not|doesn't|does not|didn't|did not|haven't|have not|hasn't|has not|never|not|might try|want to try|wanted to try|going to try|plan to|planning to|hope to|hoping to|want to|wants to|would like to|thinking about|thinking of|considering|considered|looking at|looked at|looking into|looked into|instead of|rather than|without)\b/;
+
+/**
+ * Is every mention of the item's words said as not used? `history` is for what the client tried before: an
+ * attempt that stopped ("tried an answering service", "cancelled it") is the fact, so only a denial or a plan
+ * counts ("never tried", "want to try"), never a word that dates it (Codex review of #756).
+ */
+function negatedIn(item: string, ctx: readonly LineCtx[], opts: { history?: boolean } = {}): boolean {
   for (const word of contentWords(item)) {
     const want = stemOf(word);
     let seen = 0;
@@ -997,8 +1006,9 @@ function negatedIn(item: string, ctx: readonly LineCtx[]): boolean {
         seen += 1;
         const clause = clauseAt(c.read, w.start);
         const m = NOT_USING.exec(c.read.s.slice(clause.start, w.start));
-        const before = !!m && !m[1].trim().split(/\s+/).some((x) => NEGATION_RESET.has(x));
-        if (before || NOT_USING_AFTER.test(c.read.s.slice(w.end, clause.end))) negated += 1;
+        const before = !!m && !m[1].trim().split(/\s+/).some((x) => NEGATION_RESET.has(x)) && (!opts.history || DENIAL_OR_PLAN.test(m[0]));
+        const after = !opts.history && NOT_USING_AFTER.test(c.read.s.slice(w.end, clause.end));
+        if (before || after) negated += 1;
       }
     }
     if (seen > 0 && negated === seen) return true;
@@ -1286,8 +1296,9 @@ function checkOne(f: ExtractedFact, key: string, lines: readonly TranscriptLine[
     if (typeof f.value === "string") {
       for (const m of baseText(f.value).matchAll(MAGNITUDE)) if (!stems.has(stemOf(m[0]))) return { ok: false, reason: "its words are not what the call said" };
       if (support(f.value, stems) < 0.6) return { ok: false, reason: "its words are not what the call said" };
-      // What they tried before is, by its nature, something they no longer do: "tried an answering service" is the fact.
-      if (key !== "decision.past_attempts" && !NEGATION.test(baseText(f.value)) && negatedIn(f.value, ctx)) return { ok: false, reason: "the call says they do not, or no longer" };
+      // What they tried before is, by its nature, something they no longer do: "tried an answering service" is the fact,
+      // while "never tried" or "want to try" still refuses it.
+      if (!NEGATION.test(baseText(f.value)) && negatedIn(f.value, ctx, { history: key === "decision.past_attempts" })) return { ok: false, reason: "the call says they do not, or no longer" };
     }
   }
   const v = validateProfileField({ field_key: key, value, label: "client_reported", source_type: "transcript" });
