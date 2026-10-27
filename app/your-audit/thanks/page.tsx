@@ -34,7 +34,7 @@ export default async function ThanksPage({ searchParams }: Props) {
             <>
               <h1 style={{ fontSize: 26 }}>Thank you</h1>
               <p style={{ marginTop: 14 }}>
-                Stripe is confirming your payment. As soon as it does, we will email you the next steps, including a short onboarding form and a time for our kickoff call.
+                Stripe is confirming your payment. Once it has, we will be in touch with the next steps: a short onboarding form and a time for our kickoff call.
               </p>
               <p>If anything looks wrong, reply to our email and we will sort it out.</p>
             </>

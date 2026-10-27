@@ -574,7 +574,7 @@ export function AuditDocument({ doc, proposal, totals, mode, payAction, payUnava
                   Pay {money(totals.due_now_cents, cur)} securely with Stripe
                 </button>
                 <p className="aa-small" style={{ marginTop: 12, marginBottom: 0 }}>
-                  You will go to Stripe&apos;s checkout. We count a payment only when Stripe confirms it, and we email you when it does.
+                  You will go to Stripe&apos;s checkout. We count a payment only once Stripe confirms it, then we follow up with the next steps.
                 </p>
               </form>
             ) : null}

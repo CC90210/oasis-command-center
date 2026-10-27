@@ -32,6 +32,9 @@ import { getProposalVersion } from "@/lib/ai-audit/versions";
 import { shortName } from "@/lib/ai-audit/rules";
 import { getEngagement, int, patchEngagement, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
 
+/** The welcome email's approval key, by engagement: one card per engagement, found again by the engagement page. */
+export const WELCOME_APPROVAL_KEY_PREFIX = "ai-audit-welcome:";
+
 export const STANDARD_CHECKLIST: ReadonlyArray<{ key: string; title: string; notes: string }> = [
   { key: "kickoff", title: "Hold the kickoff call", notes: "Confirm scope, owners and timeline against the approved proposal." },
   { key: "intake", title: "Receive the onboarding intake form", notes: "The client fills it in at the link in the welcome email." },
@@ -184,7 +187,7 @@ export async function runOnboarding(
   }
   done.push("checklist");
 
-  // 5. The welcome email, for CC to approve with one tap.
+  // 5. The welcome email, for CC to approve with one tap (the engagement page finds it by this key).
   if (engagement.contact_email) {
     const base = deps.baseUrl();
     const welcome = await createApproval(
@@ -202,7 +205,7 @@ export async function runOnboarding(
           body: welcomeEmailBody({ contactName: engagement.contact_name, businessName: engagement.business_name || "your business", base }),
           lead_id: engagement.lead_id,
         },
-        idempotencyKey: `ai-audit-welcome:${engagement.id}`,
+        idempotencyKey: `${WELCOME_APPROVAL_KEY_PREFIX}${engagement.id}`,
       },
       input.now,
     );

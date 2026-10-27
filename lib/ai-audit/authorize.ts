@@ -99,10 +99,18 @@ export function planFor(input: { engine: AiEngine; versionNo: number; transcript
     `Freeze discovery profile version ${input.versionNo}${input.transcriptCount ? ` and the ${input.transcriptCount === 1 ? "call transcript" : `${input.transcriptCount} call transcripts`}` : ""} exactly as they are now.`,
     "Move the engagement to Research & Audit Generation.",
   ];
+  // What the tick then does by itself (lib/ai-audit/research.ts, drafting.ts, writing.ts); each line under the
+  // payload's 300-character limit.
   if (input.engine === "none") {
-    plan.push("No AI service receives the client's information. You write the audit yourself from the frozen profile.");
+    plan.push("No AI service receives the client's information. Research checks the client's public website and page speed (no web search).");
+    plan.push("A first draft of the audit and proposal is built from what research finds, without AI. You write and check the rest yourself.");
   } else {
-    plan.push(`When the automated research and writing are switched on, they run on: ${AI_ENGINE_LABELS[input.engine]}, using only this frozen information and public sources. Until then, you write the audit yourself.`);
+    plan.push(
+      input.engine === "mac_claude"
+        ? "Research then starts by itself: the client's public website, page speed, and a web search for listings and reviews."
+        : "Research then starts by itself: the client's public website and page speed (web search runs only on Claude on CC's Mac).",
+    );
+    plan.push(`A draft of the audit and proposal follows, written by ${AI_ENGINE_LABELS[input.engine]}, from this frozen information and public sources only. You check and edit it before it goes anywhere.`);
   }
   if (input.gapCount) {
     plan.push(`${input.gapCount === 1 ? "One essential answer is" : `${input.gapCount} essential answers are`} still missing. The audit will list ${input.gapCount === 1 ? "it" : "them"} as information gaps; it will not guess.`);

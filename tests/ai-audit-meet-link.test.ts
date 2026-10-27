@@ -630,6 +630,12 @@ async function main() {
     assert.deepEqual(await events(eid, link.MEET_TRANSCRIPT_NEEDS_YOU), [], "nothing waits on an attached room");
   });
 
+  await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {
+    const { checkAuditScreens } = await import("./_ai-audit-screens");
+    const drawn = await checkAuditScreens(db, OASIS, USERS.cc.id);
+    assert.ok(drawn > 0);
+  });
+
   finish("ai-audit-meet-link");
 }
 

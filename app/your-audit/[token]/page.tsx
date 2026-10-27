@@ -30,6 +30,7 @@ type Props = { params: Promise<{ token: string }>; searchParams: Promise<Record<
 const PAY_NOTICES: Readonly<Record<string, string>> = {
   unavailable: "Payment could not be started just now. Please try again in a minute, or reply to our email.",
   busy: "Your checkout is being prepared. Please try again in a moment.",
+  offline: "Online payment is not open for this proposal yet. We have been told, and we will be in touch; you can also reply to our email.",
   closed: "This proposal can no longer be paid here. Reply to our email and we will help.",
 };
 

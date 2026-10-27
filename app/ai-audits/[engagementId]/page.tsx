@@ -10,13 +10,15 @@ import { EngagementWorkspace } from "@/components/ai-audit/workspace/EngagementW
 
 export const dynamic = "force-dynamic";
 
-type Props = { params: Promise<{ engagementId: string }> };
+type Props = { params: Promise<{ engagementId: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };
 
-export default async function EngagementPage({ params }: Props) {
+export default async function EngagementPage({ params, searchParams }: Props) {
   const session = await aiAuditPageSession();
   if (!session) notFound();
   const { engagementId } = await params;
   const view = await engagementView(session.db, session.tenantId, engagementId, new Date());
   if (!view) notFound();
-  return <EngagementWorkspace view={JSON.parse(JSON.stringify(view))} isOwner={session.isOwner} />;
+  // ?tab=call (an approval card's "Read the transcript lines") opens that tab; the workspace ignores any other value.
+  const tab = (await searchParams).tab;
+  return <EngagementWorkspace view={JSON.parse(JSON.stringify(view))} isOwner={session.isOwner} initialTab={typeof tab === "string" ? tab : undefined} />;
 }

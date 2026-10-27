@@ -779,6 +779,12 @@ async function main() {
     assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_research WHERE engagement_id = ?", args: [other.eid] })).rows[0].n), 0);
   });
 
+  await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {
+    const { checkAuditScreens } = await import("./_ai-audit-screens");
+    const drawn = await checkAuditScreens(db, OASIS, USERS.cc.id);
+    assert.ok(drawn > 0);
+  });
+
   finish("ai-audit-research");
 }
 

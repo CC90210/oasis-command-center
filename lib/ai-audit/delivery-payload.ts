@@ -11,6 +11,9 @@
  * PURE: lib/os/approvals/rules.ts validates payloads with it, and that module
  * is shared with the browser.
  */
+/** The audit email's own live switch (LIVE_SEND_AI_AUDIT, lib/integrations/send-mode.ts). */
+export const AUDIT_EMAIL_CHANNEL = "ai_audit_delivery";
+
 export const DELIVER_AI_AUDIT_KIND = "deliver_ai_audit" as const;
 
 export type DeliverAiAuditPayload = {

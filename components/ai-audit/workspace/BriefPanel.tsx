@@ -63,7 +63,9 @@ export function BriefPanel({ view }: { view: EngagementView }) {
           <div className="text-[12px] text-fg-muted">
             {view.brief
               ? `Version ${view.brief.version_no}, built ${when(view.brief.created_at)}${view.brief.status === "partial" ? ", with some checks missing" : ""}.`
-              : "Not built yet. It builds by itself once the call is booked, or press the button."}
+              : open
+                ? "Not built yet. It builds by itself once the call is booked, or press the button."
+                : "No brief was built before the call."}
           </div>
         </div>
         {open ? (

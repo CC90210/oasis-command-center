@@ -805,10 +805,21 @@ async function main() {
     // What Chromium sends from a no-referrer page (seen 2026-10-25): Origin null, Sec-Fetch-Site same-origin.
     const own = await payRoute.POST(post({ origin: "null", "sec-fetch-site": "same-origin" }), params);
     assert.equal(own.status, 303);
-    assert.match(own.headers.get("location") ?? "", /\/your-audit\/[A-Za-z0-9_-]{43}\?pay=unavailable$/, "dry run: back to the page with a plain message");
+    assert.match(own.headers.get("location") ?? "", /\/your-audit\/[A-Za-z0-9_-]{43}\?pay=offline$/, "dry run: back to the page, told online payment is not open yet");
     const fromPage = await payRoute.POST(post({ origin: "https://oasisai.work" }), params);
     assert.equal(fromPage.status, 303);
     assert.equal((await payment.listCheckouts(db, OASIS, engagementId)).length, 0, "no session was made");
+    // A link that no longer opens gets the neutral page, as the link itself does, never raw JSON.
+    const gone = "x".repeat(43);
+    const dead = await payRoute.POST(
+      new NextRequest(`https://oasisai.work/api/your-audit/${gone}/pay`, { method: "POST", headers: { host: "oasisai.work", origin: "https://oasisai.work" } }),
+      { params: Promise.resolve({ token: gone }) },
+    );
+    assert.equal(dead.status, 303);
+    assert.equal(new URL(dead.headers.get("location") ?? "").pathname, `/your-audit/${gone}`, "a dead link's Pay lands on the neutral page");
+    assert.equal(new URL(dead.headers.get("location") ?? "").search, "");
+    const page = readFileSync(join(process.cwd(), "app/your-audit/[token]/page.tsx"), "utf8");
+    assert.match(page, /offline: "Online payment is not open for this proposal yet\./, "the page has words for it");
   });
 
   console.log("payment");
@@ -842,6 +853,27 @@ async function main() {
     const r = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, isDryRun: () => true } });
     assert.ok(!r.ok && r.error === "dry_run");
     assert.equal(stripe.created.length, before);
+    await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'open' WHERE tenant_id = ?", args: [OASIS] });
+  });
+  await check("a Pay that only CC can unblock (test mode, no Stripe) tells him at once, as one open alert; the client is never left without an answer", async () => {
+    const p = (await pub.loadPublicAudit(db, token, NOW()))!;
+    const alerts: Array<Record<string, unknown>> = [];
+    const record = async (a: Record<string, unknown>) => void alerts.push(a);
+    const off = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, isDryRun: () => true, alert: record } });
+    assert.ok(!off.ok && off.error === "dry_run");
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].alertType, "ai_audit_pay_blocked");
+    assert.equal(alerts[0].subjectId, engagementId, "one open card per engagement (writeAgentAlert refreshes it)");
+    assert.equal(alerts[0].telegramOncePerOpen, true, "paged once, not on every press");
+    assert.match(String(alerts[0].body), /test mode/);
+    await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'expired' WHERE tenant_id = ?", args: [OASIS] });
+    const noKey = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, stripeSecret: async () => null, alert: record } });
+    assert.ok(!noKey.ok && noKey.error === "stripe_not_connected");
+    assert.equal(alerts.length, 2);
+    assert.match(String(alerts[1].body), /Stripe is not connected/);
+    // A failing alert never stops the client's answer.
+    const broken = await payment.createOrReuseCheckout(db, { link: p.link, now: NOW(), deps: { ...payDeps, isDryRun: () => true, alert: async () => { throw new Error("alerts are down"); } } });
+    assert.ok(!broken.ok && broken.error === "dry_run");
     await db.execute({ sql: "UPDATE ai_audit_checkouts SET status = 'open' WHERE tenant_id = ?", args: [OASIS] });
   });
   let checkoutId = "";
@@ -1079,6 +1111,12 @@ async function main() {
     // The delivery, and the one follow-up CC approved: the tick itself sends nothing.
     assert.equal(sent.length, before, "the tick sends no email");
     assert.equal(sent.length, 3, "three emails ever sent: the delivery, the approved follow-up and the revised delivery");
+  });
+
+  await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {
+    const { checkAuditScreens } = await import("./_ai-audit-screens");
+    const drawn = await checkAuditScreens(db, OASIS, USERS.cc.id);
+    assert.ok(drawn > 0);
   });
 
   finish("ai-audit-flow");

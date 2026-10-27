@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { describeError } from "@/components/ai-audit/workspace/api";
 
 /** Opens the lead's engagement (or the one already open) and goes to it. */
 export function StartAiAuditButton({ leadId }: { leadId: string }) {
@@ -13,14 +14,14 @@ export function StartAiAuditButton({ leadId }: { leadId: string }) {
     setError(null);
     try {
       const res = await fetch("/api/ai-audit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "open", lead_id: leadId }) });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; engagement_id?: string; error?: string };
+      const json = (await res.json().catch(() => ({ ok: false, error: `http_${res.status}` }))) as { ok?: boolean; engagement_id?: string; error?: string };
       if (json.ok && json.engagement_id) {
         router.push(`/ai-audits/${json.engagement_id}`);
         return;
       }
-      setError(json.error === "lead_lost" ? "This lead is marked lost." : "Could not start the audit.");
+      setError(`Could not start the audit. ${describeError({ ok: false, error: json.error })}`);
     } catch {
-      setError("Could not start the audit.");
+      setError(`Could not start the audit. ${describeError({ ok: false, error: "network_error" })}`);
     }
     setBusy(false);
   }

@@ -46,6 +46,22 @@ import { assumptionOverrides, latestResearch, latestResearchStep, researchTables
 import { estimateImpact, type AssumptionOverrides } from "@/lib/ai-audit/impact";
 import { latestWriteStep } from "@/lib/ai-audit/writing";
 import type { DocEstimate } from "@/lib/ai-audit/doc";
+import { isDryRun } from "@/lib/integrations/send-mode";
+import { DRY_RUN_CHANNEL } from "@/lib/ai-audit/payment";
+import { AUDIT_EMAIL_CHANNEL } from "@/lib/ai-audit/delivery-payload";
+import { WELCOME_APPROVAL_KEY_PREFIX } from "@/lib/ai-audit/onboarding";
+
+/** The outcome an approval's executor recorded ("sent", "dry_run", "failed"), or null. */
+function outcomeOf(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const r = JSON.parse(raw) as { outcome?: unknown };
+    return typeof r.outcome === "string" ? r.outcome : null;
+  } catch (err) {
+    console.error("[ai-audit.view] an approval's recorded result is not JSON", err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
 
 export type BoardRow = {
   id: string;
@@ -78,6 +94,41 @@ export function boardRow(e: Engagement): BoardRow {
     next_action: nextActionFor(e),
     is_fixture: e.is_fixture,
     updated_at: e.updated_at,
+  };
+}
+
+/** What the live-call screen (components/ai-audit/call/LiveCall.tsx) is drawn from, for one engagement. */
+export async function liveCallProps(db: Client, tenantId: string, e: Engagement) {
+  const version = e.current_profile_version_id ? await getProfileVersion(db, tenantId, e.current_profile_version_id) : null;
+  const [fields, notes, brief, rooms] = await Promise.all([
+    version ? listProfileFields(db, tenantId, version.id) : Promise.resolve([]),
+    listCallNotes(db, tenantId, e.id),
+    briefForPage(db, tenantId, e.id),
+    roomsForEngagement(db, tenantId, e),
+  ]);
+  // The room still to be held, else the newest: its box says what became of that call's transcript.
+  const open = rooms.find((r) => r.status !== "ended") ?? rooms[0] ?? null;
+  return {
+    brief: brief ? { hypotheses: brief.content.hypotheses, confirm: brief.content.confirm, weight: brief.content.weight } : null,
+    room: open
+      ? {
+          code: open.code,
+          title: open.title,
+          status: open.status,
+          recordAudio: open.recordAudio,
+          guests: open.guests,
+          transcript: open.transcript?.status ?? null,
+          attached: !!open.attachedTranscriptId,
+          holds: open.holds,
+        }
+      : null,
+    engagementId: e.id,
+    businessType: e.business_type,
+    callStartedAt: e.call_started_at,
+    callEndedAt: e.call_ended_at,
+    notes: notes.map((n) => ({ question_id: n.question_id, notes: n.notes, row_version: n.row_version })),
+    fields: fields.map((f) => ({ field_key: f.field_key, value: f.value, label: f.label })),
+    editable: PROFILE_EDIT_STAGES.includes(e.stage),
   };
 }
 
@@ -151,6 +202,10 @@ export type EngagementView = {
   proposalBlockers: string[];
   totals: ProposalTotals | null;
   deliveryApproval: { id: string; status: string; outcome: string | null; reason: string | null; message: string | null } | null;
+  /** Whether an approved audit email and the client's Pay button go out for real (lib/integrations/send-mode.ts). */
+  sending: { auditEmailLive: boolean; paymentsLive: boolean };
+  /** The onboarding welcome email's approval card (lib/ai-audit/onboarding.ts), once filed. */
+  welcome: { id: string; status: string; outcome: string | null } | null;
   link: ShareLink | null;
   checkouts: Checkout[];
   receipts: Receipt[];
@@ -235,6 +290,14 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     !TERMINAL_STAGES.includes(engagement.stage) &&
     !(await authorizedProfile(db, tenantId, engagement));
   const link = engagement.share_link_id ? await getShareLink(db, tenantId, engagement.share_link_id) : null;
+  const welcomeRow = engagement.customer_id
+    ? (
+        await db.execute({
+          sql: "SELECT id, status, execution_result FROM approvals WHERE tenant_id = ? AND idempotency_key = ? ORDER BY revision DESC LIMIT 1",
+          args: [tenantId, `${WELCOME_APPROVAL_KEY_PREFIX}${engagement.id}`],
+        })
+      ).rows[0]
+    : undefined;
   let research: EngagementView["research"] = null;
   if (await researchTablesInstalled(db)) {
     const [latest, step, assumptions, writing] = await Promise.all([
@@ -269,6 +332,10 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
           message: (approval.execution_result as { message?: string } | null)?.message ?? null,
         }
       : null,
+    sending: { auditEmailLive: !isDryRun(AUDIT_EMAIL_CHANNEL), paymentsLive: !isDryRun(DRY_RUN_CHANNEL) },
+    welcome: welcomeRow
+      ? { id: String(welcomeRow.id), status: String(welcomeRow.status), outcome: outcomeOf(welcomeRow.execution_result) }
+      : null,
     link,
     checkouts,
     receipts,
@@ -291,7 +358,13 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
           status: authVoided ? "voided" : effectiveStatus(authApproval, new Date().toISOString()),
           outcome: (authApproval.execution_result as { outcome?: string } | null)?.outcome ?? null,
           message: authVoided
-            ? "The authorization no longer holds: something it covered changed or was deleted. Move the engagement back to Transcript Awaiting Approval and authorize again."
+            ? `The authorization no longer holds: something it covered changed or was deleted. ${
+                engagement.stage === "final_review"
+                  ? "Reopen the audit for edits, then move the engagement back to Transcript Awaiting Approval and authorize again."
+                  : WAITING_ON_CLIENT_STAGES.includes(engagement.stage)
+                    ? "Revise the audit (Revise and send again), then move the engagement back to Transcript Awaiting Approval and authorize again."
+                    : "Move the engagement back to Transcript Awaiting Approval and authorize again."
+              }`
             : ((authApproval.execution_result as { message?: string } | null)?.message ?? null),
           engine: authPayload?.ok ? authPayload.value.engine : null,
           engine_label: authPayload?.ok ? AI_ENGINE_LABELS[authPayload.value.engine] : null,

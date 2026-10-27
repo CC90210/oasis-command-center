@@ -1193,6 +1193,27 @@ async function main() {
     assert.equal(src.match(/<span className="min-w-0 break-words text-fg">\{f\.statement\}<\/span>/g)?.length, 2, "the facts from the website and from the form");
   });
 
+  await check("a call booked on the lead after the audit was opened moves the engagement to Discovery Call Scheduled, once, so its brief builds by itself (turnkey review, finding 11)", async () => {
+    const eid = await openWith(40, null, null);
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead", "opened before the call was booked");
+    const quiet = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(quiet.callsBooked, 0, "nothing moves while the lead has no call booked");
+    await db.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.stage', 'founder_meeting_booked') WHERE tenant_id = ? AND id = ?", args: [OASIS, lead(40)] });
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(rep.callsBooked, 1, JSON.stringify(rep.errors));
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "call_scheduled");
+    const events = await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ? AND event = 'call_booked'", args: [OASIS, eid] });
+    assert.equal(Number(events.rows[0].n), 1, "on the record");
+    const again = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(again.callsBooked, 0, "forward only, and only once");
+  });
+
+  await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {
+    const { checkAuditScreens } = await import("./_ai-audit-screens");
+    const drawn = await checkAuditScreens(db, OASIS, USERS.cc.id);
+    assert.ok(drawn > 0);
+  });
+
   finish("ai-audit-brief");
 }
 

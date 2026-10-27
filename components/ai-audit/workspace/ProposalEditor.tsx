@@ -8,6 +8,7 @@
  * approval binds to it with the proposal.
  */
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AUDIT_LINK_PLACEHOLDER,
@@ -45,6 +46,13 @@ function lineId(lines: ProposalLine[]): string {
   return `l${n}`;
 }
 
+/** The same tax rule, whatever order its fields were written in. */
+function sameTax(a: TaxRule | null, b: TaxRule | null): boolean {
+  if (!a || !b) return a === b;
+  if (a.mode !== b.mode) return false;
+  return a.mode === "not_registered" || (b.mode === "registered" && a.rate_bps === b.rate_bps && a.label === b.label && (a.number ?? "") === (b.number ?? ""));
+}
+
 function inDays(days: number): string {
   return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
 }
@@ -74,6 +82,18 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
   const totals = proposalTotals(shown);
   const blockers = proposalBlockers(shown, new Date().toISOString().slice(0, 10));
   const usable = catalogue.filter((c) => c.status === "confirmed" && c.currency === p.currency);
+  // What a save would change in the stored draft (lib/ai-audit/versions.ts normalizeProposal): the current tax
+  // rule, and a catalogue line whose price is no longer confirmed. Submit refuses until it is saved again.
+  const taxChanged = !!initial && !sameTax(initial.tax, settings.tax);
+  const priceChanged = !!initial && initial.lines.some((l) => l.kind === "catalogue" && !catalogue.some((c) => c.id === l.item_id && c.status === "confirmed"));
+  const staleWords =
+    taxChanged && priceChanged
+      ? "The tax rule changed since this was saved, and so did a catalogue price: save it to apply them."
+      : taxChanged
+        ? "The tax rule changed since this was saved: save it to apply."
+        : priceChanged
+          ? "A catalogue price changed since this was saved: save it to apply."
+          : null;
   const disabled = !editable || busy;
   const money = (c: number) => formatMoney(c, p.currency);
 
@@ -84,6 +104,31 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
       return next;
     });
     setDirty(true);
+  }
+
+  /** A line waiting for a price takes its suggested item's confirmed price, in place (quantity and optional kept). */
+  function takeConfirmedPrice(i: number, item: CatalogueItem) {
+    update((d) => {
+      const old = d.lines[i];
+      d.lines[i] = {
+        kind: "catalogue",
+        line_id: old.line_id,
+        sku: item.sku,
+        item_id: item.id,
+        item_version: item.item_version,
+        name: item.name,
+        description: item.description,
+        category: item.category,
+        unit: item.unit,
+        ...(item.unit_label ? { unit_label: item.unit_label } : {}),
+        quantity: item.unit === "per_unit" ? old.quantity : 1,
+        optional: old.optional,
+        unit_price_cents: item.price_cents ?? 0,
+        currency: item.currency,
+        deliverables: item.deliverables,
+        onboarding_requirements: item.onboarding_requirements,
+      };
+    });
   }
 
   function addCatalogue() {
@@ -133,10 +178,11 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
         <div className="text-sm text-fg-muted">
           Total <span className="font-semibold tabular-nums text-fg">{money(totals.total_cents)}</span>, due now <span className="font-semibold tabular-nums text-fg">{money(totals.due_now_cents)}</span>
           {dirty ? <span className="ml-2 text-status-warm">Unsaved changes</span> : null}
+          {!dirty && staleWords && editable ? <span className="ml-2 text-status-warm">{staleWords}</span> : null}
           {message ? <span className="ml-2 text-fg">{message}</span> : null}
         </div>
         {editable ? (
-          <button type="button" className="btn-primary" onClick={save} disabled={busy || !dirty}>
+          <button type="button" className="btn-primary" onClick={save} disabled={busy || !(dirty || staleWords)}>
             Save proposal
           </button>
         ) : null}
@@ -168,7 +214,14 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
               ? settings.tax.mode === "registered"
                 ? `${settings.tax.label} ${(settings.tax.rate_bps / 100).toFixed(2)}%`
                 : "not registered, no tax added"
-              : "not set yet. Set it in AI audit settings."}
+              : (
+                <>
+                  not set yet.{" "}
+                  <Link href="/ai-audits/settings" className="font-medium text-fg underline-offset-2 hover:underline">
+                    Set it in AI audit settings
+                  </Link>
+                </>
+              )}
           </div>
         </div>
 
@@ -193,6 +246,25 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
                   </td>
                   <td className="py-2 pr-3 text-[13px] text-fg-muted">
                     {l.kind === "catalogue" ? `Catalogue (${l.sku} v${l.item_version})` : l.kind === "owner_set" ? "Your price" : "Needs your price"}
+                    {l.kind === "needs_owner_price" && l.suggested_sku ? (
+                      (() => {
+                        const match = usable.find((c) => c.sku === l.suggested_sku);
+                        return match ? (
+                          !disabled ? (
+                            <button type="button" className="btn-secondary mt-1.5 block" onClick={() => takeConfirmedPrice(i, match)}>
+                              Use the confirmed price ({formatMoney(match.price_cents ?? 0, match.currency)})
+                            </button>
+                          ) : null
+                        ) : (
+                          <div className="mt-1 text-[11px] text-fg-dim">
+                            Suggested: {l.suggested_sku}, not confirmed yet.{" "}
+                            <Link href="/ai-audits/catalogue" className="underline-offset-2 hover:underline">
+                              Confirm it
+                            </Link>
+                          </div>
+                        );
+                      })()
+                    ) : null}
                   </td>
                   <td className="py-2 pr-3 text-right">
                     <NumberInput
@@ -267,6 +339,14 @@ export function ProposalEditor({ engagementId, initial, rowVersion, editable, ca
             <button type="button" className="btn-secondary" disabled={!pick} onClick={addCatalogue}>
               Add item
             </button>
+            {!usable.length ? (
+              <span className="self-center text-[13px] text-fg-muted">
+                No confirmed prices in {p.currency} yet.{" "}
+                <Link href="/ai-audits/catalogue" className="font-medium text-fg underline-offset-2 hover:underline">
+                  Confirm prices in the catalogue
+                </Link>
+              </span>
+            ) : null}
             <button
               type="button"
               className="btn-secondary"
