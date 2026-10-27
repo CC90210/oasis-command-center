@@ -1,5 +1,5 @@
 /**
- * /ai-audit/<engagementId> — one Free AI Audit engagement: discovery profile,
+ * /ai-audits/<engagementId> — one Free AI Audit engagement: discovery profile,
  * the 9-section audit draft, the proposal, delivery, payment and onboarding,
  * and the audit trail. Founders of OASIS's own workspaces only.
  */

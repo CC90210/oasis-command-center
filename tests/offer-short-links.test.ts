@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ALL_MARKETING_PATHS } from "../lib/marketing/routes";
 import { OASIS_OFFER_SHORT_PATHS, offerShareablePath } from "../lib/offers/short-links";
+import { OS_NAV_CATALOG } from "../lib/os/nav";
 
 type Redirect = { source: string; destination: string; permanent?: boolean };
 
@@ -51,13 +52,20 @@ async function main(): Promise<void> {
   check("no short link takes a marketing page's address or an existing app route", () => {
     const marketing = new Set<string>(ALL_MARKETING_PATHS);
     for (const [slug, short] of Object.entries(OASIS_OFFER_SHORT_PATHS)) {
-      if (slug === "vsl" || slug === "ai-audit") continue; // pre-existing, owned elsewhere
+      if (slug === "vsl") continue; // pre-existing, owned elsewhere (a route handler)
       assert.ok(!marketing.has(short), `${short} is a marketing page`);
       const name = short.slice(1);
       assert.ok(!existsSync(join("app", name)), `app/${name} already exists`);
       assert.ok(!existsSync(join("app", "(marketing)", name)), `app/(marketing)/${name} already exists`);
     }
     assert.equal(OASIS_OFFER_SHORT_PATHS.fleet, "/fleet-audit", "/fleet is the marketing fleet page, never FLEET's offer");
+  });
+
+  check("no row of the signed-in rail opens a public redirect (the AI audits board sat on /ai-audit and opened the offer page)", () => {
+    for (const row of OS_NAV_CATALOG) {
+      const path = row.href.split("?")[0];
+      assert.ok(!bySource.has(path), `the rail's ${row.label} row (${row.href}) is a redirect in next.config.js`);
+    }
   });
 
   check("OASIS offers get their short link; every other workspace keeps /f/<workspace>/<offer>", () => {

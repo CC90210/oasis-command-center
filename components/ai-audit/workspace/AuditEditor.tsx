@@ -271,7 +271,7 @@ export function AuditEditor({ engagementId, initialDoc, rowVersion, editable, de
           {message ? <span className="ml-2 text-fg">{message}</span> : null}
         </div>
         <div className="flex gap-2">
-          <a className="btn-secondary" href={`/ai-audit/${engagementId}/preview`} target="_blank" rel="noreferrer">
+          <a className="btn-secondary" href={`/ai-audits/${engagementId}/preview`} target="_blank" rel="noreferrer">
             Preview
           </a>
           {editable ? (

@@ -5,7 +5,10 @@
 import "server-only";
 import { briefForPage, type StoredBrief } from "@/lib/ai-audit/briefs";
 import { authorizedProfile } from "@/lib/ai-audit/authorize";
-import { PROFILE_EDIT_STAGES, TERMINAL_STAGES } from "@/lib/ai-audit/rules";
+import { PROFILE_EDIT_STAGES, TERMINAL_STAGES, WAITING_ON_CLIENT_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
+import { AUTHORIZE_AI_AUDIT_KIND } from "@/lib/ai-audit/authorize-payload";
+import { DELIVER_AI_AUDIT_KIND } from "@/lib/ai-audit/delivery-payload";
+import { FOLLOW_UP_AI_AUDIT_KIND } from "@/lib/ai-audit/follow-up-payload";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
 import type { Client } from "@libsql/client";
 import {
@@ -25,7 +28,7 @@ import {
   type ProfileVersion,
   type ProposalVersion,
 } from "@/lib/ai-audit/versions";
-import { getEngagement, getSettings, listEngagements, listEvents, readLead, type AiAuditSettings, type AuditEvent, type Engagement } from "@/lib/ai-audit/store";
+import { getEngagement, getSettings, int, listEngagements, listEvents, readLead, requireTenant, type AiAuditSettings, type AuditEvent, type Engagement } from "@/lib/ai-audit/store";
 import { listCatalogue } from "@/lib/ai-audit/catalogue-store";
 import type { CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { getShareLink, type ShareLink } from "@/lib/ai-audit/link";
@@ -80,6 +83,58 @@ export function boardRow(e: Engagement): BoardRow {
 
 export async function boardRows(db: Client, tenantId: string, includeClosed: boolean): Promise<BoardRow[]> {
   return (await listEngagements(db, tenantId, { includeClosed, limit: 300 })).map(boardRow);
+}
+
+/** The board's headline numbers (CC, 2026-10-26: "we'd rather see metrics"). Real clients only: the test prospect is left out. */
+export type BoardMetrics = {
+  /** Cards for an AI audit waiting in Needs you: transcripts to authorize, audits to approve, follow-ups. */
+  cardsWaiting: number;
+  /** Engagements flagged failed or needing a look. */
+  problems: number;
+  /** Before delivery and still open: discovery, research, drafting, and your reviews. */
+  inProgress: number;
+  /** Delivered and waiting on the client: not opened, reading, at checkout. */
+  withClient: number;
+  stalled: number;
+  /** Paid: confirmed, onboarding or active. */
+  won: number;
+  /** Engagements an audit was ever delivered to: what the close rate is out of. */
+  delivered: number;
+  /** Every engagement ever opened, closed ones too. */
+  total: number;
+};
+
+const IN_PROGRESS: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating", "final_review"];
+const WON: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active_client"];
+
+export async function boardMetrics(db: Client, tenantId: string, now: Date = new Date()): Promise<BoardMetrics> {
+  const t = requireTenant(tenantId);
+  const m: BoardMetrics = { cardsWaiting: 0, problems: 0, inProgress: 0, withClient: 0, stalled: 0, won: 0, delivered: 0, total: 0 };
+  const groups = await db.execute({ sql: "SELECT stage, health, COUNT(*) AS n FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0 GROUP BY stage, health", args: [t] });
+  for (const r of groups.rows) {
+    const stage = String(r.stage) as AiAuditStage;
+    const n = int(r.n);
+    m.total += n;
+    if (IN_PROGRESS.includes(stage)) m.inProgress += n;
+    else if (WAITING_ON_CLIENT_STAGES.includes(stage)) m.withClient += n;
+    else if (WON.includes(stage)) m.won += n;
+    if (TERMINAL_STAGES.includes(stage)) continue;
+    if (r.health === "stalled") m.stalled += n;
+    if (r.health === "failed" || r.health === "attention") m.problems += n;
+  }
+  const cards = await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND status = 'pending' AND action_kind IN (?, ?, ?) AND (expires_at IS NULL OR expires_at > ?)",
+    args: [t, AUTHORIZE_AI_AUDIT_KIND, DELIVER_AI_AUDIT_KIND, FOLLOW_UP_AI_AUDIT_KIND, now.toISOString()],
+  });
+  m.cardsWaiting = int(cards.rows[0]?.n);
+  const delivered = await db.execute({
+    sql: `SELECT COUNT(DISTINCT ev.engagement_id) AS n FROM ai_audit_events ev
+            JOIN ai_audit_engagements e ON e.tenant_id = ev.tenant_id AND e.id = ev.engagement_id
+           WHERE ev.tenant_id = ? AND ev.event = 'delivered' AND e.is_fixture = 0`,
+    args: [t],
+  });
+  m.delivered = int(delivered.rows[0]?.n);
+  return m;
 }
 
 export type EngagementView = {

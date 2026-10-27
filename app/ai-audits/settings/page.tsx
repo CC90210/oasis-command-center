@@ -1,5 +1,5 @@
 /**
- * /ai-audit/settings — tax rule, default currency, deposit and turnaround.
+ * /ai-audits/settings — tax rule, default currency, deposit and turnaround.
  * Founders see it; only the workspace owner saves it.
  */
 import Link from "next/link";
@@ -20,7 +20,7 @@ export default async function AiAuditSettingsPage() {
       title="AI audit settings"
       subtitle="The tax rule is required before the first real proposal."
       actions={
-        <Link href="/ai-audit" className="btn-secondary">
+        <Link href="/ai-audits" className="btn-secondary">
           Back to AI audits
         </Link>
       }
