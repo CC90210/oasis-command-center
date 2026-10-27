@@ -1135,9 +1135,53 @@ async function main() {
     assert.match(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "1200" }], 2, "We pay Jobber 1200 dollars a year").dropped[0]?.reason ?? "", /per year, not per month/);
     assert.match(check1("ops.repetitive_tasks", [{ task: "Admin", "hours per week": "2" }], 3, "Admin eats 2 hours a day").dropped[0]?.reason ?? "", /per day, not per week/);
     assert.equal(check1("tech.tools", [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "100" }], 4, "We pay Jobber 100 a month").kept.length, 1, "said per month: kept");
+    // The self-test of 2026-10-27: a model writes "what_it_is_for"; the column is the same one, not an empty cell.
+    const snake = check1("tech.tools", [{ tool: "Jobber", what_it_is_for: "scheduling", monthly_cost: "100" }], 4, "We pay Jobber 100 a month for scheduling");
+    assert.deepEqual(snake.kept[0]?.value, [{ tool: "Jobber", "what it is for": "scheduling", "monthly cost": "100" }], "snake_case columns are read as the listed columns");
     const key = ["sk", "a".repeat(24)].join("-");
     const pr = ex.extractionPrompt({ businessName: `Acme ${key}`, window: tr.transcriptWindows(lines)[0] });
     assert.ok(!pr.prompt.includes(key), "the name's key never reaches the model");
+    // The self-test of 2026-10-27: quotes are one unbroken run, values use the client's words, an approximate figure is
+    // the client's number, and a range is not (its loss was most of the profile).
+    assert.match(pr.system, /ONE unbroken run of the client's words/);
+    assert.match(pr.system, /in the client's own words/);
+    assert.match(pr.system, /about, around or roughly is still the client's number/);
+    assert.match(pr.system, /If the client was unsure \(maybe, I'd guess, probably\)/, "the prompt asks only for what the checks keep (Codex review of #756)");
+    const hedged = tr.parseTranscriptText(["Dana: We get maybe 40 leads a month.", "Dana: We get about 40 leads a month."].join("\n"));
+    const hedgedLines = hedged.ok ? hedged.value.lines : [];
+    const fig = (n: number, quote: string) =>
+      ex.checkFacts({ facts: [{ key: "sales.leads_per_month", value: 40, from: n, to: n, quote }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }, hedgedLines, { from: 1, to: 2 }).kept.length;
+    assert.deepEqual([fig(1, "We get maybe 40 leads a month."), fig(2, "We get about 40 leads a month.")], [0, 1], "maybe is unsure; about is the client's number");
+    assert.match(pr.system, /gave a range \(6,000 to 9,000\)/);
+    // What they tried before is something they no longer do: that is the fact, not a negation of it.
+    const tried = tr.parseTranscriptText("Dana: I tried an answering service two years ago. They took messages wrong and customers hated it.");
+    const triedLines = tried.ok ? tried.value.lines : [];
+    const attempt = ex.checkFacts(
+      { facts: [{ key: "decision.past_attempts", value: "Tried an answering service two years ago; it took messages wrong", from: 1, to: 1, quote: "I tried an answering service two years ago. They took messages wrong and customers hated it." }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } },
+      triedLines,
+      { from: 1, to: 1 },
+    );
+    assert.equal(attempt.kept.length, 1, JSON.stringify(attempt.dropped));
+    // A denial or a plan is still refused (Codex review of #756).
+    for (const said of ["I never tried an answering service. We just let it ring.", "We want to try an answering service next year."]) {
+      const p2 = tr.parseTranscriptText(`Dana: ${said}`);
+      const l2 = p2.ok ? p2.value.lines : [];
+      const quote = said.split(".")[0] + ".";
+      const r2 = ex.checkFacts(
+        { facts: [{ key: "decision.past_attempts", value: "Tried an answering service", from: 1, to: 1, quote }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } },
+        l2,
+        { from: 1, to: 1 },
+      );
+      assert.equal(r2.kept.length, 0, `${said}: not a past attempt`);
+    }
+    // A failed attempt is still an attempt: its outcome is part of the fact (Codex review of #756).
+    const failedTry = tr.parseTranscriptText("Dana: I tried an answering service without success.");
+    const ft = ex.checkFacts(
+      { facts: [{ key: "decision.past_attempts", value: "Tried an answering service without success.", from: 1, to: 1, quote: "I tried an answering service without success." }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } },
+      failedTry.ok ? failedTry.value.lines : [],
+      { from: 1, to: 1 },
+    );
+    assert.equal(ft.kept.length, 1, JSON.stringify(ft.dropped));
   });
   await check("figures are read as written: digits in a word are no figure, scales multiply, and object names are not numbers (review of phase 2b)", () => {
     assert.deepEqual(ex.numbersIn("a constructor and a prototype"), []);

@@ -175,7 +175,8 @@ export function validateProfileField(raw: unknown): V<ProfileFieldInput> {
         const cells: string[] = Array.isArray(row)
           ? row.map((c) => String(c ?? "").trim())
           : row && typeof row === "object"
-            ? cols.map((c) => String((row as Record<string, unknown>)[c] ?? "").trim())
+            ? // "what it is for", or the "what_it_is_for" a model writes: the same column.
+              cols.map((c) => String((row as Record<string, unknown>)[c] ?? (row as Record<string, unknown>)[c.replace(/ /g, "_")] ?? "").trim())
             : [];
         if (!cells.some(Boolean)) continue;
         if (cells.some((c) => c.length > 300)) return { ok: false, field: "value", error: "a cell is longer than 300 characters" };
