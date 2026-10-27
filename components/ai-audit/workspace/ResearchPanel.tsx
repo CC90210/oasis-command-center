@@ -37,6 +37,17 @@ const STOP_WORDS: Readonly<Record<string, string>> = {
   not_authorized: "It stopped because the authorization no longer holds. Authorize the profile again first.",
 };
 
+/** Why a writing pass over the opening changed nothing (lib/ai-audit/writing.ts step error codes). */
+const WRITE_STOP_WORDS: Readonly<Record<string, string>> = {
+  draft_changed: "the draft changed while it ran, so your version was kept",
+  not_authorized: "the authorization no longer holds",
+  write_failed: "the AI call failed three times",
+  unreadable: "the AI's answer could not be read",
+  nothing_kept: "no sentence it wrote passed the evidence check",
+  rules_broken: "what it wrote broke an evidence rule, so it was held back",
+  runner_offline: "the Mac was offline, so the pass was called off",
+};
+
 const LABEL_WORDS: Readonly<Record<DocFinding["label"], string>> = {
   verified: "Verified fact",
   client_reported: "Client-reported",
@@ -319,7 +330,7 @@ function DraftBox({ view }: { view: EngagementView }) {
         <div className="text-[12px] text-fg-muted">
           {writing.written
             ? `The opening was written ${when(writing.created_at)}.`
-            : `The last pass did not change the draft${writing.error ? ` (${writing.error.replace(/_/g, " ")})` : ""}.`}
+            : `The last pass did not change the draft${writing.error ? `: ${WRITE_STOP_WORDS[writing.error] ?? writing.error.replace(/_/g, " ")}` : ""}.`}
           {writing.withheld.length ? ` ${writing.withheld.length} sentence${writing.withheld.length === 1 ? " was" : "s were"} held back:` : ""}
         </div>
       ) : null}

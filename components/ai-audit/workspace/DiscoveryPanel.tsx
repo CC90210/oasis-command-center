@@ -93,6 +93,16 @@ function wayBack(stage: string): string {
   return "They are final for this engagement.";
 }
 
+/** A profile draft's run, in words (lib/ai-audit/extraction.ts step statuses). */
+const EXTRACTION_STATUS_WORDS: Record<string, string> = {
+  queued: "queued",
+  running: "running",
+  waiting_runner: "waiting for the Mac to pick it up",
+  done: "done",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
 /** Stages before the call is held: Gate 1 waits for Discovery Call Completed. */
 const BEFORE_THE_CALL: readonly string[] = ["new_lead", "pre_call_research", "call_scheduled"];
 
@@ -406,7 +416,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           )}
           {view.extraction ? (
             <div className="text-fg-muted">
-              Last run: <span className="text-fg">{view.extraction.status.replace(/_/g, " ")}</span>
+              Last run: <span className="text-fg">{EXTRACTION_STATUS_WORDS[view.extraction.status] ?? view.extraction.status.replace(/_/g, " ")}</span>
               {view.extraction.windows ? `, ${view.extraction.done} of ${view.extraction.windows} part${view.extraction.windows === 1 ? "" : "s"} read` : ""}
               {view.extraction.failed ? <span className="text-status-warm">, {view.extraction.failed} failed</span> : null}
               {view.extraction.status === "waiting_runner" ? ", waiting for the Mac" : ""}.
