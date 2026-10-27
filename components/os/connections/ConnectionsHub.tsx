@@ -110,6 +110,13 @@ function clearDeepLink() {
   if (changed) window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
+/**
+ * The card grids. On a phone, one column that can shrink (grid-cols-1 is
+ * minmax(0, 1fr)): without it the track took a card's one-line summary as its
+ * minimum and Cloudflare's card was 469px wide on a 390px screen (2026-10-27).
+ */
+const CARD_GRID = "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3";
+
 const CUSTOM_KEYS = {
   title: "Custom keys",
   summary: "Any other app your agents use",
@@ -365,7 +372,7 @@ export function ConnectionsHub({
           Apps already set up for this workspace, with the status OASIS last measured.
         </p>
         {yours.length > 0 ? (
-          <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <ul className={`mt-3 ${CARD_GRID}`}>
             {yours.map((def) => (
               <ConnectorCard
                 key={def.slug}
@@ -406,7 +413,7 @@ export function ConnectionsHub({
                 <h3 id={`cat-${cat.key}`} className="text-xs font-medium text-fg-dim">
                   {cat.label}
                 </h3>
-                <ul aria-labelledby={`cat-${cat.key}`} className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <ul aria-labelledby={`cat-${cat.key}`} className={`mt-2 ${CARD_GRID}`}>
                   {items.map((def) => (
                     <ConnectorCard
                       key={def.slug}
@@ -427,7 +434,7 @@ export function ConnectionsHub({
               <h3 id="cat-other" className="text-xs font-medium text-fg-dim">
                 Anything else
               </h3>
-              <ul aria-labelledby="cat-other" className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              <ul aria-labelledby="cat-other" className={`mt-2 ${CARD_GRID}`}>
                 <li className="group relative flex items-center gap-3 rounded-xl border border-hairline bg-bg-panel px-3 py-3 transition-colors duration-150 hover:border-bg-border-strong hover:bg-bg-hover">
                   <button
                     type="button"
