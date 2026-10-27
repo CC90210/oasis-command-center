@@ -146,7 +146,7 @@ export function sanitizeHarnessEvent(raw: unknown): HarnessEvent | null {
 }
 
 function validEngine(engine: HarnessEngine): boolean {
-  if (engine.kind === "cli") return ["claude", "codex", "gemini"].includes(engine.name);
+  if (engine.kind === "cli") return ["claude", "codex", "opencode"].includes(engine.name);
   return /^(?:ollama|lmstudio)\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,139}$/.test(engine.name);
 }
 

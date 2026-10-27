@@ -4,9 +4,10 @@ import type { CliEngine } from "@/lib/ai/agent-engine";
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 const defaultFetch: FetchLike = (url, init) => fetch(url, init);
-const SIGN_IN_COMMAND: Record<Exclude<CliEngine, "gemini">, string> = {
+const SIGN_IN_COMMAND: Record<CliEngine, string> = {
   claude: "claude\n/login",
   codex: "codex login",
+  opencode: "opencode auth login",
 };
 
 /**
@@ -21,9 +22,6 @@ export async function startCliSignIn(
   pairingIdOrFetch?: string | FetchLike,
   suppliedFetch?: FetchLike,
 ): Promise<{ ok: true; text: string; jobId?: string; command?: string } | { ok: false; text: string; command?: string }> {
-  if (provider === "gemini") {
-    return { ok: false, text: "Gemini CLI personal sign-in is not supported. Choose a Google API key instead." };
-  }
   const pairingId = typeof pairingIdOrFetch === "string" ? pairingIdOrFetch : null;
   const fetchImpl = typeof pairingIdOrFetch === "function" ? pairingIdOrFetch : suppliedFetch ?? defaultFetch;
   const fallbackCommand = SIGN_IN_COMMAND[provider];

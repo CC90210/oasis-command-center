@@ -525,6 +525,8 @@ async function main() {
   await check("engine_unreachable:<app> reads as 'your PC's <app> couldn't be reached', alone or joined with a model swap", () => {
     assert.match(plainFallback("engine_unreachable:claude"), /^your PC's Claude Code couldn't be reached, so the API account answered \(engine_unreachable:claude\)$/);
     assert.match(plainFallback("engine_unreachable:codex"), /your PC's Codex couldn't be reached/);
+    assert.match(plainFallback("engine_unreachable:opencode"), /your PC's OpenCode couldn't be reached/);
+    // Turns logged before Gemini CLI was removed (2026-10-27) keep their words.
     assert.match(plainFallback("engine_unreachable:gemini"), /your PC's Gemini CLI couldn't be reached/);
     assert.match(plainFallback("engine_unreachable:local"), /your PC's local model couldn't be reached/);
     const both = plainFallback("model_retired:claude-3-5-sonnet-20241022+engine_unreachable:claude");

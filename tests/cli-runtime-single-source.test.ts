@@ -63,8 +63,9 @@ test("the shared accessors behave on a server render", () => {
 });
 
 test("only the three real runtimes validate", () => {
-  for (const ok of ["claude", "codex", "gemini"]) assert.ok(isCliRuntime(ok));
-  for (const bad of ["", "CLAUDE", "gpt", null, undefined, 3]) {
+  for (const ok of ["claude", "codex", "opencode"]) assert.ok(isCliRuntime(ok));
+  // Gemini CLI was removed on 2026-10-27; a stored "gemini" choice must not validate.
+  for (const bad of ["", "CLAUDE", "gpt", "gemini", null, undefined, 3]) {
     assert.equal(isCliRuntime(bad), false, `${String(bad)} must not validate`);
   }
 });

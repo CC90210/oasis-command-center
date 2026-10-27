@@ -159,12 +159,12 @@ const isChatMode = (s: unknown): s is ChatMode =>
 // origin) because plan mode is a within-conversation state, not a long-lived
 // operator preference.
 const PLAN_MODE_STORAGE_KEY = "oasis.chat.planMode.v1";const isCliRuntime = (s: unknown): s is CliRuntime =>
-  s === "claude" || s === "codex" || s === "gemini";
+  s === "claude" || s === "codex" || s === "opencode";
 
 const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
   claude: "Claude Code",
   codex: "Codex CLI",
-  gemini: "Gemini CLI",
+  opencode: "OpenCode",
 };
 // Proxy mode — when the bridge is a remote (private) VPS the browser must NOT
 // touch directly, all bridge traffic routes through same-origin /api/bridge/*

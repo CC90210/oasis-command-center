@@ -383,7 +383,7 @@ function runUsesClaude(run: Run, protocol: DepartmentTaskProtocol): boolean {
  */
 function runtimeBlockReason(run: Pick<Run, "runtimeEngineKind" | "runtimeEngineName">, state: RuntimeClaimState): string | null {
   const name = run.runtimeEngineName;
-  if (run.runtimeEngineKind === "cli" && (name === "claude" || name === "codex" || name === "gemini")) {
+  if (run.runtimeEngineKind === "cli" && (name === "claude" || name === "codex" || name === "opencode")) {
     const runtime = state[name];
     if (runtime.state === "unsupported") return "cli_account_unsupported";
     if (!runtime.installed || runtime.state === "not_installed") return "cli_not_found";

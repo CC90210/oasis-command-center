@@ -173,7 +173,7 @@ async function main() {
       data: {
         claude: { installed: true, authenticated: true, version: "2.1.0", install_hint_url: hint },
         codex: { installed: true, authenticated: false, version: "codex-cli 0.146.0", install_hint_url: hint, checked: true },
-        gemini: { installed: false, authenticated: false, version: null, install_hint_url: hint },
+        opencode: { installed: false, authenticated: false, version: null, install_hint_url: hint },
       },
     },
   });

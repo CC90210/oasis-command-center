@@ -38,7 +38,7 @@ const provider = (installed: boolean, authenticated: boolean, version: string | 
   version,
   ...(probe ? { probe } : {}),
 });
-const providers = (claude: ReturnType<typeof provider>, codex: ReturnType<typeof provider>, gemini: ReturnType<typeof provider>) => ({ claude, codex, gemini });
+const providers = (claude: ReturnType<typeof provider>, codex: ReturnType<typeof provider>, opencode: ReturnType<typeof provider>) => ({ claude, codex, opencode });
 
 const READY = providers(provider(true, true, "2.1.270"), provider(true, true, "codex-cli 0.146.0"), provider(true, true, "0.63.0"));
 const SIGNED_OUT = providers(provider(true, false, "2.1.270"), provider(false, false, null), provider(true, false, null));
@@ -107,12 +107,12 @@ async function main() {
     const body = await readStatus();
     assert.equal(body.ok, true, JSON.stringify(body));
     assert.deepEqual(stateWords(body), [
-      "192.168.11.27 (Mac): claude=signin,codex=none,gemini=signin",
-      "CCPC (Windows): claude=ready,codex=ready,gemini=ready",
+      "192.168.11.27 (Mac): claude=signin,codex=none,opencode=signin",
+      "CCPC (Windows): claude=ready,codex=ready,opencode=ready",
     ]);
     const runner = describeRunner({ warm: null, cli: { status: 200, body: body as never } }).tools;
     assert.match(runner, /192\.168\.11\.27 \(Mac\): .*Needs sign-in/);
-    assert.match(runner, /CCPC \(Windows\): Signed in: Claude Code, Codex, Gemini/);
+    assert.match(runner, /CCPC \(Windows\): Signed in: Claude Code, Codex, OpenCode/);
     // One row, not one per computer.
     const rows = await db.execute({ sql: "SELECT metadata FROM integrations_health WHERE profile_id = ? AND service = 'local_ai_clis'", args: [`p-${USERS.cc.id}`] });
     assert.equal(rows.rows.length, 1);
@@ -128,8 +128,8 @@ async function main() {
     await ping("mac-token", READY);
     const body = await readStatus();
     assert.deepEqual(stateWords(body), [
-      "192.168.11.27 (Mac): claude=ready,codex=ready,gemini=ready",
-      "CCPC (Windows): claude=ready,codex=ready,gemini=ready",
+      "192.168.11.27 (Mac): claude=ready,codex=ready,opencode=ready",
+      "CCPC (Windows): claude=ready,codex=ready,opencode=ready",
     ]);
     await ping("mac-token", SIGNED_OUT);
   });
@@ -137,7 +137,7 @@ async function main() {
   await check("a revoked pairing's computer disappears", async () => {
     await db.execute({ sql: "UPDATE bridge_pairings SET revoked_at = ? WHERE id = ?", args: [new Date().toISOString(), MAC] });
     const body = await readStatus();
-    assert.deepEqual(stateWords(body), ["CCPC (Windows): claude=ready,codex=ready,gemini=ready"]);
+    assert.deepEqual(stateWords(body), ["CCPC (Windows): claude=ready,codex=ready,opencode=ready"]);
     // A revoked bridge cannot write either.
     assert.equal((await ping("mac-token", READY)).status, 403);
     await db.execute({ sql: "UPDATE bridge_pairings SET revoked_at = NULL WHERE id = ?", args: [MAC] });
@@ -177,7 +177,7 @@ async function main() {
     assert.equal(((await readStatus()).machines as unknown[]).length, 2);
   });
 
-  await check("probe 'unsupported' (Google ended Gemini CLI on a personal sign-in) is its own finished state, per computer", async () => {
+  await check("probe 'unsupported' (the app's maker refuses this sign-in) is its own finished state, per computer", async () => {
     const { cliStatusState, unsupportedProviders, CLI_STATE_LABEL } = await import("../lib/bridge-cli-status");
     const REFUSED = providers(provider(true, true, "2.1.270"), provider(true, true, "codex-cli 0.146.0"), provider(true, false, null, "unsupported"));
     assert.equal((await ping("win-token", REFUSED)).status, 200);
@@ -185,18 +185,18 @@ async function main() {
     assert.equal(body.ok, true, JSON.stringify(body));
     const win = machinesOfBody(body as never).find((m) => m.id === WIN);
     assert.ok(win);
-    const g = win.data.gemini;
+    const g = win.data.opencode;
     assert.equal(cliStatusState(g), "unsupported");
     assert.equal(g.checked, true, "a verdict, not an unfinished check");
     assert.notEqual(CLI_STATE_LABEL[cliStatusState(g)], CLI_STATE_LABEL.needs_sign_in);
     assert.equal(cliStatusState(win.data.claude), "ready", "the other apps are untouched");
     // The runner strip and the panel say it in their own words; never "Needs sign-in" / "not confirmed" for it.
     const runner = describeRunner({ warm: null, cli: { status: 200, body: body as never } }).tools;
-    assert.match(runner, /CCPC \(Windows\): .*Not supported on this sign-in: Gemini/);
+    assert.match(runner, /CCPC \(Windows\): .*Not supported on this sign-in: OpenCode/);
     assert.doesNotMatch(runner.split("|").find((p) => p.includes("CCPC")) ?? "", /Needs sign-in|not confirmed/);
     // Refused on the only computer that has it: listed. The Mac still has it unconfirmed, so a Mac that is not refused un-lists it.
-    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never).filter((m) => m.id === WIN)), ["gemini"]);
-    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never)), [], "the Mac's Gemini is installed and not refused");
+    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never).filter((m) => m.id === WIN)), ["opencode"]);
+    assert.deepEqual(unsupportedProviders(machinesOfBody(body as never)), [], "the Mac's OpenCode is installed and not refused");
     await ping("win-token", READY);
   });
 

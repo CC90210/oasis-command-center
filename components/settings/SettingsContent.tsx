@@ -492,7 +492,7 @@ export async function SettingsContent({
               id="engine"
               defaultOpen
               title="What powers your agents"
-              subtitle="One choice for every department, Slack mention and the coding harness: an AI account (API key), an app on your paired computer (Claude Code, Codex, Gemini CLI), or a local model there."
+              subtitle="One choice for every department, Slack mention and the coding harness: an AI account (API key), an app on your paired computer (Claude Code, Codex, OpenCode), or a local model there."
             >
               <SafeBoundary label="What powers your agents">
                 {/* The AI account (connect / replace / remove a key, the model,

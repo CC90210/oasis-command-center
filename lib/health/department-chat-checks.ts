@@ -142,7 +142,7 @@ const CODE_WORDS: Record<string, string> = {
   reservation_expired: "the call started and never finished",
   bridge_unreachable: "the paired computer could not be reached",
   cli_failed: "the AI app on the paired computer could not answer",
-  cli_account_unsupported: "Gemini CLI is not supported on this Google sign-in",
+  cli_account_unsupported: "the app does not allow this sign-in on the paired computer",
   cli_auth_required: "the AI app on the paired computer is not signed in",
   cli_not_found: "the AI app is not installed on the paired computer",
   cli_outdated: "the AI app on the paired computer is out of date",
@@ -194,7 +194,8 @@ export function plainFallback(reason: string): string {
 function plainFallbackOne(reason: string): string {
   if (reason.startsWith(ENGINE_FALLBACK_PREFIX)) {
     const which = reason.slice(ENGINE_FALLBACK_PREFIX.length);
-    const app = isCliEngine(which) ? CLI_ENGINE_LABEL[which] : which === "local" ? "local model" : null;
+    // "gemini" stays readable: turns logged before Gemini CLI was removed (2026-10-27) still say it.
+    const app = isCliEngine(which) ? CLI_ENGINE_LABEL[which] : which === "gemini" ? "Gemini CLI" : which === "local" ? "local model" : null;
     if (app) return `your PC's ${app} couldn't be reached, so the API account answered (${reason})`;
   }
   const m = /^model_([a-z_]+):(.+)$/.exec(reason);

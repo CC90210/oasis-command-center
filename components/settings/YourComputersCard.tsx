@@ -33,7 +33,8 @@ import {
 } from "@/lib/devices/presence";
 import { runtimeStatusWords } from "@/lib/bridge-cli-status";
 import { CLI_ENGINE_LABEL, type CliEngine } from "@/lib/ai/agent-engine";
-import { readEngine, runtimeStatusLabel, type EngineDevice } from "@/components/settings/agent-engine-client";
+import { readEngine, runtimeStatusLabel, type EngineDevice, type EngineState } from "@/components/settings/agent-engine-client";
+import { agentsComputerId, agentsSetup, eligibleFor, moveAgentsToComputer, selectionWords } from "@/components/settings/move-agents";
 import { DEVICE_LABEL_MAX, deviceLabelProblem, deviceLabelProblemWords } from "@/lib/devices/label";
 import {
   RECONNECT_WATCH_MS,
@@ -66,9 +67,9 @@ type DeviceRow = {
 type Reconnect = { ids: string[]; since: number; done: boolean };
 
 /** What GET /api/ai/engine says about the viewer's computers: the inputs AI brain's app labels read. */
-type EngineInventory = { devices: EngineDevice[]; oasis: boolean };
+type EngineInventory = { devices: EngineDevice[]; oasis: boolean; state: EngineState };
 
-const CLI_APPS: CliEngine[] = ["claude", "codex", "gemini"];
+const CLI_APPS: CliEngine[] = ["claude", "codex", "opencode"];
 
 /**
  * One line per AI app installed on a computer, in the words Settings > AI
@@ -77,7 +78,7 @@ const CLI_APPS: CliEngine[] = ["claude", "codex", "gemini"];
  * as before: an app the computer does not have is not news on this card.
  */
 export function appStatusLines(device: EngineDevice, oasisWorkspace: boolean): string[] {
-  return CLI_APPS.filter((p) => device.runtimes[p].installed).map(
+  return CLI_APPS.filter((p) => device.runtimes[p]?.installed).map(
     (p) => `${CLI_ENGINE_LABEL[p]}: ${runtimeStatusLabel(device, p, oasisWorkspace)}`,
   );
 }
@@ -209,7 +210,7 @@ export function YourComputersCard() {
       const [dr, er] = await Promise.all([fetch("/api/devices").then((r) => r.json()), readEngine()]);
       const rows = dr.ok ? (dr.devices as DeviceRow[]) : null;
       if (seq !== readSeq.current) return { rows, newest: false };
-      setEngine(er.ok ? { devices: er.state.devices, oasis: er.state.oasis } : null);
+      setEngine(er.ok ? { devices: er.state.devices, oasis: er.state.oasis, state: er.state } : null);
       if (rows) setDevices(rows);
       else setError(dr.error || "load_failed");
       return { rows, newest: true };
@@ -335,6 +336,20 @@ export function YourComputersCard() {
     }
   }
 
+  /** "Use for agents": test the agents' setup on that computer, and switch to it when it passes. */
+  async function moveAgents(device: EngineDevice) {
+    if (!engine) return;
+    setBusyId(device.pairingId);
+    setNotice(null);
+    try {
+      const result = await moveAgentsToComputer(device, engine.state, setNotice);
+      setNotice(result.words);
+      await load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function disconnect(id: string, label: string) {
     if (!window.confirm(`Disconnect ${label}? It will stop taking agent work immediately.`)) return;
     setBusyId(id);
@@ -378,6 +393,14 @@ export function YourComputersCard() {
   const reconnectLine = reconnect ? reconnectWords(reconnectOutcome(reconnect.ids, devices, now), reconnect.done) : "";
   const reconnecting = !!reconnect && !reconnect.done;
 
+  // Which computer runs the viewer's agents, and whether it can right now.
+  const setup = engine ? agentsSetup(engine.state) : null;
+  const agentsOn = setup ? agentsComputerId(setup.selection) : null;
+  const agentsDevice = agentsOn ? engine?.devices.find((x) => x.pairingId === agentsOn) ?? null : null;
+  const engineDevice = (id: string) => engine?.devices.find((x) => x.pairingId === id) ?? null;
+  const canUseForAgents = (device: EngineDevice | null): device is EngineDevice =>
+    !!device && !!setup && device.pairingId !== agentsOn && device.online && device.approved && device.agentClaimEligible && eligibleFor(device, setup.scope);
+
   const inventoryFor = (id: string): string[] => {
     const device = engine?.devices.find((x) => x.pairingId === id);
     return device && engine ? appStatusLines(device, engine.oasis) : [];
@@ -407,6 +430,23 @@ export function YourComputersCard() {
           <RefreshCw className={`w-3 h-3 ${reconnecting ? "animate-spin" : ""}`} aria-hidden="true" /> refresh
         </button>
       </div>
+      {setup && (
+        <p className="text-sm text-fg" data-testid="agents-run-on">
+          {agentsDevice ? (
+            <>
+              Your {setup.scope === "workspace" ? "workspace's " : ""}agents run on{" "}
+              <span className="font-semibold">{selectionWords(setup.selection, agentsDevice)}</span>
+              {!agentsDevice.online && (
+                <span className="text-status-warm"> · it is offline, so they cannot answer. Choose Use for agents on a computer that is on.</span>
+              )}
+            </>
+          ) : agentsOn ? (
+            <>Your agents run on a computer that is no longer listed. Choose Use for agents on one below.</>
+          ) : (
+            <>Your agents run on an API key, not a computer. Use for agents moves them to one of your computers.</>
+          )}
+        </p>
+      )}
       {mine.length === 0 ? (
         <div className="text-fg-muted text-sm">No computers connected for you yet. Connect one below.</div>
       ) : (
@@ -424,7 +464,7 @@ export function YourComputersCard() {
             const label = d.label || "Unnamed computer";
             const fresh = state === "can_answer";
             return (
-              <li key={d.id} className="py-3 flex items-start justify-between gap-3">
+              <li key={d.id} className="py-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <Monitor className={`w-4 h-4 mt-0.5 ${fresh ? "text-accent" : "text-fg-dim"}`} aria-hidden="true" />
                   <div className="min-w-0">
@@ -468,7 +508,25 @@ export function YourComputersCard() {
                     )}
                   </div>
                 </div>
-                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <div className="flex flex-wrap items-center gap-2 pl-7 sm:shrink-0 sm:justify-end sm:pl-0">
+                  {agentsOn === d.id && (
+                    <span className="text-xs font-semibold text-accent" data-testid="runs-agents-badge">Runs your agents</span>
+                  )}
+                  {(() => {
+                    const device = engineDevice(d.id);
+                    return canUseForAgents(device) ? (
+                      <button
+                        type="button"
+                        onClick={() => void moveAgents(device)}
+                        disabled={busyId !== null}
+                        className="btn-primary text-xs inline-flex items-center gap-1"
+                        data-testid="use-for-agents"
+                      >
+                        {busyId === d.id ? <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> : null}
+                        Use for agents
+                      </button>
+                    ) : null;
+                  })()}
                   {state === "not_approved" && (
                     <button
                       onClick={() => approve(d.id)}

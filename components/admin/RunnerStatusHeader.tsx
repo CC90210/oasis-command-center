@@ -39,7 +39,7 @@ export type RunnerSnapshot = {
   cli: { status: number; body: CliBody } | { error: string } | null;
 };
 
-const CLI_LABEL: Record<string, string> = { claude: "Claude Code", codex: "Codex", gemini: "Gemini" };
+const CLI_LABEL: Record<string, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 
 /** PURE. The three lines the strip shows. */
 export function describeRunner(snap: RunnerSnapshot): { computer: string; tools: string; pool: string; computerTone: "ok" | "warn" | "neutral" } {

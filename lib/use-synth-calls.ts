@@ -28,7 +28,7 @@
 
 import { useEffect, useState } from "react";
 
-export type SynthCliRuntime = "claude" | "codex" | "gemini" | "cloud";
+export type SynthCliRuntime = "claude" | "codex" | "opencode" | "cloud";
 
 export type SynthCall = {
   id: string;
@@ -85,10 +85,10 @@ const RUNTIME_LIFECYCLE: Record<SynthCliRuntime, RuntimeLifecycle> = {
     runtimeLabel: "OpenAI Codex CLI runtime",
     contextLabel: "Codex skills · tools",
   },
-  gemini: {
-    spawnDetail: "gemini --yolo --output-format json",
-    runtimeLabel: "Gemini CLI runtime",
-    contextLabel: "Gemini extensions · tools",
+  opencode: {
+    spawnDetail: "opencode run --format json",
+    runtimeLabel: "OpenCode CLI runtime",
+    contextLabel: "OpenCode tools",
   },
   cloud: {
     spawnDetail: "POST /v1/messages — Anthropic API",
@@ -103,7 +103,7 @@ export function useSynthCalls(opts: {
   hasRealTools: boolean;
   agent: string;
   /** Which runtime the chat actually picked for this turn. The lifecycle
-   *  pills MUST match — if the operator selected Gemini we cannot render
+   *  pills MUST match — if the operator selected OpenCode we cannot render
    *  "spawn claude" or the trace lies. Defaults to claude so the existing
    *  call site (which doesn't pass a runtime yet) keeps today's behavior. */
   cliRuntime?: SynthCliRuntime;

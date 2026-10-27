@@ -54,7 +54,7 @@ export async function POST(req: Request) {
     return fail(400, "unexpected_field", "Only an AI app and paired computer can be sent here.");
   }
   if (!isSignInProvider(raw.provider)) {
-    return fail(400, "invalid_provider", "Pick Claude Code, Codex, or the supported Google API alternative.");
+    return fail(400, "invalid_provider", "Pick Claude Code, Codex or OpenCode.");
   }
   if (!validRequestId(raw.pairing_id)) {
     return fail(400, "invalid_pairing_id", "Choose the computer where this AI app should sign in.");
@@ -79,15 +79,6 @@ export async function POST(req: Request) {
     }
     if (!stringList(pairing.claim_protocols).includes("runtime_action_v1")) {
       return fail(409, "connector_update_required", "Update and restart the connector on that computer, then try again.");
-    }
-
-    if (raw.provider === "gemini") {
-      return fail(
-        409,
-        "unsupported_personal_sign_in",
-        "Gemini CLI personal sign-in is unsupported. Connect a Google Gemini API key instead.",
-        { alternative: { mode: "api", provider: "google" } },
-      );
     }
 
     const signIn = CLI_SIGN_IN[raw.provider];

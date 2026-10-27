@@ -16,6 +16,7 @@ export const RUNTIME_FAILURE_CODES = [
   "cli_nonzero_exit",
   "cli_not_found",
   "cli_timeout",
+  "cli_update_required",
   "manual_auth_required",
   "runtime_rate_limited",
   "runtime_action_failed",
@@ -43,7 +44,7 @@ export type CliRuntimeStateCode =
 export type RuntimeClaimState = {
   claude: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
   codex: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
-  gemini: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
+  opencode: { installed: boolean; authenticated: boolean; state: CliRuntimeStateCode };
   local_models?: Array<{
     ref: string;
     label: string;
@@ -86,7 +87,9 @@ export type RuntimeJobRow = {
 
 const IDENTIFIER_RE = /^[a-z0-9][a-z0-9._:/-]{0,95}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
-const CLI_NAMES = new Set(["claude", "codex", "gemini"]);
+const CLI_NAMES = new Set(["claude", "codex", "opencode"]);
+/** What a connector that predates OpenCode reports for it: it cannot run it. */
+const NOT_REPORTED: RuntimeClaimState["opencode"] = { installed: false, authenticated: false, state: "not_installed" };
 const CLI_RUNTIME_STATES = new Set([
   "ready",
   "needs_sign_in",
@@ -151,6 +154,9 @@ export function parseCapabilities(value: unknown): { ok: true; capabilities: Run
   const seen = new Set<string>();
   const capabilities: RuntimeCapability[] = [];
   for (const raw of value) {
+    // A connector from before 2026-10-27 still offers Gemini CLI, which was
+    // removed: skip that one entry rather than refuse the connector's claim.
+    if (isPlainObject(raw) && isPlainObject(raw.engine) && raw.engine.kind === "cli" && raw.engine.name === "gemini") continue;
     const parsed = parseCapability(raw);
     if (!parsed.ok) return parsed;
     const key = `${parsed.capability.action}:${parsed.capability.engine.kind}:${parsed.capability.engine.name}`;
@@ -172,14 +178,20 @@ function parseCliRuntime(value: unknown): { ok: true; value: RuntimeClaimState["
 
 export function parseRuntimeClaimState(value: unknown): { ok: true; state: RuntimeClaimState | null } | { ok: false; code: string } {
   if (value === undefined) return { ok: true, state: null };
-  if (!isPlainObject(value) || !hasOnlyKeys(value, ["claude", "codex", "gemini", "local_models"])) return { ok: false, code: "unexpected_field" };
+  // "gemini" is what a connector from before 2026-10-27 still sends (Gemini
+  // CLI was removed; OpenCode replaced it). It is checked for shape and then
+  // dropped, so that connector keeps claiming until it updates; "opencode" is
+  // absent from it and reads as not installed there.
+  if (!isPlainObject(value) || !hasOnlyKeys(value, ["claude", "codex", "opencode", "gemini", "local_models"])) return { ok: false, code: "unexpected_field" };
   const claude = parseCliRuntime(value.claude);
   const codex = parseCliRuntime(value.codex);
-  const gemini = parseCliRuntime(value.gemini);
+  const opencode = value.opencode === undefined ? { ok: true as const, value: NOT_REPORTED } : parseCliRuntime(value.opencode);
+  const legacyGemini = value.gemini === undefined ? { ok: true as const } : parseCliRuntime(value.gemini);
   if (!claude.ok) return claude;
   if (!codex.ok) return codex;
-  if (!gemini.ok) return gemini;
-  const state: RuntimeClaimState = { claude: claude.value, codex: codex.value, gemini: gemini.value };
+  if (!opencode.ok) return opencode;
+  if (!legacyGemini.ok) return legacyGemini;
+  const state: RuntimeClaimState = { claude: claude.value, codex: codex.value, opencode: opencode.value };
   if (value.local_models !== undefined) {
     if (!Array.isArray(value.local_models) || value.local_models.length > 200) return { ok: false, code: "invalid_runtime_state" };
     const models: NonNullable<RuntimeClaimState["local_models"]> = [];

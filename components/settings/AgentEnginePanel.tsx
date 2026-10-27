@@ -48,17 +48,19 @@ import { runtimeStatusWords } from "@/lib/bridge-cli-status";
 import { presenceWords } from "@/lib/devices/presence";
 import { AgentEngineScopeProvider } from "@/components/settings/agent-engine-scope-context";
 
-const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "gemini"];
+/** How often an open AI brain page re-reads its computers. */
+const ENGINE_AUTO_REFRESH_MS = 30_000;
+const CLI_PROVIDERS: CliEngine[] = ["claude", "codex", "opencode"];
 const API_PROVIDERS: ApiEngineProvider[] = ["anthropic", "openai", "google", "openrouter"];
 const INSTALL_COMMAND: Record<CliEngine, string> = {
   claude: "npm install -g @anthropic-ai/claude-code",
   codex: "npm install -g @openai/codex",
-  gemini: "npm install -g @google/gemini-cli",
+  opencode: "npm install -g opencode-ai",
 };
 const LOGIN_COMMAND: Record<CliEngine, string> = {
   claude: "claude\n/login",
   codex: "codex login",
-  gemini: "Use a Google API key",
+  opencode: "opencode auth login",
 };
 
 type Notice = { tone: "ok" | "error" | "info"; text: string; repair?: string | null } | null;
@@ -86,7 +88,6 @@ function versionForScope(state: EngineState, scope: EngineScope): string | null 
 
 function commandFor(device: EngineDevice, provider: CliEngine): string | null {
   const runtime = device.runtimes[provider];
-  if (provider === "gemini") return null;
   if (!device.online) return connectorRestartCommand(device.os);
   if (!runtime.installed) return INSTALL_COMMAND[provider];
   if (!runtime.signedIn) return LOGIN_COMMAND[provider];
@@ -132,7 +133,19 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   const [draft, setDraftState] = useState<EngineSelection | null>(null);
   const [scope, setScopeState] = useState<EngineScope>("person");
   const [readError, setReadError] = useState<string | null>(null);
-  const [activity, setActivity] = useState<Activity>("reading");
+  // A refresh that failed while the panel already shows a setup. CC
+  // (2026-10-27): the computer picker "sometimes disappears". A failed
+  // refresh used to replace the whole panel with an error box; now the last
+  // good reading stays on screen with this line above it, and the next
+  // refresh clears it.
+  const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
+  const [activity, setActivityState] = useState<Activity>("reading");
+  const activityRef = useRef<Activity>("reading");
+  const hasStateRef = useRef(false);
+  const setActivity = (next: Activity) => {
+    activityRef.current = next;
+    setActivityState(next);
+  };
   const [notice, setNotice] = useState<Notice>(null);
   const [job, setJob] = useState<RuntimeJob | null>(null);
   const [probeReceipt, setProbeReceipt] = useState<{ key: string; jobId: string } | null>(null);
@@ -152,15 +165,18 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
   // "Choose your own" takes a person who inherits the workspace default.
   const choicesRef = useRef<HTMLDivElement | null>(null);
 
-  async function load(options: { keepDraft?: boolean } = {}) {
-    if (!options.keepDraft) setActivity("reading");
+  async function load(options: { keepDraft?: boolean; show?: boolean } = {}) {
+    if (!options.keepDraft || options.show) setActivity("reading");
     const result = await readEngine();
     if (!result.ok) {
-      setReadError(result.message);
+      if (hasStateRef.current) setRefreshWarning(`${result.message} Showing the last reading.`);
+      else setReadError(result.message);
       setActivity(null);
       return;
     }
     setReadError(null);
+    setRefreshWarning(null);
+    hasStateRef.current = true;
     setState(result.state);
     setStagedKeyReceipts(result.state.savedKeyReceipts);
     if (!options.keepDraft || !draftRef.current) {
@@ -190,7 +206,14 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
     };
     window.addEventListener("oasis:agent-configs-changed", refreshAccount);
     window.addEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
+    // Keep each computer's online state and app lines current while the page
+    // is open, without touching what the viewer is editing: only when no Test,
+    // Save or sign-in is running and the tab is in view.
+    const timer = setInterval(() => {
+      if (activityRef.current === null && document.visibilityState === "visible") void load({ keepDraft: true });
+    }, ENGINE_AUTO_REFRESH_MS);
     return () => {
+      clearInterval(timer);
       window.removeEventListener("oasis:agent-configs-changed", refreshAccount);
       window.removeEventListener(OASIS_PROVIDER_KEY_STAGED_EVENT, rememberStagedKey);
       stop.current?.abort();
@@ -533,7 +556,7 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
         </div>
         <button
           type="button"
-          onClick={() => void load({ keepDraft: true })}
+          onClick={() => void load({ keepDraft: true, show: true })}
           disabled={activity !== null}
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-fg-muted hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
         >
@@ -541,6 +564,12 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
           Refresh
         </button>
       </div>
+
+      {refreshWarning && (
+        <p role="status" data-testid="engine-refresh-warning" className="rounded-lg border border-status-warm/40 bg-status-warm/10 px-3 py-2 text-xs text-fg-muted">
+          {refreshWarning}
+        </p>
+      )}
 
       {state.canManage ? (
         <div className="flex flex-wrap items-center gap-3">
@@ -637,8 +666,14 @@ export function AgentEnginePanel({ children }: { children?: React.ReactNode }) {
                   {(selected || unsupported) && status?.repair && <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">{status.repair}</p>}
                   {selected && selectedDevice && !unsupported && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {provider === "gemini" ? (
-                        <span className="text-[11px] text-fg-muted">Managed Gemini CLI account detected. Test it here; sign-in is managed on the computer.</span>
+                      {provider === "opencode" ? (
+                        // OpenCode signs in to a model provider in a terminal
+                        // on that computer; there is no browser sign-in to start.
+                        <span className="text-[11px] text-fg-muted">
+                          {runtime?.signedIn
+                            ? "Signed in to a provider on that computer. Test it here."
+                            : `Sign in on ${selectedDevice.label} in a terminal: opencode auth login, and choose a provider (Kimi K2 is under Moonshot AI). Then Test.`}
+                        </span>
                       ) : subscriptionLimited ? (
                         <span className="text-[11px] text-fg-muted">Still signed in. Wait for the subscription usage window to reset, then Test again; no reconnect is needed.</span>
                       ) : selectedDevice.ownedByViewer ? (

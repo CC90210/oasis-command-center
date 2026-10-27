@@ -3,7 +3,7 @@
  * (2026-10-15), and says it in the same words as Settings > Devices (2026-10-16).
  *
  * CC's own "My setup" page listed a teammate's computer (Adon's UPPAECHELON, with
- * its Claude Code / Codex / Gemini CLI all reading "Needs test", which CC cannot
+ * its Claude Code / Codex / OpenCode all reading "Needs test", which CC cannot
  * act on) under "Installed apps and local models". The computer picker beside it
  * was already scoped by engineDevicesForScope; the inventory section was not: any
  * manager saw every pairing in the workspace whatever tab was selected. And a
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
     runtimes: {
       claude: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: null, lastTestedAt: null, code: null },
       codex: { installed: true, signedIn: true, executionReady: true, unsupported: false, version: null, lastTestedAt: null, code: null },
-      gemini: { installed: false, signedIn: false, executionReady: false, unsupported: false, version: null, lastTestedAt: null, code: null },
+      opencode: { installed: false, signedIn: false, executionReady: false, unsupported: false, version: null, lastTestedAt: null, code: null },
     },
   };
   assert.equal(runtimeStatusLabel(tested, "codex", false), "Unsupported");
@@ -174,15 +174,17 @@ async function main(): Promise<void> {
 
   // The same four computers, both screens.
   const brain = out.aiBrain;
+  // A client workspace: Codex and OpenCode are held to OASIS's own computers
+  // (lib/ai/engine-rollout.ts), so both read Unsupported whatever the computer says.
   assert.deepEqual(brain, {
-    "Studio PC": { "Claude Code": "Ready for agents", Codex: "Unsupported", "Gemini CLI": "Not installed" },
-    "Old Mac": { "Claude Code": "Needs test", Codex: "Unsupported", "Gemini CLI": "Unsupported" },
-    Laptop: { "Claude Code": "Approval needed", Codex: "Unsupported", "Gemini CLI": "Approval needed" },
-    Tower: { "Claude Code": "Offline", Codex: "Unsupported", "Gemini CLI": "Offline" },
+    "Studio PC": { "Claude Code": "Ready for agents", Codex: "Unsupported", OpenCode: "Unsupported" },
+    "Old Mac": { "Claude Code": "Needs test", Codex: "Unsupported", OpenCode: "Unsupported" },
+    Laptop: { "Claude Code": "Approval needed", Codex: "Unsupported", OpenCode: "Unsupported" },
+    Tower: { "Claude Code": "Offline", Codex: "Unsupported", OpenCode: "Unsupported" },
   });
   const installed: Record<string, string[]> = {
     "Studio PC": ["Claude Code", "Codex"],
-    "Old Mac": ["Claude Code", "Gemini CLI"],
+    "Old Mac": ["Claude Code", "OpenCode"],
     Laptop: ["Claude Code"],
     Tower: ["Claude Code"],
   };

@@ -27,7 +27,7 @@
  */
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 
-export const BRIDGE_CLI_PROVIDERS = ["claude", "codex", "gemini"] as const;
+export const BRIDGE_CLI_PROVIDERS = ["claude", "codex", "opencode"] as const;
 export type BridgeCliProvider = (typeof BRIDGE_CLI_PROVIDERS)[number];
 
 export function isBridgeCliProvider(v: unknown): v is BridgeCliProvider {

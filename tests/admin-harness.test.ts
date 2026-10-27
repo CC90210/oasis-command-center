@@ -399,7 +399,7 @@ async function main() {
           data: {
             claude: { installed: true, authenticated: true, checked: true },
             codex: { installed: true, authenticated: false, checked: true },
-            gemini: { installed: true, authenticated: false, checked: false },
+            opencode: { installed: true, authenticated: false, checked: false },
           },
         },
       },
@@ -407,8 +407,8 @@ async function main() {
     assert.match(view.computer, /^CCPC \(Windows\): online, checked in/);
     assert.equal(view.pool, "The bridge refused the request (token).");
     // lib/bridge-cli-status.ts's words (fix/ai-brain-engine): a check that did
-    // not finish (Gemini, CC's PC 2026-10-09) is "not confirmed", never "not signed in".
-    assert.equal(view.tools, "Signed in: Claude Code. Needs sign-in: Codex. Sign-in not confirmed: Gemini");
+    // not finish (an app's check, CC's PC 2026-10-09) is "not confirmed", never "not signed in".
+    assert.equal(view.tools, "Signed in: Claude Code. Needs sign-in: Codex. Sign-in not confirmed: OpenCode");
     // A read that never answered says so, instead of "Checking..." forever.
     assert.equal(describeRunner({ warm: { error: "timeout" }, cli: { error: "timeout" } }).tools, "Couldn't check your AI tools: no answer in 12 seconds.");
     const unread = describeRunner({ warm: { error: "fetch failed" }, cli: { error: "fetch failed" } });

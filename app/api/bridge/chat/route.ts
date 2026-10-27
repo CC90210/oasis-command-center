@@ -164,7 +164,7 @@ export async function POST(req: NextRequest) {
 
   // cli_provider gate — same allowlist /api/chat (and the bridge) enforce.
   const requestedCliProvider = typeof clientBody.cli_provider === "string" ? clientBody.cli_provider.toLowerCase() : null;
-  if (requestedCliProvider !== null && !["claude", "codex", "gemini"].includes(requestedCliProvider)) {
+  if (requestedCliProvider !== null && !["claude", "codex", "opencode"].includes(requestedCliProvider)) {
     return jsonError(400, "invalid_cli_provider");
   }
 

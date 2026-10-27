@@ -413,7 +413,7 @@ async function main() {
     const operations = [
       { action: "probe" as const, engine: { kind: "cli" as const, name: "claude" }, prompt: "Reply with OASIS runtime ready." },
       { action: "probe" as const, engine: { kind: "cli" as const, name: "codex" }, prompt: "Reply with OASIS runtime ready." },
-      { action: "probe" as const, engine: { kind: "cli" as const, name: "gemini" }, prompt: "Reply with OASIS runtime ready." },
+      { action: "probe" as const, engine: { kind: "cli" as const, name: "opencode" }, prompt: "Reply with OASIS runtime ready." },
       { action: "auth" as const, engine: { kind: "cli" as const, name: "codex" } },
     ];
     assert.equal(operations.length, runtime.RUNTIME_JOB_MAX_ACTIVE_PER_USER_PAIRING);
@@ -556,17 +556,17 @@ async function main() {
       userId: USER,
       pairingId: target.id,
       action: "auth",
-      engine: { kind: "cli", name: "gemini" },
+      engine: { kind: "cli", name: "opencode" },
     });
     assert.equal(queued.ok, true);
     const claimBody = {
       protocol: "runtime_action_v1",
       claim_id: "claim-runtime-auth-1",
-      capabilities: [{ action: "auth", engine: { kind: "cli", name: "gemini" } }],
+      capabilities: [{ action: "auth", engine: { kind: "cli", name: "opencode" } }],
       runtime_state: {
         claude: { installed: true, authenticated: true, state: "account_identity_unavailable" },
         codex: { installed: true, authenticated: true, state: "ready" },
-        gemini: { installed: true, authenticated: false, state: "needs_sign_in" },
+        opencode: { installed: true, authenticated: false, state: "needs_sign_in" },
         local_models: [{ ref: "ollama/llama3.3:70b", label: "Llama 3.3 70B", adapter: "ollama", state: "ready" }],
       },
       wait_ms: 0,
@@ -579,16 +579,73 @@ async function main() {
     assert.deepEqual(Object.keys(claimed.body.job).sort(), ["action", "deadline_at", "engine", "job_id", "lease_id", "protocol"].sort());
     assert.equal(claimed.body.job.protocol, "runtime_action_v1");
     assert.equal(claimed.body.job.action, "auth");
-    assert.deepEqual(claimed.body.job.engine, { kind: "cli", name: "gemini" });
+    assert.deepEqual(claimed.body.job.engine, { kind: "cli", name: "opencode" });
     const retry = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", target.token, claimBody)));
     assert.equal(retry.body.job.job_id, claimed.body.job.job_id);
     assert.equal(retry.body.job.lease_id, claimed.body.job.lease_id);
     const state = (await db.execute({ sql: "SELECT claim_runtime_state FROM bridge_pairings WHERE id = ?", args: [target.id] })).rows[0].claim_runtime_state;
     const runtimeState = JSON.parse(String(state));
     assert.equal(runtimeState.claude.state, "account_identity_unavailable");
-    assert.equal(runtimeState.gemini.state, "needs_sign_in");
+    assert.equal(runtimeState.opencode.state, "needs_sign_in");
     assert.equal(runtimeState.local_models[0].ref, "ollama/llama3.3:70b");
     assert.doesNotMatch(String(state), /Bearer|oab_runtime/);
+  });
+
+  await check("a connector from before OpenCode keeps claiming: its Gemini entries are dropped and OpenCode reads not installed", async () => {
+    const legacy = await makePairing();
+    const queued = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: legacy.id,
+      action: "probe",
+      engine: { kind: "cli", name: "codex" },
+      prompt: "Reply with OASIS runtime ready.",
+    });
+    assert.equal(queued.ok, true);
+    const claimed = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", legacy.token, {
+      protocol: "runtime_action_v1",
+      claim_id: "claim-legacy-gemini",
+      capabilities: [
+        { action: "probe", engine: { kind: "cli", name: "codex" } },
+        { action: "probe", engine: { kind: "cli", name: "gemini" } },
+        { action: "auth", engine: { kind: "cli", name: "gemini" } },
+      ],
+      runtime_state: {
+        claude: { installed: true, authenticated: true, state: "ready" },
+        codex: { installed: true, authenticated: true, state: "ready" },
+        gemini: { installed: true, authenticated: false, state: "unsupported" },
+        local_models: [],
+      },
+      wait_ms: 0,
+    })));
+    assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+    assert.deepEqual(claimed.body.job.engine, { kind: "cli", name: "codex" });
+    const stored = JSON.parse(String((await db.execute({ sql: "SELECT claim_runtime_state FROM bridge_pairings WHERE id = ?", args: [legacy.id] })).rows[0].claim_runtime_state));
+    assert.equal("gemini" in stored, false, "the removed app is not stored");
+    assert.deepEqual(stored.opencode, { installed: false, authenticated: false, state: "not_installed" });
+    // A malformed legacy entry is still refused: dropping is not a way around the shape check.
+    const malformed = await json(await claimRoute.POST(machineRequest("/api/bridge/runtime-jobs/claim", legacy.token, {
+      protocol: "runtime_action_v1",
+      claim_id: "claim-legacy-gemini-bad",
+      capabilities: [],
+      runtime_state: {
+        claude: { installed: true, authenticated: true, state: "ready" },
+        codex: { installed: true, authenticated: true, state: "ready" },
+        gemini: { installed: true, authenticated: false, state: "ready", command: "whoami" },
+      },
+      wait_ms: 0,
+    })));
+    assert.equal(malformed.status, 400);
+    // The removed app can no longer be queued.
+    const refused = await runtime.enqueueRuntimeJob({
+      tenantId: TENANT,
+      userId: USER,
+      pairingId: legacy.id,
+      action: "probe",
+      engine: { kind: "cli", name: "gemini" },
+      prompt: "Reply with OASIS runtime ready.",
+    });
+    assert.equal(refused.ok, false);
   });
 
   await check("claim rejects arbitrary fields, unsupported actions, and every pairing that lacks canonical approval", async () => {
@@ -624,7 +681,7 @@ async function main() {
       runtime_state: {
         claude: { installed: true, authenticated: true, state: "ready", command: "whoami" },
         codex: { installed: true, authenticated: true, state: "ready" },
-        gemini: { installed: false, authenticated: false, state: "not_installed" },
+        opencode: { installed: false, authenticated: false, state: "not_installed" },
       },
     })));
     assert.equal(invalidState.status, 400);
