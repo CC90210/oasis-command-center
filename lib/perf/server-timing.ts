@@ -56,18 +56,67 @@ export async function timed<T>(label: string, p: Promise<T>, sink: PerfSpan[]): 
 }
 
 /**
+ * How a render was asked for, from the request headers Next sets:
+ *   - "prefetch": a router prefetch that stops at the loading boundary
+ *     (Next sends Next-Router-Prefetch: 1 for these);
+ *   - "rsc": a client navigation's RSC fetch, or a FULL prefetch, which
+ *     carries RSC: 1 but no prefetch header;
+ *   - "doc": a full document load (typed URL, reload, first visit).
+ */
+export type NavKind = "doc" | "rsc" | "prefetch";
+
+export function navKindOf(h: { get(name: string): string | null }): NavKind {
+  try {
+    if (h.get("next-router-prefetch") === "1") return "prefetch";
+    return h.get("rsc") === "1" ? "rsc" : "doc";
+  } catch {
+    return "doc";
+  }
+}
+
+/** What a summary line may carry besides its spans. No identifiers, no values. */
+export interface PerfMeta {
+  nav?: NavKind;
+  /** The request's cf-ray, so a layout line and a page line from one request can be joined. */
+  ray?: string | null;
+  /** How the scope ended: "ok", "redirect" or "error". */
+  outcome?: "ok" | "redirect" | "error";
+}
+
+/**
+ * [perf] lines this isolate has written. 1 and 2 are the first renders of a
+ * freshly started isolate, which is how a cold start is told apart from a
+ * warm one in the logs. A plain number per isolate: no request data, no
+ * pending promise (tests/worker-request-isolation.test.ts).
+ */
+let perfSeq = 0;
+
+const RAY_RE = /^[A-Za-z0-9-]{1,40}$/;
+
+/**
  * One structured line per tracked render scope. Greppable as `[perf]`;
  * fields are label:ms pairs plus the total. Skips trivially-fast scopes
  * (< 5ms with no spans) so full-bleed marketing paths don't spam logs.
  */
-export function logPerfSummary(scope: string, path: string, spans: PerfSpan[], totalMs: number): void {
+export function logPerfSummary(
+  scope: string,
+  path: string,
+  spans: PerfSpan[],
+  totalMs: number,
+  meta: PerfMeta = {},
+): void {
   try {
     if (!perfLogEnabled()) return;
     if (totalMs < 5 && spans.length === 0) return;
+    perfSeq += 1;
     const fields: Record<string, number> = {};
     for (const s of spans) fields[s.label] = Math.round(s.ms);
+    const extra: Record<string, string> = {};
+    if (meta.nav) extra.nav = meta.nav;
+    if (meta.ray && RAY_RE.test(meta.ray)) extra.ray = meta.ray;
+    if (meta.outcome) extra.outcome = meta.outcome;
     console.log(
-      `[perf] ${JSON.stringify({ scope, path: path.slice(0, 120), total_ms: Math.round(totalMs), spans: fields })}`,
+      `[perf] ${JSON.stringify({ ...extra, iso: perfSeq, scope, path: path.slice(0, 120), total_ms: Math.round(totalMs), spans: fields })}`,
     );
   } catch {
     // fail-open

@@ -12,9 +12,12 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   timed,
   logPerfSummary,
+  navKindOf,
   instrumentTursoClient,
   type PerfSpan,
 } from "../lib/perf/server-timing";
@@ -66,9 +69,113 @@ function testSummary(): void {
     assert.ok(cap.lines[0].includes("[perf]"));
     logPerfSummary("layout", "/quiet", [], 1);
     assert.equal(cap.lines.length, 1, "trivial empty scopes are skipped");
+
+    // Meta: nav kind, a well-formed cf-ray and the outcome ride along; `iso`
+    // counts this isolate's lines (1-2 = a cold start) and only goes up.
+    logPerfSummary("pipeline", "/pipeline", [{ label: "window", ms: 12.4 }], 40, {
+      nav: "rsc",
+      ray: "8f3a1b2c3d4e5f60-YUL",
+      outcome: "ok",
+    });
+    const line = JSON.parse(cap.lines[1].slice("[perf] ".length)) as Record<string, unknown>;
+    assert.equal(line.nav, "rsc");
+    assert.equal(line.ray, "8f3a1b2c3d4e5f60-YUL");
+    assert.equal(line.outcome, "ok");
+    assert.equal(line.scope, "pipeline");
+    assert.deepEqual(line.spans, { window: 12 });
+    assert.equal(typeof line.iso, "number");
+    const firstIso = line.iso as number;
+
+    // A ray that is not a plain token is dropped, never logged verbatim.
+    logPerfSummary("pipeline", "/pipeline", [{ label: "window", ms: 1 }], 10, { ray: "<script>alert(1)</script>" });
+    const second = JSON.parse(cap.lines[2].slice("[perf] ".length)) as Record<string, unknown>;
+    assert.equal("ray" in second, false, "a malformed cf-ray is not logged");
+    assert.equal(second.iso, firstIso + 1, "iso counts up per line in this isolate");
   } finally {
     cap.restore();
     delete process.env.PERF_LOG;
+  }
+}
+
+function testNavKind(): void {
+  const h = (entries: Record<string, string>) => new Headers(entries);
+  assert.equal(navKindOf(h({})), "doc", "no RSC header is a full document load");
+  assert.equal(navKindOf(h({ rsc: "1" })), "rsc", "RSC alone is a client navigation (or a FULL prefetch)");
+  assert.equal(navKindOf(h({ rsc: "1", "next-router-prefetch": "1" })), "prefetch", "an AUTO prefetch says so");
+  const broken = { get: () => { throw new Error("headers broke"); } };
+  assert.equal(navKindOf(broken), "doc", "a throwing headers object is fail-open");
+}
+
+/** The pipeline page logs its own [perf] line through the same seam, around the unchanged render. */
+function testPipelineWiring(): void {
+  const page = readFileSync(join(__dirname, "..", "app", "pipeline", "page.tsx"), "utf8");
+  assert.match(page, /logPerfSummary\("pipeline", "\/pipeline", perfSpans/);
+  assert.match(page, /return await renderPipeline\(props, perfSpans\)/);
+  assert.match(page, /timed\("window", listOasisPipelineWindow\(\{/);
+  const layout = readFileSync(join(__dirname, "..", "app", "layout.tsx"), "utf8");
+  assert.match(layout, /nav: navKindOf\(hdrs\)/, "the layout line carries its nav kind for the join");
+}
+
+/**
+ * lib/perf/nav-timing.ts in a stub browser: click → commit → board, each
+ * reported once; a fresh load reports navigation start → board once.
+ */
+async function testNavTiming(): Promise<void> {
+  const sent: Array<{ name: string; path: string }> = [];
+  const location = { pathname: "/today", href: "https://app.test/today", origin: "https://app.test" };
+  const g = globalThis as Record<string, unknown>;
+  const savedWindow = g.window;
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  g.window = { location };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      sendBeacon: (_url: string, body: string) => {
+        const parsed = JSON.parse(body) as { name: string; path: string };
+        sent.push({ name: parsed.name, path: parsed.path });
+        return true;
+      },
+    },
+  });
+  try {
+    const nav = await import("../lib/perf/nav-timing");
+    const click = (href: string, extra: Partial<MouseEvent> = {}) =>
+      ({
+        button: 0,
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        target: { closest: () => ({ href, target: "", hasAttribute: () => false }) },
+        ...extra,
+      }) as unknown as MouseEvent;
+
+    nav.reportBoardVisible();
+    nav.reportBoardVisible();
+    assert.deepEqual(sent.map((s) => s.name), ["OASIS-board-full"], "a fresh load reports the board once");
+
+    nav.recordLinkClick(click("https://app.test/today?stage=x"));
+    nav.recordLinkClick(click("https://evil.test/pipeline"));
+    nav.recordLinkClick(click("https://app.test/pipeline", { metaKey: true }));
+    nav.reportRouteCommit("/pipeline");
+    assert.equal(sent.length, 1, "same-route, cross-origin and modified clicks are not timed");
+
+    nav.recordLinkClick(click("https://app.test/pipeline"));
+    nav.reportRouteCommit("/pipeline");
+    nav.reportRouteCommit("/pipeline");
+    location.pathname = "/pipeline";
+    nav.reportBoardVisible();
+    nav.reportBoardVisible();
+    assert.deepEqual(
+      sent.map((s) => s.name),
+      ["OASIS-board-full", "OASIS-nav-commit", "OASIS-board-soft"],
+      "a click reports its commit and its board exactly once each",
+    );
+    assert.ok(sent.every((s) => s.path === "/today" || s.path === "/pipeline"), "pathname only, never a query");
+  } finally {
+    if (savedWindow === undefined) delete g.window;
+    else g.window = savedWindow;
+    if (savedNavigator) Object.defineProperty(globalThis, "navigator", savedNavigator);
   }
 }
 
@@ -208,6 +315,12 @@ async function testVitalsRoute(): Promise<void> {
       assert.equal(r.status, 400, `${label} is rejected`);
     }
     assert.equal(cap.lines.length, before, "rejected payloads never log");
+
+    // The first-party navigation metrics (lib/perf/nav-timing.ts) are accepted.
+    for (const name of ["OASIS-nav-commit", "OASIS-board-soft", "OASIS-board-full"]) {
+      const r = await vitalsPost(vitalsReq({ body: { name, value: 180, rating: null, path: "/pipeline" }, origin: "https://app.test" }));
+      assert.equal(r.status, 204, `${name} is accepted`);
+    }
   } finally {
     cap.restore();
   }
@@ -216,6 +329,9 @@ async function testVitalsRoute(): Promise<void> {
 async function main(): Promise<void> {
   await testTimed();
   testSummary();
+  testNavKind();
+  testPipelineWiring();
+  await testNavTiming();
   await testDbWrapper();
   await testVitalsRoute();
   console.log("perf-instrumentation: all assertions passed");

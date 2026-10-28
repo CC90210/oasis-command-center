@@ -32,6 +32,10 @@ const METRIC_NAMES = new Set([
   "Next.js-hydration",
   "Next.js-route-change-to-render",
   "Next.js-render",
+  // First-party navigation timing (components/PerfVitals.tsx).
+  "OASIS-nav-commit",
+  "OASIS-board-soft",
+  "OASIS-board-full",
 ]);
 const RATINGS = new Set(["good", "needs-improvement", "poor"]);
 const PATH_RE = /^[A-Za-z0-9/_\-.[\]]{1,100}$/;

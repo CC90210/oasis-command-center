@@ -53,6 +53,7 @@ import {
   nonEmptyString,
 } from "@/lib/format-helpers";
 import { timeAgo } from "@/lib/devices/presence";
+import { reportBoardVisible } from "@/lib/perf/nav-timing";
 import {
   ACTIVE_STAGES as SUN_ACTIVE_STAGES,
   READY_TO_ADVANCE_STAGES as SUN_READY_TO_ADVANCE_STAGES,
@@ -269,6 +270,10 @@ export function LeadPipelineView({
   resultWindow,
 }: Props) {
   const router = useRouter();
+  // Navigation timing: the board is on screen (lib/perf/nav-timing.ts).
+  useEffect(() => {
+    reportBoardVisible();
+  }, []);
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
   const [selectMode, setSelectMode] = useState(false);
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
