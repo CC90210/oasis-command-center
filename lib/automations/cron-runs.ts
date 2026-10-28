@@ -8,7 +8,6 @@
  * Honest numbers: a schedule with no recorded run says "not measured yet", never a guessed "OK", and a
  * failed read is a failed read (null), never a row of zeros.
  */
-import "server-only";
 import type { Client } from "@libsql/client";
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
 import { cronMatches } from "@/workers/oasis-cc-cron/src/cron-match";
