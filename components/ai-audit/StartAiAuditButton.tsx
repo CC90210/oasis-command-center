@@ -28,7 +28,7 @@ export function StartAiAuditButton({ leadId }: { leadId: string }) {
   return (
     <div className="flex items-center gap-2">
       {error ? <span className="text-[13px] text-status-hot">{error}</span> : null}
-      <button type="button" className="btn-primary" disabled={busy} onClick={start}>
+      <button type="button" className="btn-primary whitespace-nowrap" disabled={busy} onClick={start}>
         Start AI audit
       </button>
     </div>

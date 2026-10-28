@@ -167,32 +167,28 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
       </section>
 
       {withoutAudit.length ? (
-        <section aria-label="Founder meetings with no audit yet" className="mb-5 overflow-x-auto rounded-xl border border-hairline bg-bg-panel">
+        <section aria-label="Founder meetings with no audit yet" className="mb-5 rounded-xl border border-hairline bg-bg-panel">
           <h2 className="px-4 pt-3 text-sm font-semibold text-fg">Founder meetings with no audit yet</h2>
           <p className="px-4 pb-2 text-[12px] text-fg-dim">On the Pipeline at Founder Meeting, Meeting Held or Proposal Sent. Start an audit to prepare the meeting, the audit and the proposal.</p>
-          <table className="w-full text-sm">
-            <tbody>
-              {withoutAudit.map((d) => (
-                <tr key={d.id} className="border-t border-hairline">
-                  <td className="px-4 py-2.5">
-                    <Link href={`/pipeline/${d.id}`} className="font-medium text-fg hover:underline">
-                      {d.company || d.name || "Unnamed lead"}
-                    </Link>
-                    <div className="text-[12px] text-fg-dim">{d.company && d.name ? d.name : d.email || "no email"}</div>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" style={{ background: pipelineColumnMeta(d.stage).bg, color: pipelineColumnMeta(d.stage).fg }}>
+          <ul className="text-sm">
+            {withoutAudit.map((d) => (
+              <li key={d.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-hairline px-4 py-2.5">
+                <div className="min-w-0">
+                  <Link href={`/pipeline/${d.id}`} className="font-medium text-fg hover:underline">
+                    {d.company || d.name || "Unnamed lead"}
+                  </Link>
+                  <div className="text-[12px] text-fg-dim">{d.company && d.name ? d.name : d.email || "no email"}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-fg-dim">
+                    <span className="whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-semibold" style={{ background: pipelineColumnMeta(d.stage).bg, color: pipelineColumnMeta(d.stage).fg }}>
                       {pipelineStageLabel(d.stage)}
                     </span>
-                    <div className="mt-0.5 text-[12px] text-fg-dim">{QUEUE_WORDS[d.queue]}</div>
-                  </td>
-                  <td className="px-4 py-2.5 text-right">
-                    <StartAiAuditButton leadId={d.id} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    <span>{QUEUE_WORDS[d.queue]}</span>
+                  </div>
+                </div>
+                <StartAiAuditButton leadId={d.id} />
+              </li>
+            ))}
+          </ul>
         </section>
       ) : null}
 
