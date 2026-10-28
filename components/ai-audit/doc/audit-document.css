@@ -1443,8 +1443,23 @@ ol.aa-list {
     break-inside: avoid;
   }
 
+  /* A section's icon, number and title print as one piece. Chromium split the flex head across a page ("Section 5" at
+     the foot of one page, its title on the next: self-test PDF, 2026-10-27) despite break-inside: avoid; as one line of
+     inline blocks it cannot split. */
   .aa-section-head {
+    display: block;
+    break-inside: avoid;
     break-after: avoid;
+  }
+
+  .aa-section-head > * {
+    display: inline-block;
+    vertical-align: middle;
+  }
+
+  .aa-section-head > .aa-section-icon {
+    display: inline-flex;
+    margin-right: 14px;
   }
 
   /* A long card runs on to the next page rather than leaving half of this one blank; its parts stay whole. */
