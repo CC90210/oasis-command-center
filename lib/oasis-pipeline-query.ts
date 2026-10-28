@@ -6,7 +6,6 @@ import {
   type ListRecordsResult,
   type TenantRecord,
 } from "@/lib/manifest/data";
-import { isReleasedOasisPipelineRow } from "@/lib/oasis-sales-pipeline-policy";
 import { isInPipelineCycle, type PipelineCycleBoundary } from "@/lib/pipeline-cycle";
 import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 
@@ -134,14 +133,9 @@ type ViewerRecordLister = (input: {
 
 function activeCycleRows(
   rows: TenantRecord[],
-  now: number,
   cycle?: PipelineCycleBoundary,
 ): TenantRecord[] {
-  return rows.filter(
-    (row) =>
-      !isReleasedOasisPipelineRow(row, now) &&
-      (!cycle || isInPipelineCycle(row, cycle)),
-  );
+  return rows.filter((row) => !cycle || isInPipelineCycle(row, cycle));
 }
 
 function normalizedSearchTerms(rawQuery: string | null | undefined): string[] {
@@ -340,9 +334,8 @@ export async function listOasisPipelineWindow(
     if (scoped.total >= 2_000) {
       throw new Error("oasis_pipeline_team_scope_exceeds_safe_window");
     }
-    const now = Date.now();
     return scopedWindowFromRows({
-      rows: activeCycleRows(scoped.rows, now, input.cycle),
+      rows: activeCycleRows(scoped.rows, input.cycle),
       stageKeys,
       activeStage,
       requestedPage,
@@ -384,10 +377,9 @@ export async function listOasisPipelineWindow(
     if (scoped.total >= 2_000 || fulfillment.total >= 2_000) {
       throw new Error("oasis_pipeline_rep_scope_exceeds_safe_window");
     }
-    const now = Date.now();
-    const activeScopedRows = activeCycleRows(scoped.rows, now, input.cycle);
+    const activeScopedRows = activeCycleRows(scoped.rows, input.cycle);
     const byId = new Map(activeScopedRows.map((row) => [row.id, row]));
-    for (const row of activeCycleRows(fulfillment.rows, now, input.cycle)) byId.set(row.id, row);
+    for (const row of activeCycleRows(fulfillment.rows, input.cycle)) byId.set(row.id, row);
     return scopedWindowFromRows({
       rows: [...byId.values()].sort((left, right) =>
         String(right.updated_at || "").localeCompare(String(left.updated_at || "")),
@@ -434,9 +426,8 @@ export async function listOasisPipelineWindow(
     if (scoped.total >= 2_000) {
       throw new Error("oasis_pipeline_scope_exceeds_safe_window");
     }
-    const now = Date.now();
     return scopedWindowFromRows({
-      rows: activeCycleRows(scoped.rows, now, input.cycle),
+      rows: activeCycleRows(scoped.rows, input.cycle),
       stageKeys,
       activeStage,
       requestedPage,

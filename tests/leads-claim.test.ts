@@ -5,8 +5,9 @@
  * Two failures matter more than the rest, and neither is visible on a screen:
  *
  *   1. TWO REPS CALL THE SAME BUSINESS. The whole point of claiming.
- *   2. THE POOL SILENTLY DRAINS. Claims that never expire look identical to a
- *      healthy system until a rep says "there's nothing left to call".
+ *   2. A LEAD SILENTLY VANISHES. Until 2026-10-28 an untouched claim expired
+ *      back into the Prospects pool. That pool retired, so an expiry would now
+ *      hide a lead with nowhere to come back from. Nothing ages out any more.
  *
  * And one that is not a bug but a breach: a business on the internal
  * do-not-call list being handed to a rep because some other rule got there
@@ -17,8 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  availability, isActionableBy, isInBookOf, isReleasedFromBook, planClaim, claimPatch, releasePatch, factsFrom,
-  CLAIM_STALE_DAYS, LOST_RECYCLE_DAYS, MAX_LEADS_PER_REP, type ClaimFacts,
+  availability, isInBookOf, claimPatch, releasePatch, factsFrom, type ClaimFacts,
 } from "../lib/leads/claim";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "../lib/pipeline-cycle";
 
@@ -33,7 +33,7 @@ const base: ClaimFacts = {
 const f = (over: Partial<ClaimFacts>): ClaimFacts => ({ ...base, ...over });
 
 // ---------------------------------------------------------------------------
-// 1. Do-not-call outranks every other rule, including the ones that free leads.
+// 1. Do-not-call outranks every other rule.
 // ---------------------------------------------------------------------------
 
 assert.equal(
@@ -42,14 +42,14 @@ assert.equal(
   "an unclaimed do-not-call lead must never be claimable",
 );
 assert.equal(
-  availability(f({ dnc: true, assignedTo: "rep-a", claimedAt: iso(30 * DAY) }), NOW).available,
-  false,
-  "an EXPIRED claim must not release a do-not-call lead back into the pool",
+  availability(f({ dnc: true, assignedTo: "rep-a", claimedAt: iso(30 * DAY) }), NOW).reason,
+  "do_not_call",
+  "an old claim on a do-not-call lead reads as do-not-call, never as anything a rep may work",
 );
 assert.equal(
   availability(f({ dnc: true, stage: "lost", lostAt: iso(400 * DAY) }), NOW).available,
   false,
-  "the 90-day lost recycle must not resurrect a do-not-call lead",
+  "an old loss must not resurrect a do-not-call lead",
 );
 // The release path must not quietly un-suppress someone.
 assert.equal(
@@ -83,41 +83,19 @@ assert.equal(
 );
 
 // ---------------------------------------------------------------------------
-// 2. The pool keeps circulating.
+// 2. Nothing ages out (2026-10-28).
+//
+// The 7-day claim expiry and the 90-day lost recycle fed the shared Prospects
+// pool. With the pool retired, either rule would hide a lead from its owner
+// AND from every admin, with no screen left to recover it from (Codex review
+// of the retirement). A held lead stays held until someone reassigns it.
 // ---------------------------------------------------------------------------
 
-assert.equal(availability(base, NOW).reason, "unclaimed", "an unowned lead is claimable");
-
+assert.equal(availability(base, NOW).reason, "unclaimed", "an unowned lead is available");
 assert.equal(
-  isActionableBy(f({ assignedTo: "rep-a", claimedAt: iso(DAY) }), "rep-a", NOW),
-  true,
-  "a current owner must be able to work their lead",
-);
-assert.equal(
-  isActionableBy(f({ assignedTo: "rep-a", claimedAt: iso(8 * DAY) }), "rep-a", NOW),
-  false,
-  "an expired claim may stay visible for history but must not remain actionable",
-);
-assert.equal(
-  isActionableBy(f({ assignedTo: "rep-a", stage: "lost", lostAt: iso(91 * DAY) }), "rep-a", NOW),
-  false,
-  "a recycled loss must not remain actionable by its former owner",
-);
-
-// "NOT INTERESTED" IS A FACT ABOUT THE CONVERSATION, NOT ABOUT WHO HOLDS THE
-// RECORD. A first draft checked "nobody holds it" before the lost branch, which
-// made the 90-day rule unreachable for any lost lead with no owner: a business
-// that said no yesterday was immediately callable again, by anyone, forever.
-// (Codex review, 2026-08-23.)
-assert.equal(
-  availability(f({ stage: "lost", lostAt: iso(1 * DAY) }), NOW).available,
-  false,
-  "an UNOWNED lead lost yesterday must not be callable again -- ownership is irrelevant to whether they said no",
-);
-assert.equal(
-  availability(f({ stage: "lost", lostAt: iso((LOST_RECYCLE_DAYS + 1) * DAY) }), NOW).reason,
-  "lost_recycled",
-  "and after 90 days it comes back, still without an owner",
+  availability(f({ stage: "assigned" }), NOW).reason,
+  "unclaimed",
+  "an unowned lead at a working stage is available, which is what lets an admin assign it",
 );
 
 assert.equal(
@@ -125,71 +103,33 @@ assert.equal(
   "held",
   "a fresh claim is honoured",
 );
-
-assert.equal(
-  availability(f({ assignedTo: "rep-a", claimedAt: iso((CLAIM_STALE_DAYS + 1) * DAY) }), NOW).reason,
-  "claim_expired",
-  "a claim with no call logged in 7 days returns to the pool",
-);
-
-for (const stage of ["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"]) {
-  const activeWorkflow = f({
-    assignedTo: "rep-a",
-    stage,
-    claimedAt: iso((CLAIM_STALE_DAYS + 30) * DAY),
-    lastCallAt: null,
-  });
+for (const days of [8, 30, 400]) {
+  const old = f({ assignedTo: "rep-a", stage: "assigned", claimedAt: iso(days * DAY) });
   assert.equal(
-    availability(activeWorkflow, NOW).reason,
-    "in_progress",
-    `${stage} must never recycle through the prospect pool just because claimed_at is old`,
+    availability(old, NOW).reason,
+    "held",
+    `a claim never dialled in ${days} days stays held: no pool remains for it to fall back into`,
   );
+  assert.equal(isInBookOf(old, "rep-a"), true, `and after ${days} days it is still in its owner's book`);
+}
+
+// "NOT INTERESTED" IS A FACT ABOUT THE CONVERSATION, NOT ABOUT WHO HOLDS THE
+// RECORD. An unowned lost lead must not read as available just because nobody
+// holds it: a business that said no yesterday would be callable again by
+// anyone. (Codex review, 2026-08-23.) And with the recycle gone, a loss is
+// permanent whoever holds it.
+for (const days of [1, 91, 400]) {
   assert.equal(
-    isReleasedFromBook(activeWorkflow, NOW),
+    availability(f({ stage: "lost", lostAt: iso(days * DAY) }), NOW).available,
     false,
-    `${stage} must stay visible as active paid/handoff work`,
+    `an UNOWNED lead lost ${days} days ago stays lost`,
   );
   assert.equal(
-    isActionableBy(activeWorkflow, "rep-a", NOW),
-    true,
-    `${stage} must remain actionable by its recorded owner`,
+    availability(f({ assignedTo: "rep-a", stage: "lost", lostAt: iso(days * DAY) }), NOW).available,
+    false,
+    `an owned lead lost ${days} days ago stays lost; nothing recycles it`,
   );
 }
-assert.equal(
-  availability(f({ assignedTo: null, stage: "won", claimedAt: iso(40 * DAY) }), NOW).reason,
-  "in_progress",
-  "an orphaned paid record must fail closed instead of becoming claimable inventory",
-);
-
-// ONE LOGGED CALL RESETS IT. A rep working a lead must not lose it on day 8
-// just because the conversation is slow -- and this is what makes logging pay
-// for itself rather than being a chore.
-assert.equal(
-  availability(
-    f({ assignedTo: "rep-a", claimedAt: iso(30 * DAY), lastCallAt: iso(2 * DAY) }),
-    NOW,
-  ).reason,
-  "in_progress",
-  "a claim with any logged call is not stale, however old the claim is",
-);
-
-assert.equal(
-  availability(f({ assignedTo: "rep-a", stage: "lost", lostAt: iso(10 * DAY) }), NOW).available,
-  false,
-  "a recently lost lead stays out of the pool",
-);
-assert.equal(
-  availability(
-    f({ assignedTo: "rep-a", stage: "lost", lostAt: iso((LOST_RECYCLE_DAYS + 1) * DAY) }),
-    NOW,
-  ).reason,
-  "lost_recycled",
-  "'not interested' 90 days ago is worth another conversation",
-);
-
-// A lost lead has by definition been called, so the never-dialled rule can
-// never free it. Without the lost branch running FIRST it would be locked to
-// its last owner permanently -- the silent drain this feature exists to avoid.
 assert.equal(
   availability(
     f({
@@ -198,94 +138,77 @@ assert.equal(
     }),
     NOW,
   ).available,
-  true,
-  "an old lost lead recycles even though it has a logged call",
+  false,
+  "an old lost lead with a logged call stays lost too",
+);
+
+for (const stage of ["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"]) {
+  const activeWorkflow = f({
+    assignedTo: "rep-a",
+    stage,
+    claimedAt: iso(37 * DAY),
+    lastCallAt: null,
+  });
+  assert.equal(
+    availability(activeWorkflow, NOW).reason,
+    "in_progress",
+    `${stage} is active paid/handoff work, never prospect inventory`,
+  );
+  assert.equal(
+    isInBookOf(activeWorkflow, "rep-a"),
+    true,
+    `${stage} stays in its recorded owner's book`,
+  );
+}
+assert.equal(
+  availability(f({ assignedTo: null, stage: "won", claimedAt: iso(40 * DAY) }), NOW).reason,
+  "in_progress",
+  "an orphaned paid record must fail closed instead of becoming assignable inventory",
+);
+
+// A logged call says the lead is being worked, however old the claim is.
+assert.equal(
+  availability(
+    f({ assignedTo: "rep-a", claimedAt: iso(30 * DAY), lastCallAt: iso(2 * DAY) }),
+    NOW,
+  ).reason,
+  "in_progress",
+  "a claim with any logged call reads as in progress",
 );
 
 // ---------------------------------------------------------------------------
-// 3. Malformed or missing timestamps fail toward the rep, never toward chaos.
+// 3. Malformed or missing timestamps change nothing.
 // ---------------------------------------------------------------------------
 
 assert.equal(
   availability(f({ assignedTo: "rep-a", claimedAt: "not a date" }), NOW).reason,
   "held",
-  "an unparseable claim date must not read as ancient and yank the lead away",
+  "an unparseable claim date must not yank the lead away",
 );
 assert.equal(
   availability(f({ assignedTo: "rep-a", claimedAt: null }), NOW).reason,
   "held",
-  "a missing claim date must not instantly expire the claim",
+  "a missing claim date must not free the lead",
 );
 assert.equal(
   availability(f({ assignedTo: "rep-a", stage: "lost", lostAt: null }), NOW).available,
   false,
-  "a lost lead with no lost_at stamp stays held -- fail closed toward the prospect who said no",
+  "a lost lead with no lost_at stamp stays lost -- fail closed toward the prospect who said no",
 );
 
 // ---------------------------------------------------------------------------
-// 4. A rep's own book, and the released marker.
+// 4. A rep's own book.
 // ---------------------------------------------------------------------------
 
 assert.equal(isInBookOf(f({ assignedTo: "REP-A" }), "rep-a"), true, "ownership compare is case-insensitive");
 assert.equal(isInBookOf(f({ assignedTo: "rep-b" }), "rep-a"), false);
 assert.equal(isInBookOf(base, "rep-a"), false, "an unowned lead is in nobody's book");
 
-// A lapsed lead stays visible to its rep, flagged, rather than vanishing.
-// Silent disappearance is how a rep stops trusting the tool and starts keeping
-// their own spreadsheet.
-const lapsed = f({ assignedTo: "rep-a", claimedAt: iso(9 * DAY) });
-assert.equal(isInBookOf(lapsed, "rep-a"), true, "a lapsed lead is still in the rep's book");
-assert.equal(isReleasedFromBook(lapsed, NOW), true, "and it is marked as released");
-assert.equal(
-  isReleasedFromBook(f({ assignedTo: "rep-a", claimedAt: iso(1 * DAY) }), NOW),
-  false,
-  "a fresh claim is not marked released",
-);
-
 // ---------------------------------------------------------------------------
-// 5. Bulk claim: partial success is reported, never rounded up or refused.
-// ---------------------------------------------------------------------------
-
-{
-  const candidates = [
-    { id: "free-1", facts: base },
-    { id: "taken", facts: f({ assignedTo: "rep-b", claimedAt: iso(1 * DAY) }) },
-    { id: "free-2", facts: base },
-    { id: "suppressed", facts: f({ dnc: true }) },
-  ];
-  const plan = planClaim(candidates, 0, NOW);
-  assert.deepEqual(plan.granted, ["free-1", "free-2"], "only the available leads are granted");
-  assert.deepEqual(
-    plan.refused,
-    [{ id: "taken", reason: "held" }, { id: "suppressed", reason: "do_not_call" }],
-    "every refusal is reported with its reason -- a rep must not be told 4 when they got 2",
-  );
-}
-
-{
-  // At capacity, the cap binds mid-batch and the overflow is named.
-  const candidates = Array.from({ length: 5 }, (_, i) => ({ id: `l${i}`, facts: base }));
-  const plan = planClaim(candidates, MAX_LEADS_PER_REP - 2, NOW);
-  assert.equal(plan.granted.length, 2, "the cap binds mid-batch");
-  assert.equal(plan.refused.length, 3);
-  assert.ok(
-    plan.refused.every((r) => r.reason === "at_capacity"),
-    "overflow is reported as capacity, not as unavailable -- the leads are fine, the rep is full",
-  );
-}
-
-{
-  const plan = planClaim([{ id: "a", facts: base }], MAX_LEADS_PER_REP, NOW);
-  assert.deepEqual(plan.granted, [], "a rep at the cap gets nothing");
-  assert.equal(plan.refused[0].reason, "at_capacity");
-}
-
-// ---------------------------------------------------------------------------
-// 6. Claiming a RECYCLED lead clears the previous owner's history stamps.
+// 5. A new claim clears the previous owner's history stamps.
 //
-// Without this, a lead recycled out of `lost` keeps its old lost_at, so it
-// reads as already-lost to the new rep and recycles again on the old clock --
-// no matter what the new rep does with it.
+// Without this, a reassigned lead keeps the old owner's lost_at and call
+// stamps, so it reads as already lost, or already worked, to the new rep.
 // ---------------------------------------------------------------------------
 
 {
@@ -304,7 +227,7 @@ assert.equal(
   assert.equal(patch.sales_motion, "cold_outbound", "a claim enters only the cold outbound sales engine");
 
   // Prove the round trip: apply the patch and the lead is held by the new rep,
-  // not instantly stale and not still lost.
+  // not still lost.
   const after = factsFrom(patch as Record<string, unknown>);
   assert.equal(availability(after, NOW).reason, "held");
   assert.equal(isInBookOf(after, "rep-b"), true);
@@ -317,7 +240,7 @@ assert.deepEqual(
 );
 
 // ---------------------------------------------------------------------------
-// 7. factsFrom is strict about dnc in BOTH directions.
+// 6. factsFrom is strict about dnc in BOTH directions.
 // ---------------------------------------------------------------------------
 
 assert.equal(factsFrom({ dnc: true }).dnc, true);
@@ -336,31 +259,32 @@ assert.equal(
 );
 
 // ---------------------------------------------------------------------------
-// 8. The rules are computed on read, with no background job to fail silently.
+// 7. No rule reads the clock, and no expiry rule comes back.
 // ---------------------------------------------------------------------------
 
 {
   const src = fs.readFileSync(path.join(process.cwd(), "lib/leads/claim.ts"), "utf8");
-  // availability() takes `now` as an argument rather than calling Date.now()
-  // internally: that is what makes every rule above testable at an exact
-  // instant, and what keeps expiry a pure derivation instead of a scheduled
-  // side effect that can stop running without anyone noticing.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  // Ownership changes only when somebody assigns or releases a lead, never
+  // because time passed. A rule that read the clock would be an expiry, and an
+  // expiry needs a surface to recover the lead from, which no longer exists.
+  assert.doesNotMatch(code, /Date\.now\(\)/, "claim rules must not read the clock");
   assert.doesNotMatch(
-    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
-    /Date\.now\(\)/,
-    "claim rules must take `now` as a parameter, not read the clock -- expiry is derived on read, never swept by a job that can silently stop",
+    code,
+    /claim_expired|lost_recycled|STALE_DAYS|RECYCLE_DAYS/,
+    "no claim expiry or lost recycle may return without a screen to recover the lead from",
   );
 }
 
 // ---------------------------------------------------------------------------
-// 9. Releasing is a swap.
+// 8. Releasing is a swap.
 // ---------------------------------------------------------------------------
 
 {
   const ops = fs.readFileSync(path.join(process.cwd(), "lib/leads/release.ts"), "utf8");
 
   // An unconditional release writes back a snapshot read moments earlier. If
-  // another rep claimed a stale lead in between, that write restores the stale
+  // another rep claimed the lead in between, that write restores the stale
   // data AND clears the new owner -- silently erasing a claim on a lead they
   // are about to call.
   const releaseFn = ops.match(/export async function releaseLeads\([\s\S]*?\n\}/);
@@ -389,16 +313,17 @@ assert.equal(
 }
 
 // ---------------------------------------------------------------------------
-// 10. A lapsed owner keeps read history, not write authority.
+// 9. A held lead stays its owner's to work.
 // ---------------------------------------------------------------------------
 
 {
   const access = fs.readFileSync(path.join(process.cwd(), "lib/leads/rep-lead-access.ts"), "utf8");
-  assert.match(access, /isActionableBy\(facts, args\.userId, now\)/,
-    "the shared OASIS mutation gate must re-check derived claim expiry server-side");
-  assert.match(access, /claim_released/, "a former owner must receive a specific released-claim refusal");
+  assert.doesNotMatch(access, /claim_released/,
+    "a held lead no longer lapses, so the shared OASIS mutation gate has no released-claim refusal");
   assert.match(access, /availability\(facts, now\)\.reason === "do_not_call"/,
-    "do-not-call must be refused explicitly instead of being mislabeled as an expired claim");
+    "do-not-call must still be refused explicitly by the shared mutation gate");
+  const booking = fs.readFileSync(path.join(process.cwd(), "app/api/website-sales/[leadId]/route.ts"), "utf8");
+  assert.doesNotMatch(booking, /claim_released/, "nor does booking a founder meeting refuse a lapsed claim");
 }
 
 console.log("leads-claim ok");

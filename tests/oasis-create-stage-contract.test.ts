@@ -1128,7 +1128,7 @@ async function main() {
   const refusedSingleClear = await postSingleAssign(SINGLE_ELIGIBLE, null);
   assert.equal(refusedSingleClear.status, 422, "single assignment left an active OASIS lead ownerless");
   assert.equal(refusedSingleClear.body.error, "assignee_required");
-  assert.match(refusedSingleClear.body.message!, /Leads.*Release/i);
+  assert.match(refusedSingleClear.body.message!, /need an owner/i);
   assert.equal((await storedLead(SINGLE_ELIGIBLE)).data.assigned_to, OPENER);
 
   const singlePool = await postSingleAssign(SINGLE_POOL, OTHER_REP);
@@ -1137,10 +1137,12 @@ async function main() {
   assert.equal((await storedLead(SINGLE_POOL)).data.assigned_to, null);
   assert.equal((await storedLead(SINGLE_POOL)).data.stage, "researched");
 
+  // NOTHING AGES OUT (2026-10-28): an old, never-dialled claim is a held lead
+  // like any other, and an admin may hand it to someone else. Before the
+  // Prospects pool retired it was refused here and re-claimed from Leads.
   const singleExpired = await postSingleAssign(EXPIRED_CLAIM, OTHER_REP);
-  assert.equal(singleExpired.status, 409, "generic single assignment bypassed the Leads claim path for an expired claim");
-  assert.equal(singleExpired.body.error, "use_web_leads_claim");
-  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER);
+  assert.equal(singleExpired.status, 200, JSON.stringify(singleExpired.body));
+  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OTHER_REP);
 
   await seed.execute(lead(SAME_OWNER, WEBDEV_TENANT_ID, {
     name: "Same owner active lead", state: "ON", stage: "assigned", assigned_to: OTHER_REP,
@@ -1179,7 +1181,7 @@ async function main() {
 
   const guardedBulk = await postBulk({
     op: "assign",
-    ids: [BULK_ELIGIBLE, BULK_WON, BULK_DELIVERY, BULK_POOL, EXPIRED_CLAIM],
+    ids: [BULK_ELIGIBLE, BULK_WON, BULK_DELIVERY, BULK_POOL],
     assigned_to: OTHER_REP,
   });
   assert.equal(guardedBulk.status, 200, guardedBulk.body.message);
@@ -1189,11 +1191,11 @@ async function main() {
       skipped: guardedBulk.body.skipped,
       failed: guardedBulk.body.failed,
     },
-    { updated: 1, skipped: 4, failed: 0 },
+    { updated: 1, skipped: 3, failed: 0 },
     "bulk assignment must update only the eligible pre-handoff lead",
   );
-  assert.equal(guardedBulk.body.claim_required, 2);
-  assert.match(guardedBulk.body.message!, /Leads.*Assign/i);
+  assert.equal(guardedBulk.body.claim_required, 1);
+  assert.match(guardedBulk.body.message!, /parked prospect/i);
   const reassignedEligible = await storedLead(BULK_ELIGIBLE);
   assert.equal(reassignedEligible.data.assigned_to, OTHER_REP);
   assert.equal(reassignedEligible.data.stage, "assigned");
@@ -1205,7 +1207,6 @@ async function main() {
   assert.equal((await storedLead(BULK_WON)).data.assigned_to, OPENER, "Won ownership changed out of band");
   assert.equal((await storedLead(BULK_DELIVERY)).data.assigned_to, OPENER, "delivery ownership changed out of band");
   assert.equal((await storedLead(BULK_POOL)).data.assigned_to, null, "bulk assign partially claimed a pool row");
-  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER, "bulk assign bypassed canonical re-claim for an expired row");
   run("(c)/(d) bulk assignment accepts a sales-roster target and refuses guarded stages");
 
   // ── quick-add: the second create door, same planner on OASIS ────────────
@@ -1223,8 +1224,8 @@ async function main() {
   assert.equal(qaOwner.body.error, "use_pipeline_new");
   assert.match(qaOwner.body.message!, /New lead/i);
   assertReadable(qaOwner.body, "quick-add admin assigned");
-  // Claim facts cannot ride in on a create: a claimed_at in the past would
-  // make a hand-made lead read as an expired claim and release it to the pool.
+  // Claim facts cannot ride in on a create: the claim clock is stamped by
+  // assignment, never typed into a form.
   const claimForge = await postRecord("oasis-ai-cc", {
     name: "Claim Forge Co", state: "ON", stage: "assigned", claimed_at: "2000-01-01T00:00:00.000Z",
   });

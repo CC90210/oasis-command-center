@@ -146,16 +146,15 @@ export function oasisRegionLabel(code: string): string {
  *   sales_motion      the /pipeline filter (lib/oasis-pipeline-query.ts)
  *   sales_program     the oasis-webdev board's program predicate
  *   assigned_to       the server-resolved owner, lowercased: every "is this in my book"
- *                     check (lead-scope, web-leads isInBookOf, the rep
+ *                     check (lead-scope, lib/leads/claim isInBookOf, the rep
  *                     pipeline read) compares a lowercased id
  *   assigned_at, claimed_at, stage_entered_at   now
  *   sourced_by_user_id the rep creator for self-sourced work; null for
  *                     company/admin-created leads
  *   lost_at           now, only for a lead created as lost
  *
- * Manual and pool-created assignments share the same expiry clock. An untouched
- * lead therefore returns to Leads after the normal stale-claim window instead
- * of staying in somebody's Pipeline forever.
+ * claimed_at records when the owner took the lead. Nothing ages out of a book
+ * (lib/leads/claim.ts), so it is history, not a countdown.
  */
 export function oasisLeadCreateStamp(input: {
   stage: string;
@@ -218,11 +217,11 @@ export function oasisForbiddenRoleRefusal(): OasisLeadCreateRefusal {
 }
 
 /**
- * Claim facts a create may not carry. A `claimed_at` in the past, on a lead
- * nobody has dialled, reads as claim_expired and releases a hand-made lead
- * to the pool, which is exactly what the stamp's missing claimed_at exists to
- * prevent; with a territory id the lead also lands in the claimable pool.
- * The claim flow sets both. A create form never does.
+ * Claim facts a create may not carry. The claim clock (`claimed_at`) and a
+ * territory are stamped by assignment, never typed into a create form. (Until
+ * 2026-10-28 a past `claimed_at` also expired a hand-made lead back into the
+ * Prospects pool; nothing ages out now, but the stamp still belongs to the
+ * assignment, not the form.)
  */
 export const OASIS_CREATE_REFUSED_FIELDS: ReadonlySet<string> = new Set([
   "claimed_at",

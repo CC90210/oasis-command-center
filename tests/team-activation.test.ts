@@ -30,11 +30,14 @@ import { canonicalizeTenantMembers, isActiveMember, type MemberRow } from "../li
 // ── 1. Every lifecycle stage has exactly one disposition ─────────────────────
 {
   // CC's choice, 2026-09-24: warm conversations stay on the board, early work
-  // returns to the pool, closed/delivery records keep their owner.
+  // returns to the pool, closed/delivery records keep their owner. The pool
+  // retired with Prospects (2026-10-28), so started cold work (assigned,
+  // attempting contact) stays on the board too; only an unworked researched
+  // prospect is released, and it stays parked in the records.
   const expected: Record<string, string> = {
     researched: "pool",
-    assigned: "pool",
-    attempting_contact: "pool",
+    assigned: "board",
+    attempting_contact: "board",
     connected: "board",
     qualified: "board",
     founder_meeting_booked: "board",
@@ -65,7 +68,7 @@ import { canonicalizeTenantMembers, isActiveMember, type MemberRow } from "../li
     { id: "d", data: null },
     { id: "e", data: { stage: "founder_meeting_booked" } },
   ]);
-  assert.deepEqual(plan, { pool: ["a", "d"], board: ["b", "e"], keep: ["c"] });
+  assert.deepEqual(plan, { pool: ["d"], board: ["a", "b", "e"], keep: ["c"] });
 }
 
 // ── 3. A warm lead left on the board stays VISIBLE on the board ─────────────
@@ -318,7 +321,7 @@ async function personLevelDeactivation(): Promise<void> {
   await profile({ id: "p-dup-b", auth: "auth-b", email: " dup@oasisai.work " });
   await login("auth-a");
   await login("auth-b");
-  await lead("lead-a-cold", "auth-a", "assigned");
+  await lead("lead-a-cold", "auth-a", "researched");
   await lead("lead-b-warm", "auth-b", "qualified");
   await lead("lead-b-won", "auth-b", "won");
   await db.executeMultiple(`
@@ -399,7 +402,7 @@ async function personLevelDeactivation(): Promise<void> {
     assert.equal(state.bannedUntil, DEACTIVATION_BAN_UNTIL, `${id} must be banned`);
     assert.equal(state.sessionVersion, 1, `${id}'s open sessions must be killed`);
   }
-  assert.equal(await leadOwner("lead-a-cold"), null, "login A's cold lead returns to the pool");
+  assert.equal(await leadOwner("lead-a-cold"), null, "login A's unworked prospect loses its owner");
   assert.equal(await leadOwner("lead-b-warm"), null, "login B's warm lead is unassigned on the board");
   assert.equal(await leadOwner("lead-b-won"), "auth-b", "a won lead keeps its owner for history");
   const liveAfter = (await getTenantMembers(WEBDEV_TENANT_ID)).map((m) => m.id);

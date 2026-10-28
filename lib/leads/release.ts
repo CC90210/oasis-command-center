@@ -1,10 +1,10 @@
 /**
- * lib/leads/release.ts — return a lead to the unassigned pool.
+ * lib/leads/release.ts — clear a lead's owner.
  *
  * Moved out of lib/web-leads/claim-ops.ts when the Prospects surface was
  * retired (2026-10-28). Claiming from the pool went with Prospects; releasing
- * stayed, because deactivating a rep (lib/team-activation.ts) still hands their
- * open prospecting leads back. The ownership rules are the pure ones in
+ * stayed, because deactivating a rep (lib/team-activation.ts) still clears the
+ * owner of their unworked prospects. The ownership rules are the pure ones in
  * ./claim.
  *
  * EVERY STATEMENT PINS THE TENANT. libSQL has no row-level security, so
@@ -16,7 +16,7 @@ import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { factsFrom, isInBookOf, releasePatch, ACTIVE_PROSPECT_CLAIM_STAGES } from "./claim";
 
 /**
- * Return leads to the pool.
+ * Clear the owner of these leads.
  *
  * A rep may release only their OWN leads; an admin may release anyone's. The
  * check is here rather than in the route because it is a property of the

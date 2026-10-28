@@ -44,7 +44,6 @@ import {
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import {
   OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
-  isReleasedOasisPipelineRow,
   roleMayOperateOasisSalesLead,
 } from "@/lib/oasis-sales-pipeline-policy";
 import {
@@ -207,7 +206,7 @@ export async function POST(
       {
         ok: false,
         error: "assignee_required",
-        message: "OASIS leads need an owner: CC or an active sales rep. Use Leads and its Release action to return work to the shared pool.",
+        message: "OASIS leads need an owner: CC or an active sales rep.",
       },
       { status: 422 },
     );
@@ -228,20 +227,21 @@ export async function POST(
       { status: 400 },
     );
   }
+  // The parked prospect pool (researched / unassigned rows) retired with the
+  // Prospects surface on 2026-10-28 and has no screen. An unowned lead at a
+  // working stage IS assignable: an admin hands it to someone here, and
+  // assignLifecycleOwner stamps the owner, the cycle and the claim clock
+  // together (a rep is refused below by assertMayWorkLead).
   if (
     isOasisSalesLead &&
     !isWarmInboundLead &&
-    (!currentOwner ||
-      !currentStage ||
-      currentStage === "unassigned" ||
-      currentStage === "researched" ||
-      isReleasedOasisPipelineRow(record))
+    (!currentStage || currentStage === "unassigned" || currentStage === "researched")
   ) {
     return NextResponse.json(
       {
         ok: false,
         error: "use_web_leads_claim",
-        message: "Assign untouched prospects from Leads so ownership, stage, and commission provenance are recorded together.",
+        message: "This lead is in the parked prospect pool, which retired with the Prospects page. It stays in the records, untouched.",
       },
       { status: 409 },
     );

@@ -4,16 +4,21 @@
  * CC retired the OASIS sales team on 2026-09-24 and chose, for the leads those
  * reps held: keep the warm ones on the board for the founders, send the cold
  * ones back to the prospect pool, and leave closed and delivery records with
- * the person who closed them. That choice is THE rule here, so the one-time
- * retirement and every later Active/Inactive toggle in Settings behave the same.
+ * the person who closed them. The prospect pool retired with the Prospects page
+ * on 2026-10-28, so cold work the rep had started (assigned, attempting
+ * contact) now stays on the board like warm work: released into a pool with no
+ * screen, it would vanish. The one-time retirement and every later
+ * Active/Inactive toggle in Settings behave the same.
  *
- *   pool   — researched, assigned, attempting_contact (or no stage): nobody has
- *            a conversation going yet, so the lead goes back to Leads for anyone
- *            to claim (web-leads releaseLeads, the existing tested path).
- *   board  — connected, qualified, founder_meeting_booked, demo_completed,
- *            proposal_sent: a live conversation. It stays on the pipeline board,
- *            unassigned and stamped into the current cycle so the cycle
- *            boundary keeps showing it, for CC to pick up.
+ *   pool   — researched (or no stage): an unworked prospect. The owner is
+ *            cleared (lib/leads/release.ts releaseLeads, the existing tested
+ *            path) and it stays in the records, parked, like every other
+ *            researched prospect.
+ *   board  — assigned, attempting_contact, connected, qualified,
+ *            founder_meeting_booked, demo_completed, proposal_sent: open work.
+ *            It stays on the pipeline board, unassigned and stamped into the
+ *            current cycle so the cycle boundary keeps showing it, for CC to
+ *            pick up.
  *   keep   — won, lost, onboarding, in_build, client_review, launched: the
  *            owner is history (and commission attribution), not live work.
  *
@@ -27,11 +32,11 @@ export const DEACTIVATION_BAN_UNTIL = "9999-12-31T23:59:59.000Z";
 
 export const POOL_ON_DEACTIVATION: ReadonlySet<string> = new Set([
   "researched",
-  "assigned",
-  "attempting_contact",
 ]);
 
 export const BOARD_ON_DEACTIVATION: ReadonlySet<string> = new Set([
+  "assigned",
+  "attempting_contact",
   "connected",
   "qualified",
   "founder_meeting_booked",
@@ -60,7 +65,7 @@ export function planLeadDisposition(
 }
 
 /**
- * The `data` patch for a warm lead that stays on the board without an owner.
+ * The `data` patch for an open lead that stays on the board without an owner.
  *
  * `pipeline_cycle` is set explicitly because the board shows only rows inside
  * the current cycle (lib/pipeline-cycle.ts): without it a lead assigned before

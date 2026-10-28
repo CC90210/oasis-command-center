@@ -66,12 +66,11 @@ async function main() {
     leadId: "lead-expired",
     accessMode: "owned_oasis_sales",
   });
-  assert.deepEqual(expiredAccess, {
-    ok: false,
-    status: 409,
-    error: "claim_released",
-    message: "This lead's claim lapsed and it went back to the unassigned pool. Ask an admin to assign it to you before working it.",
-  });
+  assert.deepEqual(
+    expiredAccess,
+    { ok: true },
+    "an old, never-dialled claim is still its owner's to work: nothing ages out (2026-10-28)",
+  );
 
   await insertLead("lead-dnc");
   await db.execute({

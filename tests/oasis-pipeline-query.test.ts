@@ -433,13 +433,8 @@ const viewerPage = await listOasisPipelineWindow(
 assert.equal(viewerReads, 1, "one owned-or-collaborating read replaces one query per stage");
 assert.deepEqual(
   viewerPage.rows.map((row) => row.id),
-  ["owned-lost", "collaborating-launched"],
-  "a rep retains active history and collaborator deals without also seeing an expired claim that returned to Leads",
-);
-assert.equal(
-  viewerPage.rows.some((row) => row.id === "expired-assigned"),
-  false,
-  "an expired claim cannot appear in both the Leads pool and the former rep's Pipeline",
+  ["expired-assigned", "owned-lost", "collaborating-launched"],
+  "a rep keeps an old untouched claim, their history and collaborator deals: nothing ages out of a book (2026-10-28)",
 );
 assert.equal(viewerPage.stageCounts.lost, 1);
 assert.equal(viewerPage.stageCounts.launched, 1);
@@ -544,10 +539,10 @@ const teamPage = await listOasisPipelineWindow(
   },
   { list: teamList },
 );
-assert.equal(teamPage.total, 159, "manager count excludes a released claim now visible in Leads");
-assert.equal(teamPage.rows.length, 59, "the second global page is based on the active filtered total");
+assert.equal(teamPage.total, 160, "an old, never-dialled claim stays in the manager count: nothing ages out (2026-10-28)");
+assert.equal(teamPage.rows.length, 60, "the second global page is based on the filtered total");
 assert.equal(teamPage.shownFrom, 101);
-assert.equal(teamPage.shownTo, 159);
+assert.equal(teamPage.shownTo, 160);
 assert.deepEqual(
   teamCalls.map((call) => call.whereIn?.assigned_to),
   [["rep-1", "rep-2"]],
@@ -594,8 +589,12 @@ const adminPage = await listOasisPipelineWindow(
   },
 );
 assert.equal(adminReads, 1, "a bounded admin board is read once, not once per lifecycle stage");
-assert.deepEqual(adminPage.stageCounts, { assigned: 1, lost: 2 });
-assert.equal(adminPage.rows.some((row) => row.id === "admin-expired"), false);
+assert.deepEqual(adminPage.stageCounts, { assigned: 2, lost: 2 });
+assert.equal(
+  adminPage.rows.some((row) => row.id === "admin-expired"),
+  true,
+  "an old, never-dialled claim stays on the admin board: nothing ages out (2026-10-28)",
+);
 
 let adminRepReads = 0;
 const adminRepPage = await listOasisPipelineWindow(
@@ -621,9 +620,9 @@ const adminRepPage = await listOasisPipelineWindow(
   },
 );
 assert.equal(adminRepReads, 1, "admin rep-filter scope must use one bounded read");
-assert.deepEqual(adminRepPage.rows.map((row) => row.id), ["rep-filter-active"]);
-assert.deepEqual(adminRepPage.stageCounts, { assigned: 1 });
-assert.equal(adminRepPage.total, 1, "admin rep-filter counts included a released claim");
+assert.deepEqual(adminRepPage.rows.map((row) => row.id), ["rep-filter-expired", "rep-filter-active"]);
+assert.deepEqual(adminRepPage.stageCounts, { assigned: 2 });
+assert.equal(adminRepPage.total, 2, "the admin rep filter counts an old claim with the rest of that rep's book");
 
 const conflicting = await listOasisPipelineWindow(
   {
