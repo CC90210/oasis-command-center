@@ -20,7 +20,7 @@ import { oasisBoardProgramFilter, oasisBoardStages } from "@/lib/oasis-lead-crea
 import { stagesForOasisWarmInboundRole } from "@/lib/oasis-sales-pipeline-policy";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
-import { openAuditsForLeads, type OpenAudit } from "@/lib/ai-audit/pipeline-link";
+import { allOpenAudits, type OpenAudit } from "@/lib/ai-audit/pipeline-link";
 import type { PipelineQueue } from "@/lib/ai-audit/pipeline-view";
 
 export type PipelineDeal = {
@@ -36,10 +36,10 @@ export type PipelineDeal = {
 export type PipelineSnapshot = {
   /** Exact deals per stage in each queue, as the Pipeline counts them for its owner. */
   counts: Record<PipelineQueue, Record<string, number>>;
-  /** Stages with more deals than the read returns rows for (the Pipeline's own overview limit). */
-  truncated: Record<PipelineQueue, string[]>;
-  /** The deals the read returned, each with its open audit if it has one. */
+  /** Every deal the Pipeline counts, both queues, each with its open audit if it has one. */
   deals: PipelineDeal[];
+  /** Open audits whose lead is on neither queue (no queue, outside the cold board's cycle, released). */
+  offPipeline: OpenAudit[];
 };
 
 function text(v: unknown): string | null {
@@ -63,6 +63,7 @@ export async function ownerPipelineSnapshot(db: Client, tenantId: string): Promi
       includeUnassigned: false,
       cycle: CURRENT_OASIS_PIPELINE_CYCLE,
       query: null,
+      everyRow: true,
     }),
     listOasisPipelineWindow({
       tenantId,
@@ -73,17 +74,18 @@ export async function ownerPipelineSnapshot(db: Client, tenantId: string): Promi
       salesMotion: OASIS_INBOUND_WARM_MOTION,
       includeUnassigned: true,
       query: null,
+      everyRow: true,
     }),
   ]);
   const rows = [
     ...cold.rows.map((r) => ({ r, queue: "cold" as const })),
     ...warm.rows.map((r) => ({ r, queue: "warm" as const })),
   ];
-  const audits = await openAuditsForLeads(db, tenantId, rows.map(({ r }) => r.id));
-  const truncatedOf = (w: typeof cold) => Object.entries(w.stageCounts).filter(([stage, n]) => n > w.rows.filter((r) => r.data.stage === stage).length).map(([stage]) => stage);
+  // Every open audit, read on its own: never capped by the board's table, never narrowed by Include closed.
+  const audits = await allOpenAudits(db, tenantId);
+  const onPipeline = new Set(rows.map(({ r }) => r.id));
   return {
     counts: { cold: cold.stageCounts, warm: warm.stageCounts },
-    truncated: { cold: truncatedOf(cold), warm: truncatedOf(warm) },
     deals: rows.map(({ r, queue }) => ({
       id: r.id,
       queue,
@@ -93,5 +95,6 @@ export async function ownerPipelineSnapshot(db: Client, tenantId: string): Promi
       email: text(r.data.email),
       audit: audits.get(r.id) ?? null,
     })),
+    offPipeline: [...audits.entries()].filter(([leadId]) => !onPipeline.has(leadId)).map(([, a]) => a),
   };
 }

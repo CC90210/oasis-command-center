@@ -72,7 +72,7 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
   let withoutAudit: PipelineDeal[] = [];
   try {
     const snapshot = await ownerPipelineSnapshot(session.db, session.tenantId);
-    columns = boardColumns({ ...snapshot, audits: rows.filter((r) => !r.closed) });
+    columns = boardColumns(snapshot);
     withoutAudit = snapshot.deals.filter((d) => !d.audit && AUDIT_STAGES.has(d.stage));
   } catch (err) {
     console.error("[ai-audits] the Pipeline's deals could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));

@@ -170,6 +170,7 @@ function scopedWindowFromRows(input: {
   stageKeys: readonly string[];
   activeStage: string | null;
   requestedPage: number;
+  everyRow?: boolean;
   salesProgram?: string | null;
   salesMotion?: string | null;
   query?: string | null;
@@ -203,7 +204,9 @@ function scopedWindowFromRows(input: {
     ? Math.max(1, Math.ceil(activeTotal / pageSize))
     : 1;
   const page = Math.min(input.requestedPage, lastPage);
-  const visibleRows = input.activeStage
+  const visibleRows = input.everyRow
+    ? input.stageKeys.flatMap((stage) => byStage.get(stage) || [])
+    : input.activeStage
     ? (byStage.get(input.activeStage) || []).slice((page - 1) * pageSize, page * pageSize)
     : input.stageKeys.flatMap((stage) =>
         (byStage.get(stage) || []).slice(0, OASIS_PIPELINE_OVERVIEW_LIMIT),
@@ -263,6 +266,12 @@ export async function listOasisPipelineWindow(
     /** Optional reversible board boundary. Historical rows remain stored. */
     cycle?: PipelineCycleBoundary;
     query?: string | null;
+    /**
+     * Return every row the board counts, not one page or the overview slice:
+     * for a reader that must see the whole filtered set (the AI audits board,
+     * lib/ai-audit/pipeline-deals.ts). Counts and filters are unchanged.
+     */
+    everyRow?: boolean;
   },
   deps: { list: RecordLister; listForViewer?: ViewerRecordLister } = {
     list: listRecords,
@@ -340,6 +349,7 @@ export async function listOasisPipelineWindow(
       salesProgram: input.salesProgram,
       salesMotion: input.salesMotion,
       query: input.query,
+      everyRow: input.everyRow,
     });
   }
   if (viewerUserId && assignedTo !== viewerUserId) {
@@ -388,6 +398,7 @@ export async function listOasisPipelineWindow(
       salesProgram: input.salesProgram,
       salesMotion: input.salesMotion,
       query: input.query,
+      everyRow: input.everyRow,
     });
   }
 
@@ -432,6 +443,7 @@ export async function listOasisPipelineWindow(
       salesProgram: input.salesProgram,
       salesMotion: input.salesMotion,
       query: input.query,
+      everyRow: input.everyRow,
     });
   }
 

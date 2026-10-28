@@ -61,6 +61,15 @@ export async function everDelivered(db: Client, tenantId: string, engagementIds:
 
 export type OpenAudit = { engagementId: string; stage: AiAuditStage };
 
+/** Every open audit in the workspace, by lead (one per lead at most: the one-open-per-lead index). Not capped: open audits are bounded by the leads. */
+export async function allOpenAudits(db: Client, tenantId: string): Promise<Map<string, OpenAudit>> {
+  const rs = await db.execute({
+    sql: "SELECT id, lead_id, stage FROM ai_audit_engagements WHERE tenant_id = ? AND closed_at IS NULL",
+    args: [requireTenant(tenantId)],
+  });
+  return new Map(rs.rows.map((r) => [String(r.lead_id), { engagementId: String(r.id), stage: String(r.stage) as AiAuditStage }]));
+}
+
 /** The open audit on each of these leads (one per lead at most: the one-open-per-lead index). */
 export async function openAuditsForLeads(db: Client, tenantId: string, leadIds: readonly string[]): Promise<Map<string, OpenAudit>> {
   const t = requireTenant(tenantId);

@@ -74,19 +74,16 @@ export type BoardColumn = PipelineColumn & {
 
 /**
  * The board's columns. Counts are the Pipeline's (`counts`, per queue and
- * stage). An audit counts inside its column when its lead is one of those
- * deals: one the read returned, or one in a stage the read had more deals for
- * than rows. An audit whose lead is on neither queue (no queue, or outside the
- * cold board's cycle) gets a "Not on the Pipeline" column of its own, so it is
- * never counted as a Pipeline deal.
+ * stage); `deals` is every deal those counts are made of, with its open audit,
+ * so the steps and "No audit yet" inside each column are exact. Open audits
+ * whose lead is on neither queue get a "Not on the Pipeline" column of their
+ * own, so they are never counted as Pipeline deals.
  */
 export function boardColumns(input: {
   counts: Record<PipelineQueue, Record<string, number>>;
-  truncated: Record<PipelineQueue, readonly string[]>;
-  deals: ReadonlyArray<{ id: string }>;
-  audits: ReadonlyArray<{ stage: AiAuditStage; lead_id: string; pipeline_stage: string | null; queue_key: PipelineQueue | null }>;
+  deals: ReadonlyArray<{ stage: string; audit: { stage: AiAuditStage } | null }>;
+  offPipeline: ReadonlyArray<{ stage: AiAuditStage }>;
 }): BoardColumn[] {
-  const dealIds = new Set(input.deals.map((d) => d.id));
   const byQueue = (q: PipelineQueue) => {
     const m = new Map<string, number>();
     for (const [stage, n] of Object.entries(input.counts[q])) {
@@ -98,23 +95,24 @@ export function boardColumns(input: {
   const warm = byQueue("warm");
   const cold = byQueue("cold");
   const steps = new Map<string, Map<AiAuditStage, number>>();
-  const onBoard = new Map<string, number>();
-  for (const a of input.audits) {
-    const truncated = !!a.queue_key && !!a.pipeline_stage && input.truncated[a.queue_key].includes(a.pipeline_stage);
-    const on = dealIds.has(a.lead_id) || truncated;
-    const key = on ? pipelineColumnKey(a.pipeline_stage) : NOT_ON_PIPELINE;
-    if (on) onBoard.set(key, (onBoard.get(key) ?? 0) + 1);
+  const unaudited = new Map<string, number>();
+  const add = (key: string, stage: AiAuditStage) => {
     const m = steps.get(key) ?? new Map<AiAuditStage, number>();
-    m.set(a.stage, (m.get(a.stage) ?? 0) + 1);
+    m.set(stage, (m.get(stage) ?? 0) + 1);
     steps.set(key, m);
+  };
+  for (const d of input.deals) {
+    const key = pipelineColumnKey(d.stage);
+    if (d.audit) add(key, d.audit.stage);
+    else unaudited.set(key, (unaudited.get(key) ?? 0) + 1);
   }
-  const offBoard = [...(steps.get(NOT_ON_PIPELINE)?.values() ?? [])].reduce((n, c) => n + c, 0);
+  for (const a of input.offPipeline) add(NOT_ON_PIPELINE, a.stage);
   return ORDER.map((key) => {
-    const w = warm.get(key) ?? 0;
-    const c = cold.get(key) ?? 0;
-    const count = key === NOT_ON_PIPELINE ? offBoard : w + c;
+    const off = key === NOT_ON_PIPELINE;
+    const w = off ? 0 : (warm.get(key) ?? 0);
+    const c = off ? 0 : (cold.get(key) ?? 0);
     const st = steps.get(key) ?? new Map<AiAuditStage, number>();
     const list = AI_AUDIT_STAGES.filter((s) => st.has(s)).map((s) => ({ stage: s, label: AI_AUDIT_STAGE_LABELS[s], count: st.get(s)! }));
-    return { key, ...pipelineColumnMeta(key), count, warm: key === NOT_ON_PIPELINE ? 0 : w, cold: key === NOT_ON_PIPELINE ? 0 : c, noAudit: key === NOT_ON_PIPELINE || key === BEFORE_MEETING ? 0 : Math.max(0, count - (onBoard.get(key) ?? 0)), steps: list };
+    return { key, ...pipelineColumnMeta(key), count: off ? input.offPipeline.length : w + c, warm: w, cold: c, noAudit: off || key === BEFORE_MEETING ? 0 : (unaudited.get(key) ?? 0), steps: list };
   }).filter((col) => ALWAYS.includes(col.key) || col.count > 0);
 }

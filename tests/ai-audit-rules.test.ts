@@ -196,8 +196,13 @@ async function main() {
       warm: { researched: 9, attempting_contact: 1, founder_meeting_booked: 9, proposal_sent: 1, lost: 0 },
       cold: { qualified: 3, founder_meeting_booked: 4 },
     };
-    const deals = [{ id: "fixture" }, ...Array.from({ length: 13 }, (_, i) => ({ id: `fm${i}` }))];
-    const cols = pv.boardColumns({ counts, truncated: { warm: [], cold: [] }, deals, audits: [{ stage: "payment_pending", lead_id: "fixture", pipeline_stage: "proposal_sent", queue_key: "warm" }] });
+    const deal = (stage: string, audit: string | null = null) => ({ stage, audit: audit ? { stage: audit as never } : null });
+    const deals = [
+      ...Array.from({ length: 10 }, () => deal("researched")).slice(0, 9), deal("attempting_contact"), ...Array.from({ length: 3 }, () => deal("qualified")),
+      ...Array.from({ length: 13 }, () => deal("founder_meeting_booked")),
+      deal("proposal_sent", "payment_pending"),
+    ];
+    const cols = pv.boardColumns({ counts, deals, offPipeline: [] });
     assert.deepEqual(cols.map((c) => c.label), ["Before the meeting", "Founder Meeting", "Meeting Held", "Proposal Sent", "Won", "Onboarding", "In Build"]);
     const meeting = cols.find((c) => c.key === "founder_meeting_booked")!;
     assert.deepEqual([meeting.count, meeting.warm, meeting.cold, meeting.noAudit], [13, 9, 4, 13], "every founder meeting counts, with or without an audit");
@@ -207,19 +212,17 @@ async function main() {
     assert.equal(sent.bg, OASIS_LEAD_STAGES.find((st) => st.key === "proposal_sent")!.bg, "the Pipeline's colour");
     const before = cols.find((c) => c.key === pv.BEFORE_MEETING)!;
     assert.deepEqual([before.count, before.warm, before.cold, before.noAudit], [13, 10, 3, 0], "Researched to Qualified, both queues; no audit is expected before the meeting");
-    // An audit whose lead is on neither queue is never counted as a Pipeline deal; a truncated stage still counts its audits.
-    const odd = pv.boardColumns({
-      counts: { warm: { founder_meeting_booked: 50 }, cold: {} },
-      truncated: { warm: ["founder_meeting_booked"], cold: [] },
-      deals: [],
-      audits: [
-        { stage: "call_scheduled", lead_id: "beyond-the-rows", pipeline_stage: "founder_meeting_booked", queue_key: "warm" },
-        { stage: "generating", lead_id: "no-queue", pipeline_stage: "demo_completed", queue_key: null },
-      ],
+    // Codex review of #763: steps and "No audit yet" come from every counted deal (41 meetings, 40 audited: 1 without),
+    // and an audit whose lead is on neither queue is its own column, never a Pipeline deal.
+    const many = pv.boardColumns({
+      counts: { warm: { founder_meeting_booked: 41 }, cold: {} },
+      deals: [...Array.from({ length: 40 }, () => deal("founder_meeting_booked", "call_scheduled")), deal("founder_meeting_booked")],
+      offPipeline: [{ stage: "generating" }],
     });
-    assert.deepEqual([odd.find((c) => c.key === "founder_meeting_booked")!.noAudit, odd.find((c) => c.key === "demo_completed")!.count], [49, 0]);
-    const off = odd.find((c) => c.key === pv.NOT_ON_PIPELINE)!;
-    assert.deepEqual([off.label, off.count, off.noAudit], ["Not on the Pipeline", 1, 0]);
+    const fm = many.find((c) => c.key === "founder_meeting_booked")!;
+    assert.deepEqual([fm.count, fm.noAudit, fm.steps[0].count], [41, 1, 40]);
+    const off = many.find((c) => c.key === pv.NOT_ON_PIPELINE)!;
+    assert.deepEqual([off.label, off.count, off.noAudit, off.steps[0].label], ["Not on the Pipeline", 1, 0, "Research and writing"]);
     assert.equal(pv.queueKey("inbound_warm"), "warm");
     assert.equal(pv.queueKey("cold_outbound"), "cold");
     assert.equal(pv.queueKey(null), null);

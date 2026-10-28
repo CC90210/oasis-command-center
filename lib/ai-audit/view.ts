@@ -79,8 +79,6 @@ export type BoardRow = {
   payment_status: Engagement["payment_status"];
   next_action: string;
   is_fixture: boolean;
-  /** Declined, cancelled or an active client: shown with Include closed, never counted on the Pipeline columns. */
-  closed: boolean;
   updated_at: string;
 };
 
@@ -102,7 +100,6 @@ export function boardRow(e: Engagement, lead: LeadOnPipeline | null): BoardRow {
     payment_status: e.payment_status,
     next_action: nextActionFor(e),
     is_fixture: e.is_fixture,
-    closed: !!e.closed_at,
     updated_at: e.updated_at,
   };
 }
