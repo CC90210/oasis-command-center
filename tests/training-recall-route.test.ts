@@ -48,6 +48,8 @@ const ROUTE = "app/api/admin/agent-training/[[...path]]/route.ts";
 // happy path run through the real route with no login, database or model. Each records what it got.
 let session: unknown = { ok: false, status: 401, error: "unauthorized" };
 let picked: string[] = [];
+let prepareResult: unknown = null;
+let modelResult: unknown = null;
 const turnRequests: Array<Record<string, unknown>> = [];
 const modelMessages: Array<Array<{ role: string; content: string }>> = [];
 stubModule(join(ROOT, "lib/os/runs/session.ts"), { resolveRunSession: async () => session });
@@ -61,11 +63,11 @@ stubModule(join(ROOT, "components/os/department/config.ts"), {
 stubModule(join(ROOT, "lib/os/department-agent.ts"), {
   prepareAgentTurn: async (request: Record<string, unknown>) => {
     turnRequests.push(request);
-    return { ok: true, turn: { trainingNoteIds: picked, engine: { runsOn: "the workspace AI account" } } };
+    return prepareResult ?? { ok: true, turn: { trainingNoteIds: picked, engine: { runsOn: "the workspace AI account" } } };
   },
   runAgentTurnToText: async (_turn: unknown, messages: Array<{ role: string; content: string }>) => {
     modelMessages.push(messages);
-    return { ok: true, text: "Open with the problem, then the proof." };
+    return modelResult ?? { ok: true, text: "Open with the problem, then the proof." };
   },
 });
 const operatorSession = (over: Record<string, unknown> = {}) => ({
@@ -214,6 +216,32 @@ async function main(): Promise<void> {
     const res = await route.POST(req, ctx);
     assert.equal(res.status, 200);
     assert.equal(((await res.json()) as { included: boolean }).included, false);
+  });
+
+  await check("a failed turn says what to change when its code is known, and only an unknown one says try again", async () => {
+    session = operatorSession();
+    picked = ["n1"];
+    const ask = async () => {
+      const { req, ctx } = post(["recall"], good, same);
+      const res = await route.POST(req, ctx);
+      return { status: res.status, json: (await res.json()) as { error: string; code: string; message: string; fix?: { href: string } } };
+    };
+    prepareResult = { ok: false, status: 402, error: "ai_budget_exhausted" };
+    let got = await ask();
+    assert.equal(got.status, 402);
+    assert.equal(got.json.code, "ai_budget_exhausted");
+    assert.match(got.json.message, /This month's AI budget is used/);
+    prepareResult = null;
+    modelResult = { ok: false, code: "provider_401" };
+    got = await ask();
+    assert.equal(got.status, 502);
+    assert.match(got.json.message, /Your AI account refused the request/);
+    assert.ok(got.json.fix?.href.startsWith("/"), "a fixable failure links to where it is fixed");
+    modelResult = { ok: false, code: "something_new" };
+    got = await ask();
+    assert.match(got.json.message, /did not answer this time/);
+    assert.equal(got.json.fix, undefined);
+    modelResult = null;
   });
 
   await check("the gates and the turn, as the source writes them", () => {

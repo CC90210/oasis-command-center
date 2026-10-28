@@ -62,6 +62,25 @@ function refuse(status: number, error: string, extra: Record<string, unknown> = 
   return reply(status, { ok: false, error, message: MESSAGES[error] ?? MESSAGES.turn_failed, ...extra });
 }
 
+/**
+ * A turn that failed, in the channel's own words when its code has them (a spent monthly budget, a key
+ * the provider refused, settings that could not be read), so the operator learns what to change, with
+ * the link to change it; retrying fixes none of those. The generic retry sentence is kept for a code no
+ * copy knows (Codex review, 2026-10-28).
+ */
+function turnFailure(status: number, code: string, extra: Record<string, unknown> = {}): NextResponse {
+  const copy = failureCopy(code, { canManageAi: true });
+  const known = copy.sentence !== failureCopy(null, { canManageAi: true }).sentence;
+  return reply(status, {
+    ok: false,
+    error: "turn_failed",
+    code,
+    message: known ? copy.sentence : MESSAGES.turn_failed,
+    ...(known && copy.fix ? { fix: copy.fix } : {}),
+    ...extra,
+  });
+}
+
 /** resolveRunSession's refusals that are about the workspace (its account or its settings), not a computer. */
 const WORKSPACE_REFUSALS: ReadonlySet<string> = new Set([
   "unknown_department",
@@ -157,12 +176,13 @@ async function recall(req: Request): Promise<NextResponse> {
   if (!prepared.ok) {
     // The two refusals prepareAgentTurn gives an engine that answers only on a paired computer.
     const computerOnly = prepared.error === "computer_choice_needs_pairing" || prepared.error === "engine_dispatch_unavailable";
-    return refuse(computerOnly ? 409 : prepared.status, computerOnly ? "computer_only" : "turn_failed", { code: prepared.error });
+    if (computerOnly) return refuse(409, "computer_only", { code: prepared.error });
+    return turnFailure(prepared.status, prepared.error);
   }
   const turn = prepared.turn;
   const included = turn.trainingNoteIds.includes(noteId);
   const answer = await runAgentTurnToText(turn, [{ role: "user", content: question }], RECALL_MAX_TOKENS);
-  if (!answer.ok) return refuse(502, "turn_failed", { code: answer.code, included });
+  if (!answer.ok) return turnFailure(502, answer.code, { included });
   return reply(200, {
     ok: true,
     included,

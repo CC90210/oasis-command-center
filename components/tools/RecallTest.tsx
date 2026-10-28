@@ -16,7 +16,7 @@ type Outcome =
   | { kind: "idle" }
   | { kind: "running" }
   | { kind: "done"; included: boolean; answer: string; runsOn: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; fix: { href: string; label: string } | null };
 
 export function RecallTest({
   noteId,
@@ -46,15 +46,24 @@ export function RecallTest({
       });
       const body = (await res.json().catch(() => null)) as
         | { ok: true; included: boolean; answer: string; runsOn: string }
-        | { ok: false; message?: string }
+        | { ok: false; message?: string; fix?: { href?: unknown; label?: unknown } }
         | null;
       if (body && body.ok) {
         setOutcome({ kind: "done", included: body.included, answer: body.answer, runsOn: body.runsOn });
       } else {
-        setOutcome({ kind: "error", message: body?.message || "The agent did not answer this time. Try again." });
+        const fix = body?.fix;
+        setOutcome({
+          kind: "error",
+          message: body?.message || "The agent did not answer this time. Try again.",
+          // Only a same-site path: the link comes from the server's own failure copy.
+          fix:
+            fix && typeof fix.href === "string" && fix.href.startsWith("/") && !fix.href.startsWith("//") && typeof fix.label === "string"
+              ? { href: fix.href, label: fix.label }
+              : null,
+        });
       }
     } catch {
-      setOutcome({ kind: "error", message: "Couldn't reach the server. Check your connection and try again." });
+      setOutcome({ kind: "error", message: "Couldn't reach the server. Check your connection and try again.", fix: null });
     }
   }
 
@@ -94,6 +103,14 @@ export function RecallTest({
         {outcome.kind === "error" && (
           <p className="text-xs text-status-warm" aria-live="polite">
             {outcome.message}
+            {outcome.fix && (
+              <>
+                {" "}
+                <a href={outcome.fix.href} className="font-medium text-accent hover:underline">
+                  {outcome.fix.label}
+                </a>
+              </>
+            )}
           </p>
         )}
       </form>

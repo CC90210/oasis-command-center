@@ -110,6 +110,9 @@ export async function startAutomationTurn(input: StartAutomationTurnInput): Prom
     apiAccountSnapshot: session.apiAccountSnapshot,
     fallbackFrom: null,
     failClosedWithoutComputerDispatch: true,
+    // The notes this agent reads are picked by the task it was given
+    // (lib/os/training-notes.ts), the same as in its web channel.
+    trainingQuery: task,
   });
   if (!prepared.ok) {
     return {

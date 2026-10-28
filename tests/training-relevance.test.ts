@@ -181,6 +181,23 @@ async function main(): Promise<void> {
     assert.match(read("lib/os/runs/turn-starter.ts"), /trainingQuery: run\.userText,/);
     assert.match(read("lib/os/runs/computer-turn.ts"), /trainingQuery: run\.userText,/);
     assert.match(read("app/api/agents/chat/route.ts"), /trainingQuery: lastUser\.content,/);
+    assert.match(read("lib/slack/jobs.ts"), /trainingQuery: picked\.question,/, "a Slack mention picks by its question");
+    assert.match(read("lib/os/runs/automation-turn.ts"), /trainingQuery: task,/, "a guided automation picks by its task");
+    // And any caller added later: every module that prepares a department turn hands over a question.
+    const callers = [
+      "app/api/agents/chat/route.ts",
+      "app/api/admin/agent-training/[[...path]]/route.ts",
+      "lib/os/runs/turn-starter.ts",
+      "lib/os/runs/computer-turn.ts",
+      "lib/slack/jobs.ts",
+      "lib/os/runs/automation-turn.ts",
+    ];
+    for (const file of callers) {
+      const src = read(file);
+      const prepares = (src.match(/(?:prepareAgentTurn|\bprepare)\(\{/g) || []).length;
+      const queries = (src.match(/trainingQuery: /g) || []).length;
+      assert.ok(prepares >= 1 && queries >= prepares, `${file}: ${prepares} prepare call(s), ${queries} trainingQuery`);
+    }
   });
 
   console.log(`training-relevance: ${passed} passed, ${failed} failed`);
