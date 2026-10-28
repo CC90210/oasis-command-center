@@ -28,3 +28,19 @@ export type KnownAgent = (typeof KNOWN_AGENTS)[number];
  * KNOWN_AGENTS minus 'cc' (the operator never messages themselves).
  */
 export const COMPOSER_RECIPIENTS = KNOWN_AGENTS.filter((a) => a !== "cc");
+
+/**
+ * The claim protocol a paired computer advertises in its ping when it runs the
+ * agent inbox relay (bravo_cli/inbox_relay.py): app/api/bridge/inbox serves
+ * only a computer that advertises it, and Admin > Agent ops can tell a computer
+ * that will deliver from one whose bridge predates delivery.
+ */
+export const AGENT_INBOX_PROTOCOL = "agent_inbox_v1";
+
+/**
+ * A message id as the inbox mints them (random hex, or a UUID): all that in_reply_to and thread_id may
+ * hold on their way into an agent's local inbox (Codex review of #768). Anything else is dropped there.
+ */
+export function isMessageId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,64}$/.test(value);
+}

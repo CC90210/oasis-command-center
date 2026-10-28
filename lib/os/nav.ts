@@ -130,8 +130,7 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   // Tools (2026-10-10): it shapes how OASIS's own agents write, not a
   // workspace content tool, so it is an Admin door, not a Content one.
   { id: "admin-agent-training", href: "/admin/agent-training", label: "Agent training", icon: "GraduationCap", section: "admin", audience: "operator", oasisOnly: true },
-  { id: "admin-runs", href: "/runs", label: "Runs", icon: "History", section: "admin", audience: "operator", oasisOnly: true },
-  { id: "admin-inbox", href: "/inbox", label: "Inbox", icon: "Inbox", section: "admin", audience: "operator", oasisOnly: true },
+  { id: "admin-agent-ops", href: "/agent-ops", label: "Agent ops", icon: "Inbox", section: "admin", audience: "operator", oasisOnly: true },
 ];
 
 export type BuildOsNavInput = {

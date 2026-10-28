@@ -10,6 +10,47 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "./secret-redaction";
+
+const SNAPSHOT_KEYS = 40;
+const SNAPSHOT_STRING = 500;
+const SNAPSHOT_DEPTH = 3;
+const SNAPSHOT_BYTES = 4_000;
+
+function scrubbed(value: unknown, depth: number, scrub: (text: string) => string): unknown {
+  if (typeof value === "string") return scrub(value).slice(0, SNAPSHOT_STRING);
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (depth >= SNAPSHOT_DEPTH) return "[nested]";
+  if (Array.isArray(value)) return value.slice(0, SNAPSHOT_KEYS).map((v) => scrubbed(v, depth + 1, scrub));
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, SNAPSHOT_KEYS)
+        .map(([k, v]) => [scrub(k).slice(0, 80), scrubbed(v, depth + 1, scrub)]),
+    );
+  }
+  return scrub(String(value)).slice(0, SNAPSHOT_STRING);
+}
+
+/**
+ * What an agent's action ASKED to set, for the Execution trace (2026-10-28,
+ * Codex review of #768): its request, not proof of what was written (a
+ * handler may ignore a field, and a failed action wrote nothing), so it is
+ * stored as `requested`, never as `after`. Every string and key is scrubbed of
+ * environment secrets, URL key parameters AND the workspace's saved
+ * credentials (`vault`, Codex review of #768) BEFORE it is shortened; at most
+ * 40 keys, 3 levels and 4 KB; null when there is nothing to show. `vault`
+ * null means the credentials could not be read: then nothing is kept, rather
+ * than a request that may hold one of them in plain text.
+ */
+export function actionSnapshot(payload: unknown, vault: readonly VaultSecret[] | null): Record<string, unknown> | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (vault === null) return { note: "not kept: the workspace's saved credentials could not be checked" };
+  const secrets = [...vault];
+  const copy = scrubbed(payload, 0, (text) => redactTenantVaultSecrets(redactAll(text), secrets)) as Record<string, unknown>;
+  if (Object.keys(copy).length === 0) return null;
+  return JSON.stringify(copy).length <= SNAPSHOT_BYTES ? copy : { note: "too large to keep" };
+}
 
 export type LoggedAction = {
   agent_key: string;
@@ -21,6 +62,8 @@ export type LoggedAction = {
   error?: string;
   before?: unknown;
   after?: unknown;
+  /** What the action asked to set (actionSnapshot): its request, not proof of what was written. */
+  requested?: unknown;
 };
 
 export async function logAction(input: LoggedAction): Promise<boolean> {
@@ -37,6 +80,7 @@ export async function logAction(input: LoggedAction): Promise<boolean> {
         error: input.error || null,
         before: input.before ?? null,
         after: input.after ?? null,
+        requested: input.requested ?? null,
         tenant_id: input.tenant_id,
         user_id: input.user_id,
       },

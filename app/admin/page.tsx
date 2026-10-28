@@ -13,7 +13,7 @@
  */
 
 import type { ReactNode } from "react";
-import { Activity, Cpu, GraduationCap, History, Inbox, RefreshCcw, ShieldCheck, SquareTerminal } from "lucide-react";
+import { Activity, Cpu, GraduationCap, Inbox, RefreshCcw, ShieldCheck, SquareTerminal } from "lucide-react";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LinkList, type LinkListItem } from "@/components/os/landings/LinkList";
@@ -32,8 +32,7 @@ const ADMIN_DETAIL: Record<string, { description: string; icon: ReactNode }> = {
   "admin-agent": { description: "Run Claude Code/Codex in a department's repo on your PC through the bridge (operator only)", icon: <SquareTerminal {...ICON} /> },
   "admin-fleet": { description: "Each agent, whether its processes are running, and what it owns", icon: <Cpu {...ICON} /> },
   "admin-agent-training": { description: "Teach the agents from a web page or GitHub repo: hook, pacing and tone", icon: <GraduationCap {...ICON} /> },
-  "admin-runs": { description: "Every change an agent made to your dashboard data, and whether it worked", icon: <History {...ICON} /> },
-  "admin-inbox": { description: "Notes the agents leave each other, and a box to leave one yourself", icon: <Inbox {...ICON} /> },
+  "admin-agent-ops": { description: "Send an agent a directive and see it delivered and read, and every change the agents made to your data", icon: <Inbox {...ICON} /> },
 };
 
 export default async function AdminPage() {

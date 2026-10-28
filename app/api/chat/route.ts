@@ -35,6 +35,7 @@ import { operatorNameOverride } from "@/lib/operator-name";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
+import { actionSnapshot } from "@/lib/action-log";
 import { rateLimit } from "@/lib/rate-limit";
 import { extractActionMarkers, runAction } from "@/lib/agent-actions";
 import { SAFE_TENANT_TOOL_PALETTE } from "@/lib/chat-tool-palettes";
@@ -990,6 +991,15 @@ export async function POST(req: NextRequest) {
           cloudToolsMode === "tools"
             ? rawSpecs.filter((s) => !TOOL_NATIVE_MARKER_TYPES.has(s.type))
             : rawSpecs;
+        // The stored action snapshots need EVERY saved credential (Codex review of #768): the vault is read
+        // completely, once per turn, when the first action is logged, and a failed or partial read keeps
+        // no snapshot. The stream's own read above may degrade; a stored copy may not.
+        let snapshotVault: Promise<Awaited<ReturnType<typeof fetchTenantVaultSecretsForRedaction>> | null> | null = null;
+        const vaultForSnapshot = () =>
+          (snapshotVault ??= fetchTenantVaultSecretsForRedaction(tenantId, { requireComplete: true }).catch((err: unknown) => {
+            console.error("[chat.snapshot_vault]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+            return null;
+          }));
         for (const spec of specs) {
           if (!crmWritesAllowed && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
             send("action", {
@@ -1010,6 +1020,8 @@ export async function POST(req: NextRequest) {
             ok: r.ok,
             summary: r.ok ? r.summary : undefined,
             error: !r.ok ? r.error : undefined,
+            // What it asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
+            requested: actionSnapshot(spec.payload, await vaultForSnapshot()),
           });
         }
       } catch (err) {
@@ -1102,7 +1114,7 @@ export async function POST(req: NextRequest) {
         if (injectedInboxIds.length > 0 && !streamError && replySaved) {
           await Promise.all(
             injectedInboxIds.map(async (id) => {
-              const marked = await markReadDb(tenantId, id).catch((err: unknown) => ({
+              const marked = await markReadDb(tenantId, id, "cloud_chat").catch((err: unknown) => ({
                 ok: false,
                 error: err instanceof Error ? err.message : String(err),
               }));

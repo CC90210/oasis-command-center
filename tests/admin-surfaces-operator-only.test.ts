@@ -280,8 +280,8 @@ async function main() {
 
   const gate = await import("../lib/role-surfaces-session");
   const pages = {
-    "/runs": (await import("../app/runs/page")).default,
-    "/inbox": (await import("../app/inbox/page")).default,
+    "/agent-ops": (await import("../app/agent-ops/page")).default,
+    "/agent-ops/trace": (await import("../app/agent-ops/trace/page")).default,
     "/reasoning": (await import("../app/reasoning/page")).default,
     "/system-health": (await import("../app/system-health/page")).default,
   } as Record<string, () => Promise<unknown>>;
@@ -411,8 +411,8 @@ async function main() {
   });
   await check("each admin page calls requireOperator() as its first statement", () => {
     for (const file of [
-      "app/runs/page.tsx",
-      "app/inbox/page.tsx",
+      "app/agent-ops/page.tsx",
+      "app/agent-ops/trace/page.tsx",
       "app/reasoning/page.tsx",
       "app/system-health/page.tsx",
       "app/operations/page.tsx",

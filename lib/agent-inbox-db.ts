@@ -13,6 +13,7 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { getTursoClient } from "./turso";
 import { randomBytes } from "node:crypto";
 import { VALID_PRIORITIES, KNOWN_AGENTS, type Priority } from "./agent-inbox-types";
 
@@ -34,7 +35,38 @@ export type DbInboxMessage = {
   thread_id: string | null;
   read_at: string | null;
   created_at: string;
+  /** 1 = the agents owner's computer may deliver it to the agent's local inbox (bravo__246). */
+  relay_eligible?: number | boolean | null;
+  delivered_at?: string | null;
+  delivered_pairing_id?: string | null;
+  delivered_label?: string | null;
+  acked_at?: string | null;
+  read_via?: ReadVia | null;
+  /** When delivered_pairing_id reserved it for delivery (bravo__247). */
+  relay_claimed_at?: string | null;
 };
+
+/** Who marked a note read (bravo__246 read_via). */
+export const READ_VIA = ["dashboard", "cloud_chat", "agent"] as const;
+export type ReadVia = (typeof READ_VIA)[number];
+
+/**
+ * The agents a paired computer can deliver to: each has a local inbox it reads
+ * at the start of every session (scripts/core/agent_inbox.py in its repo on the
+ * agents owner's computer). `broadcast` reaches all three. Aura has no reader
+ * yet, so a note to Aura is never relayed.
+ */
+export const RELAY_RECIPIENTS = ["bravo", "atlas", "maven", "broadcast"] as const;
+
+export function isRelayRecipient(agent: string): boolean {
+  return (RELAY_RECIPIENTS as readonly string[]).includes(agent.trim().toLowerCase());
+}
+
+/** One relay batch at most: a computer that has been away catches up in a few minutes, not one request. */
+export const RELAY_BATCH_MAX = 20;
+
+/** A reservation with no delivery after this long may be taken by another computer (the first stopped partway). */
+export const RELAY_RESERVATION_MS = 5 * 60 * 1000;
 
 const PRIORITY_RANK: Record<Priority, number> = {
   urgent: 0,
@@ -43,12 +75,18 @@ const PRIORITY_RANK: Record<Priority, number> = {
   low: 3,
 };
 
+/**
+ * The unread notes a cloud chat puts in front of its agent (lib/agent-context.ts), and then marks read.
+ * A RELAY directive is never among them (Codex review of #768): it is for the agent on CC's computer,
+ * and a cloud chat reading it first would mark it read and keep it from ever being delivered.
+ */
 export async function listUnreadDb(tenantId: string, toAgent?: string): Promise<DbInboxMessage[]> {
   const db = getServiceSupabase();
   let q = db
     .from("agent_messages")
     .select("*")
     .eq("tenant_id", tenantId)
+    .eq("relay_eligible", 0)
     .is("read_at", null);
   if (toAgent) q = q.eq("to_agent", toAgent);
   const { data, error } = await q
@@ -98,17 +136,117 @@ export async function unreadCountDb(tenantId: string, toAgent?: string): Promise
 
 export async function markReadDb(
   tenantId: string,
-  id: string
+  id: string,
+  via: ReadVia = "dashboard",
 ): Promise<{ ok: boolean; error?: string }> {
   if (!id) return { ok: false, error: "missing_id" };
   const db = getServiceSupabase();
   const { error } = await db
     .from("agent_messages")
-    .update({ read_at: new Date().toISOString() })
+    .update({ read_at: new Date().toISOString(), read_via: via })
     .eq("tenant_id", tenantId)
     .eq("id", id);
   if (error) return { ok: false, error: error.message };
   return { ok: true };
+}
+
+/**
+ * Reserve, for `pairingId`, the directives waiting for delivery and return them,
+ * oldest first: relay eligible, not delivered, not read, and not reserved by
+ * another computer in the last RELAY_RESERVATION_MS (Codex review of #768: two
+ * computers polling at once both received the same directives, and the local
+ * write happens before the delivery report). ONE statement, so two computers
+ * never both win a note; a computer that stopped partway loses its reservation
+ * after five minutes. Throws on a failed write (it is not "nothing to deliver").
+ */
+export async function reserveRelayBatchDb(
+  tenantId: string,
+  pairingId: string,
+  now: number = Date.now(),
+): Promise<DbInboxMessage[]> {
+  const nowIso = new Date(now).toISOString();
+  const staleIso = new Date(now - RELAY_RESERVATION_MS).toISOString();
+  const open =
+    "relay_eligible = 1 AND delivered_at IS NULL AND read_at IS NULL " +
+    "AND (delivered_pairing_id IS NULL OR delivered_pairing_id = ? OR relay_claimed_at IS NULL OR relay_claimed_at < ?)";
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET delivered_pairing_id = ?, relay_claimed_at = ? ` +
+        `WHERE tenant_id = ? AND ${open} AND id IN (` +
+        `SELECT id FROM agent_messages WHERE tenant_id = ? AND ${open} ORDER BY created_at ASC LIMIT ${RELAY_BATCH_MAX}` +
+        `) RETURNING *`,
+      args: [pairingId, nowIso, tenantId, pairingId, staleIso, tenantId, pairingId, staleIso],
+    });
+    const rows = rs.rows.map((row) => ({ ...(row as unknown as DbInboxMessage) }));
+    return rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  } catch (err) {
+    throw new Error(`agent_messages relay reservation failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Record that `pairing` wrote these notes into their agents' local inboxes. Only the computer that
+ * reserved a note may report it delivered. Returns the ids delivered BY THIS COMPUTER, including ones it
+ * already reported: asked again, it hears yes again, and the first stamp stands. The computer publishes
+ * a note into the agent's readable inbox only after this yes (bravo_cli/inbox_relay.py), so an answer
+ * lost in transit must be recoverable by asking again (Codex review of CEO-Agent #134). A computer that
+ * lost the note to another hears no, every time. So does one reporting a FIRST delivery of a note the
+ * operator dismissed after it was reserved (Codex review of #768): a cancelled directive is never
+ * published; a note already delivered is still confirmed.
+ */
+export async function markDeliveredDb(
+  tenantId: string,
+  ids: readonly string[],
+  pairing: { id: string; label: string },
+): Promise<string[]> {
+  if (ids.length === 0) return [];
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET delivered_at = COALESCE(delivered_at, ?), delivered_label = COALESCE(delivered_label, ?) ` +
+        `WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")}) ` +
+        `AND relay_eligible = 1 AND delivered_pairing_id = ? AND (delivered_at IS NOT NULL OR read_at IS NULL) RETURNING id`,
+      args: [new Date().toISOString(), pairing.label.slice(0, 80), tenantId, ...ids, pairing.id],
+    });
+    return rs.rows.map((row) => String(row.id));
+  } catch (err) {
+    throw new Error(`agent_messages delivery write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Record that the agent moved these notes to its read/ folder. Only the computer that DELIVERED a note
+ * (delivered_at set, not merely reserved) may say it was read, and only once (acked_at). A dismissal on
+ * the dashboard after delivery does not block the agent's own receipt; it keeps its read_at and read_via.
+ */
+export async function markAckedDb(tenantId: string, ids: readonly string[], pairingId: string): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const now = new Date().toISOString();
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET acked_at = ?, read_at = COALESCE(read_at, ?), read_via = COALESCE(read_via, 'agent') ` +
+        `WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")}) ` +
+        `AND delivered_pairing_id = ? AND delivered_at IS NOT NULL AND acked_at IS NULL RETURNING id`,
+      args: [now, now, tenantId, ...ids, pairingId],
+    });
+    return rs.rows.map((row) => String(row.id));
+  } catch (err) {
+    throw new Error(`agent_messages acknowledgement write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Every note in the workspace, newest first, for Admin > Agent ops. Throws on a failed read. */
+export async function listAgentOpsMessagesDb(tenantId: string, limit = 100): Promise<DbInboxMessage[]> {
+  const { data, error } = await getServiceSupabase()
+    .from("agent_messages")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false })
+    .limit(Math.max(1, Math.min(200, limit)));
+  if (error) throw new Error(`agent_messages agent-ops read failed: ${error.message}`);
+  return (data || []) as DbInboxMessage[];
 }
 
 export async function postMessageDb(opts: {
@@ -126,6 +264,13 @@ export async function postMessageDb(opts: {
    * /inbox page can dedupe rows from the two sources by message_id.
    */
   messageId?: string;
+  /**
+   * A directive the operator posted from the dashboard, to an agent with a
+   * local reader (isRelayRecipient): the agents owner's computer delivers it.
+   * Never set for a note an agent wrote: an agent's words do not travel to
+   * another agent's machine on their own.
+   */
+  relayEligible?: boolean;
 }): Promise<{ ok: boolean; message?: DbInboxMessage; error?: string }> {
   if (!opts.body || !opts.body.trim()) return { ok: false, error: "body_required" };
   if (!opts.from.trim() || !opts.to.trim()) return { ok: false, error: "agent_required" };
@@ -145,6 +290,7 @@ export async function postMessageDb(opts: {
     requires_response: !!opts.requires_response,
     in_reply_to: opts.in_reply_to || null,
     thread_id: opts.in_reply_to || messageId,
+    relay_eligible: opts.relayEligible && isRelayRecipient(opts.to) ? 1 : 0,
   };
   const { data, error } = await db
     .from("agent_messages")

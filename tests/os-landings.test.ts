@@ -471,7 +471,7 @@ async function main() {
     await login("cc");
     const hub = await AdminPage();
     const hubText = text(hub);
-    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox"]) {
+    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/agent-ops"]) {
       assert.ok(hubText.includes(door), `the hub links ${door}`);
     }
     // One System health (2026-09-30): /system-health redirects to /health and

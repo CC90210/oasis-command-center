@@ -69,6 +69,7 @@ import {
 } from "@/lib/integrations/presence-heartbeat";
 import { parseRuntimeClaimState } from "@/lib/bridge/runtime-jobs";
 import { processStamp, reconnectForCheckIn } from "@/lib/devices/reconnect";
+import { AGENT_INBOX_PROTOCOL } from "@/lib/agent-inbox-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -173,7 +174,7 @@ export async function POST(req: NextRequest) {
   // tool_capabilities, and recorded for every scope (a connector computer
   // still needs to tell the server which claim protocols it speaks).
   if (Array.isArray(body.claim_protocols)) {
-    const allowedProtocols = new Set(["department_task_v1", "department_task_v2", "runtime_action_v1", "coding_harness_task_v1"]);
+    const allowedProtocols = new Set(["department_task_v1", "department_task_v2", "runtime_action_v1", "coding_harness_task_v1", AGENT_INBOX_PROTOCOL]);
     const cleanedProtocols = body.claim_protocols.filter((t): t is string => typeof t === "string" && allowedProtocols.has(t));
     pairingUpdate.claim_protocols = JSON.stringify(cleanedProtocols);
   }

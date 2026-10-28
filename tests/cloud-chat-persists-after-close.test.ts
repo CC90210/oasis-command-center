@@ -190,7 +190,10 @@ async function main() {
     -- turn and marked read once the reply is saved.
     CREATE TABLE agent_messages (id TEXT PRIMARY KEY, message_id TEXT, tenant_id TEXT, from_agent TEXT, to_agent TEXT,
       subject TEXT, body TEXT, priority TEXT, requires_response INTEGER, in_reply_to TEXT, thread_id TEXT,
-      read_at TEXT, created_at TEXT);
+      read_at TEXT, created_at TEXT,
+      -- bravo__246: delivery to the agents owner's computer, and who marked it read.
+      relay_eligible INTEGER NOT NULL DEFAULT 0, delivered_at TEXT, delivered_pairing_id TEXT, delivered_label TEXT,
+      acked_at TEXT, read_via TEXT);
   `);
   await db.executeMultiple(readFileSync(join(__dirname, "..", "database", "turso", "bravo__192_ai_usage.sql"), "utf8"));
   const { encryptField } = await import("../lib/field-encryption");

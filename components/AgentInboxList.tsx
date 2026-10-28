@@ -1,174 +1,27 @@
 "use client";
 
+/**
+ * The composer for a note or directive to an agent (Admin > Agent ops). The list
+ * that used to sit beside it went with the /inbox page (2026-10-28): Agent ops
+ * draws the notes itself, with what became of each.
+ */
 import { useState, useTransition } from "react";
-import { Check, ChevronRight, Reply } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { Tag } from "./Card";
-import type { InboxMessage, Priority } from "@/lib/agent-inbox-fs";
-import { timeAgo } from "@/lib/devices/presence";
+import type { Priority } from "@/lib/agent-inbox-types";
 
-const TONE_BY_PRIORITY: Record<Priority, "warm" | "hot" | "neutral" | "info"> = {
-  urgent: "hot",
-  high: "warm",
-  normal: "info",
-  low: "neutral",
-};
+/** Who the composer offers when a page does not narrow it. */
+const DEFAULT_RECIPIENTS = ["bravo", "atlas", "maven", "aura", "life-preservation", "codex", "broadcast"] as const;
 
-export function AgentInboxList({
-  unread,
-  read,
+export function AgentInboxComposer({
+  recipients = DEFAULT_RECIPIENTS,
+  submitLabel = "post message",
 }: {
-  unread: InboxMessage[];
-  read: InboxMessage[];
+  /** The agents offered as recipients; the first is selected. The sender is always the operator (the route sets it). */
+  recipients?: readonly string[];
+  submitLabel?: string;
 }) {
   const router = useRouter();
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [showRead, setShowRead] = useState(false);
-  const [pending, startTransition] = useTransition();
-  const [marking, setMarking] = useState<string | null>(null);
-
-  function toggle(id: string) {
-    setOpenId((cur) => (cur === id ? null : id));
-  }
-
-  async function onMarkRead(filename: string) {
-    setMarking(filename);
-    try {
-      const res = await fetch("/api/inbox/mark-read", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ filename }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!j.ok) {
-        alert(`mark-read failed: ${j.error || "unknown"}`);
-        return;
-      }
-      startTransition(() => router.refresh());
-    } finally {
-      setMarking(null);
-    }
-  }
-
-  if (unread.length === 0 && read.length === 0) {
-    return (
-      <div className="text-sm text-fg-muted py-6 text-center">
-        Inbox is empty. Messages from sibling agents will appear here.
-      </div>
-    );
-  }
-
-  const list = showRead ? read : unread;
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-xs">
-        <button
-          type="button"
-          className={`px-2 py-1 rounded border ${
-            !showRead
-              ? "bg-accent-soft text-accent border-accent/30"
-              : "border-bg-border text-fg-muted hover:text-fg"
-          }`}
-          onClick={() => setShowRead(false)}
-        >
-          Unread {unread.length > 0 && <span className="font-mono">({unread.length})</span>}
-        </button>
-        <button
-          type="button"
-          className={`px-2 py-1 rounded border ${
-            showRead
-              ? "bg-accent-soft text-accent border-accent/30"
-              : "border-bg-border text-fg-muted hover:text-fg"
-          }`}
-          onClick={() => setShowRead(true)}
-        >
-          Read {read.length > 0 && <span className="font-mono">({read.length})</span>}
-        </button>
-      </div>
-
-      {list.length === 0 ? (
-        <div className="text-sm text-fg-muted py-4 text-center">
-          {showRead ? "No archived messages." : "No unread messages."}
-        </div>
-      ) : (
-        <ul className="divide-y divide-bg-border rounded-lg border border-bg-border overflow-hidden bg-bg">
-          {list.map((m) => {
-            const isOpen = openId === m.message_id;
-            return (
-              <li key={m.message_id || m._filename} className="text-sm">
-                <button
-                  type="button"
-                  onClick={() => toggle(m.message_id || m._filename)}
-                  className="w-full flex items-start gap-3 px-4 py-3 hover:bg-bg-elev transition-colors text-left"
-                >
-                  <ChevronRight
-                    className={`w-4 h-4 mt-0.5 flex-shrink-0 transition-transform text-fg-dim ${
-                      isOpen ? "rotate-90" : ""
-                    }`}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-2 flex-wrap">
-                      <span className="font-mono text-[10px] uppercase tracking-wider text-fg-muted">
-                        {m.from} → {m.to}
-                      </span>
-                      <Tag tone={TONE_BY_PRIORITY[m.priority]}>{m.priority}</Tag>
-                      {m.requires_response && (
-                        <Tag tone="accent">needs reply</Tag>
-                      )}
-                    </div>
-                    <div className="text-fg font-medium mt-1 truncate">
-                      {m.subject || "(no subject)"}
-                    </div>
-                  </div>
-                  {/* Drawn on the server, then again in the browser, whose clock and zone differ (a month-old
-                      stamp is a date in the viewer's own zone): the browser's words win, without a mismatch. */}
-                  <span suppressHydrationWarning className="text-xs text-fg-dim font-mono flex-shrink-0">
-                    {timeAgo(m.timestamp)}
-                  </span>
-                </button>
-                {isOpen && (
-                  <div className="px-4 pb-4 pt-1 ml-7 space-y-3">
-                    <pre className="whitespace-pre-wrap font-sans text-fg-muted text-sm">
-                      {m.body}
-                    </pre>
-                    {!m._read && (
-                      <div className="flex items-center gap-2 pt-2 border-t border-bg-border">
-                        <button
-                          type="button"
-                          disabled={marking === m._filename || pending}
-                          onClick={() => onMarkRead(m._filename)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-bg-border text-xs text-fg hover:border-accent-muted hover:text-accent transition-colors disabled:opacity-50"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          {marking === m._filename ? "marking…" : "mark read"}
-                        </button>
-                        <span className="text-[11px] text-fg-dim">
-                          message_id: <span className="font-mono">{m.message_id}</span>
-                        </span>
-                      </div>
-                    )}
-                    {m._read && (
-                      <div className="flex items-center gap-2 pt-2 border-t border-bg-border text-[11px] text-fg-dim">
-                        <Reply className="w-3.5 h-3.5" />
-                        Reply via the post form below — set in_reply_to to{" "}
-                        <span className="font-mono">{m.message_id}</span>.
-                      </div>
-                    )}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export function AgentInboxComposer({ defaultFrom = "cc" }: { defaultFrom?: string }) {
-  const router = useRouter();
-  const [to, setTo] = useState("bravo");
+  const [to, setTo] = useState(recipients[0] ?? "bravo");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [priority, setPriority] = useState<Priority>("normal");
@@ -190,7 +43,6 @@ export function AgentInboxComposer({ defaultFrom = "cc" }: { defaultFrom?: strin
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          from: defaultFrom,
           to,
           subject,
           body,
@@ -222,7 +74,7 @@ export function AgentInboxComposer({ defaultFrom = "cc" }: { defaultFrom?: strin
             onChange={(e) => setTo(e.target.value)}
             className="bg-bg-elev border border-bg-border rounded px-2 py-1.5 text-fg"
           >
-            {["bravo", "atlas", "maven", "aura", "life-preservation", "codex", "broadcast"].map((a) => (
+            {recipients.map((a) => (
               <option key={a} value={a}>
                 {a}
               </option>
@@ -280,7 +132,7 @@ export function AgentInboxComposer({ defaultFrom = "cc" }: { defaultFrom?: strin
         disabled={submitting || pending}
         className="px-3 py-1.5 rounded bg-accent-soft border border-accent/30 text-accent text-xs font-bold uppercase tracking-wider hover:bg-accent/20 transition-colors disabled:opacity-50"
       >
-        {submitting ? "posting…" : "post message"}
+        {submitting ? "sending…" : submitLabel}
       </button>
     </form>
   );

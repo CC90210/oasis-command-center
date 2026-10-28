@@ -708,7 +708,49 @@ async function main() {
     assert.deepEqual(good.logged, [{ type: "update_profile", ok: true, tenant_id: OASIS, error: undefined }]);
   });
 
-  await check("POST /api/bridge/chat then /api/bridge/actions: nothing is written until the operator confirms; then it lands on their own row, logged for /runs", async () => {
+  await check("confirm: the stored request is scrubbed of every saved credential, or not kept at all", async () => {
+    // Codex review of #768: the snapshot of what a confirmed change asked to set is stored, so it reads the
+    // workspace's vault completely; one entry that cannot be decrypted means nothing is kept.
+    const { proposeBridgeMarkers, applyPendingBridgeAction } = await import("../lib/admin/bridge-dashboard-actions");
+    process.env.BRAVO_FIELD_ENCRYPTION_KEY ??= "admin-harness-field-key-long-enough-0001";
+    const { encryptField } = await import("../lib/field-encryption");
+    await db.executeMultiple(`CREATE TABLE IF NOT EXISTS tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      tenant_id TEXT NOT NULL, service TEXT NOT NULL, field_key TEXT NOT NULL, encrypted_value TEXT NOT NULL);`);
+    const requested: unknown[] = [];
+    const deps = {
+      run: (async (spec: { type: string }) => ({ ok: true as const, type: spec.type, summary: "done" })) as never,
+      log: (async (a: { requested?: unknown }) => {
+        requested.push(a.requested);
+        return true;
+      }) as never,
+    };
+    const confirm = async () => {
+      const now = Date.now();
+      const [p] = proposeBridgeMarkers('<dashboard-action type="update_profile">{"full_name":"acmevault-9f8e7d6c5b4a"}</dashboard-action>', ctx, now).pending;
+      assert.equal((await applyPendingBridgeAction({ ...p }, ctx, deps, now)).status, 200);
+      return requested.at(-1);
+    };
+    const originalError = console.error;
+    console.error = () => undefined; // the partial read below is logged by design
+    try {
+      await db.execute({
+        sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'custom', 'acme_api', ?)",
+        args: [OASIS, encryptField("acmevault-9f8e7d6c5b4a")],
+      });
+      const scrubbed = await confirm();
+      assert.ok(scrubbed && !JSON.stringify(scrubbed).includes("acmevault"), JSON.stringify(scrubbed));
+      await db.execute({
+        sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'custom', 'broken', 'not-a-ciphertext')",
+        args: [OASIS],
+      });
+      assert.deepEqual(await confirm(), { note: "not kept: the workspace's saved credentials could not be checked" }, "a partial read keeps nothing");
+    } finally {
+      console.error = originalError;
+      await db.execute({ sql: "DELETE FROM tenant_integration_credentials WHERE tenant_id = ?", args: [OASIS] });
+    }
+  });
+
+  await check("POST /api/bridge/chat then /api/bridge/actions: nothing is written until the operator confirms; then it lands on their own row, logged for the execution trace", async () => {
     await login(CC);
     const bridgeChat = await import("../app/api/bridge/chat/route");
     const actionsRoute = await import("../app/api/bridge/actions/route");
@@ -807,7 +849,7 @@ async function main() {
       assert.deepEqual(await ok.json(), { ok: true, type: "update_profile", summary: "display_name updated" });
       assert.equal(await profileName(), "CC-FROM-HARNESS", "applied to the operator's own profile on confirm");
       const logged = await loggedRows();
-      assert.equal(logged.length, 1, "logged once for /runs");
+      assert.equal(logged.length, 1, "logged once for the execution trace");
       assert.equal(logged[0]?.correlation_id, OASIS, "under the session's tenant, not the body's tenant_id");
     } finally {
       console.error = originalError;
@@ -932,24 +974,27 @@ async function main() {
     const src = readFileSync(join(ROOT, "components", "manifest", "ManifestDashboard.tsx"), "utf8");
     assert.doesNotMatch(src, /\/agent\?agent=/);
   });
-  await check("the agent inbox read fails loud (no agent_messages table here), so /inbox says Couldn't check", async () => {
+  await check("the agent inbox read fails loud (no agent_messages table here), so Agent ops says Couldn't check", async () => {
     const inboxDb = await import("../lib/agent-inbox-db");
     await assert.rejects(() => inboxDb.listUnreadDb(OASIS), /agent_messages unread read failed/);
     await assert.rejects(() => inboxDb.listReadDb(OASIS), /agent_messages read-archive read failed/);
+    await assert.rejects(() => inboxDb.listAgentOpsMessagesDb(OASIS), /agent_messages agent-ops read failed/);
+    await assert.rejects(() => inboxDb.reserveRelayBatchDb(OASIS, "pairing-1"), /agent_messages relay reservation failed/);
   });
-  await check("copy: /runs has no invented goal, /inbox reads only the database and says Turso", () => {
-    const runs = readFileSync(join(ROOT, "app", "runs", "page.tsx"), "utf8");
-    assert.doesNotMatch(runs, /\$7000|MRR target/);
+  await check("copy: Agent ops has no invented goal, reads only the database, and the trace says Apply and Confirm", () => {
+    const trace = readFileSync(join(ROOT, "app", "agent-ops", "trace", "page.tsx"), "utf8");
+    assert.doesNotMatch(trace, /\$7000|MRR target/);
     // The harness writes nothing until the operator confirms each change
     // (lib/admin/bridge-dashboard-actions.ts); the page must not say it applies
     // them the way a cloud chat does.
-    const runsText = runs.replace(/\s+/g, " ");
-    assert.doesNotMatch(runsText, /applies and logs the markers the same way/);
-    assert.match(runsText, /until you click Apply, then Confirm/);
-    const inbox = readFileSync(join(ROOT, "app", "inbox", "page.tsx"), "utf8");
-    assert.doesNotMatch(inbox, /from "@\/lib\/agent-inbox-fs"/, "the page no longer imports the filesystem inbox");
-    assert.doesNotMatch(inbox, /Supabase|tmp\/agent_inbox|\$5K/);
-    assert.match(inbox, /Turso/);
+    const traceText = trace.replace(/\s+/g, " ");
+    assert.doesNotMatch(traceText, /applies and logs the markers the same way/);
+    assert.match(traceText, /after you Apply and Confirm it/);
+    for (const rel of ["app/agent-ops/page.tsx", "app/api/inbox/post/route.ts", "app/api/inbox/mark-read/route.ts"]) {
+      const src = readFileSync(join(ROOT, rel), "utf8");
+      assert.doesNotMatch(src, /from "@\/lib\/agent-inbox-fs"/, `${rel} no longer touches the filesystem inbox (no disk on the Worker)`);
+      assert.doesNotMatch(src, /\$5K/);
+    }
   });
 
   if (failures > 0) {
