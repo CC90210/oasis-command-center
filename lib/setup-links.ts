@@ -116,13 +116,13 @@ const TARGETS: Record<Exclude<SetupNeed, `connector:${string}`>, SetupTarget> = 
     label: "Open your profile",
     ask: "Update your profile in Settings.",
   },
-  // Settings > Team > Revenue goal (id="revenue-goal").
+  // Money > Revenue goal (id="revenue-goal"; moved from Settings > Team 2026-10-28).
   revenue_goal: {
-    href: "/settings/team#revenue-goal",
+    href: "/money#revenue-goal",
     audience: "manage",
     label: "Set a revenue goal",
     ask: "Ask your workspace owner to set the revenue goal.",
-    anchorIn: SETTINGS_CONTENT,
+    anchorIn: "app/money/page.tsx",
   },
   // Invites, roles, active status.
   team: {

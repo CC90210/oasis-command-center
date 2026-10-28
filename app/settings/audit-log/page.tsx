@@ -14,7 +14,10 @@
 
 import { redirect } from "next/navigation";
 import { PageFrame } from "@/components/os/PageFrame";
+import { SafeBoundary } from "@/components/SafeBoundary";
 import { ActivityActorChips } from "@/components/settings/ActivityActorChips";
+import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
+import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
 import { groupSummary, humanizeAction } from "@/components/settings/activity-log-format";
 import { getActivityFeed, type ActivityRow } from "@/lib/audit/activity-feed";
 import { getActiveProfile, getTenant } from "@/lib/queries";
@@ -144,6 +147,21 @@ export default async function AuditLogPage({
       }
     >
       <div className="space-y-4">
+        {/* Settings boundaries (2026-10-28): the team's week at a glance and CC's
+            operations tracker sit here, beside the full history, not in Team.
+            Same gates as before: Team performance for whoever may see this page
+            on an OASIS workspace; the tracker for owners and admins only. */}
+        {isOasisSurfaceTenant(surface.tenantSlug) && (
+          <SafeBoundary label="sales-team-performance">
+            <SalesTeamOperationsPanel tenantId={profile.tenant_id} tenantName={tenant?.name ?? null} />
+          </SafeBoundary>
+        )}
+        {!salesTeamScope && (
+          <SafeBoundary label="operations-tracker">
+            <OperationsTrackerPanel tenantId={profile.tenant_id} tenantName={tenant?.name ?? null} />
+          </SafeBoundary>
+        )}
+
         <ActivityActorChips
           active={activeActors}
           former={formerActors}

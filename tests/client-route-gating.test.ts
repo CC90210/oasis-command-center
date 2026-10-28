@@ -1053,19 +1053,24 @@ async function main() {
     }
   });
 
-  // ── 9. Goal pace -> Settings > Team > Revenue goal ────────────────────────
+  // ── 9. Goal pace -> Money > Revenue goal (moved from Settings > Team, 2026-10-28) ──
   const { GoalPaceGlance, REVENUE_GOAL_SETTINGS_HREF } = await import("../components/os/today/GoalPaceGlance");
   const settingsTeam = (await import("../app/settings/team/page")).default;
-  await check("Goal pace 'Set one in Settings' opens Settings > Team at the Revenue goal section", async () => {
-    assert.equal(REVENUE_GOAL_SETTINGS_HREF, "/settings/team#revenue-goal");
+  await check("Goal pace 'Set one' opens Money at the Revenue goal section; Team keeps seats only", async () => {
+    assert.equal(REVENUE_GOAL_SETTINGS_HREF, "/money#revenue-goal");
     const glance = GoalPaceGlance({ view: { kind: "no_goal" } as never, detailHref: "#x" });
     const links = walk(glance).elements.filter((e) => typeof e.props.href === "string").map((e) => e.props.href);
     assert.ok(links.includes(REVENUE_GOAL_SETTINGS_HREF), `the link goes to ${links.join(", ")}`);
+    const money = readFileSync(join(ROOT, "app/money/page.tsx"), "utf8");
+    assert.match(money, /<section id="revenue-goal"/, "Money carries the fragment's target");
+    assert.match(money, /<RevenueGoalSection canEdit=\{canEditGoal\} \/>/, "the finance owner's Money page");
+    assert.match(money, /surface\.capabilities\.canSeeCompanyFinancials\) notFound\(\);/, "an admin who is not the books' owner gets the goal alone");
     await login("cc");
     const team = await withContent(await settingsTeam());
-    const section = walk(team).elements.find((e) => e.props.id === "revenue-goal");
-    assert.ok(section, "Settings > Team has no element with id revenue-goal for the fragment to open");
-    assert.equal(section.props.title, "Revenue goal");
+    assert.equal(walk(team).elements.find((e) => e.props.id === "revenue-goal"), undefined, "Settings > Team no longer holds the goal");
+    const audit = readFileSync(join(ROOT, "app/settings/audit-log/page.tsx"), "utf8");
+    assert.match(audit, /<SalesTeamOperationsPanel /, "Team performance is in the Activity log");
+    assert.match(audit, /\{!salesTeamScope && \(\s*<SafeBoundary label="operations-tracker">/, "the tracker stays owner/admin");
   });
 
   // ── the tenant summary card names no default vendor ─────────────────────
