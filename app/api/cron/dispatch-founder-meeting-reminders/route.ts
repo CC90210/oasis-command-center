@@ -821,7 +821,7 @@ async function processRow(
       // (lib/integrations/quo.ts), and an automated text must honour one. So
       // reminders are texted only once that intake is connected; until then
       // the email carries them (Codex review of #774).
-      if (!quoStopIntakeConnected()) {
+      if (!(await quoStopIntakeConnected(row.tenant_id))) {
         await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
         return "skipped";
       }

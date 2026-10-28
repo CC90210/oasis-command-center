@@ -41,6 +41,9 @@ import { checkPhoneOptOut } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { providerSwitchedOn } from "@/lib/routing/provider-availability";
 import { isRetiredTenant } from "@/lib/tenant/retired";
+import type { Client } from "@libsql/client";
+import { getTursoClient } from "@/lib/turso";
+import { quoWebhookKeyConfigured } from "@/lib/integrations/quo-webhook";
 
 export const QUO_API_BASE = "https://api.quo.com/v1";
 
@@ -372,17 +375,35 @@ export async function quoSender(
 }
 
 /**
- * Is a STOP texted back to the Quo number read by OASIS? Not yet: there is no
- * authenticated Quo inbound handler that puts a STOP on the workspace's STOP
- * list (lib/sms-opt-out.ts applyInboundSmsStop). Automated texts (the
+ * Is a STOP texted back to the Quo number read by OASIS? Automated texts (the
  * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
- * until it exists. Closed in code, not by a setting, so no key or switch can
- * open it early (Codex review of #774): the PR that adds the verified handler,
- * with its STOP-then-blocked-resend canary, replaces this body. A person's own
- * reply in Conversations is not automated and is unaffected.
+ * until it provably is. Both must hold:
+ *   - the webhook's signing key is set (QUO_WEBHOOK_SIGNING_KEY), so
+ *     app/api/webhooks/quo can authenticate a delivery; and
+ *   - that route has recorded a delivery whose signature verified AND whose
+ *     message.received sender and text it could read (quo_inbound_health
+ *     last_inbound_at): the exact event a STOP arrives as. A STOP then goes
+ *     through applyInboundSmsStop, the path the Twilio intake already uses,
+ *     and sendQuoSms refuses that number (tests/quo-stop-intake.test.ts).
+ * A key alone never opens it (Codex review of #774). A read failure keeps it
+ * closed. A person's own reply in Conversations is not automated.
  */
-export function quoStopIntakeConnected(): boolean {
-  return false;
+export async function quoStopIntakeConnected(
+  tenantId: string,
+  deps: { env?: Readonly<Record<string, string | undefined>>; client?: Pick<Client, "execute"> } = {},
+): Promise<boolean> {
+  if (!quoWebhookKeyConfigured(deps.env ?? process.env)) return false;
+  try {
+    const result = await (deps.client ?? getTursoClient()).execute({
+      sql: "SELECT last_inbound_at FROM quo_inbound_health WHERE tenant_id = ? LIMIT 1",
+      args: [tenantId],
+    });
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return typeof row?.last_inbound_at === "string" && row.last_inbound_at.length > 0;
+  } catch (error) {
+    console.error("[quo] STOP intake check failed; automated texts stay off", error instanceof Error ? error.message : error);
+    return false;
+  }
 }
 
 // -- Sending --------------------------------------------------------------------------
