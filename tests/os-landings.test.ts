@@ -489,11 +489,12 @@ async function main() {
       | undefined;
     assert.ok(fleetProp, "the fleet reached the page");
     assert.equal(fleetProp.signalsKnown, true);
-    // W4a, decision 21: the fleet is OASIS's house agents, CC's own included,
-    // not the business workspace's roster (its leads and built teammates).
-    const { FAMILY_AGENT_KEYS } = await import("../lib/agents");
-    assert.deepEqual(fleetProp.agents, [...FAMILY_AGENT_KEYS]);
-    assert.ok(fleetProp.agents.includes("aura") && fleetProp.agents.includes("lex"), "CC's own agents live in Admin > Fleet");
+    // CC, 2026-10-28: the fleet is his four agents (Bravo, Atlas, Maven, Aura),
+    // not the business workspace's roster and not the whole catalog family.
+    const { OASIS_RUNTIME_AGENT_KEYS } = await import("../lib/agents");
+    assert.deepEqual(fleetProp.agents, [...OASIS_RUNTIME_AGENT_KEYS]);
+    assert.deepEqual(fleetProp.agents, ["bravo", "atlas", "maven", "aura"]);
+    assert.ok(!fleetProp.agents.includes("lex") && !fleetProp.agents.includes("hermes"), "the catalog's other agents leave this view");
     assert.ok(!fleetProp.agents.includes("sdr") && !fleetProp.agents.includes("customer-support"), "a library template is not a fleet process");
     assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo's scheduler process checked in 2 minutes ago");
     assert.equal(fleetProp.signals.get("bravo")?.tickCount, 41);

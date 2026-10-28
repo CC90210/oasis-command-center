@@ -28,7 +28,7 @@ export default async function AdminFleetPage() {
   return (
     <PageFrame
       title="Fleet"
-      subtitle="Every agent wired to your Command Center. Running means one of its processes on your computer checked in within 5 minutes; Last task is its own last tick."
+      subtitle="Your four agents. Alive means a process checked in within 5 minutes or the agent ticked within 15; what it is working on stays on your computer."
       actions={
         <>
           <FleetSummaryTag fleet={fleet} />

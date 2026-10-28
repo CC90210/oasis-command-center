@@ -1,30 +1,63 @@
 /**
- * AgentFleet — Admin › Fleet's roster: one row per agent the workspace has
- * enabled, whether it is running, and what it owns (registered schedules,
- * always-on processes, workflows). Moved from the old /agents page with its
- * copy and catalog intact; the pulsing glow dot and the per-agent coloured
- * labels were not moved (#464: no perpetual motion, no glow; blue is for
- * actions and links).
+ * AgentFleet — Admin › Fleet: CC's four agents (Bravo, Atlas, Maven, Aura), one
+ * tile each (2026-10-28). Each tile says ONE liveness state (fleet-data.ts
+ * fleetLiveness: grey never seen, green alive, amber quiet, red down), what it
+ * is made of (process check-ins, the agent's own last tick, the computer it runs
+ * on, its last Coding harness job: times and statuses only), and three quick
+ * actions: open it in the Coding harness, see what it was taught, manage its
+ * processes. What an agent is working on is never shown: it stays on the Mac.
  *
- * Server component. Signals come from fleet-data.ts; when those reads failed,
- * every agent says "status unknown" rather than "never seen".
- *
- * Running (2026-09-30) means one of the agent's processes on the operator's
- * machine checked in within 5 minutes; "Last task" (its last reasoning tick)
- * is its own line, so a quiet loop no longer reads as a dead agent and a stale
- * tick no longer reads as a running one.
+ * Server component. A solid status dot, no glow and no perpetual motion (#464).
+ * When the liveness reads failed, every tile says "status unknown" rather than
+ * "never seen".
  */
 
+import Link from "next/link";
 import { Card, Tag } from "@/components/Card";
 import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentInfo } from "@/lib/agents";
 import { timeAgo } from "@/lib/fmt";
-import type { Fleet } from "@/components/os/landings/fleet-data";
+import {
+  COMPUTER_SILENT_MS,
+  fleetLiveness,
+  type Fleet,
+  type FleetSignal,
+  type Liveness,
+} from "@/components/os/landings/fleet-data";
 
-export function fleetSummary(fleet: Fleet): { running: number; total: number } | null {
+/** Each agent's seat in CC's company. */
+export const FLEET_ROLES: Record<string, string> = {
+  bravo: "CEO · COO · CTO",
+  atlas: "CFO",
+  maven: "CMO",
+  aura: "Life & home",
+};
+
+/** The Admin › Agent training tab each agent learns on (Aura has no department). */
+export const FLEET_TRAINING_TAB: Record<string, string> = {
+  bravo: "chief_of_staff",
+  atlas: "finance",
+  maven: "marketing",
+};
+
+const LIVENESS: Record<Liveness, { dot: string; word: string }> = {
+  green: { dot: "bg-status-engaged", word: "Alive" },
+  amber: { dot: "bg-status-warm", word: "Quiet" },
+  red: { dot: "bg-status-hot", word: "Down" },
+  grey: { dot: "bg-fg-faint", word: "Never seen" },
+};
+
+/** The newest of an agent's process check-in and its own tick. */
+function lastHeard(signal: FleetSignal | null | undefined): string | null {
+  const times = [signal?.lastSignalAt, signal?.lastTaskAt].filter((t): t is string => Boolean(t));
+  if (times.length === 0) return null;
+  return times.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
+}
+
+export function fleetSummary(fleet: Fleet, now: number = Date.now()): { running: number; total: number } | null {
   if (!fleet.signalsKnown) return null;
   let running = 0;
-  for (const s of fleet.signals.values()) if (s.live) running += 1;
+  for (const key of fleet.agents) if (fleetLiveness(fleet.signals.get(key), fleet.computer, now) === "green") running += 1;
   return { running, total: fleet.agents.length };
 }
 
@@ -32,62 +65,87 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
   if (fleet.agents.length === 0) {
     return (
       <Card>
-        <p className="py-6 text-sm text-fg-muted">No agents are enabled for this workspace.</p>
+        <p className="py-6 text-sm text-fg-muted">No agents are wired to this workspace.</p>
       </Card>
     );
   }
+  const now = Date.now();
+  const computerSilent =
+    fleet.computer && (!fleet.computer.lastSeenAt || now - Date.parse(fleet.computer.lastSeenAt) >= COMPUTER_SILENT_MS);
   return (
-    <Card noPadding>
-      <ul className="divide-y divide-hairline">
-        {fleet.agents.map((key) => {
-          const info = getAgentInfo(key);
-          const cat = catalogFor(key);
-          const signal = fleet.signals.get(key) ?? null;
-          const total = cat.crons.length + cat.processes.length + cat.workflows.length;
-          const dot = !fleet.signalsKnown
-            ? "bg-fg-faint"
-            : signal?.live
-              ? "bg-status-engaged"
-              : signal?.lastSignalAt
-                ? "bg-status-warm"
-                : "bg-fg-faint";
-          const status = !fleet.signalsKnown
-            ? "status unknown"
-            : signal?.live
-              ? `Running · ${signal.runningCount} of ${signal.processCount} process${signal.processCount === 1 ? "" : "es"} checked in`
-              : signal?.lastSignalAt
-                ? `Not running · last check-in ${timeAgo(signal.lastSignalAt)}`
-                : "No process has reported";
-          const lastTask = !fleet.signalsKnown
-            ? null
-            : signal?.lastTaskAt
-              ? `Last task ${timeAgo(signal.lastTaskAt)}${signal.tickCount !== null ? ` (tick ${signal.tickCount})` : ""}`
-              : "No task recorded";
-          return (
-            <li key={key} className="space-y-3 px-4 py-4">
-              <div className="flex flex-wrap items-start gap-3">
-                <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${dot}`} aria-hidden />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-baseline gap-x-2">
-                    <span className="text-sm font-semibold text-fg">{info.label}</span>
-                    <span className="text-xs text-fg-muted">{info.tagline}</span>
+    <ul className="grid gap-3 lg:grid-cols-2">
+      {fleet.agents.map((key) => {
+        const info = getAgentInfo(key);
+        const cat = catalogFor(key);
+        const signal = fleet.signals.get(key) ?? null;
+        const liveness = fleet.signalsKnown ? fleetLiveness(signal, fleet.computer, now) : null;
+        const look = liveness ? LIVENESS[liveness] : { dot: "bg-fg-faint", word: "Status unknown" };
+        const heard = lastHeard(signal);
+        const total = cat.crons.length + cat.processes.length + cat.workflows.length;
+        const job = fleet.lastJobs.get(key);
+        const tab = FLEET_TRAINING_TAB[key];
+        return (
+          <li key={key} className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/25 p-4">
+            <div className="flex items-start gap-2.5">
+              <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${look.dot}`} aria-hidden />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-sm font-semibold text-fg">{info.label}</span>
+                  <span className="text-xs text-fg-muted">{FLEET_ROLES[key] ?? info.tagline}</span>
+                </div>
+                <div className="mt-0.5 text-[13px] text-fg">
+                  {look.word}
+                  {liveness && heard ? <span className="text-fg-muted"> · heard {timeAgo(heard)}</span> : null}
+                </div>
+                {liveness === "red" && computerSilent ? (
+                  <div className="mt-0.5 text-xs text-status-hot">
+                    {fleet.computer!.label} has been silent{" "}
+                    {fleet.computer!.lastSeenAt ? `since ${timeAgo(fleet.computer!.lastSeenAt)}` : "since it was paired"}, so nothing on it can report.
                   </div>
-                  {info.description && <p className="mt-1 text-[13px] leading-5 text-fg-muted">{info.description}</p>}
-                  {info.askMeAbout && (
-                    <p className="mt-1 text-xs text-fg-dim">
-                      <span className="font-medium text-fg-muted">Ask about: </span>
-                      {info.askMeAbout}
-                    </p>
-                  )}
-                </div>
-                <div className="shrink-0 text-right text-xs tabular-nums text-fg-muted">
-                  <div>{status}</div>
-                  {lastTask && <div className="mt-0.5 text-fg-dim">{lastTask}</div>}
-                  {total > 0 && <div className="mt-0.5 text-fg-dim">{total} highlighted</div>}
-                </div>
+                ) : null}
               </div>
-              {total > 0 ? (
-                <div className="grid gap-4 pl-5 lg:grid-cols-3">
+            </div>
+            {fleet.signalsKnown ? (
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                <dt className="text-fg-dim">Processes</dt>
+                <dd className="text-fg-muted">
+                  {signal && signal.processCount > 0
+                    ? `${signal.runningCount} of ${signal.processCount} running${signal.downCount > 0 ? `, ${signal.downCount} reported down` : ""}`
+                    : "None report from your computer"}
+                </dd>
+                <dt className="text-fg-dim">Last tick</dt>
+                <dd className="text-fg-muted">
+                  {signal?.lastTaskAt ? `${timeAgo(signal.lastTaskAt)}${signal.tickCount !== null ? ` (tick ${signal.tickCount})` : ""}` : "Never"}
+                </dd>
+                <dt className="text-fg-dim">Coding harness</dt>
+                <dd className="text-fg-muted">
+                  {!fleet.jobsKnown
+                    ? "Couldn't check"
+                    : job
+                      ? `Last job ${job.status.replace(/_/g, " ")}${job.errorCode ? ` (${job.errorCode.replace(/_/g, " ")})` : ""} · ${timeAgo(job.at)}`
+                      : "No jobs yet"}
+                </dd>
+              </dl>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Link href={`/agent?agent=${key}`} prefetch={false} className="btn-secondary text-xs">
+                Open in Coding harness
+              </Link>
+              {tab ? (
+                <Link href={`/admin/agent-training?agent=${tab}`} prefetch={false} className="btn-secondary text-xs">
+                  What it learned
+                </Link>
+              ) : null}
+              {signal && signal.processCount > 0 ? (
+                <Link href="/automations" prefetch={false} className="btn-secondary text-xs">
+                  Processes
+                </Link>
+              ) : null}
+            </div>
+            {total > 0 ? (
+              <details className="group">
+                <summary className="cursor-pointer select-none text-xs text-fg-muted hover:text-fg">What it owns ({total})</summary>
+                <div className="mt-3 grid gap-4 sm:grid-cols-3">
                   <CatalogColumn
                     title="Registered schedules"
                     hint="status in Automations"
@@ -104,21 +162,19 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
                     entries={cat.workflows.map((w) => ({ name: w.name, meta: w.location, desc: w.description }))}
                   />
                 </div>
-              ) : (
-                <p className="pl-5 text-xs text-fg-dim">No schedules, processes or workflows registered for this agent yet.</p>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </Card>
+              </details>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
 export function FleetSummaryTag({ fleet }: { fleet: Fleet }) {
   const summary = fleetSummary(fleet);
   if (!summary) return <Tag tone="warm">Status unknown</Tag>;
-  return <Tag tone={summary.running === 0 ? "neutral" : "engaged"}>{`${summary.running} of ${summary.total} running`}</Tag>;
+  return <Tag tone={summary.running === 0 ? "neutral" : "engaged"}>{`${summary.running} of ${summary.total} alive`}</Tag>;
 }
 
 function CatalogColumn({
