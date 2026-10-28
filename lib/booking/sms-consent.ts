@@ -12,7 +12,7 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { hasTickedConsent } from "@/lib/consent/ledger";
+import { consentState, hasTickedConsent } from "@/lib/consent/ledger";
 
 export async function bookingSmsConsent(
   db: SupabaseClient,
@@ -30,4 +30,26 @@ export async function bookingSmsConsent(
     });
     return false;
   }
+}
+
+/**
+ * Right before a queued reminder is texted: has the lead since taken the
+ * "text me" back (Codex review of #774)? The meeting's sms_consent is a
+ * snapshot from booking; the ledger holds every later choice.
+ *   - "withdrawn" / "declined" as the latest decision -> "no": never texted.
+ *   - the ledger cannot be read -> "unknown": the text waits for the next run.
+ *   - no ledger row at all -> "yes": consent captured on the lead page with
+ *     its own proof (grantFounderMeetingSmsConsent) has no ledger row, and the
+ *     snapshot stands.
+ */
+export async function smsConsentStillGiven(
+  db: SupabaseClient,
+  tenantId: string,
+  phone: string,
+  read: typeof consentState = consentState,
+): Promise<"yes" | "no" | "unknown"> {
+  const state = await read(db, { tenantId, channel: "sms", destination: phone });
+  if (state === "withdrawn" || state === "declined") return "no";
+  if (state === "unknown") return "unknown";
+  return "yes";
 }

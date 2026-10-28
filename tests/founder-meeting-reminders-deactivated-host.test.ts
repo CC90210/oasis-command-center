@@ -142,6 +142,7 @@ async function main() {
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
     ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__214_consent_events.sql", "utf8")}
   `);
   const profile = (id: string, authId: string, name: string, deactivatedAt: string | null = null) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, full_name, joined_at, deactivated_at)

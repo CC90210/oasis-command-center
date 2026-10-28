@@ -7,6 +7,7 @@ import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { quoCredentialsOrNull, sendQuoSms } from "@/lib/integrations/quo";
+import { smsConsentStillGiven } from "@/lib/booking/sms-consent";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { checkTcpaWindow, dispatchByTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
@@ -387,8 +388,15 @@ async function persistReminderTracking(db: Db, row: NotificationRow): Promise<vo
   if (!row.provider || !row.provider_receipt || !row.sent_at || !row.attempt_token) {
     throw new Error("reminder_tracking_receipt_missing");
   }
-  await recordTouch(db, row, row.provider, row.provider_receipt, row.sent_at);
+  // Mail to the founder is not contact with the lead: no timeline "email
+  // sent", no Last Touch, no outreach count (Codex review of #774).
+  if (!isHostKind(row.kind)) await recordTouch(db, row, row.provider, row.provider_receipt, row.sent_at);
   await markTrackingComplete(db, row);
+}
+
+/** Mail to OASIS's own founder about a meeting (heads-up), never to the lead. */
+function isHostKind(kind: string): boolean {
+  return kind === "host_15";
 }
 
 async function processRow(
@@ -512,66 +520,103 @@ async function processRow(
         return "failed";
       }
       const subject = deliveryRow.subject || "Your OASIS meeting reminder";
-      const sent = await sendGmailAsOperator({
-        tenantId: row.tenant_id,
-        userId: row.sender_user_id,
-        to: row.recipient,
-        subject,
-        body: deliveryRow.body,
-        expectedFromAddress: appointment.organizer_email_snapshot,
-        idempotencyKey: row.attempt_token,
-        brand: reminderBrand,
-      });
-      if (sent.ok) {
-        provider = sent.provider;
-        receipt = sent.gmail_message_id;
-      } else if (sent.reason === "not_connected" || sent.reason === "refresh_failed") {
-        // The host's own Gmail login is not connected: every reminder from
-        // 2026-09-04 to 2026-10-28 failed right here ("no gmail_oauth bundle")
-        // and nobody heard. OASIS's shared mailbox sends it instead.
+      if (isHostKind(row.kind)) {
+        // Mail to OASIS's own founder, not a lead: always the shared mailbox as
+        // an internal team alert, so an opt-out filed against a founder's
+        // address cannot silence it (Codex review of #774).
         const shared = await sendOasisSharedGmail({
           tenantId: row.tenant_id,
           to: row.recipient,
           subject,
           body: deliveryRow.body,
           idempotencyKey: row.attempt_token,
-          // The founder's heads-up goes to the founder: internal team mail.
-          internalAlert: row.kind === "host_15",
+          internalAlert: true,
         });
         if (!shared.ok) {
-          const detail = `operator:${sent.reason}; shared:${shared.reason}:${shared.error}`;
-          if (shared.reason === "suppressed") {
-            await mark(db, row, "skipped", { error: "recipient_suppressed" });
-            return "skipped";
-          }
           if (shared.reason === "delivery_unknown") {
-            await mark(db, row, "failed", { error: detail, incrementAttempt: true });
+            await mark(db, row, "failed", { error: `shared:${shared.reason}:${shared.error}`, incrementAttempt: true });
           } else {
-            await retryOrFail(db, row, detail);
+            await retryOrFail(db, row, `shared:${shared.reason}:${shared.error}`);
           }
           return "failed";
         }
         provider = shared.provider;
         receipt = shared.gmail_message_id || row.attempt_token;
       } else {
-        if (sent.reason === "sender_mismatch" || sent.reason === "delivery_unknown") {
-          await mark(db, row, "failed", { error: `${sent.reason}:${sent.error}`, incrementAttempt: true });
+        const sent = await sendGmailAsOperator({
+          tenantId: row.tenant_id,
+          userId: row.sender_user_id,
+          to: row.recipient,
+          subject,
+          body: deliveryRow.body,
+          expectedFromAddress: appointment.organizer_email_snapshot,
+          idempotencyKey: row.attempt_token,
+          brand: reminderBrand,
+        });
+        if (sent.ok) {
+          provider = sent.provider;
+          receipt = sent.gmail_message_id;
+        } else if (sent.reason === "not_connected" || sent.reason === "refresh_failed") {
+          // The host's own Gmail login is not connected: every reminder from
+          // 2026-09-04 to 2026-10-28 failed right here ("no gmail_oauth bundle")
+          // and nobody heard. OASIS's shared mailbox sends it instead.
+          const shared = await sendOasisSharedGmail({
+            tenantId: row.tenant_id,
+            to: row.recipient,
+            subject,
+            body: deliveryRow.body,
+            idempotencyKey: row.attempt_token,
+            // A lead answering "can we move it?" reaches the host, as from the
+            // host's own Gmail (Codex review of #774).
+            replyTo: appointment.organizer_email_snapshot,
+          });
+          if (!shared.ok) {
+            const detail = `operator:${sent.reason}; shared:${shared.reason}:${shared.error}`;
+            if (shared.reason === "suppressed") {
+              await mark(db, row, "skipped", { error: "recipient_suppressed" });
+              return "skipped";
+            }
+            if (shared.reason === "delivery_unknown") {
+              await mark(db, row, "failed", { error: detail, incrementAttempt: true });
+            } else {
+              await retryOrFail(db, row, detail);
+            }
+            return "failed";
+          }
+          provider = shared.provider;
+          receipt = shared.gmail_message_id || row.attempt_token;
         } else {
-          await retryOrFail(db, row, `${sent.reason}:${sent.error}`);
+          if (sent.reason === "sender_mismatch" || sent.reason === "delivery_unknown") {
+            await mark(db, row, "failed", { error: `${sent.reason}:${sent.error}`, incrementAttempt: true });
+          } else {
+            await retryOrFail(db, row, `${sent.reason}:${sent.error}`);
+          }
+          return "failed";
         }
-        return "failed";
       }
     } else {
       if (!appointment.sms_consent || appointment.client_phone_snapshot !== row.recipient) {
         await mark(db, row, "skipped", { error: "sms_consent_missing_or_recipient_changed" });
         return "skipped";
       }
-      // Quiet hours. A step inside the hour before the call always goes out:
-      // the lead picked that time, and a reminder held to 8 am would be a
-      // reminder for a call already over. The day-before text keeps the
-      // lead's daytime: moved to the next 8 am-9 pm opening while that is still
-      // more than an hour ahead, else left to the email.
-      if (Number(row.reminder_minutes_before ?? 0) > 60) {
+      // The snapshot is from booking: a later "no" in the consent ledger wins.
+      const consent = await smsConsentStillGiven(db, row.tenant_id, row.recipient);
+      if (consent === "no") {
+        await mark(db, row, "skipped", { error: "sms_consent_withdrawn" });
+        return "skipped";
+      }
+      if (consent === "unknown") {
+        await retryOrFail(db, row, "sms_consent_check_failed");
+        return "failed";
+      }
+      // Quiet hours, by the real time left before the call. Inside the last
+      // hour a text always goes out: the lead picked that time, and one held
+      // to 8 am would be for a call already over. Further out (the day-before
+      // text, a confirmation for a call days away) it keeps the lead's
+      // daytime: moved to the next 8 am-9 pm opening while that is still more
+      // than an hour ahead, else left to the email (Codex review of #774).
+      const minutesToCall = (Date.parse(appointment.scheduled_for) - Date.now()) / 60_000;
+      if (minutesToCall > 60) {
         const quietHours = checkTcpaWindow(row.recipient, new Date());
         if (!quietHours.usedFallback && !quietHours.withinWindow) {
           const opens = nextTcpaWindowStart(row.recipient, new Date());

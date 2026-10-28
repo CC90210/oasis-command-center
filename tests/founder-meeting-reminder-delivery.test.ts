@@ -53,7 +53,7 @@ stubModule(require.resolve("../lib/integrations/gmail-oauth-send"), {
     return { ok: false, provider: "gmail_oauth", reason: "not_connected", error: "no gmail_oauth bundle" };
   },
 });
-type SharedSend = { to: string; subject: string; body: string; internalAlert?: boolean | null; idempotencyKey?: string };
+type SharedSend = { to: string; subject: string; body: string; internalAlert?: boolean | null; idempotencyKey?: string; replyTo?: string | null };
 const sharedSends: SharedSend[] = [];
 let sharedResult: Record<string, unknown> | null = null;
 stubModule(require.resolve("../lib/integrations/oasis-shared-gmail-send"), {
@@ -129,6 +129,7 @@ async function main() {
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
     ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__214_consent_events.sql", "utf8")}
   `);
   await seed.execute({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, full_name, joined_at)
@@ -196,6 +197,7 @@ async function main() {
     assert.match(sent.subject, /AI automation audit starts in 1[45] minutes/);
     assert.match(sent.body, /meet\.google\.com\/abc-defg-hij/);
     assert.notEqual(sent.internalAlert, true, "a lead's reminder is never flagged internal");
+    assert.equal(sent.replyTo, HOST_EMAIL, "a lead's reply reaches the host, as from the host's own Gmail");
     assert.ok(operatorAttempts.includes("taylor@example.com"), "the host's own Gmail is tried first");
   });
   await check("the lead's 5-minute text leaves through Quo, branded, with the join link", async () => {
@@ -217,6 +219,9 @@ async function main() {
     assert.equal(sent.internalAlert, true);
     assert.match(sent.subject, /^In 1[45] minutes: Taylor Smith, North Star Dental$/);
     assert.match(sent.body, /Phone: \+14165550101/);
+    assert.ok(!operatorAttempts.includes(HOST_EMAIL), "the founder's mail never takes the lead-facing path");
+    const touches = await seed.execute({ sql: "SELECT count(*) AS n FROM lead_interactions WHERE to_email = ?", args: [HOST_EMAIL] });
+    assert.equal(Number(touches.rows[0].n), 0, "mail to the founder is not contact with the lead");
   });
   await check("the run reports three sent and no failures", async () => {
     assert.equal(pass1.sent, 3);
@@ -236,6 +241,49 @@ async function main() {
     assert.equal(quoSends.length, 1, "nothing was texted at night");
   });
   window = { usedFallback: false, withinWindow: true };
+
+  // Pass 2b: a confirmation text for a call days away waits for daytime too.
+  window = { usedFallback: false, withinWindow: false };
+  await appointment("appt-later", 3 * 24 * 60);
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('confirm-later', ?, 'appt-later', 'lead-appt-later', 'confirmation', NULL, 'sms', ?, ?, ?, NULL,
+      'OASIS AI: Your call is booked.', 'pending', 0, 1, 'dedupe-confirm-later')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), PHONE, HOST],
+  });
+  await dispatch();
+  await check("a confirmation text for a call days away waits for the lead's daytime", async () => {
+    const row = await rowOf("confirm-later");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "held_for_recipient_daytime");
+  });
+  window = { usedFallback: false, withinWindow: true };
+
+  // Pass 2c: the lead took the "text me" back after booking.
+  const withdrawnPhone = "+14165550199";
+  const { consentSubjectHash } = await import("../lib/consent/ledger");
+  const { normalizeConsentSubject } = await import("../lib/consent/ledger-disclosure");
+  const subjectHash = consentSubjectHash("sms", normalizeConsentSubject("sms", withdrawnPhone) || "");
+  for (const [id, ticked, at] of [["c1", 1, "2026-10-01T00:00:00.000Z"], ["c2", 0, "2026-10-20T00:00:00.000Z"]] as const) {
+    await seed.execute({
+      sql: `INSERT INTO consent_events (id, tenant_id, lead_id, form_id, channel, ticked, subject_hash, disclosure_hash,
+              disclosure_version, disclosure_text, identity_source, created_at)
+            VALUES (?, ?, 'lead-appt-withdrawn', 'form-1', 'sms', ?, ?, 'h', 'v', 't', 'test', ?)`,
+      args: [id, OASIS, ticked, subjectHash, at],
+    });
+  }
+  await appointment("appt-withdrawn", 5, withdrawnPhone);
+  await queue("lead-sms-withdrawn", "appt-withdrawn", "reminder_5", 5, "sms", withdrawnPhone);
+  const textsBefore = quoSends.length;
+  await dispatch();
+  await check("a lead who withdrew SMS consent after booking is never texted", async () => {
+    const row = await rowOf("lead-sms-withdrawn");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.last_error, "sms_consent_withdrawn");
+    assert.equal(quoSends.length, textsBefore);
+  });
 
   // Pass 3: Quo refuses (an international number the Quo line may not text).
   quoResult = { ok: false, code: "quo_refused", status: 403, reason: "Destination not allowed." };
