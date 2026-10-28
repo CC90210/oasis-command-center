@@ -39,6 +39,8 @@ import { BANK_NOT_CONNECTED, incompleteBooksNote } from "@/lib/founders-finances
 import { financeBook, loadOverviewPage } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { formatCents } from "@/lib/founders-finances/money";
+import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
+import { getActiveProfile } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Money" };
@@ -90,6 +92,9 @@ export default async function MoneyPage() {
     );
   }
   const tiles = moneyTiles(loaded, formatCents);
+  // Revenue goal (moved from Settings > Team, 2026-10-28). Saving stays owner/admin (app/api/goals).
+  const profile = (await getActiveProfile().catch(() => null)) as { is_owner?: boolean; team_role?: string } | null;
+  const canEditGoal = !!profile && (profile.is_owner === true || profile.team_role === "owner" || profile.team_role === "admin");
 
   return (
     <PageFrame
@@ -113,6 +118,16 @@ export default async function MoneyPage() {
           {tiles.month.map(({ id, ...tile }) => (
             <KpiTile key={id} {...tile} />
           ))}
+        </section>
+
+        {/* id="revenue-goal": Today's Goal pace card links here (lib/setup-links.ts). */}
+        <section id="revenue-goal" aria-label="Revenue goal" className="scroll-mt-24">
+          <Card
+            title="Revenue goal"
+            subtitle="The one goal Today counts down to: money collected in a period, from the books. MRR is read live from Stripe, never typed."
+          >
+            <RevenueGoalPanel canEdit={canEditGoal} />
+          </Card>
         </section>
 
         {loaded ? <Details loaded={loaded} /> : <p className="text-sm text-fg-muted">Couldn&rsquo;t load the rest of the overview. The error has been logged.</p>}

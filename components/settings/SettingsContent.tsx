@@ -54,14 +54,11 @@ import { SafeBoundary } from "@/components/SafeBoundary";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { HARNESS_REPO } from "@/lib/install-scripts";
-import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { AgentEnginePanel } from "@/components/settings/AgentEnginePanel";
 import { ConnectYourComputerCard, YourComputersCard } from "@/components/settings/YourComputersCard";
 import { readAgentEngine } from "@/lib/ai/agent-engine-store";
 import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
-import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
-import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifestRead } from "@/lib/manifest/loader";
 import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
@@ -416,45 +413,25 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* id="revenue-goal": Today's Goal pace card links
-              /settings/team#revenue-goal, and OpenSectionOnHash opens it. */}
-          {show("team") && canManageTenant && oasisSalesWorkspace && (
-            <SettingsSection
-              id="revenue-goal"
-              defaultOpen={focused}
-              title="Revenue goal"
-              subtitle="The one goal Today counts down to: money collected in a period, computed from the Finances ledger. MRR is never typed — it is read live from Stripe."
-            >
-              <RevenueGoalPanel
-                canEdit={
-                  !!teamProfile &&
-                  (teamProfile.is_owner === true || teamProfile.team_role === "owner" || teamProfile.team_role === "admin")
-                }
-              />
-            </SettingsSection>
-          )}
-
-          {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
-              very important feature." Read-only operations view — daemons,
-              sequences, employee activity in one place. Mutations live on the
-              surfaces it tracks. It lives under Team now: it is the team's week
-              at a glance, and its full history link is the Audit log. */}
-          {show("team") && canSeeTeamPerformance && oasisSalesWorkspace && profile.tenant_id && (
-            <SafeBoundary label="sales-team-performance">
-              <SalesTeamOperationsPanel
-                tenantId={profile.tenant_id}
-                tenantName={tenant?.name ?? null}
-              />
-            </SafeBoundary>
-          )}
-
-          {show("team") && (
-            <SafeBoundary label="operations-tracker">
-              <OperationsTrackerPanel
-                tenantId={profile?.tenant_id ?? null}
-                tenantName={tenant?.name ?? null}
-              />
-            </SafeBoundary>
+          {/* Settings boundaries (2026-10-28): Team is seats only. The Revenue goal
+              lives on Money (/money#revenue-goal); Team performance and the
+              operations tracker live in the Activity log, beside their history. */}
+          {show("team") && canSeeTeamPerformance && (
+            <p className="text-sm text-fg-muted">
+              Team performance and the operations tracker are in the{" "}
+              <Link href="/settings/audit-log" prefetch={false} className="text-accent hover:underline">
+                Activity log
+              </Link>
+              {oasisSalesWorkspace && canManageTenant ? (
+                <>
+                  ; the revenue goal is on{" "}
+                  <Link href="/money#revenue-goal" prefetch={false} className="text-accent hover:underline">
+                    Money
+                  </Link>
+                </>
+              ) : null}
+              .
+            </p>
           )}
 
           {/* ── Connections ─────────────────────────────────────────── */}
@@ -700,7 +677,7 @@ async function PersonalSettingsView({
           title={tenantName ? `Settings · ${tenantName}` : "Settings"}
           subtitle={
             showTeamPerformance
-              ? "Your profile and account connections, plus a read-only scorecard for the OASIS sales team."
+              ? "Your profile and account connections. The OASIS sales team's scorecard is in the Activity log."
               : "Your profile, password, and account connections. Workspace administration stays with an owner or admin."
           }
           action={
@@ -805,11 +782,6 @@ async function PersonalSettingsView({
         </SettingsSection>
       )}
 
-      {show("team") && showTeamPerformance && tenantId && (
-        <SafeBoundary label="sales-team-performance">
-          <SalesTeamOperationsPanel tenantId={tenantId} tenantName={tenantName} />
-        </SafeBoundary>
-      )}
     </div>
   );
 }
