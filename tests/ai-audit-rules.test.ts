@@ -152,6 +152,9 @@ async function main() {
     for (const step of ["generating", "final_review"] as const) {
       assert.deepEqual(rules.followLead(step, "lost", { delivered: true }), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, `${step} after a delivery is flagged, never declined`);
     }
+    for (const reason of [rules.LOST_WITH_CLIENT, rules.LOST_AFTER_PAYMENT, rules.LOST_AT_FINAL_APPROVAL]) assert.ok(rules.isLostOnPipelineFlag("attention", reason));
+    assert.equal(rules.isLostOnPipelineFlag("attention", "The Mac could not print the PDF"), false, "a PDF failure may replace the Lost flag, never the other way round");
+    assert.equal(rules.isLostOnPipelineFlag("ok", null), false);
     // P2: the Lost flag never covers a warning that matters more.
     for (const ctx of [{ health: "failed" as const, healthReason: "PDF failed" }, { health: "attention" as const, healthReason: "A second payment arrived" }, { paymentStatus: "disputed" as const }, { paymentStatus: "refunded" as const }, { paymentStatus: "partially_refunded" as const }, { paymentStatus: "overpaid_review" as const }]) {
       assert.equal(rules.followLead("onboarding", "lost", ctx), null, JSON.stringify(ctx));
@@ -165,9 +168,11 @@ async function main() {
     for (const step of ["call_completed", "transcript_review", "generating", "final_review", "delivered", "payment_pending"] as const) {
       assert.equal(rules.followLead(step, "demo_completed"), null, `${step} never moves back`);
     }
-    for (const step of ["new_lead", "call_scheduled", "transcript_review", "final_review"] as const) {
+    for (const step of ["new_lead", "call_scheduled", "transcript_review", "generating"] as const) {
       assert.deepEqual(rules.followLead(step, "lost"), { kind: "move", to: "declined", event: "lead_lost_on_pipeline" }, step);
     }
+    // Codex review of #762, round 2: at final approval an email may be pending or its fate uncertain, so never declined by itself.
+    assert.deepEqual(rules.followLead("final_review", "lost"), { kind: "flag", reason: rules.LOST_AT_FINAL_APPROVAL });
     for (const step of ["delivered", "proposal_review", "payment_pending"] as const) {
       assert.deepEqual(rules.followLead(step, "lost"), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, step);
     }

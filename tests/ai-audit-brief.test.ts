@@ -1277,6 +1277,17 @@ async function main() {
     assert.equal(e?.health_reason, rules.LOST_WITH_CLIENT);
   });
 
+  await check("an audit email whose fate was uncertain is never declined by a Lost lead: the owner can still confirm it (Codex review of #762, round 2)", async () => {
+    const eid = await openWith(50, null, null);
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'generating', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });
+    await db.execute(store.eventStatement({ tenantId: OASIS, engagementId: eid, event: "delivery_unknown", actor: cc, at: NOW().toISOString() }));
+    await setLead(50, "stage", "lost");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.equal(e?.stage, "generating");
+    assert.equal(e?.health_reason, rules.LOST_WITH_CLIENT);
+  });
+
   await check("a refund to review keeps its own warning when the lead is marked Lost (Codex review of #762, P2)", async () => {
     const eid = await openWith(49, null, null);
     await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'onboarding', payment_status = 'refunded', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });

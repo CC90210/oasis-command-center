@@ -119,15 +119,26 @@ export function mayMoveStage(from: AiAuditStage, to: AiAuditStage): boolean {
   return STAGE_MOVES[from].includes(to);
 }
 
-/** Steps before an audit is delivered. A revision after delivery comes back through them, so they alone never prove the client has nothing. */
-const BEFORE_DELIVERY: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating", "final_review"];
+/**
+ * Steps a Lost lead may decline the audit from: before final approval, where no
+ * email to the client can be pending or uncertain. A revision after delivery
+ * comes back through them too, so they alone never prove the client has
+ * nothing (followLead also reads the delivery history).
+ */
+const BEFORE_FINAL_APPROVAL: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating"];
 const PAID: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active_client"];
 /** Payment states with their own warning for CC (nextActionFor): a Lost flag never covers them. */
 const MONEY_TO_REVIEW: readonly PaymentStatus[] = ["overpaid_review", "partially_refunded", "refunded", "disputed"];
 
 export const LOST_WITH_CLIENT = "The lead is Lost on the Pipeline, but the client still has this audit. Decline it here to close their page and payment link.";
 export const LOST_AFTER_PAYMENT = "The lead is Lost on the Pipeline, but this client has paid. Check the lead.";
-const LOST_REASONS: readonly string[] = [LOST_WITH_CLIENT, LOST_AFTER_PAYMENT];
+export const LOST_AT_FINAL_APPROVAL = "The lead is Lost on the Pipeline while this audit is at final approval. Check whether its email went out, then decline it here.";
+const LOST_REASONS: readonly string[] = [LOST_WITH_CLIENT, LOST_AFTER_PAYMENT, LOST_AT_FINAL_APPROVAL];
+
+/** The flag followLead sets: any other warning (a PDF that failed, a payment to review) may replace it. */
+export function isLostOnPipelineFlag(health: string, reason: string | null): boolean {
+  return health === "attention" && LOST_REASONS.includes(reason ?? "");
+}
 
 export type LeadFollow =
   | { kind: "move"; to: AiAuditStage; event: "call_booked" | "meeting_held_on_pipeline" | "lead_lost_on_pipeline" }
@@ -139,7 +150,7 @@ export type LeadFollow =
 export type FollowContext = {
   /** The lead's how-many-th audit (engagement.cycle_no). */
   cycleNo?: number;
-  /** An audit of this engagement was ever delivered (an ai_audit_events "delivered" row): the client holds a page. */
+  /** An audit of this engagement was ever delivered, or its email's fate was uncertain (ai_audit_events "delivered" or "delivery_unknown"). */
   delivered?: boolean;
   health?: HealthFlag;
   healthReason?: string | null;
@@ -155,10 +166,12 @@ export type FollowContext = {
  *     The lead's FIRST audit only: a later one (cycle 2 or more) holds its
  *     own meeting, and the lead never moves back, so its Meeting Held may be
  *     the last audit's;
- *   - the lead marked Lost declines an audit that was never delivered. Once
- *     one was (a revision after delivery included), the client holds a page
- *     and a Pay button, so the audit is flagged for CC instead of closed
- *     behind his back. The flag never covers a warning that matters more (a
+ *   - the lead marked Lost declines an audit that was never delivered and is
+ *     not yet at final approval. Once one was delivered, or its email's fate
+ *     was uncertain (a revision after delivery included), the client may
+ *     hold a page and a Pay button; and at final approval an email may be
+ *     pending or uncertain. Then the audit is flagged for CC instead of
+ *     closed behind his back. The flag never covers a warning that matters more (a
  *     failed step, another check, a refund or dispute to review): the board's
  *     Pipeline column says Lost either way. It clears itself when the lead
  *     comes back from Lost.
@@ -167,10 +180,10 @@ export type FollowContext = {
 export function followLead(step: AiAuditStage, leadStage: string | null, ctx: FollowContext = {}): LeadFollow {
   if (TERMINAL_STAGES.includes(step) || !leadStage) return null;
   const health = ctx.health ?? "ok";
-  const ours = health === "attention" && LOST_REASONS.includes(ctx.healthReason ?? "");
+  const ours = isLostOnPipelineFlag(health, ctx.healthReason ?? null);
   if (leadStage === "lost") {
-    if (BEFORE_DELIVERY.includes(step) && !ctx.delivered) return { kind: "move", to: "declined", event: "lead_lost_on_pipeline" };
-    const reason = PAID.includes(step) ? LOST_AFTER_PAYMENT : LOST_WITH_CLIENT;
+    if (BEFORE_FINAL_APPROVAL.includes(step) && !ctx.delivered) return { kind: "move", to: "declined", event: "lead_lost_on_pipeline" };
+    const reason = PAID.includes(step) ? LOST_AFTER_PAYMENT : step === "final_review" && !ctx.delivered ? LOST_AT_FINAL_APPROVAL : LOST_WITH_CLIENT;
     if (ours) return ctx.healthReason === reason ? null : { kind: "flag", reason };
     if ((health !== "ok" && health !== "stalled") || MONEY_TO_REVIEW.includes(ctx.paymentStatus ?? "none")) return null;
     return { kind: "flag", reason };

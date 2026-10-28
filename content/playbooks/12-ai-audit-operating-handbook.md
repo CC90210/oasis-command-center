@@ -42,7 +42,7 @@ An audit is not a second pipeline. The deal has one set of stages, the **Pipelin
 
 - The AI audits board counts each audit under the stage its lead is in on the Pipeline, under the same name and colour. On the Pipeline, a deal with an open audit shows **AI audit:** and its step on its row, linking to the audit.
 - They move together. Each audit step moves the lead forward. When the lead moves on the Pipeline, the audit follows within five minutes: a founder meeting booked moves it to Meeting booked, and, on the lead's first audit, the lead at Meeting Held moves it to Profile from the call. A later audit holds its own meeting.
-- **Lost on the Pipeline.** An audit that was never delivered is declined with it. Once one was (a revision after delivery included), the client still has a page and a Pay button, so the audit is flagged for you instead: decline it on the audit to close them. The flag never hides a refund, a dispute or a failed step, and it clears by itself if the lead comes back from Lost.
+- **Lost on the Pipeline.** An audit that was never delivered and is not yet at final approval is declined with it. Once one was delivered, or its email may have gone out (a revision after delivery included), the client may still have a page and a Pay button; and at final approval an email may be pending. Then the audit is flagged for you instead: check it, then decline it on the audit to close them. The flag never hides a refund, a dispute or a failed step, and it clears by itself if the lead comes back from Lost.
 - Starting a lead's first audit when it is already past the meeting starts it at Profile from the call.
 
 ---

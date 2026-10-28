@@ -29,7 +29,7 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { WAITING_ON_CLIENT_STAGES, followLead, shortName, stallReason } from "@/lib/ai-audit/rules";
+import { WAITING_ON_CLIENT_STAGES, followLead, isLostOnPipelineFlag, shortName, stallReason } from "@/lib/ai-audit/rules";
 import { everDelivered, leadsOnPipeline } from "@/lib/ai-audit/pipeline-link";
 import { withdrawAuthorization } from "@/lib/ai-audit/authorize";
 import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
@@ -189,7 +189,8 @@ export async function runAiAuditTick(
           // A Mac that keeps failing the print gets three tries, then CC is asked, once.
           const failures = await pdfFailures(db, tenantId, audit.id);
           if (failures.count >= PDF_MAX_FAILURES) {
-            if (e.health === "ok") {
+            // The Pipeline's Lost flag gives way: a PDF that cannot print is CC's to fix first (Codex review of #762).
+            if (e.health === "ok" || isLostOnPipelineFlag(e.health, e.health_reason)) {
               const reason = `The Mac could not print the PDF (${failures.count} tries${failures.lastError ? `; last: ${failures.lastError}` : ""}). Fix it, then press Retry PDF.`;
               const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "attention", health_reason: reason }, event: "pdf_failed", actor: { type: "system", id: null }, now: now() });
               if (r.ok) {

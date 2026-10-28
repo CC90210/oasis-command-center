@@ -40,14 +40,18 @@ export async function leadsOnPipeline(db: Client, tenantId: string, leadIds: rea
   return out;
 }
 
-/** Which of these engagements ever had an audit delivered (an ai_audit_events "delivered" row), revisions included. */
+/**
+ * Which of these engagements ever had an audit delivered, or an audit email
+ * whose fate was uncertain (the mail server stopped answering after taking it):
+ * ai_audit_events "delivered" or "delivery_unknown", revisions included.
+ */
 export async function everDelivered(db: Client, tenantId: string, engagementIds: readonly string[]): Promise<Set<string>> {
   const t = requireTenant(tenantId);
   const out = new Set<string>();
   for (const ids of chunks(engagementIds)) {
     const rs = await db.execute({
       sql: `SELECT DISTINCT engagement_id FROM ai_audit_events
-             WHERE tenant_id = ? AND event = 'delivered' AND engagement_id IN (${ids.map(() => "?").join(", ")})`,
+             WHERE tenant_id = ? AND event IN ('delivered', 'delivery_unknown') AND engagement_id IN (${ids.map(() => "?").join(", ")})`,
       args: [t, ...ids],
     });
     for (const r of rs.rows) out.add(String(r.engagement_id));
