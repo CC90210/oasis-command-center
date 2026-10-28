@@ -329,7 +329,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
   // The "text me" box they ticked on the form, read back from the consent
   // ledger for this phone: the reminders text them only if they said yes.
-  const smsConsent = await bookingSmsConsent(db, context.tenantId, combined.phone);
+  const bookingContact = buildPublicBookingContact(combined);
+  const smsConsent = await bookingSmsConsent(db, context.tenantId, bookingContact.phone);
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
   try {
     meeting = await createVerifiedFounderMeeting({
@@ -341,7 +342,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meetingAt: startsAt,
       durationMinutes,
       offerLabel,
-      contact: buildPublicBookingContact(combined),
+      contact: bookingContact,
       clientAgenda: `A ${durationMinutes}-minute ${context.formName} call with OASIS AI Solutions.`,
       // A form answer has no length limit on the server, and one over the
       // service's limit would refuse this lead's every booking.

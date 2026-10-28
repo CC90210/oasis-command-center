@@ -6,7 +6,7 @@ import { getTursoClient } from "@/lib/turso";
 import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
-import { quoCredentialsOrNull, sendQuoSms } from "@/lib/integrations/quo";
+import { quoCredentialsOrNull, quoSender, quoStopIntakeConnected, sendQuoSms } from "@/lib/integrations/quo";
 import { smsConsentStillGiven } from "@/lib/booking/sms-consent";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -653,6 +653,14 @@ async function processRow(
       };
       // OASIS texts through Quo since 2026-10-26 (Twilio broke). Its own
       // switches and the workspace's STOP list are re-checked in sendQuoSms.
+      // A STOP texted back to the Quo number is not read by OASIS yet
+      // (lib/integrations/quo.ts), and an automated text must honour one. So
+      // reminders are texted only once that intake is connected; until then
+      // the email carries them (Codex review of #774).
+      if (!quoStopIntakeConnected()) {
+        await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
+        return "skipped";
+      }
       const quo = await quoCredentialsOrNull(row.tenant_id);
       if (!quo) {
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
@@ -662,7 +670,14 @@ async function processRow(
         await mark(db, row, "skipped", { error: "quo_live_send_disabled" });
         return "skipped";
       }
-      const sent = await sendQuoSms(quo, { to: row.recipient, text: deliveryRow.body });
+      // Which number it leaves from is settled BEFORE anything is sent: a
+      // failed lookup sent nothing, so it retries instead of dropping the text.
+      const sender = await quoSender(quo);
+      if (!sender.ok) {
+        await retryOrFail(db, row, `quo_sender:${sender.code}:${sender.reason}`);
+        return "failed";
+      }
+      const sent = await sendQuoSms({ ...quo, fromNumber: sender.number }, { to: row.recipient, text: deliveryRow.body });
       if (!sent.ok) {
         const detail = `${sent.code}:${sent.reason}`;
         if (["recipient_opted_out", "invalid_recipient", "quo_switched_off", "live_send_disabled", "tenant_retired"].includes(sent.code)) {

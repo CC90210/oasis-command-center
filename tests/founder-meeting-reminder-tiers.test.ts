@@ -10,6 +10,7 @@ import {
   founderMeetingDedupeKey,
   hostHeadsUpPlanned,
   isKnownReminderTier,
+  normalizeFounderMeetingPhone,
   plannedReminderTiers,
   reminderChannelsFor,
   reminderKindFor,
@@ -138,6 +139,12 @@ assert.equal(heads.subject, "In 15 minutes: Gideon Boniface, Rice farm");
 assert.match(heads.body, /Join: https:\/\/meet\.google\.com\/abc-defg-hij/);
 assert.match(heads.body, /Phone: \+2348153169177/);
 assert.match(heads.body, /\/pipeline\/lead-1/, "the heads-up links the lead");
+// A number written with its country code keeps it (Codex review of #774).
+assert.equal(normalizeFounderMeetingPhone("+65 9823 4567"), "+6598234567", "+65 is never read as +1 659...");
+assert.equal(normalizeFounderMeetingPhone("+234 815 316 9177"), "+2348153169177");
+assert.equal(normalizeFounderMeetingPhone("(416) 555-0101"), "+14165550101", "a bare 10-digit number is North American");
+assert.equal(normalizeFounderMeetingPhone("+1 (416) 555-0101"), "+14165550101");
+assert.throws(() => normalizeFounderMeetingPhone("+12"), /invalid_client_phone/);
 assert.equal(
   founderMeetingDedupeKey("appointment-1", 2, "ten_minute", "sms"),
   "appointment-1:2:ten_minute:sms",

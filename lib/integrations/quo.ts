@@ -371,6 +371,16 @@ export async function quoSender(
   return { ok: true, number: sole.number.number, source: "workspace" };
 }
 
+/**
+ * Is a STOP texted back to the Quo number read by OASIS? Not yet: Quo's inbound
+ * webhook is not connected (no QUO_WEBHOOK_SIGNING_KEY). Automated texts (the
+ * founder-meeting reminders) are held until it is, since they promise "Reply
+ * STOP to opt out". A person's own reply in Conversations is not automated.
+ */
+export function quoStopIntakeConnected(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return (env.QUO_WEBHOOK_SIGNING_KEY || "").trim().length > 0;
+}
+
 // -- Sending --------------------------------------------------------------------------
 
 /**

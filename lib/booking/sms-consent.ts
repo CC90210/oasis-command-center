@@ -13,6 +13,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { consentState, hasTickedConsent } from "@/lib/consent/ledger";
+import { normalizeFounderMeetingPhone } from "@/lib/website-sales-meeting";
 
 export async function bookingSmsConsent(
   db: SupabaseClient,
@@ -20,7 +21,15 @@ export async function bookingSmsConsent(
   phone: unknown,
   read: typeof hasTickedConsent = hasTickedConsent,
 ): Promise<boolean> {
-  const destination = typeof phone === "string" ? phone.trim() : "";
+  // The SAME number the meeting stores and the reminders text (the meeting's
+  // own normalizer), never the one as typed: consent for one number is never
+  // consent for another (Codex review of #774).
+  let destination = "";
+  try {
+    destination = normalizeFounderMeetingPhone(typeof phone === "string" ? phone : "") ?? "";
+  } catch {
+    destination = "";
+  }
   if (!destination) return false;
   try {
     return await read(db, { tenantId, channel: "sms", destination });

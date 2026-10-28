@@ -417,7 +417,10 @@ await check("a website the form invited but the calendar cannot parse never bloc
     () => normalizeFounderMeetingContact(buildPublicBookingContact({ ...base, phone: "555-1212", phone_e164: "" })),
     /invalid_client_phone/,
   );
-  assert.match(bookingRoute, /contact: buildPublicBookingContact\(combined\)/);
+  // One contact, built once: the meeting stores the phone the SMS consent was read for (Codex review of #774).
+  assert.match(bookingRoute, /const bookingContact = buildPublicBookingContact\(combined\);/);
+  assert.match(bookingRoute, /bookingSmsConsent\(db, context\.tenantId, bookingContact\.phone\)/);
+  assert.match(bookingRoute, /contact: bookingContact,/);
   assert.match(bookingRoute, /CONTACT_ERRORS\.has\(errorCode\)[\s\S]{0,260}status: 422/);
 });
 

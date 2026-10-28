@@ -375,7 +375,8 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
   const endsAt = new Date(Date.parse(request.startsAt) + durationMinutes * 60_000).toISOString();
   const handoff = request.note || `Booked from ${sourceLabel(request.source)}${request.instagramHandle ? ` (@${request.instagramHandle})` : ""}.`;
   // Texts only if this phone ticked "text me" on a form (the consent ledger).
-  const smsConsent = await bookingSmsConsent(deps.db, tenantId, request.contact.phone);
+  const bookingContact = buildPublicBookingContact({ ...answers, company: request.contact.company });
+  const smsConsent = await bookingSmsConsent(deps.db, tenantId, bookingContact.phone);
   let meeting: VerifiedFounderMeeting | null = null;
   try {
     meeting = await deps.createMeeting({
@@ -387,7 +388,7 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
       meetingAt: request.startsAt,
       durationMinutes,
       offerLabel,
-      contact: buildPublicBookingContact({ ...answers, company: request.contact.company }),
+      contact: bookingContact,
       clientAgenda: `A ${durationMinutes}-minute ${offerLabel} with OASIS AI Solutions.`,
       handoffNote: handoff.slice(0, HANDOFF_NOTE_MAX),
       smsConsent,

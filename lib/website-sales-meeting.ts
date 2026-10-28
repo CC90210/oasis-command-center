@@ -83,6 +83,14 @@ function normalizePhone(value: unknown): string | null {
   const raw = optionalText(value, 80);
   if (!raw) return null;
   const digits = raw.replace(/\D/g, "");
+  // A number written with its country code is kept as written, as the lead's
+  // own phone_e164 is (lib/conversation-threading.ts normalizePhoneE164): only
+  // a bare 10-digit national number reads as North American. "+65 9823 4567"
+  // used to become +16598234567, a stranger's number (Codex review of #774).
+  if (raw.startsWith("+")) {
+    if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
+    throw new Error("invalid_client_phone");
+  }
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
   throw new Error("invalid_client_phone");

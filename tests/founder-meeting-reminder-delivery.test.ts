@@ -62,12 +62,16 @@ stubModule(require.resolve("../lib/integrations/oasis-shared-gmail-send"), {
     return sharedResult ?? { ok: true, provider: "oasis_shared_gmail", gmail_message_id: `<m${sharedSends.length}@oasisai.work>`, from_address: "team@oasisai.work" };
   },
 });
-const quoSends: Array<{ to: string; text: string }> = [];
+const quoSends: Array<{ to: string; text: string; from: string | null }> = [];
 let quoResult: Record<string, unknown> | null = null;
+let quoSenderResult: Record<string, unknown> | null = null;
+let stopIntake = true;
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
-  sendQuoSms: async (_creds: unknown, input: { to: string; text: string }) => {
-    quoSends.push(input);
+  quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
+  quoStopIntakeConnected: () => stopIntake,
+  sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
+    quoSends.push({ ...input, from: creds.fromNumber });
     return quoResult ?? { ok: true, id: `QU${quoSends.length}`, status: "queued" };
   },
 });
@@ -106,8 +110,25 @@ async function check(name: string, fn: () => Promise<void>) {
   }
 }
 
+async function consentIsReadForTheStoredNumber() {
+  const { bookingSmsConsent } = await import("../lib/booking/sms-consent");
+  const asked: string[] = [];
+  const read = (async (_db: unknown, args: { destination: string }) => {
+    asked.push(args.destination);
+    return args.destination === "+6598234567";
+  }) as never;
+  await check("SMS consent is read for the exact number the meeting stores", async () => {
+    assert.equal(await bookingSmsConsent({} as never, OASIS, "+65 9823 4567", read), true);
+    assert.equal(asked.at(-1), "+6598234567", "a written country code is kept, never read as +1");
+    assert.equal(await bookingSmsConsent({} as never, OASIS, "(416) 555-0101", read), false);
+    assert.equal(asked.at(-1), "+14165550101");
+    assert.equal(await bookingSmsConsent({} as never, OASIS, "12", read), false, "an unusable number is never consent");
+  });
+}
+
 async function main() {
   console.log("founder-meeting-reminder-delivery:");
+  await consentIsReadForTheStoredNumber();
   const seed = createClient({ url: `file:${dbFile}` });
   await seed.executeMultiple(`
     CREATE TABLE call_appointments (
@@ -210,6 +231,7 @@ async function main() {
     assert.match(quoSends[0].text, /^OASIS AI: Reminder: your AI automation audit starts in [45] minutes/);
     assert.match(quoSends[0].text, /meet\.google\.com\/abc-defg-hij/);
     assert.match(quoSends[0].text, /Reply STOP to opt out/, "the first text carries the opt-out footer");
+    assert.equal(quoSends[0].from, "+13653603976", "the sending number is settled before the send");
   });
   await check("the founder's heads-up reaches the founder as internal mail, naming the lead", async () => {
     const row = await rowOf("host-15");
@@ -284,6 +306,33 @@ async function main() {
     assert.equal(row.last_error, "sms_consent_withdrawn");
     assert.equal(quoSends.length, textsBefore);
   });
+
+  // Pass 2d: STOP replies to the Quo number are not read yet: no automated texts.
+  stopIntake = false;
+  await appointment("appt-nostop", 5);
+  await queue("lead-sms-nostop", "appt-nostop", "reminder_5", 5, "sms", PHONE);
+  const beforeNoStop = quoSends.length;
+  await dispatch();
+  await check("without STOP intake on the Quo number, reminders are not texted", async () => {
+    const row = await rowOf("lead-sms-nostop");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.last_error, "quo_stop_intake_not_connected");
+    assert.equal(quoSends.length, beforeNoStop);
+  });
+  stopIntake = true;
+
+  // Pass 2e: the sending number cannot be looked up: nothing was sent, so it retries.
+  quoSenderResult = { ok: false, code: "quo_unreachable", reason: "Quo did not answer." };
+  await appointment("appt-nosender", 5);
+  await queue("lead-sms-nosender", "appt-nosender", "reminder_5", 5, "sms", PHONE);
+  await dispatch();
+  await check("a failed sender lookup sent nothing and retries", async () => {
+    const row = await rowOf("lead-sms-nosender");
+    assert.equal(row.status, "pending");
+    assert.equal(Number(row.attempts), 1);
+    assert.match(String(row.last_error), /^quo_sender:quo_unreachable/);
+  });
+  quoSenderResult = null;
 
   // Pass 3: Quo refuses (an international number the Quo line may not text).
   quoResult = { ok: false, code: "quo_refused", status: 403, reason: "Destination not allowed." };

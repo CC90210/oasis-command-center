@@ -73,6 +73,8 @@ stubModule(require.resolve("../lib/integrations/gmail-oauth-send"), {
 const smsSends: Array<{ tenantId: string; to: string }> = [];
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: "+13653603976" }),
+  quoSender: async () => ({ ok: true, number: "+13653603976", source: "configured" }),
+  quoStopIntakeConnected: () => true,
   sendQuoSms: async (creds: { tenantId: string }, input: { to: string }) => {
     smsSends.push({ tenantId: creds.tenantId, to: input.to });
     return { ok: true, id: `QU${smsSends.length}`, status: "queued" };
