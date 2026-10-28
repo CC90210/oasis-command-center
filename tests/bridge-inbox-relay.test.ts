@@ -145,11 +145,16 @@ async function computer(opts: { tenant?: string; user?: string; approved?: boole
   return { id, token };
 }
 
+// Each request comes from its own address unless a check names one: the route limits by address
+// before the bearer, and the checks below would otherwise share one bucket.
+let addressSeq = 0;
 function request(method: "GET" | "POST", verb: string, token: string | null, body?: unknown, headers: Record<string, string> = {}) {
+  addressSeq += 1;
   return {
     req: new NextRequest(`https://app.test/api/bridge/inbox/${verb}`, {
       method,
       headers: {
+        "x-forwarded-for": `10.9.${Math.floor(addressSeq / 250)}.${(addressSeq % 250) + 1}`,
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
         ...headers,
@@ -337,6 +342,15 @@ async function main(): Promise<void> {
     for (let i = 0; i < 11; i += 1) statuses.push((await call("GET", "pending", busy.token)).status);
     assert.deepEqual(statuses.slice(0, 10), Array(10).fill(200));
     assert.equal(statuses[10], 429);
+  });
+
+  await check("a caller guessing bearers is stopped by address before the bearer is looked up", async () => {
+    const guesser = { "x-forwarded-for": "203.0.113.7" };
+    const statuses: number[] = [];
+    for (let i = 0; i < 31; i += 1) statuses.push((await call("GET", "pending", `oab_guess_${i}`, undefined, guesser)).status);
+    assert.deepEqual(statuses.slice(0, 30), Array(30).fill(401));
+    assert.equal(statuses[30], 429);
+    assert.equal((await call("GET", "pending", "oab_guess_x", undefined, { "x-forwarded-for": "203.0.113.8" })).status, 401, "another address still gets an answer");
   });
 
   console.log(`bridge-inbox-relay: ${passed} passed, ${failed} failed`);

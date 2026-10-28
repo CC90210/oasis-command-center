@@ -18,7 +18,8 @@
  * GATES, every request: no Origin header (a machine, never a page), the pairing's bearer
  * (resolvePairingFromBearer), an owner on the pairing, approved to claim work, the workspace's agents
  * owner (the computer the agents run on), a live seat, OASIS's own workspace, and the pairing
- * advertising agent_inbox_v1 in its ping. Ten requests a minute per pairing.
+ * advertising agent_inbox_v1 in its ping. Thirty requests per caller address (one more every two
+ * seconds) before the bearer is even looked up, then ten a minute per pairing.
  *
  * ONE COMPUTER PER DIRECTIVE. pending RESERVES what it returns for the asking computer (one UPDATE ...
  * RETURNING, lib/agent-inbox-db.ts reserveRelayBatchDb), so two computers polling at once never both
@@ -34,6 +35,7 @@
  * near Cloudflare's size limit (see app/api/automations/guided/[[...path]]/route.ts).
  */
 import { type NextRequest, NextResponse } from "next/server";
+import { getClientIp } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { tursoConfigured } from "@/lib/turso";
 import { isAgentsOwner } from "@/lib/agents-owner";
@@ -77,6 +79,11 @@ async function advertises(pairing: ResolvedPairing): Promise<boolean> {
 async function authorize(req: NextRequest): Promise<{ ok: true; pairing: ResolvedPairing } | { ok: false; res: NextResponse }> {
   const refuse = (status: number, error: string) => ({ ok: false as const, res: json(status, { ok: false, error }) });
   if (req.headers.get("origin")) return refuse(403, "unexpected_origin_header");
+  // By caller address BEFORE the bearer is looked up (CodeRabbit on #768, as app/api/bridge/ping does):
+  // a caller guessing bearers never reaches the per-pairing limit below, yet every guess costs a
+  // bridge_pairings lookup. One computer polls once a minute and reports at most twice.
+  const byAddress = rateLimit({ key: `bridge-inbox-ip:${getClientIp(req)}`, capacity: 30, refillPerSec: 0.5 });
+  if (!byAddress.allowed) return { ok: false, res: json(429, { ok: false, error: "too_fast", retry_in_sec: byAddress.resetIn }) };
   if (!tursoConfigured()) return refuse(503, "database_not_configured");
   const resolved = await resolvePairingFromBearer(req);
   if (!resolved.ok) return refuse(resolved.status, resolved.error);
