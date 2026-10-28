@@ -8,8 +8,12 @@
  *   2. parseAgentTicks: at most four, house agents only, once each, known keys only, a sane clock,
  *      a whole count, a known health word; absent is [] and malformed is null.
  *   3. recordAgentTicks on real libSQL: forward only, and every write wipes working_memory and
- *      pending_actions (the old focus text goes with the first tick).
- *   4. POST /api/bridge/ping end to end: the agents owner's computer on OASIS's workspace records its
+ *      pending_actions (the old focus text goes with the first tick), records the pairing that carried
+ *      it (reported_by_pairing_id, bravo__248) and clears the agent's own old tick id (last_tick_id).
+ *   4. The computer judged is the one that reported the freshest heartbeat, only when it is the agents
+ *      owner's live pairing in this workspace; another device checking in never stands in for it.
+ *   5. Each agent's last harness job is read on its own: a busy agent never hides another's failure.
+ *   6. POST /api/bridge/ping end to end: the agents owner's computer on OASIS's workspace records its
  *      ticks; another member's computer, a client workspace's owner and a malformed field are ignored,
  *      and the heartbeat itself still answers 200 every time.
  *
@@ -82,6 +86,12 @@ async function schema(): Promise<void> {
       pending_actions TEXT DEFAULT '[]', health_status TEXT DEFAULT 'ok',
       updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE UNIQUE INDEX "agent_state_snapshot_agent_name_key" ON agent_state_snapshot (agent_name);
+    ALTER TABLE agent_state_snapshot ADD COLUMN reported_by_pairing_id TEXT;
+    CREATE TABLE bridge_harness_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      pairing_id TEXT NOT NULL, agent_key TEXT NOT NULL, engine_kind TEXT NOT NULL, engine_name TEXT NOT NULL,
+      chat_mode TEXT NOT NULL, repo_writes INTEGER NOT NULL DEFAULT 0, request_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued', claim_id TEXT, lease_id TEXT, claimed_at TEXT, heartbeat_at TEXT,
+      deadline_at TEXT NOT NULL, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT);
   `);
   await db.batch([
     { sql: "INSERT INTO tenants (id, slug) VALUES (?, 'oasis-ai-cc')", args: [OASIS] },
@@ -93,16 +103,16 @@ async function schema(): Promise<void> {
     { sql: "INSERT INTO workspace_agents_owner VALUES (?, ?, NULL)", args: [OASIS, OWNER] },
     { sql: "INSERT INTO workspace_agents_owner VALUES (?, ?, NULL)", args: [CLIENT, CLIENT_OWNER] },
     // Bravo's row carries the old focus text an earlier mirror left behind.
-    { sql: `INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at, working_memory, health_status) VALUES ('bravo', 1388, '2026-10-22T09:20:53.819703+00:00', '{"focus":"secret plans"}', 'healthy')`, args: [] },
+    { sql: `INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at, last_tick_id, working_memory, health_status) VALUES ('bravo', 1388, '2026-10-22T09:20:53.819703+00:00', 'f2e2c4773fea', '{"focus":"secret plans"}', 'healthy')`, args: [] },
   ], "write");
 }
 
-async function computer(user: string, tenant: string) {
-  const id = `pair-${user}`;
-  const token = `oab_${user}_token`;
+async function computer(user: string, tenant: string, opts: { id?: string; label?: string; lastSeenAt?: string; revokedAt?: string } = {}) {
+  const id = opts.id ?? `pair-${user}`;
+  const token = `oab_${id}_token`;
   await db.execute({
-    sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, scope, paired_via, claim_enabled_at) VALUES (?, ?, ?, 'Mac', ?, 'connector', 'pair_code', '2026-10-01T00:00:00Z')",
-    args: [id, tenant, user, sha256(token)],
+    sql: "INSERT INTO bridge_pairings (id, tenant_id, user_id, label, bridge_token_hash, scope, paired_via, claim_enabled_at, last_seen_at, revoked_at) VALUES (?, ?, ?, ?, ?, 'connector', 'pair_code', '2026-10-01T00:00:00Z', ?, ?)",
+    args: [id, tenant, user, opts.label ?? "Mac", sha256(token), opts.lastSeenAt ?? null, opts.revokedAt ?? null],
   });
   return token;
 }
@@ -164,19 +174,71 @@ async function main(): Promise<void> {
 
   await schema();
 
-  await check("recordAgentTicks: forward only, and every write wipes the working memory", async () => {
+  await check("recordAgentTicks: forward only, wipes the working memory, records the reporting computer", async () => {
     const moved = await ticks.recordAgentTicks(db, [
       { agent: "bravo", lastTickAt: "2026-10-28T11:59:00.000Z", tickCount: 1389, health: "healthy" },
       { agent: "aura", lastTickAt: "2026-10-28T11:00:00.000Z", tickCount: 3, health: "degraded" },
-    ], NOW);
+    ], NOW, "pair-mac");
     assert.equal(moved, 2);
     const bravo = (await db.execute("SELECT * FROM agent_state_snapshot WHERE agent_name = 'bravo'")).rows[0];
     assert.equal(bravo.tick_count, 1389);
     assert.equal(bravo.working_memory, "{}", "the old focus text is gone");
-    const older = await ticks.recordAgentTicks(db, [{ agent: "bravo", lastTickAt: "2026-10-28T10:00:00.000Z", tickCount: 1, health: "down" }], NOW);
+    assert.equal(bravo.reported_by_pairing_id, "pair-mac");
+    assert.equal(bravo.last_tick_id, null, "the agent's old tick id never sits beside a new time on /operations");
+    const aura = (await db.execute("SELECT * FROM agent_state_snapshot WHERE agent_name = 'aura'")).rows[0];
+    assert.equal(aura.reported_by_pairing_id, "pair-mac", "a first tick inserts the reporter too");
+    assert.equal(aura.health_status, "degraded");
+    const older = await ticks.recordAgentTicks(db, [{ agent: "bravo", lastTickAt: "2026-10-28T10:00:00.000Z", tickCount: 1, health: "down" }], NOW, "pair-pc");
     assert.equal(older, 0, "an older report never overwrites a newer one");
-    assert.equal((await db.execute("SELECT tick_count FROM agent_state_snapshot WHERE agent_name = 'bravo'")).rows[0].tick_count, 1389);
-    assert.equal((await db.execute("SELECT health_status FROM agent_state_snapshot WHERE agent_name = 'aura'")).rows[0].health_status, "degraded");
+    const after = (await db.execute("SELECT tick_count, reported_by_pairing_id FROM agent_state_snapshot WHERE agent_name = 'bravo'")).rows[0];
+    assert.equal(after.tick_count, 1389);
+    assert.equal(after.reported_by_pairing_id, "pair-mac", "nor does it take the reporter");
+  });
+
+  await check("reportingPairingOf: the freshest heartbeat's computer", () => {
+    assert.equal(fleet.reportingPairingOf([]), null);
+    assert.equal(
+      fleet.reportingPairingOf([
+        { last_tick_at: ago(30 * MIN), reported_by_pairing_id: "pair-pc" },
+        { last_tick_at: ago(2 * MIN), reported_by_pairing_id: "pair-mac" },
+        { last_tick_at: ago(1 * MIN), reported_by_pairing_id: null },
+        { last_tick_at: "not a time", reported_by_pairing_id: "pair-bad" },
+      ]),
+      "pair-mac",
+    );
+    assert.equal(fleet.reportingPairingOf([{ last_tick_at: ago(1 * MIN), reported_by_pairing_id: null }]), null, "a row no dashboard heartbeat wrote names nobody");
+  });
+
+  await check("readFleetComputer: only the reporting pairing, only the agents owner's, only live", async () => {
+    await computer(OWNER, OASIS, { id: "pair-mac", label: "MacBook", lastSeenAt: ago(30 * MIN) });
+    await computer(OWNER, OASIS, { id: "pair-pc", label: "PC", lastSeenAt: ago(1 * MIN) });
+    await computer(OWNER, OASIS, { id: "pair-old", label: "Old laptop", lastSeenAt: ago(1 * MIN), revokedAt: ago(60 * MIN) });
+    await computer(MEMBER, OASIS, { id: "pair-member", label: "Member Mac", lastSeenAt: ago(1 * MIN) });
+    const mac = await fleet.readFleetComputer(OASIS, "pair-mac");
+    assert.deepEqual(mac, { label: "MacBook", lastSeenAt: ago(30 * MIN) });
+    assert.equal(fleet.fleetLiveness(sig({ lastTaskAt: ago(30 * MIN) }), mac, NOW), "red", "the PC checking in does not stand in for the silent Mac");
+    assert.equal(await fleet.readFleetComputer(OASIS, null), null, "no reporter named: nobody judged");
+    assert.equal(await fleet.readFleetComputer(OASIS, "pair-member"), null, "another member's computer is not the agents' computer");
+    assert.equal(await fleet.readFleetComputer(OASIS, "pair-old"), null, "a revoked pairing is not judged");
+    assert.equal(await fleet.readFleetComputer(CLIENT, "pair-mac"), null, "another workspace never sees it");
+  });
+
+  await check("readLastJobs: one read per agent, so a busy agent never hides another's failure", async () => {
+    const job = (id: string, agent: string, at: string, status: string, error: string | null) => ({
+      sql: `INSERT INTO bridge_harness_jobs (id, tenant_id, user_id, pairing_id, agent_key, engine_kind, engine_name, chat_mode, request_json, status, deadline_at, error_code, created_at, updated_at, finished_at)
+            VALUES (?, ?, ?, 'pair-mac', ?, 'subscription', 'claude', 'build', '{}', ?, ?, ?, ?, ?, ?)`,
+      args: [id, OASIS, OWNER, agent, status, at, error, at, at, at],
+    });
+    await db.batch([
+      job("j-atlas", "atlas", ago(90 * MIN), "failed", "timeout"),
+      ...Array.from({ length: 45 }, (_, i) => job(`j-bravo-${i}`, "bravo", ago((60 - i) * MIN), "succeeded", null)),
+      { sql: "INSERT INTO bridge_harness_jobs (id, tenant_id, user_id, pairing_id, agent_key, engine_kind, engine_name, chat_mode, request_json, status, deadline_at, created_at, updated_at) VALUES ('j-client', ?, ?, 'pair-x', 'maven', 'subscription', 'claude', 'build', '{}', 'failed', ?, ?, ?)", args: [CLIENT, CLIENT_OWNER, ago(1 * MIN), ago(1 * MIN), ago(1 * MIN)] },
+    ], "write");
+    const jobs = await fleet.readLastJobs(OASIS, ["bravo", "atlas", "maven", "aura"]);
+    assert.deepEqual(jobs.get("atlas"), { status: "failed", errorCode: "timeout", at: ago(90 * MIN) }, "atlas's failure survives 45 newer bravo jobs");
+    assert.deepEqual(jobs.get("bravo"), { status: "succeeded", errorCode: null, at: ago(16 * MIN) }, "bravo's newest");
+    assert.equal(jobs.has("maven"), false, "another workspace's job is not this one's");
+    assert.equal(jobs.has("aura"), false);
   });
 
   const route = await import("../app/api/bridge/ping/route");
@@ -195,11 +257,13 @@ async function main(): Promise<void> {
   const clientToken = await computer(CLIENT_OWNER, CLIENT);
   const tick = (agent: string, at: string, count: number) => ({ agent, last_tick_at: at, tick_count: count, health: "green" });
 
-  await check("the ping: the agents owner's computer on OASIS records its ticks", async () => {
+  await check("the ping: the agents owner's computer on OASIS records its ticks, and itself as the reporter", async () => {
     const res = await ping(ownerToken, { agent_ticks: [tick("maven", new Date(Date.now() - MIN).toISOString(), 21)] });
     assert.equal(res.status, 200, JSON.stringify(res.json));
     assert.equal(res.json.agent_ticks_recorded, 1);
-    assert.equal((await db.execute("SELECT tick_count FROM agent_state_snapshot WHERE agent_name = 'maven'")).rows[0].tick_count, 21);
+    const maven = (await db.execute("SELECT tick_count, reported_by_pairing_id FROM agent_state_snapshot WHERE agent_name = 'maven'")).rows[0];
+    assert.equal(maven.tick_count, 21);
+    assert.equal(maven.reported_by_pairing_id, `pair-${OWNER}`);
   });
 
   await check("the ping: anyone else's ticks, and a malformed field, are ignored; the heartbeat still answers", async () => {

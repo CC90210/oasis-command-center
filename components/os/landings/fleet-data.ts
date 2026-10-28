@@ -16,7 +16,8 @@
  *     the agents owner's computer (lib/bridge/fleet-ticks.ts) with its name,
  *     time, count and health ONLY. What an agent is working on stays on the Mac
  *     (CC, 2026-10-28), so no mission text is read or shown here;
- *   - the computer: the agents owner's paired computer's last check-in;
+ *   - the computer: the pairing that carried the agents' latest heartbeat (agent_state_snapshot
+ *     .reported_by_pairing_id, stamped by the ping), never whichever of the owner's devices checked in last;
  *   - the agent's last Coding harness job, its status and time only.
  * fleetLiveness folds them into one of four states (grey, green, amber, red).
  *
@@ -156,23 +157,68 @@ function processIsUp(status: string | null | undefined, metadata: unknown): bool
   return !(status === "degraded" && String(pm2Status ?? "") === SUPERVISOR_DISABLED);
 }
 
-/** The agents owner's most recently seen approved computer, or null. Throws when a read fails. */
-async function readFleetComputer(tenantId: string): Promise<FleetComputer | null> {
+/**
+ * The computer the agents report from: the agents owner's pairing that carried the freshest heartbeat
+ * (`reportingPairingId`, from agent_state_snapshot.reported_by_pairing_id). Null when no heartbeat names one, or it
+ * is not the owner's live pairing in this workspace: then nobody's silence is judged (Codex review, #769:
+ * any other device of the owner's checking in must not make stale agents read as merely quiet).
+ * Throws when a read fails.
+ */
+export async function readFleetComputer(tenantId: string, reportingPairingId: string | null): Promise<FleetComputer | null> {
+  if (!reportingPairingId) return null;
   const owner = await readAgentsOwner(tenantId);
   if (owner.state === "unavailable") throw new Error("fleet: agents owner read failed");
   if (owner.state !== "set") return null;
   const { data, error } = await getServiceSupabase()
     .from("bridge_pairings")
-    .select("label, last_seen_at, claim_enabled_at, paired_via")
+    .select("label, last_seen_at")
     .eq("tenant_id", tenantId)
     .eq("user_id", owner.authUserId)
+    .eq("id", reportingPairingId)
     .is("revoked_at", null)
-    .order("last_seen_at", { ascending: false })
-    .limit(10);
+    .maybeSingle();
   if (error) throw new Error(`fleet: bridge_pairings read failed: ${error.message}`);
-  const rows = (data || []) as Array<{ label: string | null; last_seen_at: string | null; claim_enabled_at: string | null; paired_via: string | null }>;
-  const pick = rows.find((row) => row.claim_enabled_at && row.paired_via !== "signup_secret");
-  return pick ? { label: (pick.label || "").trim() || "your computer", lastSeenAt: pick.last_seen_at } : null;
+  const row = data as { label: string | null; last_seen_at: string | null } | null;
+  return row ? { label: (row.label || "").trim() || "your computer", lastSeenAt: row.last_seen_at } : null;
+}
+
+/**
+ * Each agent's latest Coding harness job in this workspace: one read per agent (Codex review, #769: one
+ * shared limit let a busy agent's history push another agent's last job, even a failed one, out of the
+ * result). Throws when any read fails.
+ */
+export async function readLastJobs(tenantId: string, agents: readonly string[]): Promise<Map<string, FleetJob>> {
+  const db = getServiceSupabase();
+  const results = await Promise.all(
+    agents.map((agent) =>
+      db
+        .from("bridge_harness_jobs")
+        .select("agent_key, status, error_code, created_at, finished_at")
+        .eq("tenant_id", tenantId)
+        .eq("agent_key", agent)
+        .order("created_at", { ascending: false })
+        .limit(1),
+    ),
+  );
+  const failed = results.find((r) => r.error)?.error;
+  if (failed) throw new Error(`fleet: bridge_harness_jobs read failed: ${failed.message}`);
+  const out = new Map<string, FleetJob>();
+  for (const result of results) {
+    const job = ((result.data || []) as Array<{ agent_key: string; status: string; error_code: string | null; created_at: string; finished_at: string | null }>)[0];
+    if (job) out.set(job.agent_key, { status: job.status, errorCode: job.error_code, at: job.finished_at || job.created_at });
+  }
+  return out;
+}
+
+/** The pairing that carried the freshest heartbeat among the agents, or null. PURE. */
+export function reportingPairingOf(states: ReadonlyArray<{ last_tick_at: string | null; reported_by_pairing_id?: string | null }>): string | null {
+  let best: { at: number; id: string } | null = null;
+  for (const s of states) {
+    const at = s.last_tick_at ? Date.parse(s.last_tick_at) : NaN;
+    if (!s.reported_by_pairing_id || !Number.isFinite(at)) continue;
+    if (!best || at > best.at) best = { at, id: s.reported_by_pairing_id };
+  }
+  return best?.id ?? null;
 }
 
 export async function loadFleet(): Promise<Fleet> {
@@ -181,48 +227,41 @@ export async function loadFleet(): Promise<Fleet> {
   const agents = [...OASIS_RUNTIME_AGENT_KEYS];
 
   const db = getServiceSupabase();
-  const [states, pings, computer, jobs] = await Promise.all([
-    db.from("agent_state_snapshot").select("agent_name, tick_count, last_tick_at").in("agent_name", agents),
+  const [states, pings, lastJobs] = await Promise.all([
+    db.from("agent_state_snapshot").select("agent_name, tick_count, last_tick_at, reported_by_pairing_id").in("agent_name", agents),
     tenantId
       ? db.from("integrations_health").select("service, last_ping_at, status, metadata").eq("tenant_id", tenantId).like("service", "pm2.%")
       : Promise.resolve({ data: [], error: null }),
     tenantId
-      ? readFleetComputer(tenantId).catch((err: unknown) => {
-          console.error("[os.fleet.computer]", err instanceof Error ? err.message : String(err));
-          return undefined;
+      ? readLastJobs(tenantId, agents).catch((err: unknown) => {
+          console.error("[os.fleet.harness_jobs]", err instanceof Error ? err.message : String(err));
+          return null;
         })
-      : Promise.resolve(null),
-    tenantId
-      ? db
-          .from("bridge_harness_jobs")
-          .select("agent_key, status, error_code, created_at, finished_at")
-          .eq("tenant_id", tenantId)
-          .in("agent_key", agents)
-          .order("created_at", { ascending: false })
-          .limit(40)
-      : Promise.resolve({ data: [], error: null }),
+      : Promise.resolve(new Map<string, FleetJob>()),
   ]);
   if (states.error) console.error("[os.fleet.state_snapshot]", states.error.message);
   if (pings.error) console.error("[os.fleet.integrations_health]", pings.error.message);
-  if (jobs.error) console.error("[os.fleet.harness_jobs]", jobs.error.message);
   const signalsKnown = !states.error && !pings.error;
-  const lastJobs = new Map<string, FleetJob>();
-  for (const job of (jobs.data || []) as Array<{ agent_key: string; status: string; error_code: string | null; created_at: string; finished_at: string | null }>) {
-    if (!lastJobs.has(job.agent_key)) lastJobs.set(job.agent_key, { status: job.status, errorCode: job.error_code, at: job.finished_at || job.created_at });
-  }
+  const stateRows = (states.data || []) as Array<{ agent_name: string; last_tick_at: string | null; tick_count: number | null; reported_by_pairing_id: string | null }>;
+  const computer: FleetComputer | null | undefined = tenantId
+    ? await readFleetComputer(tenantId, reportingPairingOf(stateRows)).catch((err: unknown) => {
+        console.error("[os.fleet.computer]", err instanceof Error ? err.message : String(err));
+        return undefined;
+      })
+    : null;
   return {
     agents,
     signals: signalsKnown
       ? fleetSignals(
           agents,
-          (states.data || []) as Array<{ agent_name: string; last_tick_at: string | null; tick_count: number | null }>,
+          stateRows,
           (pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>,
           Date.now(),
         )
       : new Map(),
     signalsKnown,
     computer,
-    lastJobs,
-    jobsKnown: !jobs.error,
+    lastJobs: lastJobs ?? new Map(),
+    jobsKnown: lastJobs !== null,
   };
 }

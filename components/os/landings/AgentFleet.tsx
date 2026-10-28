@@ -16,6 +16,7 @@ import Link from "next/link";
 import { Card, Tag } from "@/components/Card";
 import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentInfo } from "@/lib/agents";
+import { HARNESS_TARGETS } from "@/lib/admin/harness-targets";
 import { timeAgo } from "@/lib/fmt";
 import {
   COMPUTER_SILENT_MS,
@@ -84,6 +85,9 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
         const total = cat.crons.length + cat.processes.length + cat.workflows.length;
         const job = fleet.lastJobs.get(key);
         const tab = FLEET_TRAINING_TAB[key];
+        // Only an agent the Coding harness can open gets the link (Aura has no repo target yet:
+        // the harness would open another agent's instead).
+        const harness = HARNESS_TARGETS.some((t) => t.agent === key);
         return (
           <li key={key} className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/25 p-4">
             <div className="flex items-start gap-2.5">
@@ -128,9 +132,11 @@ export function AgentFleet({ fleet }: { fleet: Fleet }) {
               </dl>
             ) : null}
             <div className="flex flex-wrap gap-2">
-              <Link href={`/agent?agent=${key}`} prefetch={false} className="btn-secondary text-xs">
-                Open in Coding harness
-              </Link>
+              {harness ? (
+                <Link href={`/agent?agent=${key}`} prefetch={false} className="btn-secondary text-xs">
+                  Open in Coding harness
+                </Link>
+              ) : null}
               {tab ? (
                 <Link href={`/admin/agent-training?agent=${tab}`} prefetch={false} className="btn-secondary text-xs">
                   What it learned

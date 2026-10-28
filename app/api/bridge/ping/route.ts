@@ -367,7 +367,7 @@ async function recordFleetTicks(pairing: ResolvedPairing, raw: unknown): Promise
       console.error("[bridge.ping.agent_ticks] malformed; ignored", { pairingId: pairing.pairingId });
       return 0;
     }
-    return ticks.length > 0 ? await recordAgentTicks(getTursoClient(), ticks, now) : 0;
+    return ticks.length > 0 ? await recordAgentTicks(getTursoClient(), ticks, now, pairing.pairingId) : 0;
   } catch (error) {
     console.error("[bridge.ping.agent_ticks]", { pairingId: pairing.pairingId, error: error instanceof Error ? error.message : String(error) });
     return 0;

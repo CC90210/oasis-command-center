@@ -63,26 +63,31 @@ export function parseAgentTicks(raw: unknown, now: number): AgentTick[] | null {
 
 /**
  * Write each tick into agent_state_snapshot (a global table: the house agents, not a workspace's),
- * forward only, wiping working_memory and pending_actions. Returns how many rows moved.
- * Throws on a failed write; the ping catches it, logs, and still answers the heartbeat.
+ * forward only, wiping working_memory and pending_actions. reported_by_pairing_id records the pairing
+ * that carried the tick (bravo__248), so Admin > Fleet judges THAT computer's silence, never another of
+ * the owner's devices. last_tick_id is cleared: it is the agent's own tick id, which a dashboard
+ * heartbeat does not carry, and /operations would print an old one beside the new time.
+ * Returns how many rows moved. Throws on a failed write; the ping catches it, logs, and still answers.
  */
-export async function recordAgentTicks(db: Client, ticks: readonly AgentTick[], now: number): Promise<number> {
+export async function recordAgentTicks(db: Client, ticks: readonly AgentTick[], now: number, pairingId: string): Promise<number> {
   let moved = 0;
   const nowIso = new Date(now).toISOString();
   for (const tick of ticks) {
     const rs = await db.execute({
-      sql: `INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at, health_status, working_memory, pending_actions, updated_at)
-            VALUES (?, ?, ?, ?, '{}', '[]', ?)
+      sql: `INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at, last_tick_id, reported_by_pairing_id, health_status, working_memory, pending_actions, updated_at)
+            VALUES (?, ?, ?, NULL, ?, ?, '{}', '[]', ?)
             ON CONFLICT (agent_name) DO UPDATE SET
               tick_count = excluded.tick_count,
               last_tick_at = excluded.last_tick_at,
+              last_tick_id = NULL,
+              reported_by_pairing_id = excluded.reported_by_pairing_id,
               health_status = excluded.health_status,
               working_memory = '{}',
               pending_actions = '[]',
               updated_at = excluded.updated_at
             WHERE agent_state_snapshot.last_tick_at IS NULL
                OR julianday(excluded.last_tick_at) > julianday(agent_state_snapshot.last_tick_at)`,
-      args: [tick.agent, tick.tickCount, tick.lastTickAt, tick.health, nowIso],
+      args: [tick.agent, tick.tickCount, tick.lastTickAt, pairingId, tick.health, nowIso],
     });
     moved += rs.rowsAffected > 0 ? 1 : 0;
   }
