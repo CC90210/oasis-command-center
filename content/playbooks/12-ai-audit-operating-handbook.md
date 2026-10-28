@@ -1,6 +1,6 @@
 ---
 tags: [playbook, sales, ai-audit, runbook, founders]
-updated: 2026-10-27
+updated: 2026-10-28
 ---
 
 # Free AI Audit: operating handbook
@@ -22,7 +22,28 @@ updated: 2026-10-27
 9. Stripe confirms the payment. Pressing Pay never counts.
 10. Onboarding starts by itself: client record, project, checklist, and a welcome email waiting for your one-tap approval.
 
-Everything is on the **AI audits** board (Sales, AI audits): each engagement's stage, any flag, and the next thing to do. Its **Setup** list says what a real audit still needs (confirmed prices, the tax rule, the Mac, PDF storage, private links, the mailbox, Stripe) and whether emails and payments to clients are live or in test mode. Anything marked **Needs you** stops a real audit: fix it there first. The same list is on AI audit settings.
+Everything is on the **AI audits** board (Sales, AI audits): where each audit's lead is on the Pipeline, the audit's step, any flag, and the next thing to do. Its **Setup** list says what a real audit still needs (confirmed prices, the tax rule, the Mac, PDF storage, private links, the mailbox, Stripe) and whether emails and payments to clients are live or in test mode. Anything marked **Needs you** stops a real audit: fix it there first. The same list is on AI audit settings.
+
+---
+
+## One pipeline
+
+An audit is not a second pipeline. The deal has one set of stages, the **Pipeline's**, in both the Warm inbound and Cold outbound queues. The founder meeting is the audit's discovery call. The audit adds **steps** inside the Pipeline stages from the meeting onward:
+
+| Pipeline stage | Audit steps inside it |
+|---|---|
+| Before the meeting (Assigned to Qualified) | Audit opened, Pre-call research |
+| Founder Meeting | Meeting booked |
+| Meeting Held | Profile from the call, Transcript to approve (Gate 1), Research and writing, Audit to approve (Gate 2) |
+| Proposal Sent | Audit sent, Client reading it, At checkout |
+| Won | Paid |
+| Onboarding | Onboarding |
+| In Build | Active client |
+
+- The AI audits board counts each audit under the stage its lead is in on the Pipeline, under the same name and colour. On the Pipeline, a deal with an open audit shows **AI audit:** and its step on its row, linking to the audit.
+- They move together. Each audit step moves the lead forward. When the lead moves on the Pipeline, the audit follows within five minutes: a founder meeting booked moves it to Meeting booked, and, on the lead's first audit, the lead at Meeting Held moves it to Profile from the call. A later audit holds its own meeting.
+- **Lost on the Pipeline.** An audit that was never delivered and is not yet at final approval is declined with it. Once one was delivered, or its email may have gone out (a revision after delivery included), the client may still have a page and a Pay button; and at final approval an email may be pending. Then the audit is flagged for you instead: check it, then decline it on the audit to close them. The flag never hides a refund, a dispute or a failed step, and it clears by itself if the lead comes back from Lost.
+- Starting a lead's first audit when it is already past the meeting starts it at Profile from the call.
 
 ---
 
@@ -43,8 +64,8 @@ Every finding in an audit carries exactly one of these. The client's page explai
 
 ## Before the call
 
-- Open the lead and choose **Start AI audit** when the call is booked, if there is no engagement yet. An Oasis Meet call held after that attaches its transcript by itself; an engagement opened before the booking moves to Discovery Call Scheduled by itself once the call is booked. A call held before the engagement was opened is attached by hand on **Call and transcripts**.
-- Read the **pre-call research brief** at the top of **Call and transcripts**. It builds by itself once the engagement reaches Research in Progress or Discovery Call Scheduled; press **Build the brief** to build it sooner or again. It shows:
+- Open the lead and choose **Start AI audit** when the call is booked, if there is no engagement yet. An Oasis Meet call held after that attaches its transcript by itself; an engagement opened before the booking moves to Meeting booked by itself once the founder meeting is booked. A call held before the engagement was opened is attached by hand on **Call and transcripts**.
+- Read the **pre-call research brief** at the top of **Call and transcripts**. It builds by itself once the engagement reaches Pre-call research or Meeting booked; press **Build the brief** to build it sooner or again. It shows:
   - what their website shows, checked by the Command Center (Verified), such as whether visitors can book online, call in one tap, or chat;
   - what they said on the form (Client-reported);
   - likely problems to test on the call (Hypotheses, never facts until the client confirms them);
@@ -71,7 +92,7 @@ Run it from the **live-call screen** (Call and transcripts, Open the live-call s
 - What looks like a password, a PIN, a card or account number or a key is taken out before the transcript is stored, and the screen says how many. No check catches every way a person can say one, so press **View lines** and read what is stored before you ask for authorization. Only you (the workspace owner) can delete a transcript; after Gate 1, deleting one cancels the authorization.
 - Open **Discovery profile** and check each fact: its label and where it came from. Mark something Verified only if you saw the evidence, and say what it was. Figures you typed on the live-call screen are already there.
 - Press **Ask for authorization**. The card lists what will be frozen, who processes it (Claude on your Mac, the cloud account, or no AI if the client said no), and what is still missing. Approve it in **Needs you**. Only the owner can.
-- Any change to the profile or the transcripts afterwards withdraws the card; ask again. Once approved, the profile is frozen. To correct it, move the engagement back to **Transcript Awaiting Approval** and authorize again.
+- Any change to the profile or the transcripts afterwards withdraws the card; ask again. Once approved, the profile is frozen. To correct it, move the audit back to **Transcript to approve** and authorize again.
 
 ## Research
 
@@ -138,7 +159,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent; the en
 
 ## Payment and onboarding
 
-- The client pays on Stripe's page. The engagement moves to **Payment Confirmed** only when the server has re-read the session from Stripe and the amount, currency and proposal all match.
+- The client pays on Stripe's page. The engagement moves to **Paid** only when the server has re-read the session from Stripe and the amount, currency and proposal all match.
 - Marking an engagement **declined** or **cancelled** also stops its open payment link at Stripe. If a payment still lands (the client paid moments before), it is kept, the engagement is flagged, and you get an urgent alert. Nothing is refunded automatically: you decide.
 - Onboarding then runs by itself: client record, delivery project, checklist, and a welcome email for your one-tap approval. It links the client's own onboarding form (a personal link, so their answers attach to their record, not to a new lead) and the kickoff booking page. If the form cannot be linked, the email says a form follows, and you see that on the card before you approve. It goes to the address the audit was sent to, under the audit's own switch, so it goes out as soon as audits do.
 - When every checklist task is done, the engagement becomes **Active Client** and the lead moves into the build. That closes the audit cycle: the delivery project carries the client from there.
@@ -162,7 +183,7 @@ Decision point: if the card says it ran in **dry run**, nothing was sent; the en
 | "A client could not pay" | They pressed Pay and no checkout opened: client payments are in test mode, Stripe is not connected, or Stripe refused (the alert says which). Fix it on the Setup list, then reply to the client. |
 | The call had no transcript (a phone call, or no recording) | In the Gate 1 box on **Call and transcripts**, press **The call is done**, check the profile, then ask for authorization. |
 | The PDF never arrives | The Mac runner is off or offline. Turn the Mac on; the job is picked up within a minute. |
-| The client asks for changes before paying | Before delivery, press **Reopen for edits**. After delivery, press **Revise and send again** (owner only). Any payment page the client has open stops working at once, and the engagement goes back to Research & Audit Generation with drafts copied from what the client has; the email is reworded as an update. The client keeps reading the delivered version until you submit, approve and send the new one: that delivery replaces their link, and the old one stops working; if that email fails, their earlier link works again. A paid audit cannot be revised, and Revise waits while money is moving: a payment Stripe confirmed, a checkout the client completed (a bank payment can take days to clear), or a Pay press still opening its page. If the drafts cannot be made, the engagement goes back to what the client has and you can press it again. |
+| The client asks for changes before paying | Before delivery, press **Reopen for edits**. After delivery, press **Revise and send again** (owner only). Any payment page the client has open stops working at once, and the audit goes back to Research and writing with drafts copied from what the client has; the email is reworded as an update. The client keeps reading the delivered version until you submit, approve and send the new one: that delivery replaces their link, and the old one stops working; if that email fails, their earlier link works again. A paid audit cannot be revised, and Revise waits while money is moving: a payment Stripe confirmed, a checkout the client completed (a bank payment can take days to clear), or a Pay press still opening its page. If the drafts cannot be made, the engagement goes back to what the client has and you can press it again. |
 | "Call transcript waiting" | An Oasis Meet transcript was not attached by itself; the alert says why. If the client's answer about AI analysis is missing, record it on the live-call screen and the next run attaches it. Otherwise open **Call and transcripts**, check that it is this audit's call, and attach it by hand. A guest who did not agree to the recording means it cannot be used; one over 500 KB is never cut: paste the part that matters instead. |
 | The client asks you to delete a recorded call | Deleting the recording in Oasis Meet does not delete the copy attached to the audit. Delete the transcript under **Call and transcripts** too (only you can). |
 | The client asks you to delete their data | Delete each transcript on the engagement (that wipes the call's words and voids the authorization), and the meeting in Oasis Meet if there was one. The lead itself cannot be deleted while it has an audit: the audit's history points at it. Write the request down for CC's operations process; the full data purge arrives in a later phase. |
@@ -187,4 +208,4 @@ Each step is one of the ten acceptance checks (docs/BUILD_ACCEPTANCE_STANDARD.md
 7. **The guards hold.** No transcript quote, line number or note of yours appears on the client page; every finding carries a label.
 8. **Failures are handled.** Press Retry PDF with the Mac asleep: it waits, then asks you. Approving Gate 2 twice sends one email.
 9. **The live canary (only when you say go).** With live sending on for this one run, approve Gate 2 for the fixture. One email reaches your own inbox. Pressing Pay opens one real Stripe page, which is expired at once. Nothing is paid.
-10. **The receipt and the clean-up.** The board shows Audit Delivered with the email's message id, the Stripe session shows expired, and live sending is switched off again.
+10. **The receipt and the clean-up.** The board shows Audit sent with the email's message id, the Stripe session shows expired, and live sending is switched off again.

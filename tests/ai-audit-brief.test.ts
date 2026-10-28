@@ -1010,6 +1010,7 @@ async function main() {
   const briefs = await import("../lib/ai-audit/briefs");
   const tick = await import("../lib/ai-audit/tick");
   const view = await import("../lib/ai-audit/view");
+  const rules = await import("../lib/ai-audit/rules");
   const route = await import("../app/api/ai-audit/[engagementId]/route");
   const cc = { type: "user" as const, id: USERS.cc.id };
   const lead = (n: number) => `7c000000-0000-4000-8000-0000000000${String(n).padStart(2, "0")}`;
@@ -1193,7 +1194,7 @@ async function main() {
     assert.equal(src.match(/<span className="min-w-0 break-words text-fg">\{f\.statement\}<\/span>/g)?.length, 2, "the facts from the website and from the form");
   });
 
-  await check("a call booked on the lead after the audit was opened moves the engagement to Discovery Call Scheduled, once, so its brief builds by itself (turnkey review, finding 11)", async () => {
+  await check("a call booked on the lead after the audit was opened moves the engagement to Meeting booked, once, so its brief builds by itself (turnkey review, finding 11)", async () => {
     const eid = await openWith(40, null, null);
     assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead", "opened before the call was booked");
     const quiet = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
@@ -1206,6 +1207,152 @@ async function main() {
     assert.equal(Number(events.rows[0].n), 1, "on the record");
     const again = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
     assert.equal(again.callsBooked, 0, "forward only, and only once");
+  });
+
+  console.log("one pipeline (CC, 2026-10-28)");
+  const setLead = (n: number, path: string, value: string) =>
+    db.execute({ sql: `UPDATE tenant_records SET data = json_set(data, '$.${path}', ?) WHERE tenant_id = ? AND id = ?`, args: [value, OASIS, lead(n)] });
+  const eventsOf = async (eid: string, event: string) =>
+    Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ? AND event = ?", args: [OASIS, eid, event] })).rows[0].n);
+
+  await check("the lead at Meeting Held on the Pipeline moves an audit still before the meeting to Profile from the call, once", async () => {
+    const eid = await openWith(41, null, null);
+    await setLead(41, "stage", "demo_completed");
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(rep.meetingsHeld, 1, JSON.stringify(rep.errors));
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "call_completed");
+    assert.equal(await eventsOf(eid, "meeting_held_on_pipeline"), 1, "on the record");
+    const again = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(again.meetingsHeld, 0, "forward only, and only once");
+    assert.equal((await store.readLead(db, OASIS, lead(41)))?.stage, "demo_completed", "the lead stays where the team put it");
+  });
+
+  await check("a lead marked Lost on the Pipeline declines its audit before delivery, and the lead stays Lost", async () => {
+    const eid = await openWith(42, null, null);
+    await setLead(42, "stage", "lost");
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(rep.lostOnPipeline, 1, JSON.stringify(rep.errors));
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.equal(e?.stage, "declined");
+    assert.ok(e?.closed_at, "closed, so it leaves the open board");
+    assert.equal(await eventsOf(eid, "lead_lost_on_pipeline"), 1);
+    assert.equal((await store.readLead(db, OASIS, lead(42)))?.stage, "lost");
+    const again = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(again.lostOnPipeline, 0, "once");
+  });
+
+  await check("a decline for a Lost lead lands only while the lead is still Lost, inside the write, and never touches the lead (Codex review of #762, round 3)", async () => {
+    const eid = await openWith(51, null, null);
+    await setLead(51, "stage", "lost");
+    const e = (await store.getEngagement(db, OASIS, eid))!;
+    // The lead is restored after the tick read it Lost and before it writes.
+    await setLead(51, "stage", "qualified");
+    const r = await store.moveStage(db, { tenantId: OASIS, id: eid, to: "declined", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: e.row_version, event: "lead_lost_on_pipeline", whileLeadStage: "lost" });
+    assert.equal(r.ok, false, "refused: the lead is no longer Lost");
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead");
+    assert.equal((await store.readLead(db, OASIS, lead(51)))?.stage, "qualified", "the correction stands");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead", "the next tick reads the lead again and leaves the audit open");
+    await setLead(51, "stage", "lost");
+    const ok = await store.moveStage(db, { tenantId: OASIS, id: eid, to: "declined", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: (await store.getEngagement(db, OASIS, eid))!.row_version, event: "lead_lost_on_pipeline", whileLeadStage: "lost" });
+    assert.ok(ok.ok, "still Lost: declined");
+    // Round 4: the same for a meeting held, and the tick never writes the lead back.
+    const held = await openWith(52, null, null);
+    await setLead(52, "stage", "demo_completed");
+    const h = (await store.getEngagement(db, OASIS, held))!;
+    await setLead(52, "stage", "qualified");
+    const moved = await store.moveStage(db, { tenantId: OASIS, id: held, to: "call_completed", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: h.row_version, event: "meeting_held_on_pipeline", whileLeadStage: "demo_completed" });
+    assert.equal(moved.ok, false, "refused: the lead was corrected");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal((await store.getEngagement(db, OASIS, held))?.stage, "new_lead");
+    assert.equal((await store.readLead(db, OASIS, lead(52)))?.stage, "qualified", "the correction stands");
+  });
+
+  await check("after delivery a Lost lead only flags the audit for CC: the client's page is never closed behind his back", async () => {
+    const eid = await openWith(43, null, null);
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'delivered', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });
+    await setLead(43, "stage", "lost");
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(rep.lostOnPipeline, 1, JSON.stringify(rep.errors));
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.equal(e?.stage, "delivered", "not moved");
+    assert.equal(e?.closed_at, null);
+    assert.equal(e?.health, "attention");
+    assert.equal(e?.health_reason, rules.LOST_WITH_CLIENT);
+    const again = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal(again.lostOnPipeline, 0, "flagged once, not every five minutes");
+    assert.equal(await eventsOf(eid, "lead_lost_on_pipeline"), 1);
+    // Codex review of #762, P2: the lead back from Lost clears the flag, so stall checks run again.
+    await setLead(43, "stage", "proposal_sent");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    const back = await store.getEngagement(db, OASIS, eid);
+    assert.equal(back?.health, "ok");
+    assert.equal(back?.health_reason, null);
+    assert.equal(await eventsOf(eid, "lead_back_on_pipeline"), 1);
+  });
+
+  await check("a revision after delivery is back at Research and writing, but a Lost lead still only flags it: the client has a page (Codex review of #762, P1)", async () => {
+    const eid = await openWith(48, null, null);
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'generating', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });
+    await db.execute(store.eventStatement({ tenantId: OASIS, engagementId: eid, event: "delivered", actor: cc, at: NOW().toISOString() }));
+    await setLead(48, "stage", "lost");
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.deepEqual(rep.errors.filter((x) => x.engagementId === eid), []);
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.equal(e?.stage, "generating", "not declined: the revision can still be finished");
+    assert.equal(e?.closed_at, null);
+    assert.equal(e?.health_reason, rules.LOST_WITH_CLIENT);
+  });
+
+  await check("an audit email whose fate was uncertain is never declined by a Lost lead: the owner can still confirm it (Codex review of #762, round 2)", async () => {
+    const eid = await openWith(50, null, null);
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'generating', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });
+    await db.execute(store.eventStatement({ tenantId: OASIS, engagementId: eid, event: "delivery_unknown", actor: cc, at: NOW().toISOString() }));
+    await setLead(50, "stage", "lost");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.equal(e?.stage, "generating");
+    assert.equal(e?.health_reason, rules.LOST_WITH_CLIENT);
+  });
+
+  await check("a refund to review keeps its own warning when the lead is marked Lost (Codex review of #762, P2)", async () => {
+    const eid = await openWith(49, null, null);
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'onboarding', payment_status = 'refunded', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });
+    await setLead(49, "stage", "lost");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    const e = await store.getEngagement(db, OASIS, eid);
+    assert.notEqual(e?.health_reason, rules.LOST_AFTER_PAYMENT, "never written over the refund");
+    assert.equal(rules.nextActionFor(e!), "Review the refund");
+    assert.equal(await eventsOf(eid, "lead_lost_on_pipeline"), 0);
+  });
+
+  await check("an audit started on a lead already past the meeting starts at Profile from the call; at a booked meeting, at Meeting booked", async () => {
+    for (const [n, leadStage, step] of [[44, "demo_completed", "call_completed"], [45, "proposal_sent", "call_completed"], [46, "founder_meeting_booked", "call_scheduled"]] as const) {
+      await db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)", args: [lead(n), OASIS, JSON.stringify({ stage: leadStage, company: `[TEST] Brief ${n}`, email: `brief${n}@fixture.test` })] });
+      const o = await store.openEngagement(db, { tenantId: OASIS, leadId: lead(n), actor: cc, now: NOW(), isFixture: true });
+      assert.ok(o.ok);
+      assert.equal(o.ok && o.engagement.stage, step, leadStage);
+    }
+  });
+
+  await check("the board shows each audit's lead as the Pipeline has it, and the Pipeline's rows carry the audit's step", async () => {
+    const link = await import("../lib/ai-audit/pipeline-link");
+    const eid = await openWith(47, null, null);
+    await setLead(47, "sales_motion", "inbound_warm");
+    await setLead(47, "stage", "founder_meeting_booked");
+    const rows = await view.boardRows(db, OASIS, false);
+    const row = rows.find((r) => r.id === eid)!;
+    assert.equal(row.pipeline_stage, "founder_meeting_booked", "the lead's own stage, read now");
+    assert.equal(row.pipeline_stage_label, "Founder Meeting");
+    assert.equal(row.queue, "Warm inbound");
+    assert.equal(row.stage_label, "Audit opened", "the step the tick has not moved yet");
+    const steps = await link.openAuditsForLeads(db, OASIS, [lead(47), lead(42), "7c000000-0000-4000-8000-000000009999"]);
+    assert.deepEqual([...steps.keys()], [lead(47)], "open audits only: 42 was declined, the last lead has none");
+    const drawn = link.withAuditSteps([{ id: lead(47), data: { stage: "founder_meeting_booked" } }, { id: lead(42), data: { stage: "lost" } }], steps);
+    assert.equal(drawn[0].data.ai_audit_step, "Audit opened");
+    assert.equal(drawn[0].data.ai_audit_engagement_id, eid);
+    assert.equal(drawn[1].data.ai_audit_step, undefined);
+    assert.deepEqual(await link.auditStepsForLeads([lead(47)], { tenantId: OASIS, isTrueAdmin: false }), new Map(), "only the founders who can open an audit");
   });
 
   await check("every audit screen draws with its real data, for the owner and an admin, and says what comes next", async () => {

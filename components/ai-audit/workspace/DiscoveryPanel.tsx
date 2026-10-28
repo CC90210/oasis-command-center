@@ -87,8 +87,8 @@ function TranscriptLines({ engagementId, transcriptId }: { engagementId: string;
 
 /** How to change what Gate 1 froze, from where the engagement stands (lib/ai-audit/rules.ts STAGE_MOVES). */
 function wayBack(stage: string): string {
-  if (stage === "generating") return "To change them, move the engagement back to Transcript Awaiting Approval.";
-  if (stage === "final_review") return "To change them, reopen the audit for edits, then move the engagement back to Transcript Awaiting Approval.";
+  if (stage === "generating") return "To change them, move the audit back to Transcript to approve.";
+  if (stage === "final_review") return "To change them, reopen the audit for edits, then move the audit back to Transcript to approve.";
   if (["delivered", "proposal_review", "payment_pending"].includes(stage)) return "The audit is with the client: to change them, revise the audit first.";
   return "They are final for this engagement.";
 }
@@ -103,7 +103,7 @@ const EXTRACTION_STATUS_WORDS: Record<string, string> = {
   cancelled: "cancelled",
 };
 
-/** Stages before the call is held: Gate 1 waits for Discovery Call Completed. */
+/** Stages before the call is held: Gate 1 waits for Profile from the call. */
 const BEFORE_THE_CALL: readonly string[] = ["new_lead", "pre_call_research", "call_scheduled"];
 
 

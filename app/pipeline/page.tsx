@@ -56,6 +56,7 @@ import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 import { inboundQueueFromWindow, readOasisInboundQueue, type OasisInboundQueue } from "@/components/os/department/inbound-load";
 import { tileCount } from "@/components/os/department/count-rules";
+import { auditStepsForLeads, withAuditSteps } from "@/lib/ai-audit/pipeline-link";
 
 export const dynamic = "force-dynamic";
 
@@ -367,6 +368,12 @@ export default async function PipelinePage({
     ...row,
     data: withAssignedName(row.data, memberNameMap),
   }));
+  // ONE PIPELINE (CC, 2026-10-28): a deal with an open Free AI Audit shows the
+  // audit's step on its row, for the founders who can open it. Read alongside
+  // the website scores below; a failed read draws the rows without the step.
+  const auditStepsPromise = session.ok
+    ? auditStepsForLeads(named.map((row) => row.id), { tenantId, isTrueAdmin: session.isTrueAdmin })
+    : Promise.resolve(new Map());
   /**
    * The website score, joined server-side.
    *
@@ -392,10 +399,11 @@ export default async function PipelinePage({
    * de-researched, rep-filtered and paged -- so this resolves one screen of
    * rows rather than thirty-one thousand.
    */
-  const rows =
+  const scored =
     tenantId === WEBDEV_TENANT_ID
       ? await attachWebsiteScores(named)
       : named;
+  const rows = withAuditSteps(scored, await auditStepsPromise);
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.

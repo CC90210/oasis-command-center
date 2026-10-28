@@ -7,7 +7,7 @@ import Link from "next/link";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { aiAuditTablesInstalled, getOpenEngagementForLead } from "@/lib/ai-audit/store";
-import { AI_AUDIT_STAGE_LABELS, nextActionFor, stageNumber } from "@/lib/ai-audit/rules";
+import { AI_AUDIT_STAGE_LABELS, nextActionFor } from "@/lib/ai-audit/rules";
 import { StartAiAuditButton } from "./StartAiAuditButton";
 
 export async function AiAuditLeadCard({ tenantId, leadId, canWork }: { tenantId: string | null; leadId: string; canWork: boolean }) {
@@ -27,8 +27,7 @@ export async function AiAuditLeadCard({ tenantId, leadId, canWork }: { tenantId:
         <h2 className="text-sm font-semibold text-fg">Free AI Audit</h2>
         {engagement ? (
           <div className="text-[13px] text-fg-muted">
-            {stageNumber(engagement.stage) ? `${stageNumber(engagement.stage)}. ` : ""}
-            {AI_AUDIT_STAGE_LABELS[engagement.stage]}. Next: <span className="text-fg">{nextActionFor(engagement)}</span>
+            Audit step: {AI_AUDIT_STAGE_LABELS[engagement.stage]}. Next: <span className="text-fg">{nextActionFor(engagement)}</span>
           </div>
         ) : (
           <div className="text-[13px] text-fg-muted">No audit yet. Start one to prepare the discovery call, the audit and the proposal.</div>

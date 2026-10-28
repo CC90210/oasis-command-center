@@ -15,7 +15,7 @@
  * stored payload is valid. Then, in ONE write transaction, it re-reads the
  * engagement, the profile, the transcripts and the notes, checks every one
  * against the card and that the consent still allows the engine, freezes the
- * profile and moves the engagement to Research & Audit Generation. Every write
+ * profile and moves the engagement to Research and writing. Every write
  * that could change those (a field, a transcript, a note, a new draft) carries
  * its own "still before Gate 1" check, so it lands before the transaction (the
  * card no longer matches, nothing is frozen) or is refused after it. Nothing
@@ -59,7 +59,7 @@ import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
 
-/** Stages from which CC may ask for Gate 1. The request moves Discovery Call Completed on to Transcript Awaiting Approval. */
+/** Stages from which CC may ask for Gate 1. The request moves Profile from the call on to Transcript to approve. */
 export const AUTHORIZE_FROM: readonly Engagement["stage"][] = ["call_completed", "transcript_review"];
 const AUTHORIZATION_TTL_DAYS = 14;
 
@@ -97,7 +97,7 @@ export function engineFor(consent: boolean, settings: Pick<AiAuditSettings, "eng
 export function planFor(input: { engine: AiEngine; versionNo: number; transcriptCount: number; gapCount: number }): string[] {
   const plan = [
     `Freeze discovery profile version ${input.versionNo}${input.transcriptCount ? ` and the ${input.transcriptCount === 1 ? "call transcript" : `${input.transcriptCount} call transcripts`}` : ""} exactly as they are now.`,
-    "Move the engagement to Research & Audit Generation.",
+    "Move the engagement to Research and writing.",
   ];
   // What the tick then does by itself (lib/ai-audit/research.ts, drafting.ts, writing.ts); each line under the
   // payload's 300-character limit.
@@ -203,7 +203,7 @@ export function bindingKey(p: AuthorizeAiAuditPayload): string {
  * information and engine give the same card back while it is pending (or
  * already approved); a card that ended (cancelled, failed, expired, sent back)
  * is never handed back as new; anything else withdraws the pending card and
- * files a revision. After a move back from Research & Audit Generation the
+ * files a revision. After a move back from Research and writing the
  * frozen profile is copied into a new draft first, so CC can authorize again
  * (review of phase 2, F1).
  */
@@ -302,8 +302,8 @@ async function lastRevision(db: Client, t: string, id: string): Promise<Awaited<
 }
 
 /**
- * Point the engagement at a Gate 1 card, moving Discovery Call Completed on to
- * Transcript Awaiting Approval. A concurrent write only means re-reading; a
+ * Point the engagement at a Gate 1 card, moving Profile from the call on to
+ * Transcript to approve. A concurrent write only means re-reading; a
  * card left unlinked is picked up by the next request (the orphan check above).
  */
 async function linkAuthorizationCard(

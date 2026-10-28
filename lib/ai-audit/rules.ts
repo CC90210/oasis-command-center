@@ -4,14 +4,21 @@
  * PURE: no I/O, no server-only import, so the board, the editors and the
  * server share one definition of every stage, label and allowed move.
  *
- * THE 13 CRM STAGES are CC's brief (2026-10-25, section 9) word for word, plus
- * the two end states it asks for (declined, cancelled). "Stalled" and
- * "payment failed" are FLAGS (engagement.health / payment_status), not stages:
- * the stage stays where the work stopped, so the board says both where a
- * prospect is and what went wrong there.
+ * ONE PIPELINE (CC, 2026-10-28: "they need to be merged and act as one"). The
+ * sales pipeline's stages (lib/oasis-stage-meta.ts) are the only stages a deal
+ * has. The 13 entries below are the AUDIT'S STEPS inside them: the work from
+ * opening an audit to an active client, from CC's brief of 2026-10-25, plus
+ * two end states (declined, cancelled). LEAD_STAGE_FOR says which pipeline
+ * stage each step sits in, and the labels name the step, never a pipeline
+ * stage, so the two lists cannot read as two pipelines.
  *
- * Each stage moves the lead's existing pipeline stage too (LEAD_STAGE_FOR), so
- * every report, board and SLA that reads tenant_records keeps working.
+ * "Stalled" and "payment failed" are FLAGS (engagement.health /
+ * payment_status), not steps: the step stays where the work stopped, so the
+ * board says both where a prospect is and what went wrong there.
+ *
+ * The two move together (lib/ai-audit/lifecycle.ts): each step moves the lead
+ * forward, and the tick moves the audit when the lead moves on the Pipeline
+ * (the meeting held, the lead lost).
  */
 
 export const AI_AUDIT_STAGES = [
@@ -34,28 +41,22 @@ export const AI_AUDIT_STAGES = [
 export type AiAuditStage = (typeof AI_AUDIT_STAGES)[number];
 
 export const AI_AUDIT_STAGE_LABELS: Readonly<Record<AiAuditStage, string>> = {
-  new_lead: "New Lead",
-  pre_call_research: "Research in Progress",
-  call_scheduled: "Discovery Call Scheduled",
-  call_completed: "Discovery Call Completed",
-  transcript_review: "Transcript Awaiting Approval",
-  generating: "Research & Audit Generation",
-  final_review: "Audit Awaiting Final Approval",
-  delivered: "Audit Delivered",
-  proposal_review: "Proposal Under Review",
-  payment_pending: "Payment Pending",
-  payment_confirmed: "Payment Confirmed",
-  onboarding: "Onboarding In Progress",
-  active_client: "Active Client",
+  new_lead: "Audit opened",
+  pre_call_research: "Pre-call research",
+  call_scheduled: "Meeting booked",
+  call_completed: "Profile from the call",
+  transcript_review: "Transcript to approve",
+  generating: "Research and writing",
+  final_review: "Audit to approve",
+  delivered: "Audit sent",
+  proposal_review: "Client reading it",
+  payment_pending: "At checkout",
+  payment_confirmed: "Paid",
+  onboarding: "Onboarding",
+  active_client: "Active client",
   declined: "Declined",
   cancelled: "Cancelled",
 };
-
-/** The brief's numbering (1-13). The end states have no number. */
-export function stageNumber(stage: AiAuditStage): number | null {
-  const i = AI_AUDIT_STAGES.indexOf(stage);
-  return i >= 0 && i < 13 ? i + 1 : null;
-}
 
 export const TERMINAL_STAGES: readonly AiAuditStage[] = ["declined", "cancelled"];
 
@@ -93,9 +94,9 @@ export const STAGE_MOVES: Readonly<Record<AiAuditStage, readonly AiAuditStage[]>
   pre_call_research: ["call_scheduled", "call_completed", "declined", "cancelled"],
   call_scheduled: ["call_completed", "pre_call_research", "declined", "cancelled"],
   call_completed: ["transcript_review", "declined", "cancelled"],
-  // Phase 2: Transcript Awaiting Approval moves on ONLY through Gate 1 (the
+  // Phase 2: Transcript to approve moves on ONLY through Gate 1 (the
   // authorize_ai_audit executor), to generating, even when CC writes the audit
-  // himself. Back to Discovery Call Completed reopens the call's capture.
+  // himself. Back to Profile from the call reopens the call's capture.
   transcript_review: ["generating", "call_completed", "declined", "cancelled"],
   generating: ["final_review", "transcript_review", "declined", "cancelled"],
   // Out of final review only by delivery, Reopen (to generating, which withdraws
@@ -116,6 +117,84 @@ export const STAGE_MOVES: Readonly<Record<AiAuditStage, readonly AiAuditStage[]>
 
 export function mayMoveStage(from: AiAuditStage, to: AiAuditStage): boolean {
   return STAGE_MOVES[from].includes(to);
+}
+
+/**
+ * Steps a Lost lead may decline the audit from: before final approval, where no
+ * email to the client can be pending or uncertain. A revision after delivery
+ * comes back through them too, so they alone never prove the client has
+ * nothing (followLead also reads the delivery history).
+ */
+const BEFORE_FINAL_APPROVAL: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating"];
+const PAID: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active_client"];
+/** Payment states with their own warning for CC (nextActionFor): a Lost flag never covers them. */
+const MONEY_TO_REVIEW: readonly PaymentStatus[] = ["overpaid_review", "partially_refunded", "refunded", "disputed"];
+
+export const LOST_WITH_CLIENT = "The lead is Lost on the Pipeline, but the client still has this audit. Decline it here to close their page and payment link.";
+export const LOST_AFTER_PAYMENT = "The lead is Lost on the Pipeline, but this client has paid. Check the lead.";
+export const LOST_AT_FINAL_APPROVAL = "The lead is Lost on the Pipeline while this audit is at final approval. Check whether its email went out, then decline it here.";
+const LOST_REASONS: readonly string[] = [LOST_WITH_CLIENT, LOST_AFTER_PAYMENT, LOST_AT_FINAL_APPROVAL];
+
+/** The flag followLead sets: any other warning (a PDF that failed, a payment to review) may replace it. */
+export function isLostOnPipelineFlag(health: string, reason: string | null): boolean {
+  return health === "attention" && LOST_REASONS.includes(reason ?? "");
+}
+
+export type LeadFollow =
+  | { kind: "move"; to: AiAuditStage; event: "call_booked" | "meeting_held_on_pipeline" | "lead_lost_on_pipeline" }
+  | { kind: "flag"; reason: string }
+  | { kind: "clear" }
+  | null;
+
+/** What followLead needs to know about the audit besides its step. */
+export type FollowContext = {
+  /** The lead's how-many-th audit (engagement.cycle_no). */
+  cycleNo?: number;
+  /** An audit of this engagement was ever delivered, or its email's fate was uncertain (ai_audit_events "delivered" or "delivery_unknown"). */
+  delivered?: boolean;
+  health?: HealthFlag;
+  healthReason?: string | null;
+  paymentStatus?: PaymentStatus;
+};
+
+/**
+ * What an open audit does when its lead moved on the Pipeline (ONE PIPELINE,
+ * CC 2026-10-28). Forward only, and nothing here reaches the client:
+ *   - a founder meeting booked moves an audit not yet there to Meeting booked;
+ *   - the lead at Meeting Held or Proposal Sent moves an audit still before
+ *     the meeting to Profile from the call, so its transcript can be added.
+ *     The lead's FIRST audit only: a later one (cycle 2 or more) holds its
+ *     own meeting, and the lead never moves back, so its Meeting Held may be
+ *     the last audit's;
+ *   - the lead marked Lost declines an audit that was never delivered and is
+ *     not yet at final approval. Once one was delivered, or its email's fate
+ *     was uncertain (a revision after delivery included), the client may
+ *     hold a page and a Pay button; and at final approval an email may be
+ *     pending or uncertain. Then the audit is flagged for CC instead of
+ *     closed behind his back. The flag never covers a warning that matters more (a
+ *     failed step, another check, a refund or dispute to review): the board's
+ *     Pipeline column says Lost either way. It clears itself when the lead
+ *     comes back from Lost.
+ * The other direction (each step moving the lead) is lib/ai-audit/lifecycle.ts.
+ */
+export function followLead(step: AiAuditStage, leadStage: string | null, ctx: FollowContext = {}): LeadFollow {
+  if (TERMINAL_STAGES.includes(step) || !leadStage) return null;
+  const health = ctx.health ?? "ok";
+  const ours = isLostOnPipelineFlag(health, ctx.healthReason ?? null);
+  if (leadStage === "lost") {
+    if (BEFORE_FINAL_APPROVAL.includes(step) && !ctx.delivered) return { kind: "move", to: "declined", event: "lead_lost_on_pipeline" };
+    const reason = PAID.includes(step) ? LOST_AFTER_PAYMENT : step === "final_review" && !ctx.delivered ? LOST_AT_FINAL_APPROVAL : LOST_WITH_CLIENT;
+    if (ours) return ctx.healthReason === reason ? null : { kind: "flag", reason };
+    if ((health !== "ok" && health !== "stalled") || MONEY_TO_REVIEW.includes(ctx.paymentStatus ?? "none")) return null;
+    return { kind: "flag", reason };
+  }
+  if (ours) return { kind: "clear" };
+  const beforeMeeting = step === "new_lead" || step === "pre_call_research";
+  if (leadStage === "founder_meeting_booked" && beforeMeeting) return { kind: "move", to: "call_scheduled", event: "call_booked" };
+  if ((ctx.cycleNo ?? 1) === 1 && (leadStage === "demo_completed" || leadStage === "proposal_sent") && (beforeMeeting || step === "call_scheduled")) {
+    return { kind: "move", to: "call_completed", event: "meeting_held_on_pipeline" };
+  }
+  return null;
 }
 
 /** The stages the owner may set by hand (the rest are set by the work itself). */
@@ -155,9 +234,9 @@ export type OnboardingStatus = (typeof ONBOARDING_STATUSES)[number];
  * clears these, and only these (Codex review of phase 2, fourth pass).
  */
 export const AUTHORIZATION_VOIDED_REASONS = {
-  transcriptDeleted: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript Awaiting Approval and authorize again.",
+  transcriptDeleted: "A transcript the authorization covered was deleted, so the authorization no longer holds. Move the engagement back to Transcript to approve and authorize again.",
   notAuthorized:
-    "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript Awaiting Approval, authorize it again, then submit again.",
+    "The client's information is no longer authorized (Gate 1), for example because a transcript it covered was deleted. Move the engagement back to Transcript to approve, authorize it again, then submit again.",
 } as const;
 
 export const EVIDENCE_LABELS = ["verified", "client_reported", "estimate", "hypothesis"] as const;
@@ -242,7 +321,7 @@ export const WAITING_ON_CLIENT_STAGES: readonly AiAuditStage[] = ["delivered", "
  *
  * Never opened: counted from delivery. Opened but unpaid: counted from the
  * first view. A client who pressed Pay and walked away is still unpaid: their
- * Checkout Session expires after a day, the stage stays Payment Pending and the
+ * Checkout Session expires after a day, the stage stays At checkout and the
  * payment status stays pending, so this rule must cover them too (Codex review
  * of PR #732: they were excluded and never alerted).
  */
@@ -294,13 +373,13 @@ export function nextActionFor(e: {
   if (e.payment_status === "overpaid_review") return "Review a second payment";
   switch (e.stage) {
     case "new_lead":
-      return "Prepare for the discovery call";
+      return "Prepare for the founder meeting";
     case "pre_call_research":
-      return "Book the discovery call";
+      return "Book the founder meeting";
     case "call_scheduled":
-      return "Run the discovery call";
+      return "Hold the founder meeting";
     case "call_completed":
-      return "Add the transcript, check the profile, then ask for authorization";
+      return "Add the meeting transcript, check the profile, then ask for authorization";
     case "transcript_review":
       return "Approve the authorization in Needs you (Gate 1)";
     case "generating":

@@ -37,7 +37,7 @@ export type ConsentBasis = (typeof CONSENT_BASES)[number];
 /** At most this many live transcripts per engagement (Gate 1's card binds up to 50; a call rarely needs more than one). */
 export const MAX_TRANSCRIPTS = 20;
 
-/** Stages where a transcript may still be added: up to and including Transcript Awaiting Approval (the profile's edit stages). */
+/** Stages where a transcript may still be added: up to and including Transcript to approve (the profile's edit stages). */
 export const TRANSCRIPT_OPEN_STAGES: readonly AiAuditStage[] = PROFILE_EDIT_STAGES;
 const BEFORE_CALL: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled"];
 

@@ -1,9 +1,15 @@
 /**
  * /ai-audits — the Free AI Audit board: the numbers first (what waits on CC,
- * what is in progress, with the client, won, the close rate), then every
- * engagement, its CRM stage (the brief's 13), any flag (stalled, failed,
- * needs you) and the next thing to do. Founders of OASIS's own workspaces
- * only. An engagement starts from the lead's page ("Start AI audit").
+ * what is in progress, with the client, won, the close rate), then the audits
+ * by the stage their lead is in on the Pipeline, then every engagement: its
+ * Pipeline stage and queue, the audit's step, any flag (stalled, failed, needs
+ * you) and the next thing to do. Founders of OASIS's own workspaces only. An
+ * engagement starts from the lead's page ("Start AI audit").
+ *
+ * ONE PIPELINE (CC, 2026-10-28). The board used to draw the audit's 13 steps
+ * as numbered stages of their own, beside the Pipeline's 14: two pipelines for
+ * one deal. Its columns are now the Pipeline's own stages, names and colours
+ * (lib/ai-audit/pipeline-view.ts), read from each lead's row.
  *
  * Not /ai-audit: that address is the public campaign link to the Free AI Audit
  * offer page (a permanent redirect in next.config.js), so the board placed
@@ -15,7 +21,7 @@ import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { boardMetrics, boardRows, type BoardMetrics } from "@/lib/ai-audit/view";
-import { AI_AUDIT_STAGES, AI_AUDIT_STAGE_LABELS, stageNumber } from "@/lib/ai-audit/rules";
+import { pipelineColumnKey, pipelineColumnMeta, pipelineColumns } from "@/lib/ai-audit/pipeline-view";
 import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
 import { SetupChecklist } from "@/components/ai-audit/SetupChecklist";
 
@@ -52,14 +58,16 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
   }
   const tile = (value: number) => ({ value: metrics ? value : null, status: metrics ? ("live" as const) : ("error" as const) });
   const closeRate = metrics && metrics.delivered ? `${Math.round((metrics.won / metrics.delivered) * 100)}%` : null;
-  const counts = new Map<string, number>();
-  for (const r of rows) counts.set(r.stage, (counts.get(r.stage) ?? 0) + 1);
+  const columns = pipelineColumns(rows);
   const flagged = rows.filter((r) => r.health !== "ok").length;
+  // The numbers above count real clients only (boardMetrics), so a test audit on the list says so.
+  const tests = rows.filter((r) => r.is_fixture).length;
+  const noun = rows.length === 1 ? "engagement" : "engagements";
 
   return (
     <PageFrame
       title="AI audits"
-      subtitle={`${rows.length} ${showClosed ? "engagements" : "open engagements"}${flagged ? `, ${flagged} need attention` : ""}`}
+      subtitle={`${rows.length} ${showClosed ? noun : `open ${noun}`}${flagged ? `, ${flagged} need attention` : ""}${tests ? `, ${tests === 1 ? "1 test" : `${tests} tests`} left out of the numbers` : ""}`}
       actions={
         <>
           <Link href="/ai-audits/catalogue" className="btn-secondary">
@@ -105,17 +113,32 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
         )}
       </div>
 
-      <div className="mb-5 overflow-x-auto rounded-xl border border-hairline bg-bg-panel">
-        <ol className="flex min-w-max divide-x divide-hairline text-[12px]">
-          {AI_AUDIT_STAGES.slice(0, 13).map((s) => (
-            <li key={s} className="px-3 py-2">
-              <div className="text-fg-dim tabular-nums">{stageNumber(s)}</div>
-              <div className="whitespace-nowrap text-fg-muted">{AI_AUDIT_STAGE_LABELS[s]}</div>
-              <div className="mt-0.5 text-sm font-semibold tabular-nums text-fg">{counts.get(s) ?? 0}</div>
+      <section aria-label="Audits by Pipeline stage" className="mb-5">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold text-fg">On the Pipeline</h2>
+          <p className="text-[12px] text-fg-dim">The same stages as the Pipeline, with each audit&apos;s step inside.</p>
+        </div>
+        <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+          {columns.map((col) => (
+            <li key={col.key} className="min-w-0 rounded-lg border border-hairline bg-bg-panel px-3 py-2" style={{ borderTop: `3px solid ${col.bg}` }}>
+              <div className="truncate text-[12px] text-fg-muted" title={col.label}>
+                {col.label}
+              </div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums text-fg">{col.count}</div>
+              {col.steps.length ? (
+                <ul className="mt-1 space-y-0.5 text-[11px] text-fg-dim">
+                  {col.steps.map((st) => (
+                    <li key={st.stage} className="flex justify-between gap-2">
+                      <span className="min-w-0 truncate">{st.label}</span>
+                      <span className="tabular-nums">{st.count}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </li>
           ))}
         </ol>
-      </div>
+      </section>
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-hairline bg-bg-panel p-6 text-sm text-fg-muted">
@@ -136,7 +159,8 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
             <thead>
               <tr className="border-b border-hairline text-left text-[12px] text-fg-muted">
                 <th className="px-4 py-2 font-medium">Business</th>
-                <th className="px-4 py-2 font-medium">Stage</th>
+                <th className="px-4 py-2 font-medium">Pipeline</th>
+                <th className="px-4 py-2 font-medium">Audit step</th>
                 <th className="px-4 py-2 font-medium">Next</th>
                 <th className="px-4 py-2 font-medium">Flag</th>
                 <th className="px-4 py-2 text-right font-medium">Updated</th>
@@ -152,10 +176,18 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
                     {r.is_fixture ? <span className="ml-2 text-[11px] text-fg-dim">test</span> : null}
                     <div className="text-[12px] text-fg-dim">{r.contact_email || "no email"}</div>
                   </td>
-                  <td className="px-4 py-2.5 text-fg-muted">
-                    {r.stage_number ? <span className="mr-1.5 tabular-nums text-fg-dim">{r.stage_number}.</span> : null}
-                    {r.stage_label}
+                  <td className="px-4 py-2.5">
+                    <Link
+                      href={`/pipeline/${r.lead_id}`}
+                      className="inline-block max-w-full truncate rounded px-2 py-0.5 text-[11px] font-semibold hover:opacity-90"
+                      style={{ background: pipelineColumnMeta(pipelineColumnKey(r.pipeline_stage)).bg, color: pipelineColumnMeta(pipelineColumnKey(r.pipeline_stage)).fg }}
+                      title="Open the lead on the Pipeline"
+                    >
+                      {r.pipeline_stage_label}
+                    </Link>
+                    <div className="mt-0.5 text-[12px] text-fg-dim">{r.queue ?? "No queue set"}</div>
                   </td>
+                  <td className="px-4 py-2.5 text-fg-muted">{r.stage_label}</td>
                   <td className="px-4 py-2.5 text-fg">{r.next_action}</td>
                   <td className="px-4 py-2.5">
                     {r.health !== "ok" ? (

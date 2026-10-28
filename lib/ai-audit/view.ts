@@ -11,11 +11,9 @@ import { DELIVER_AI_AUDIT_KIND } from "@/lib/ai-audit/delivery-payload";
 import { FOLLOW_UP_AI_AUDIT_KIND } from "@/lib/ai-audit/follow-up-payload";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
 import type { Client } from "@libsql/client";
-import {
-  AI_AUDIT_STAGE_LABELS,
-  nextActionFor,
-  stageNumber,
-} from "@/lib/ai-audit/rules";
+import { AI_AUDIT_STAGE_LABELS, nextActionFor } from "@/lib/ai-audit/rules";
+import { pipelineStageLabel, queueLabel } from "@/lib/ai-audit/pipeline-view";
+import { leadsOnPipeline, type LeadOnPipeline } from "@/lib/ai-audit/pipeline-link";
 import { auditDocIssues, type DocIssue } from "@/lib/ai-audit/doc";
 import { proposalBlockers, proposalTotals, type ProposalTotals } from "@/lib/ai-audit/proposal";
 import {
@@ -68,9 +66,13 @@ export type BoardRow = {
   lead_id: string;
   business_name: string | null;
   contact_email: string | null;
+  /** The audit's step, and its name (lib/ai-audit/rules.ts). */
   stage: Engagement["stage"];
   stage_label: string;
-  stage_number: number | null;
+  /** Where the lead actually is on the Pipeline: its stage key and name, and its queue ("Warm inbound"). */
+  pipeline_stage: string | null;
+  pipeline_stage_label: string;
+  queue: string | null;
   health: Engagement["health"];
   health_reason: string | null;
   payment_status: Engagement["payment_status"];
@@ -79,7 +81,8 @@ export type BoardRow = {
   updated_at: string;
 };
 
-export function boardRow(e: Engagement): BoardRow {
+/** One engagement as the board shows it. `lead` is its lead as the Pipeline has it; null when the lead row is gone. */
+export function boardRow(e: Engagement, lead: LeadOnPipeline | null): BoardRow {
   return {
     id: e.id,
     lead_id: e.lead_id,
@@ -87,7 +90,9 @@ export function boardRow(e: Engagement): BoardRow {
     contact_email: e.contact_email,
     stage: e.stage,
     stage_label: AI_AUDIT_STAGE_LABELS[e.stage],
-    stage_number: stageNumber(e.stage),
+    pipeline_stage: lead?.stage ?? null,
+    pipeline_stage_label: pipelineStageLabel(lead?.stage ?? null),
+    queue: queueLabel(lead?.motion ?? null),
     health: e.health,
     health_reason: e.health_reason,
     payment_status: e.payment_status,
@@ -133,7 +138,9 @@ export async function liveCallProps(db: Client, tenantId: string, e: Engagement)
 }
 
 export async function boardRows(db: Client, tenantId: string, includeClosed: boolean): Promise<BoardRow[]> {
-  return (await listEngagements(db, tenantId, { includeClosed, limit: 300 })).map(boardRow);
+  const engagements = await listEngagements(db, tenantId, { includeClosed, limit: 300 });
+  const leads = await leadsOnPipeline(db, tenantId, engagements.map((e) => e.lead_id));
+  return engagements.map((e) => boardRow(e, leads.get(e.lead_id) ?? null));
 }
 
 /** The board's headline numbers (CC, 2026-10-26: "we'd rather see metrics"). Real clients only: the test prospect is left out. */
@@ -312,7 +319,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
   }
   return {
     engagement,
-    row: boardRow(engagement),
+    row: boardRow(engagement, lead ? { stage: lead.stage || null, motion: typeof lead.data.sales_motion === "string" ? lead.data.sales_motion : null } : null),
     lead: lead ? { id: lead.id, stage: lead.stage, website: lead.website, city: lead.city } : null,
     events,
     profile: profileVersion ? { version: profileVersion, fields } : null,
@@ -368,10 +375,10 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
           message: authVoided
             ? `The authorization no longer holds: something it covered changed or was deleted. ${
                 engagement.stage === "final_review"
-                  ? "Reopen the audit for edits, then move the engagement back to Transcript Awaiting Approval and authorize again."
+                  ? "Reopen the audit for edits, then move the audit back to Transcript to approve and authorize again."
                   : WAITING_ON_CLIENT_STAGES.includes(engagement.stage)
-                    ? "Revise the audit (Revise and send again), then move the engagement back to Transcript Awaiting Approval and authorize again."
-                    : "Move the engagement back to Transcript Awaiting Approval and authorize again."
+                    ? "Revise the audit (Revise and send again), then move the audit back to Transcript to approve and authorize again."
+                    : "Move the engagement back to Transcript to approve and authorize again."
               }`
             : ((authApproval.execution_result as { message?: string } | null)?.message ?? null),
           engine: authPayload?.ok ? authPayload.value.engine : null,

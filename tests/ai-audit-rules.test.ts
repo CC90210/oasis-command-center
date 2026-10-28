@@ -105,24 +105,116 @@ async function main() {
   const profile = await import("../lib/ai-audit/profile");
 
   console.log("stages");
-  await check("the brief's 13 CRM stages, in order, plus declined and cancelled", () => {
+  await check("the audit's 13 steps, in order, plus declined and cancelled, are steps inside the Pipeline, never stages of their own (CC, 2026-10-28)", async () => {
+    const { OASIS_LEAD_STAGES, OASIS_LEAD_STAGE_KEYS } = await import("../lib/oasis-stage-meta");
     assert.deepEqual(rules.AI_AUDIT_STAGES.slice(0, 13).map((s) => rules.AI_AUDIT_STAGE_LABELS[s]), [
-      "New Lead",
-      "Research in Progress",
-      "Discovery Call Scheduled",
-      "Discovery Call Completed",
-      "Transcript Awaiting Approval",
-      "Research & Audit Generation",
-      "Audit Awaiting Final Approval",
-      "Audit Delivered",
-      "Proposal Under Review",
-      "Payment Pending",
-      "Payment Confirmed",
-      "Onboarding In Progress",
-      "Active Client",
+      "Audit opened",
+      "Pre-call research",
+      "Meeting booked",
+      "Profile from the call",
+      "Transcript to approve",
+      "Research and writing",
+      "Audit to approve",
+      "Audit sent",
+      "Client reading it",
+      "At checkout",
+      "Paid",
+      "Onboarding",
+      "Active client",
     ]);
-    assert.equal(rules.stageNumber("active_client"), 13);
-    assert.equal(rules.stageNumber("declined"), null);
+    // A step never borrows a Pipeline stage's name, so the two cannot read as two pipelines; Onboarding is the one
+    // step that is its stage's only step, and says so in the same word.
+    const stageNames = new Set(OASIS_LEAD_STAGES.map((st) => st.label.toLowerCase()));
+    for (const s of rules.AI_AUDIT_STAGES) {
+      if (s === "onboarding") continue;
+      assert.ok(!stageNames.has(rules.AI_AUDIT_STAGE_LABELS[s].toLowerCase()), `${s} is named like a Pipeline stage`);
+    }
+    // Every step that moves the lead names a real Pipeline stage.
+    for (const s of rules.AI_AUDIT_STAGES) {
+      const target = rules.LEAD_STAGE_FOR[s];
+      if (target) assert.ok(OASIS_LEAD_STAGE_KEYS.includes(target), `${s} moves the lead to ${target}, which the Pipeline does not have`);
+    }
+    assert.equal(OASIS_LEAD_STAGES.find((st) => st.key === "demo_completed")?.label, "Meeting Held", "the founder meeting, then the meeting held");
+  });
+  await check("an audit follows its lead on the Pipeline, forward only, and a Lost lead never closes an audit the client already holds", () => {
+    assert.deepEqual(rules.followLead("new_lead", "founder_meeting_booked"), { kind: "move", to: "call_scheduled", event: "call_booked" });
+    assert.deepEqual(rules.followLead("pre_call_research", "founder_meeting_booked"), { kind: "move", to: "call_scheduled", event: "call_booked" });
+    assert.equal(rules.followLead("call_scheduled", "founder_meeting_booked"), null, "already there");
+    for (const lead of ["demo_completed", "proposal_sent"]) {
+      for (const step of ["new_lead", "pre_call_research", "call_scheduled"] as const) {
+        assert.deepEqual(rules.followLead(step, lead), { kind: "move", to: "call_completed", event: "meeting_held_on_pipeline" }, `${step} at ${lead}`);
+      }
+    }
+    assert.equal(rules.followLead("new_lead", "demo_completed", { cycleNo: 2 }), null, "a later audit holds its own meeting: the lead's Meeting Held may be the last audit's");
+    assert.deepEqual(rules.followLead("new_lead", "founder_meeting_booked", { cycleNo: 2 }), { kind: "move", to: "call_scheduled", event: "call_booked" });
+    assert.deepEqual(rules.followLead("new_lead", "lost", { cycleNo: 2 }), { kind: "move", to: "declined", event: "lead_lost_on_pipeline" });
+    // Codex review of #762, P1: a revision after delivery is back at Research and writing or Audit to approve, but the client has a page.
+    for (const step of ["generating", "final_review"] as const) {
+      assert.deepEqual(rules.followLead(step, "lost", { delivered: true }), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, `${step} after a delivery is flagged, never declined`);
+    }
+    for (const reason of [rules.LOST_WITH_CLIENT, rules.LOST_AFTER_PAYMENT, rules.LOST_AT_FINAL_APPROVAL]) assert.ok(rules.isLostOnPipelineFlag("attention", reason));
+    assert.equal(rules.isLostOnPipelineFlag("attention", "The Mac could not print the PDF"), false, "a PDF failure may replace the Lost flag, never the other way round");
+    assert.equal(rules.isLostOnPipelineFlag("ok", null), false);
+    // P2: the Lost flag never covers a warning that matters more.
+    for (const ctx of [{ health: "failed" as const, healthReason: "PDF failed" }, { health: "attention" as const, healthReason: "A second payment arrived" }, { paymentStatus: "disputed" as const }, { paymentStatus: "refunded" as const }, { paymentStatus: "partially_refunded" as const }, { paymentStatus: "overpaid_review" as const }]) {
+      assert.equal(rules.followLead("onboarding", "lost", ctx), null, JSON.stringify(ctx));
+    }
+    assert.deepEqual(rules.followLead("delivered", "lost", { health: "stalled", healthReason: "Not opened in 3 days" }), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, "a Lost lead matters more than a stall");
+    assert.equal(rules.followLead("delivered", "lost", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), null, "flagged once");
+    assert.deepEqual(rules.followLead("payment_confirmed", "lost", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), { kind: "flag", reason: rules.LOST_AFTER_PAYMENT }, "the words follow the step");
+    // P2: the flag clears when the lead comes back from Lost; another warning is left alone.
+    assert.deepEqual(rules.followLead("delivered", "proposal_sent", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), { kind: "clear" });
+    assert.equal(rules.followLead("delivered", "proposal_sent", { health: "attention", healthReason: "A second payment arrived" }), null);
+    for (const step of ["call_completed", "transcript_review", "generating", "final_review", "delivered", "payment_pending"] as const) {
+      assert.equal(rules.followLead(step, "demo_completed"), null, `${step} never moves back`);
+    }
+    for (const step of ["new_lead", "call_scheduled", "transcript_review", "generating"] as const) {
+      assert.deepEqual(rules.followLead(step, "lost"), { kind: "move", to: "declined", event: "lead_lost_on_pipeline" }, step);
+    }
+    // Codex review of #762, round 2: at final approval an email may be pending or its fate uncertain, so never declined by itself.
+    assert.deepEqual(rules.followLead("final_review", "lost"), { kind: "flag", reason: rules.LOST_AT_FINAL_APPROVAL });
+    for (const step of ["delivered", "proposal_review", "payment_pending"] as const) {
+      assert.deepEqual(rules.followLead(step, "lost"), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, step);
+    }
+    for (const step of ["payment_confirmed", "onboarding", "active_client"] as const) {
+      assert.deepEqual(rules.followLead(step, "lost"), { kind: "flag", reason: rules.LOST_AFTER_PAYMENT }, step);
+    }
+    for (const step of ["declined", "cancelled"] as const) assert.equal(rules.followLead(step, "lost"), null);
+    assert.equal(rules.followLead("new_lead", null), null, "no lead row: nothing to follow");
+    assert.equal(rules.followLead("new_lead", "qualified"), null);
+    for (const s of rules.AI_AUDIT_STAGES) {
+      const f = rules.followLead(s, "founder_meeting_booked") ?? rules.followLead(s, "demo_completed") ?? rules.followLead(s, "lost");
+      if (f?.kind === "move") assert.ok(rules.mayMoveStage(s, f.to), `${s} to ${f.to} is not a legal move`);
+    }
+  });
+  await check("the board files each audit under its lead's Pipeline stage, in the Pipeline's words and colours", async () => {
+    const pv = await import("../lib/ai-audit/pipeline-view");
+    const { OASIS_LEAD_STAGES } = await import("../lib/oasis-stage-meta");
+    const cols = pv.pipelineColumns([
+      { stage: "payment_pending", pipeline_stage: "proposal_sent" },
+      { stage: "delivered", pipeline_stage: "proposal_sent" },
+      { stage: "transcript_review", pipeline_stage: "demo_completed" },
+      { stage: "new_lead", pipeline_stage: "qualified" },
+      { stage: "pre_call_research", pipeline_stage: "connected" },
+    ]);
+    assert.deepEqual(cols.map((c) => c.label), ["Before the meeting", "Founder Meeting", "Meeting Held", "Proposal Sent", "Won", "Onboarding", "In Build"]);
+    const sent = cols.find((c) => c.key === "proposal_sent")!;
+    assert.equal(sent.count, 2);
+    assert.deepEqual(sent.steps.map((st) => [st.label, st.count]), [["Audit sent", 1], ["At checkout", 1]], "in the audit's order");
+    assert.equal(sent.bg, OASIS_LEAD_STAGES.find((st) => st.key === "proposal_sent")!.bg, "the Pipeline's colour");
+    assert.equal(cols.find((c) => c.key === pv.BEFORE_MEETING)!.count, 2, "Assigned to Qualified are one column");
+    assert.equal(cols.reduce((n, c) => n + c.count, 0), 5, "every audit counted once");
+    const odd = pv.pipelineColumns([
+      { stage: "delivered", pipeline_stage: "lost" },
+      { stage: "generating", pipeline_stage: null },
+      { stage: "generating", pipeline_stage: "not_a_stage" },
+    ]);
+    assert.deepEqual(odd.slice(7).map((c) => [c.label, c.count]), [["Lost", 1], ["Not on the Pipeline", 2]], "drawn only when an audit sits there, after the rest");
+    assert.equal(pv.queueLabel("inbound_warm"), "Warm inbound");
+    assert.equal(pv.queueLabel("cold_outbound"), "Cold outbound");
+    assert.equal(pv.queueLabel(undefined), null);
+    assert.equal(pv.pipelineStageLabel("demo_completed"), "Meeting Held");
+    assert.equal(pv.pipelineStageLabel(null), "Not on the Pipeline");
   });
   await check("a paid engagement only moves on to onboarding; end states move nowhere", () => {
     assert.deepEqual([...rules.STAGE_MOVES.payment_confirmed], ["onboarding"]);

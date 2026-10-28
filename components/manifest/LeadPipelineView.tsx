@@ -1789,6 +1789,10 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // "City, PROV · Industry" -- whichever parts exist, never a lone separator.
   const place = [city, province].filter(Boolean).join(", ");
   const businessLine = [place, industry].filter(Boolean).join(" · ");
+  // ONE PIPELINE (CC, 2026-10-28): the open Free AI Audit's step, attached
+  // server-side for the founders who can open it (lib/ai-audit/pipeline-link.ts).
+  const auditStep = str(d.ai_audit_step);
+  const auditEngagementId = str(d.ai_audit_engagement_id);
   return {
     name,
     contactName,
@@ -1811,7 +1815,23 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     webScoreState,
     businessLine,
     isWebLead: Boolean(webLeadBusinessId),
+    auditStep,
+    auditHref: auditStep && auditEngagementId ? `/ai-audits/${encodeURIComponent(auditEngagementId)}` : null,
   };
+}
+
+/** The deal's open AI audit and its step, linking to the audit. Above the row's stretched link, like the website links. */
+function AuditStepLink({ m, className = "" }: { m: ReturnType<typeof oasisRowModel>; className?: string }) {
+  if (!m.auditStep || !m.auditHref) return null;
+  return (
+    <Link
+      href={m.auditHref}
+      title={`Open the AI audit for ${m.name}`}
+      className={`relative z-10 block max-w-full truncate font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${className}`}
+    >
+      AI audit: {m.auditStep}
+    </Link>
+  );
 }
 
 /** "https://www.expertvelo.com/x" -> "expertvelo.com". "" when unparseable. */
@@ -2008,6 +2028,7 @@ function OasisDesktopRow({
               </span>
             )}
             <span className="block truncate text-[10px] text-accent/80" title={m.assignedRep}>Assigned: {m.assignedRep}</span>
+            <AuditStepLink m={m} className="text-[10px]" />
           </span>
         </div>
       </Cell>
@@ -2064,6 +2085,7 @@ function OasisMobileRow({
                 <div className="truncate text-[11px] font-medium text-accent">Ask for {m.contactName}</div>
               )}
               <div className="truncate text-[10px] text-accent/80">Assigned: {m.assignedRep}</div>
+              <AuditStepLink m={m} className="text-[11px]" />
             </div>
             <StageChip stage={stage} />
           </div>

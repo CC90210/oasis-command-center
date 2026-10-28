@@ -32,7 +32,7 @@ const PHASE_WORDS: Readonly<Record<string, string>> = {
 };
 
 const STOP_WORDS: Readonly<Record<string, string>> = {
-  stage_closed: "It stopped because the engagement left Research & Audit Generation.",
+  stage_closed: "It stopped because the engagement left Research and writing.",
   research_failed: "A step failed three times, so it stopped. Press Research again to start a new run.",
   not_authorized: "It stopped because the authorization no longer holds. Authorize the profile again first.",
 };
