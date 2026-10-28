@@ -10,6 +10,38 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { redactAll } from "./secret-redaction";
+
+const SNAPSHOT_KEYS = 40;
+const SNAPSHOT_STRING = 500;
+const SNAPSHOT_DEPTH = 3;
+const SNAPSHOT_BYTES = 4_000;
+
+function scrubbed(value: unknown, depth: number): unknown {
+  if (typeof value === "string") return redactAll(value).slice(0, SNAPSHOT_STRING);
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (depth >= SNAPSHOT_DEPTH) return "[nested]";
+  if (Array.isArray(value)) return value.slice(0, SNAPSHOT_KEYS).map((v) => scrubbed(v, depth + 1));
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).slice(0, SNAPSHOT_KEYS).map(([k, v]) => [k, scrubbed(v, depth + 1)]),
+    );
+  }
+  return String(value);
+}
+
+/**
+ * What an agent's action asked to set, for the Execution trace (2026-10-28,
+ * Codex review of #768: no producer recorded a snapshot, so the trace's field
+ * view never appeared for a real action). Secrets scrubbed in every string,
+ * at most 40 keys, 3 levels and 4 KB; null when there is nothing to show.
+ */
+export function actionSnapshot(payload: unknown): Record<string, unknown> | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const copy = scrubbed(payload, 0) as Record<string, unknown>;
+  if (Object.keys(copy).length === 0) return null;
+  return JSON.stringify(copy).length <= SNAPSHOT_BYTES ? copy : { note: "too large to keep" };
+}
 
 export type LoggedAction = {
   agent_key: string;

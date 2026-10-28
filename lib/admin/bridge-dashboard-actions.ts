@@ -43,7 +43,7 @@
 import "server-only";
 
 import { extractActionMarkers, knownActionTypes, runAction, type ActionResult } from "@/lib/agent-actions";
-import { logAction } from "@/lib/action-log";
+import { actionSnapshot, logAction } from "@/lib/action-log";
 import { READ_ONLY_DENIED_MARKERS, canWriteCrm } from "@/lib/role-gates";
 import { signResumeState, verifyResumeState, type ResumeBinding } from "@/lib/resume-hmac";
 
@@ -147,7 +147,12 @@ export function proposeBridgeMarkers(
   return { pending, refused };
 }
 
-async function logResult(result: ActionResult, ctx: BridgeActionContext, log: typeof logAction): Promise<void> {
+async function logResult(
+  result: ActionResult,
+  ctx: BridgeActionContext,
+  log: typeof logAction,
+  payload?: Record<string, unknown>,
+): Promise<void> {
   await log({
     agent_key: ctx.agent,
     tenant_id: ctx.tenantId,
@@ -156,6 +161,8 @@ async function logResult(result: ActionResult, ctx: BridgeActionContext, log: ty
     ok: result.ok,
     summary: result.ok ? result.summary : undefined,
     error: result.ok ? undefined : result.error,
+    // What the confirmed change asked to set, for the Execution trace (scrubbed, bounded).
+    ...(payload ? { after: actionSnapshot(payload) } : {}),
   });
 }
 
@@ -203,7 +210,7 @@ export async function applyPendingBridgeAction(
       result = { ok: false, type, error: err instanceof Error ? err.message : "action_failed" };
     }
   }
-  await logResult(result, ctx, log);
+  await logResult(result, ctx, log, spec.payload);
   return { status: result.ok || result.error !== "forbidden_role" ? 200 : 403, result };
 }
 

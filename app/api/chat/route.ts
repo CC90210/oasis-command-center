@@ -35,6 +35,7 @@ import { operatorNameOverride } from "@/lib/operator-name";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
+import { actionSnapshot } from "@/lib/action-log";
 import { rateLimit } from "@/lib/rate-limit";
 import { extractActionMarkers, runAction } from "@/lib/agent-actions";
 import { SAFE_TENANT_TOOL_PALETTE } from "@/lib/chat-tool-palettes";
@@ -1010,6 +1011,8 @@ export async function POST(req: NextRequest) {
             ok: r.ok,
             summary: r.ok ? r.summary : undefined,
             error: !r.ok ? r.error : undefined,
+            // What it asked to set, for the Execution trace (scrubbed, bounded).
+            after: actionSnapshot(spec.payload),
           });
         }
       } catch (err) {

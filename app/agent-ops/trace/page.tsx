@@ -65,6 +65,9 @@ export default async function AgentOpsTracePage() {
                 const p = (ev.payload || {}) as ActionPayload;
                 const ok = Boolean(p.ok);
                 const { changes, more } = keyChanges(p.before, p.after);
+                // Producers record what an action asked to set (lib/action-log.ts actionSnapshot);
+                // a before is shown only when one was recorded.
+                const setOnly = p.before === null || p.before === undefined;
                 return (
                   <li key={ev.id} className="space-y-1.5 py-3 text-sm">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -76,6 +79,9 @@ export default async function AgentOpsTracePage() {
                     <div className="break-words text-fg-muted">
                       {redactAll(ok ? p.summary || "(no summary)" : p.error || "(no error message)")}
                     </div>
+                    {changes.length > 0 ? (
+                      <div className="text-[11px] uppercase tracking-[0.06em] text-fg-dim">{setOnly ? "What it set" : "What changed"}</div>
+                    ) : null}
                     {changes.length > 0 ? (
                       <dl className="grid gap-x-3 gap-y-1 rounded-md border border-bg-border bg-bg-deep/40 px-3 py-2 font-mono text-[11.5px] sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
                         {changes.map((c) => (

@@ -18,8 +18,15 @@
  * GATES, every request: no Origin header (a machine, never a page), the pairing's bearer
  * (resolvePairingFromBearer), an owner on the pairing, approved to claim work, the workspace's agents
  * owner (the computer the agents run on), a live seat, OASIS's own workspace, and the pairing
- * advertising agent_inbox_v1 in its ping. Ten requests a minute per pairing. Delivery is first writer
- * wins, and only the computer that delivered a note may report it read.
+ * advertising agent_inbox_v1 in its ping. Ten requests a minute per pairing.
+ *
+ * ONE COMPUTER PER DIRECTIVE. pending RESERVES what it returns for the asking computer (one UPDATE ...
+ * RETURNING, lib/agent-inbox-db.ts reserveRelayBatchDb), so two computers polling at once never both
+ * write the same directive; only the reserving computer may report it delivered, and only the
+ * delivering one may report it read. A reservation with no delivery lapses after five minutes.
+ *
+ * SCRUBBED. The subject and body go through redactAll before they leave: the note lands in a folder a
+ * model reads at the start of every session, so a credential pasted into a directive never reaches it.
  *
  * One module, not one per verb: each Next route compiles to its own server bundle and the Worker is
  * near Cloudflare's size limit (see app/api/automations/guided/[[...path]]/route.ts).
@@ -32,7 +39,8 @@ import { isOasisWorkspace } from "@/lib/ai/agent-engine-store";
 import { pairingCanClaim, resolvePairingFromBearer, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
 import { liveSeat } from "@/lib/os/seat";
 import { rateLimit } from "@/lib/rate-limit";
-import { listRelayPendingDb, markAckedDb, markDeliveredDb, RELAY_BATCH_MAX } from "@/lib/agent-inbox-db";
+import { markAckedDb, markDeliveredDb, RELAY_BATCH_MAX, reserveRelayBatchDb } from "@/lib/agent-inbox-db";
+import { redactAll } from "@/lib/secret-redaction";
 import { AGENT_INBOX_PROTOCOL } from "@/lib/agent-inbox-types";
 
 export const runtime = "nodejs";
@@ -112,7 +120,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   const auth = await authorize(req);
   if (!auth.ok) return auth.res;
   try {
-    const rows = await listRelayPendingDb(auth.pairing.tenantId);
+    const rows = await reserveRelayBatchDb(auth.pairing.tenantId, auth.pairing.pairingId);
     return json(200, {
       ok: true,
       messages: rows.map((row) => ({
@@ -120,8 +128,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
         message_id: row.message_id,
         from: row.from_agent,
         to: row.to_agent,
-        subject: row.subject ?? "",
-        body: row.body,
+        subject: redactAll(row.subject ?? ""),
+        body: redactAll(row.body),
         priority: row.priority,
         requires_response: Boolean(row.requires_response),
         in_reply_to: row.in_reply_to,

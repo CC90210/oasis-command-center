@@ -9,8 +9,11 @@
  *      agents owner's, one that does not advertise agent_inbox_v1, a deactivated seat, a workspace that is
  *      not OASIS's own;
  *   3. pending lists only this workspace's undelivered, unread, eligible directives, oldest first;
- *   4. delivery is first writer wins, and only the computer that delivered a note may report it read;
- *   5. a malformed body is a 400, and an eleventh request in a minute is a 429.
+ *   4. pending RESERVES what it returns for one computer: a second computer polling at once gets none
+ *      of it, may take it only after the reservation lapses, may report delivered only what it reserved,
+ *      and only the delivering computer may report it read;
+ *   5. the subject and body leave scrubbed of secrets (they land in a folder a model reads);
+ *   6. a malformed body is a 400, and an eleventh request in a minute is a 429.
  *
  * Run: node --conditions=react-server --import tsx tests/bridge-inbox-relay.test.ts
  */
@@ -96,8 +99,8 @@ async function seed(): Promise<void> {
     sql: "INSERT INTO agent_messages (id, message_id, tenant_id, from_agent, to_agent, body, created_at) VALUES ('old-note', 'old1', ?, 'cc', 'bravo', 'from before delivery', '2026-10-01T00:00:00.000Z')",
     args: [OASIS],
   });
-  for (const statement of statements(readFileSync(join(ROOT, "database", "turso", "bravo__246_agent_messages_delivery.sql"), "utf8"))) {
-    await db.execute(statement);
+  for (const file of ["bravo__246_agent_messages_delivery.sql", "bravo__247_agent_messages_relay_claim.sql"]) {
+    for (const statement of statements(readFileSync(join(ROOT, "database", "turso", file), "utf8"))) await db.execute(statement);
   }
   for (const [tenant, slug] of [[OASIS, "oasis-ai-cc"], [CLIENT, "acme-plumbing"]]) {
     await db.execute({ sql: "INSERT INTO tenants VALUES (?, ?)", args: [tenant, slug] });
@@ -176,7 +179,7 @@ async function main(): Promise<void> {
   // Directives, in posting order.
   const post = (to: string, body: string, relayEligible: boolean, tenantId = OASIS) =>
     inbox.postMessageDb({ tenantId, from: "cc", to, subject: body, body, relayEligible });
-  const first = await post("bravo", "first directive", true);
+  const first = await post("bravo", "first directive: see https://x.test/run?token=abc123supersecret", true);
   await new Promise((r) => setTimeout(r, 5));
   const second = await post("maven", "second directive", true);
   const aura = await post("aura", "aura has no reader", true);
@@ -220,30 +223,50 @@ async function main(): Promise<void> {
     }
   });
 
-  await check("pending: this workspace's undelivered, unread, eligible directives, oldest first", async () => {
+  await check("pending: this workspace's undelivered, unread, eligible directives, oldest first, scrubbed", async () => {
     const res = await call("GET", "pending", mac.token);
     assert.equal(res.status, 200, JSON.stringify(res.json));
-    assert.deepEqual(res.json.messages!.map((m) => m.body), ["first directive", "second directive"]);
+    assert.deepEqual(res.json.messages!.map((m) => m.id), [first.message!.id, second.message!.id]);
     assert.deepEqual(res.json.messages![0], {
       ...res.json.messages![0],
       id: first.message!.id,
       to: "bravo",
       message_id: first.message!.message_id,
     });
+    const text = JSON.stringify(res.json.messages);
+    assert.ok(!text.includes("abc123supersecret"), "a credential in a directive never leaves for a model-read inbox");
+    assert.match(res.json.messages![0].body, /token=\[REDACTED\]/);
   });
 
-  await check("delivered: first writer wins, and the stamp names the computer", async () => {
+  await check("a second computer polling at once gets nothing the first reserved", async () => {
+    assert.deepEqual((await call("GET", "pending", laptop.token)).json.messages, [], "both directives are the Mac's for now");
+    assert.equal((await row(first.message!.id)).delivered_pairing_id, mac.id);
+    assert.ok((await row(first.message!.id)).relay_claimed_at, "the reservation is stamped");
+  });
+
+  await check("delivered: only the reserving computer may report it, and the stamp names the computer", async () => {
     const won = await call("POST", "delivered", mac.token, { ids: [first.message!.id] });
     assert.deepEqual(won.json.delivered, [first.message!.id]);
-    const lost = await call("POST", "delivered", laptop.token, { ids: [first.message!.id, second.message!.id] });
-    assert.deepEqual(lost.json.delivered, [second.message!.id], "the laptop wins only what nobody delivered yet");
+    const notYours = await call("POST", "delivered", laptop.token, { ids: [first.message!.id, second.message!.id] });
+    assert.deepEqual(notYours.json.delivered, [], "the laptop reserved neither");
     const stamped = await row(first.message!.id);
     assert.equal(stamped.delivered_pairing_id, mac.id);
     assert.equal(stamped.delivered_label, "CC's Mac");
     assert.ok(stamped.delivered_at);
-    assert.deepEqual((await call("GET", "pending", mac.token)).json.messages, [], "nothing left to deliver");
     const noOne = await call("POST", "delivered", mac.token, { ids: [agentNote.message!.id, elsewhere.message!.id] });
     assert.deepEqual(noOne.json.delivered, [], "an ineligible note and another workspace's are never stamped");
+  });
+
+  await check("a reservation that lapses (the Mac stopped partway) may be taken by another computer", async () => {
+    await db.execute({
+      sql: "UPDATE agent_messages SET relay_claimed_at = ? WHERE id = ?",
+      args: [new Date(Date.now() - 6 * 60_000).toISOString(), second.message!.id],
+    });
+    const taken = await call("GET", "pending", laptop.token);
+    assert.deepEqual(taken.json.messages!.map((m) => m.id), [second.message!.id]);
+    assert.deepEqual((await call("POST", "delivered", laptop.token, { ids: [second.message!.id] })).json.delivered, [second.message!.id]);
+    assert.deepEqual((await call("POST", "delivered", mac.token, { ids: [second.message!.id] })).json.delivered, [], "the Mac lost it");
+    assert.deepEqual((await call("GET", "pending", mac.token)).json.messages, [], "nothing left to deliver");
   });
 
   await check("acked: only the computer that delivered a note may say it was read, once", async () => {

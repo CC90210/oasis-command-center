@@ -937,7 +937,7 @@ async function main() {
     await assert.rejects(() => inboxDb.listUnreadDb(OASIS), /agent_messages unread read failed/);
     await assert.rejects(() => inboxDb.listReadDb(OASIS), /agent_messages read-archive read failed/);
     await assert.rejects(() => inboxDb.listAgentOpsMessagesDb(OASIS), /agent_messages agent-ops read failed/);
-    await assert.rejects(() => inboxDb.listRelayPendingDb(OASIS), /agent_messages relay read failed/);
+    await assert.rejects(() => inboxDb.reserveRelayBatchDb(OASIS, "pairing-1"), /agent_messages relay reservation failed/);
   });
   await check("copy: Agent ops has no invented goal, reads only the database, and the trace says Apply and Confirm", () => {
     const trace = readFileSync(join(ROOT, "app", "agent-ops", "trace", "page.tsx"), "utf8");

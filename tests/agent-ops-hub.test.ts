@@ -5,7 +5,9 @@
  *   1. deliveryStateOf says only what a note's record proves, in one line, at an exact instant: read,
  *      dismissed, delivered, waiting (online, offline, an old bridge, no computer, couldn't check), and
  *      the notes no computer carries (an agent's note, an agent with no reader, a note from before);
- *   2. keyChanges lists an action's changed top-level keys, capped, with long values shortened;
+ *   2. keyChanges lists an action's changed top-level keys, capped: compared whole and typed, then
+ *      scrubbed whole, then shortened; actionSnapshot records what an action asked to set, scrubbed and
+ *      bounded, from both producers;
  *   3. the pages: operator-gated first, PageFrame, the two tabs, the composer offering only agents with
  *      a reader, values scrubbed in the trace; /runs and /inbox redirect here; one Admin rail row;
  *   4. the post route writes the database only, as the operator, and marks a directive relayable only
@@ -91,7 +93,28 @@ async function main(): Promise<void> {
     const long = keyChanges({}, { note: "x".repeat(500) }).changes[0];
     assert.equal(long.after!.length, 120);
     assert.ok(long.after!.endsWith("…"));
+    // Whole and typed: a change after the cut, or 1 -> "1", is still a change.
+    assert.equal(keyChanges({ note: "a".repeat(130) + "b" }, { note: "a".repeat(130) + "c" }).changes.length, 1, "a change past the display cut");
+    assert.equal(keyChanges({ n: 1 }, { n: "1" }).changes.length, 1, "1 and \"1\" differ");
+    assert.equal(keyChanges({ n: 1 }, { n: 1 }).changes.length, 0);
+    // Scrubbed whole, then shortened: a credential crossing the cut never shows a prefix.
+    const crossing = keyChanges({}, { url: "x".repeat(108) + "?token=abcdefghijklmnopqrstuv" }).changes[0];
+    assert.ok(!crossing.after!.includes("abcdefgh"), crossing.after!);
     console.log("  ok    key changes");
+
+    const { actionSnapshot } = await import("../lib/action-log");
+    assert.equal(actionSnapshot(null), null);
+    assert.equal(actionSnapshot(["a"]), null);
+    assert.equal(actionSnapshot({}), null);
+    const snap = actionSnapshot({ stage: "qualified", link: "https://x.test/?token=abc123supersecret", deep: { a: { b: { c: 1 } } } })!;
+    assert.equal(snap.stage, "qualified");
+    assert.ok(!JSON.stringify(snap).includes("abc123supersecret"), "secrets are scrubbed before they are stored");
+    assert.deepEqual(snap.deep, { a: { b: "[nested]" } }, "three levels at most");
+    assert.deepEqual(actionSnapshot({ big: "y".repeat(400), more: "z".repeat(400), lots: Array.from({ length: 40 }, () => "w".repeat(400)) }), { note: "too large to keep" });
+    assert.match(read("app/api/chat/route.ts"), /after: actionSnapshot\(spec\.payload\),/, "the cloud chat records what it set");
+    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /await logResult\(result, ctx, log, spec\.payload\);/, "so does a confirmed harness change");
+    assert.match(read("app/agent-ops/trace/page.tsx"), /\{setOnly \? "What it set" : "What changed"\}/);
+    console.log("  ok    action snapshots");
   }
 
   // 3. The pages and the routing.
@@ -128,6 +151,9 @@ async function main(): Promise<void> {
   assert.doesNotMatch(read("app/api/inbox/mark-read/route.ts"), /from "@\/lib\/agent-inbox-fs"/);
   assert.match(read("app/api/chat/route.ts"), /markReadDb\(tenantId, id, "cloud_chat"\)/, "a cloud chat's read is labelled");
   assert.match(read("app/api/bridge/ping/route.ts"), /"coding_harness_task_v1", AGENT_INBOX_PROTOCOL\]/, "the ping accepts agent_inbox_v1");
+  const relay = read("app/api/bridge/inbox/[[...path]]/route.ts");
+  assert.match(relay, /reserveRelayBatchDb\(auth\.pairing\.tenantId, auth\.pairing\.pairingId\)/, "pending reserves for the asking computer");
+  assert.match(relay, /subject: redactAll\(row\.subject \?\? ""\),\n\s*body: redactAll\(row\.body\),/, "the text leaves scrubbed");
   const { AGENT_INBOX_PROTOCOL } = await import("../lib/agent-inbox-types");
   assert.equal(AGENT_INBOX_PROTOCOL, "agent_inbox_v1");
   console.log("  ok    routes");

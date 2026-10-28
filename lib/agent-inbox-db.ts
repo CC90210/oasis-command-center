@@ -13,6 +13,7 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { getTursoClient } from "./turso";
 import { randomBytes } from "node:crypto";
 import { VALID_PRIORITIES, KNOWN_AGENTS, type Priority } from "./agent-inbox-types";
 
@@ -41,6 +42,8 @@ export type DbInboxMessage = {
   delivered_label?: string | null;
   acked_at?: string | null;
   read_via?: ReadVia | null;
+  /** When delivered_pairing_id reserved it for delivery (bravo__247). */
+  relay_claimed_at?: string | null;
 };
 
 /** Who marked a note read (bravo__246 read_via). */
@@ -61,6 +64,9 @@ export function isRelayRecipient(agent: string): boolean {
 
 /** One relay batch at most: a computer that has been away catches up in a few minutes, not one request. */
 export const RELAY_BATCH_MAX = 20;
+
+/** A reservation with no delivery after this long may be taken by another computer (the first stopped partway). */
+export const RELAY_RESERVATION_MS = 5 * 60 * 1000;
 
 const PRIORITY_RANK: Record<Priority, number> = {
   urgent: 0,
@@ -139,28 +145,44 @@ export async function markReadDb(
 }
 
 /**
- * The directives waiting for a computer to deliver them, oldest first: relay
- * eligible, not delivered, not read. Throws on a failed read (a failed read is
- * not "nothing to deliver").
+ * Reserve, for `pairingId`, the directives waiting for delivery and return them,
+ * oldest first: relay eligible, not delivered, not read, and not reserved by
+ * another computer in the last RELAY_RESERVATION_MS (Codex review of #768: two
+ * computers polling at once both received the same directives, and the local
+ * write happens before the delivery report). ONE statement, so two computers
+ * never both win a note; a computer that stopped partway loses its reservation
+ * after five minutes. Throws on a failed write (it is not "nothing to deliver").
  */
-export async function listRelayPendingDb(tenantId: string, limit = RELAY_BATCH_MAX): Promise<DbInboxMessage[]> {
-  const { data, error } = await getServiceSupabase()
-    .from("agent_messages")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .eq("relay_eligible", 1)
-    .is("delivered_at", null)
-    .is("read_at", null)
-    .order("created_at", { ascending: true })
-    .limit(Math.max(1, Math.min(RELAY_BATCH_MAX, limit)));
-  if (error) throw new Error(`agent_messages relay read failed: ${error.message}`);
-  return (data || []) as DbInboxMessage[];
+export async function reserveRelayBatchDb(
+  tenantId: string,
+  pairingId: string,
+  now: number = Date.now(),
+): Promise<DbInboxMessage[]> {
+  const nowIso = new Date(now).toISOString();
+  const staleIso = new Date(now - RELAY_RESERVATION_MS).toISOString();
+  const open =
+    "relay_eligible = 1 AND delivered_at IS NULL AND read_at IS NULL " +
+    "AND (delivered_pairing_id IS NULL OR delivered_pairing_id = ? OR relay_claimed_at IS NULL OR relay_claimed_at < ?)";
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET delivered_pairing_id = ?, relay_claimed_at = ? ` +
+        `WHERE tenant_id = ? AND ${open} AND id IN (` +
+        `SELECT id FROM agent_messages WHERE tenant_id = ? AND ${open} ORDER BY created_at ASC LIMIT ${RELAY_BATCH_MAX}` +
+        `) RETURNING *`,
+      args: [pairingId, nowIso, tenantId, pairingId, staleIso, tenantId, pairingId, staleIso],
+    });
+    const rows = rs.rows.map((row) => ({ ...(row as unknown as DbInboxMessage) }));
+    return rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  } catch (err) {
+    throw new Error(`agent_messages relay reservation failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**
  * Record that `pairing` wrote these notes into their agents' local inboxes.
- * First writer wins: a note another computer already delivered is left as it
- * is, and only the ids THIS call stamped are returned.
+ * Only the computer that reserved a note may report it delivered, once; only
+ * the ids THIS call stamped are returned.
  */
 export async function markDeliveredDb(
   tenantId: string,
@@ -178,6 +200,7 @@ export async function markDeliveredDb(
     .eq("tenant_id", tenantId)
     .in("id", [...ids])
     .eq("relay_eligible", 1)
+    .eq("delivered_pairing_id", pairing.id)
     .is("delivered_at", null)
     .select("id");
   if (error) throw new Error(`agent_messages delivery write failed: ${error.message}`);

@@ -11,6 +11,7 @@
  */
 import { isRelayRecipient, type DbInboxMessage } from "@/lib/agent-inbox-db";
 import { machineState, timeAgo } from "@/lib/devices/presence";
+import { redactAll } from "@/lib/secret-redaction";
 
 /** When delivery began (bravo__246): a note posted before it was never going to be relayed. */
 export const DELIVERY_STARTED_AT = "2026-10-28T00:00:00.000Z";
@@ -106,13 +107,21 @@ export type KeyChange = { key: string; change: "added" | "removed" | "changed"; 
 
 const VALUE_CHARS = 120;
 
-function shown(value: unknown): string {
-  let text: string;
+/** The whole value as text, type kept (1 and "1" differ): what two values are compared by. */
+function serialized(value: unknown): string {
   try {
-    text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+    return JSON.stringify(value) ?? String(value);
   } catch {
-    text = String(value);
+    return String(value);
   }
+}
+
+/**
+ * A value for display: the WHOLE text scrubbed of secrets first, then shortened, so a credential that
+ * crosses the cut is still recognised whole (Codex review of #768). Strings show without quotes.
+ */
+function shown(value: unknown): string {
+  const text = redactAll(typeof value === "string" ? value : serialized(value));
   return text.length > VALUE_CHARS ? `${text.slice(0, VALUE_CHARS - 1)}…` : text;
 }
 
@@ -133,9 +142,8 @@ export function keyChanges(before: unknown, after: unknown, limit = 12): { chang
     const inB = Object.prototype.hasOwnProperty.call(b, key);
     const inA = Object.prototype.hasOwnProperty.call(a, key);
     if (inB && inA) {
-      const before = shown(b[key]);
-      const after = shown(a[key]);
-      if (before !== after) changes.push({ key, change: "changed", before, after });
+      // Compared whole and typed; only a real change is then formatted.
+      if (serialized(b[key]) !== serialized(a[key])) changes.push({ key, change: "changed", before: shown(b[key]), after: shown(a[key]) });
     } else if (inA) {
       changes.push({ key, change: "added", before: null, after: shown(a[key]) });
     } else {
