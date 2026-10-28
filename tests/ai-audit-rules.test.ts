@@ -145,9 +145,23 @@ async function main() {
         assert.deepEqual(rules.followLead(step, lead), { kind: "move", to: "call_completed", event: "meeting_held_on_pipeline" }, `${step} at ${lead}`);
       }
     }
-    assert.equal(rules.followLead("new_lead", "demo_completed", 2), null, "a later audit holds its own meeting: the lead's Meeting Held may be the last audit's");
-    assert.deepEqual(rules.followLead("new_lead", "founder_meeting_booked", 2), { kind: "move", to: "call_scheduled", event: "call_booked" });
-    assert.deepEqual(rules.followLead("new_lead", "lost", 2), { kind: "move", to: "declined", event: "lead_lost_on_pipeline" });
+    assert.equal(rules.followLead("new_lead", "demo_completed", { cycleNo: 2 }), null, "a later audit holds its own meeting: the lead's Meeting Held may be the last audit's");
+    assert.deepEqual(rules.followLead("new_lead", "founder_meeting_booked", { cycleNo: 2 }), { kind: "move", to: "call_scheduled", event: "call_booked" });
+    assert.deepEqual(rules.followLead("new_lead", "lost", { cycleNo: 2 }), { kind: "move", to: "declined", event: "lead_lost_on_pipeline" });
+    // Codex review of #762, P1: a revision after delivery is back at Research and writing or Audit to approve, but the client has a page.
+    for (const step of ["generating", "final_review"] as const) {
+      assert.deepEqual(rules.followLead(step, "lost", { delivered: true }), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, `${step} after a delivery is flagged, never declined`);
+    }
+    // P2: the Lost flag never covers a warning that matters more.
+    for (const ctx of [{ health: "failed" as const, healthReason: "PDF failed" }, { health: "attention" as const, healthReason: "A second payment arrived" }, { paymentStatus: "disputed" as const }, { paymentStatus: "refunded" as const }, { paymentStatus: "partially_refunded" as const }, { paymentStatus: "overpaid_review" as const }]) {
+      assert.equal(rules.followLead("onboarding", "lost", ctx), null, JSON.stringify(ctx));
+    }
+    assert.deepEqual(rules.followLead("delivered", "lost", { health: "stalled", healthReason: "Not opened in 3 days" }), { kind: "flag", reason: rules.LOST_WITH_CLIENT }, "a Lost lead matters more than a stall");
+    assert.equal(rules.followLead("delivered", "lost", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), null, "flagged once");
+    assert.deepEqual(rules.followLead("payment_confirmed", "lost", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), { kind: "flag", reason: rules.LOST_AFTER_PAYMENT }, "the words follow the step");
+    // P2: the flag clears when the lead comes back from Lost; another warning is left alone.
+    assert.deepEqual(rules.followLead("delivered", "proposal_sent", { health: "attention", healthReason: rules.LOST_WITH_CLIENT }), { kind: "clear" });
+    assert.equal(rules.followLead("delivered", "proposal_sent", { health: "attention", healthReason: "A second payment arrived" }), null);
     for (const step of ["call_completed", "transcript_review", "generating", "final_review", "delivered", "payment_pending"] as const) {
       assert.equal(rules.followLead(step, "demo_completed"), null, `${step} never moves back`);
     }

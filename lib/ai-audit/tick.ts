@@ -30,7 +30,7 @@ import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WAITING_ON_CLIENT_STAGES, followLead, shortName, stallReason } from "@/lib/ai-audit/rules";
-import { leadsOnPipeline } from "@/lib/ai-audit/pipeline-link";
+import { everDelivered, leadsOnPipeline } from "@/lib/ai-audit/pipeline-link";
 import { withdrawAuthorization } from "@/lib/ai-audit/authorize";
 import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
@@ -322,21 +322,34 @@ export async function runAiAuditTick(
     });
 
     // 7b3. ONE PIPELINE (CC, 2026-10-28): the audit follows its lead when the lead moves on the Pipeline,
-    // forward only (lib/ai-audit/rules.ts followLead). One read for every open engagement's lead.
+    // forward only (lib/ai-audit/rules.ts followLead). One read for every open engagement's lead, one for
+    // which were ever delivered (a revision after delivery is back at an earlier step, but the client has a page).
     let leadStages = new Map<string, { stage: string | null }>();
+    let delivered = new Set<string>();
+    let followRead = false;
     await guard("follow_lead", undefined, async () => {
-      leadStages = await leadsOnPipeline(db, tenantId, open.map((e) => e.lead_id));
+      [leadStages, delivered] = await Promise.all([
+        leadsOnPipeline(db, tenantId, open.map((e) => e.lead_id)),
+        everDelivered(db, tenantId, open.map((e) => e.id)),
+      ]);
+      followRead = true;
     });
-    for (const e of open) {
+    for (const e of followRead ? open : []) {
       if (over()) break;
-      const follow = followLead(e.stage, leadStages.get(e.lead_id)?.stage ?? null, e.cycle_no);
+      const follow = followLead(e.stage, leadStages.get(e.lead_id)?.stage ?? null, {
+        cycleNo: e.cycle_no,
+        delivered: delivered.has(e.id),
+        health: e.health,
+        healthReason: e.health_reason,
+        paymentStatus: e.payment_status,
+      });
       if (!follow) continue;
       await guard("follow_lead", e.id, async () => {
         const system = { type: "system" as const, id: null };
-        if (follow.kind === "flag") {
-          if (e.health === "attention" && e.health_reason === follow.reason) return;
-          const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "attention", health_reason: follow.reason }, event: "lead_lost_on_pipeline", actor: system, now: now() });
-          if (r.ok) report.lostOnPipeline += 1;
+        if (follow.kind === "flag" || follow.kind === "clear") {
+          const patch = follow.kind === "flag" ? { health: "attention" as const, health_reason: follow.reason } : { health: "ok" as const, health_reason: null };
+          const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch, event: follow.kind === "flag" ? "lead_lost_on_pipeline" : "lead_back_on_pipeline", actor: system, now: now() });
+          if (r.ok && follow.kind === "flag") report.lostOnPipeline += 1;
           return;
         }
         // Not while the audit email is going out: the send already checked the stage (store.noDeliveryInFlight).

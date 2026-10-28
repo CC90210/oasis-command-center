@@ -119,17 +119,32 @@ export function mayMoveStage(from: AiAuditStage, to: AiAuditStage): boolean {
   return STAGE_MOVES[from].includes(to);
 }
 
-/** Steps before anything reached the client. */
+/** Steps before an audit is delivered. A revision after delivery comes back through them, so they alone never prove the client has nothing. */
 const BEFORE_DELIVERY: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating", "final_review"];
 const PAID: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active_client"];
+/** Payment states with their own warning for CC (nextActionFor): a Lost flag never covers them. */
+const MONEY_TO_REVIEW: readonly PaymentStatus[] = ["overpaid_review", "partially_refunded", "refunded", "disputed"];
 
 export const LOST_WITH_CLIENT = "The lead is Lost on the Pipeline, but the client still has this audit. Decline it here to close their page and payment link.";
 export const LOST_AFTER_PAYMENT = "The lead is Lost on the Pipeline, but this client has paid. Check the lead.";
+const LOST_REASONS: readonly string[] = [LOST_WITH_CLIENT, LOST_AFTER_PAYMENT];
 
 export type LeadFollow =
   | { kind: "move"; to: AiAuditStage; event: "call_booked" | "meeting_held_on_pipeline" | "lead_lost_on_pipeline" }
   | { kind: "flag"; reason: string }
+  | { kind: "clear" }
   | null;
+
+/** What followLead needs to know about the audit besides its step. */
+export type FollowContext = {
+  /** The lead's how-many-th audit (engagement.cycle_no). */
+  cycleNo?: number;
+  /** An audit of this engagement was ever delivered (an ai_audit_events "delivered" row): the client holds a page. */
+  delivered?: boolean;
+  health?: HealthFlag;
+  healthReason?: string | null;
+  paymentStatus?: PaymentStatus;
+};
 
 /**
  * What an open audit does when its lead moved on the Pipeline (ONE PIPELINE,
@@ -140,20 +155,30 @@ export type LeadFollow =
  *     The lead's FIRST audit only: a later one (cycle 2 or more) holds its
  *     own meeting, and the lead never moves back, so its Meeting Held may be
  *     the last audit's;
- *   - the lead marked Lost declines an audit nothing has reached the client
- *     from yet; after delivery the client holds a page and a Pay button, so
- *     the audit is flagged for CC instead of closed behind his back.
+ *   - the lead marked Lost declines an audit that was never delivered. Once
+ *     one was (a revision after delivery included), the client holds a page
+ *     and a Pay button, so the audit is flagged for CC instead of closed
+ *     behind his back. The flag never covers a warning that matters more (a
+ *     failed step, another check, a refund or dispute to review): the board's
+ *     Pipeline column says Lost either way. It clears itself when the lead
+ *     comes back from Lost.
  * The other direction (each step moving the lead) is lib/ai-audit/lifecycle.ts.
  */
-export function followLead(step: AiAuditStage, leadStage: string | null, cycleNo = 1): LeadFollow {
+export function followLead(step: AiAuditStage, leadStage: string | null, ctx: FollowContext = {}): LeadFollow {
   if (TERMINAL_STAGES.includes(step) || !leadStage) return null;
+  const health = ctx.health ?? "ok";
+  const ours = health === "attention" && LOST_REASONS.includes(ctx.healthReason ?? "");
   if (leadStage === "lost") {
-    if (BEFORE_DELIVERY.includes(step)) return { kind: "move", to: "declined", event: "lead_lost_on_pipeline" };
-    return { kind: "flag", reason: PAID.includes(step) ? LOST_AFTER_PAYMENT : LOST_WITH_CLIENT };
+    if (BEFORE_DELIVERY.includes(step) && !ctx.delivered) return { kind: "move", to: "declined", event: "lead_lost_on_pipeline" };
+    const reason = PAID.includes(step) ? LOST_AFTER_PAYMENT : LOST_WITH_CLIENT;
+    if (ours) return ctx.healthReason === reason ? null : { kind: "flag", reason };
+    if ((health !== "ok" && health !== "stalled") || MONEY_TO_REVIEW.includes(ctx.paymentStatus ?? "none")) return null;
+    return { kind: "flag", reason };
   }
+  if (ours) return { kind: "clear" };
   const beforeMeeting = step === "new_lead" || step === "pre_call_research";
   if (leadStage === "founder_meeting_booked" && beforeMeeting) return { kind: "move", to: "call_scheduled", event: "call_booked" };
-  if (cycleNo === 1 && (leadStage === "demo_completed" || leadStage === "proposal_sent") && (beforeMeeting || step === "call_scheduled")) {
+  if ((ctx.cycleNo ?? 1) === 1 && (leadStage === "demo_completed" || leadStage === "proposal_sent") && (beforeMeeting || step === "call_scheduled")) {
     return { kind: "move", to: "call_completed", event: "meeting_held_on_pipeline" };
   }
   return null;
