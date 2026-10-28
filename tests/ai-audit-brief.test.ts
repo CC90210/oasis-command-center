@@ -1241,6 +1241,23 @@ async function main() {
     assert.equal(again.lostOnPipeline, 0, "once");
   });
 
+  await check("a decline for a Lost lead lands only while the lead is still Lost, inside the write, and never touches the lead (Codex review of #762, round 3)", async () => {
+    const eid = await openWith(51, null, null);
+    await setLead(51, "stage", "lost");
+    const e = (await store.getEngagement(db, OASIS, eid))!;
+    // The lead is restored after the tick read it Lost and before it writes.
+    await setLead(51, "stage", "qualified");
+    const r = await store.moveStage(db, { tenantId: OASIS, id: eid, to: "declined", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: e.row_version, event: "lead_lost_on_pipeline", whileLeadStage: "lost" });
+    assert.equal(r.ok, false, "refused: the lead is no longer Lost");
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead");
+    assert.equal((await store.readLead(db, OASIS, lead(51)))?.stage, "qualified", "the correction stands");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal((await store.getEngagement(db, OASIS, eid))?.stage, "new_lead", "the next tick reads the lead again and leaves the audit open");
+    await setLead(51, "stage", "lost");
+    const ok = await store.moveStage(db, { tenantId: OASIS, id: eid, to: "declined", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: (await store.getEngagement(db, OASIS, eid))!.row_version, event: "lead_lost_on_pipeline", whileLeadStage: "lost" });
+    assert.ok(ok.ok, "still Lost: declined");
+  });
+
   await check("after delivery a Lost lead only flags the audit for CC: the client's page is never closed behind his back", async () => {
     const eid = await openWith(43, null, null);
     await db.execute({ sql: "UPDATE ai_audit_engagements SET stage = 'delivered', row_version = row_version + 1 WHERE tenant_id = ? AND id = ?", args: [OASIS, eid] });

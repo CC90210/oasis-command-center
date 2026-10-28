@@ -524,6 +524,11 @@ export async function moveStage(
     extra?: InStatement[];
     /** Refuse while a final-approval email for this engagement is being sent (a move by hand). */
     unlessDeliveryInFlight?: boolean;
+    /**
+     * Write only while the engagement's lead is still at this Pipeline stage, checked inside the write: a
+     * move the tick makes because of the lead's stage never lands after someone moved the lead again.
+     */
+    whileLeadStage?: string;
   },
 ): Promise<CasResult> {
   const tenantId = requireTenant(input.tenantId);
@@ -538,7 +543,16 @@ export async function moveStage(
   // Active client ends the audit cycle too: the delivery project carries the client from here, and
   // the lead is free for other deals (an open engagement holds website sales off it, ownership.ts).
   const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" || input.to === "active_client" ? { closed_at: at, closed_reason: input.to } : {};
-  const guard = input.unlessDeliveryInFlight ? noDeliveryInFlight(tenantId, current.id, input.now) : undefined;
+  const guards = [
+    ...(input.unlessDeliveryInFlight ? [noDeliveryInFlight(tenantId, current.id, input.now)] : []),
+    ...(input.whileLeadStage !== undefined
+      ? [{
+          sql: "EXISTS (SELECT 1 FROM tenant_records r WHERE r.tenant_id = ? AND r.id = ? AND r.entity_type = 'lead' AND json_extract(r.data, '$.stage') = ?)",
+          args: [tenantId, current.lead_id, input.whileLeadStage],
+        }]
+      : []),
+  ];
+  const guard = guards.length ? { sql: guards.map((g) => `(${g.sql})`).join(" AND "), args: guards.flatMap((g) => g.args) } : undefined;
   const update = engagementUpdateStatement(tenantId, current.id, current.row_version, { ...(input.patch ?? {}), ...closing }, at, input.to, undefined, guard);
   const ev = eventStatement({
     tenantId,
@@ -558,7 +572,7 @@ export async function moveStage(
   const purge = voids && !PROFILE_EDIT_STAGES.includes(current.stage) && (await researchTablesInstalled(db)) ? researchPurgeStatements(tenantId, current.id) : [];
   const applied = await casWrite(db, update, [ev, ...stops, ...purge, ...(input.extra ?? [])]);
   const after = await getEngagement(db, tenantId, current.id);
-  if (!applied && after && guard && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
+  if (!applied && after && input.unlessDeliveryInFlight && after.row_version === current.row_version && (await deliveryInFlight(db, tenantId, current.id, input.now))) {
     return { ok: false, error: "delivery_in_progress", engagement: after };
   }
   if (!applied) return { ok: false, error: after ? "conflict" : "not_found", engagement: after };

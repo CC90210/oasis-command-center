@@ -32,7 +32,7 @@ import { isRetiredTenant } from "@/lib/tenant/retired";
 import { WAITING_ON_CLIENT_STAGES, followLead, isLostOnPipelineFlag, shortName, stallReason } from "@/lib/ai-audit/rules";
 import { everDelivered, leadsOnPipeline } from "@/lib/ai-audit/pipeline-link";
 import { withdrawAuthorization } from "@/lib/ai-audit/authorize";
-import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
+import { eventStatement, listEngagements, moveStage, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
@@ -354,7 +354,12 @@ export async function runAiAuditTick(
           return;
         }
         // Not while the audit email is going out: the send already checked the stage (store.noDeliveryInFlight).
-        const r = await advanceEngagement(db, { tenantId, engagementId: e.id, to: follow.to, actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true });
+        // A decline lands only while the lead is still Lost, checked inside the write, and leaves the lead alone:
+        // it is Lost already, and someone who restored it a moment ago is never overwritten (Codex review of #762).
+        const r =
+          follow.to === "declined"
+            ? await moveStage(db, { tenantId, id: e.id, to: "declined", actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true, whileLeadStage: "lost" })
+            : await advanceEngagement(db, { tenantId, engagementId: e.id, to: follow.to, actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true });
         if (!r.ok) return;
         if (follow.to === "call_scheduled") report.callsBooked += 1;
         else if (follow.to === "call_completed") report.meetingsHeld += 1;
