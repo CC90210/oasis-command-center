@@ -475,7 +475,7 @@ async function processRow(
         });
         deliveryRow = { ...row, subject: heads.subject, body: heads.body };
       } else {
-        if (!reminderTierStillValid(tier, actualMinutes)) {
+        if (!reminderTierStillValid(tier, actualMinutes, row.channel)) {
           await mark(db, row, "skipped", { error: "reminder_tier_superseded" });
           return "skipped";
         }
@@ -683,6 +683,12 @@ async function processRow(
         if (["recipient_opted_out", "invalid_recipient", "quo_switched_off", "live_send_disabled", "tenant_retired"].includes(sent.code)) {
           await mark(db, row, "skipped", { error: detail });
           return "skipped";
+        }
+        if (sent.code === "quo_refused" && sent.status === 429) {
+          // Quo said "slow down": nothing was sent, so the next run (a minute
+          // on) tries again, within MAX_ATTEMPTS (Codex review of #774).
+          await retryOrFail(db, row, detail);
+          return "failed";
         }
         if (sent.code === "quo_unreachable" || sent.code === "quo_unexpected" || sent.code === "quo_refused") {
           // Unknown or refused by Quo (a destination the number may not text,

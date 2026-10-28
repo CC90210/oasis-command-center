@@ -372,13 +372,17 @@ export async function quoSender(
 }
 
 /**
- * Is a STOP texted back to the Quo number read by OASIS? Not yet: Quo's inbound
- * webhook is not connected (no QUO_WEBHOOK_SIGNING_KEY). Automated texts (the
- * founder-meeting reminders) are held until it is, since they promise "Reply
- * STOP to opt out". A person's own reply in Conversations is not automated.
+ * Is a STOP texted back to the Quo number read by OASIS? Not yet: there is no
+ * authenticated Quo inbound handler that puts a STOP on the workspace's STOP
+ * list (lib/sms-opt-out.ts applyInboundSmsStop). Automated texts (the
+ * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
+ * until it exists. Closed in code, not by a setting, so no key or switch can
+ * open it early (Codex review of #774): the PR that adds the verified handler,
+ * with its STOP-then-blocked-resend canary, replaces this body. A person's own
+ * reply in Conversations is not automated and is unaffected.
  */
-export function quoStopIntakeConnected(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  return (env.QUO_WEBHOOK_SIGNING_KEY || "").trim().length > 0;
+export function quoStopIntakeConnected(): boolean {
+  return false;
 }
 
 // -- Sending --------------------------------------------------------------------------

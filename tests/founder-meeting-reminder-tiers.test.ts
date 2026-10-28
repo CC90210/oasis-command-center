@@ -21,6 +21,7 @@ import {
   withSmsFooter,
 } from "../lib/website-sales-meeting";
 import { countSegments } from "../lib/sms-segments";
+import { quoStopIntakeConnected } from "../lib/integrations/quo";
 import { teamInviteOrigin } from "../lib/team-invite-email";
 
 const migration167 = readFileSync(
@@ -105,18 +106,23 @@ assert.deepEqual(
   [15, 5],
   "a 20-minute lead time never invents T-60/T-30 reminders",
 );
-assert(!reminderTierStillValid(1440, 60), "the day-before reminder is dropped once the hour reminder is due");
-assert(reminderTierStillValid(1440, 61));
-assert(!reminderTierStillValid(60, 30), "T-60 is superseded exactly when T-30 becomes due");
-assert(reminderTierStillValid(60, 31));
-assert(!reminderTierStillValid(60, 29));
-assert(!reminderTierStillValid(30, 15), "T-30 is superseded exactly when T-15 becomes due");
-assert(reminderTierStillValid(30, 16));
-assert(!reminderTierStillValid(15, 5), "T-15 is superseded exactly when T-5 becomes due");
-assert(reminderTierStillValid(5, 1));
-assert(!reminderTierStillValid(5, 0));
-assert(reminderTierStillValid(10, 1), "an old T-10 row still goes out until the call starts");
-assert(!reminderTierStillValid(10, 0));
+// Superseded only by the next step on the SAME channel (Codex review of #774).
+// Email steps: 1440, 60, 15. Text steps: 1440, 30, 15, 5.
+assert(!reminderTierStillValid(1440, 60, "email"), "the day-before email is dropped once the hour email is due");
+assert(reminderTierStillValid(1440, 61, "email"));
+assert(!reminderTierStillValid(1440, 30, "sms"), "the day-before text is dropped once the 30-minute text is due");
+assert(reminderTierStillValid(60, 30, "email"), "no 30-minute email exists, so the hour email still goes out at 30");
+assert(!reminderTierStillValid(60, 15, "email"), "T-60 email is superseded when the 15-minute email is due");
+assert(!reminderTierStillValid(30, 15, "sms"), "T-30 text is superseded exactly when the T-15 text is due");
+assert(reminderTierStillValid(30, 16, "sms"));
+assert(reminderTierStillValid(15, 4, "email"), "the 15-minute email is the last email: a 5-minute TEXT never drops it");
+assert(!reminderTierStillValid(15, 5, "sms"), "the T-15 text is superseded exactly when the T-5 text is due");
+assert(reminderTierStillValid(5, 1, "sms"));
+assert(!reminderTierStillValid(5, 0, "sms"));
+assert(reminderTierStillValid(10, 1, "email"), "an old T-10 row still goes out until the call starts");
+assert(!reminderTierStillValid(10, 0, "sms"));
+// Automated texts stay off until an authenticated Quo STOP intake exists (Codex review of #774).
+assert.equal(quoStopIntakeConnected(), false);
 assert.equal(reminderWindowText(1440), "about 24 hours");
 assert.equal(reminderWindowText(58), "1 hour");
 assert.equal(reminderWindowText(5), "5 minutes");

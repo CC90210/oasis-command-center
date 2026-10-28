@@ -199,11 +199,20 @@ export function plannedReminderTiers(input: {
 export function reminderTierStillValid(
   tier: FounderReminderTier,
   actualRemainingMinutes: number,
+  channel: FounderReminderChannel,
 ): boolean {
   if (!Number.isFinite(actualRemainingMinutes)) return false;
-  // A late step is dropped once the next step down is due: a day-before
-  // reminder that only gets its turn inside the hour would just repeat it.
-  const next = tier === 10 ? 0 : (FOUNDER_REMINDER_SCHEDULE.map((step) => step.minutes as number).find((m) => m < tier) ?? 0);
+  // A late step is dropped once the next step down ON THE SAME CHANNEL is due:
+  // a day-before email that only gets its turn inside the hour would just
+  // repeat the hour's. Another channel never supersedes it: the 15-minute email
+  // stays the last email until the call starts, whether or not a 5-minute text
+  // exists for this lead (Codex review of #774).
+  const next = tier === 10
+    ? 0
+    : (FOUNDER_REMINDER_SCHEDULE
+        .filter((step) => (step.channels as readonly string[]).includes(channel))
+        .map((step) => step.minutes as number)
+        .find((m) => m < tier) ?? 0);
   return actualRemainingMinutes > next;
 }
 

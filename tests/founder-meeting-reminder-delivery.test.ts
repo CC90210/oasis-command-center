@@ -334,6 +334,19 @@ async function main() {
   });
   quoSenderResult = null;
 
+  // Pass 2f: Quo throttles (HTTP 429): nothing was sent, so it retries.
+  quoResult = { ok: false, code: "quo_refused", status: 429, reason: "Too many requests." };
+  await appointment("appt-throttled", 5);
+  await queue("lead-sms-throttled", "appt-throttled", "reminder_5", 5, "sms", PHONE);
+  await dispatch();
+  await check("a text Quo throttles goes back to pending for the next run", async () => {
+    const row = await rowOf("lead-sms-throttled");
+    assert.equal(row.status, "pending");
+    assert.equal(Number(row.attempts), 1);
+    assert.match(String(row.last_error), /^quo_refused:/);
+  });
+  quoResult = null;
+
   // Pass 3: Quo refuses (an international number the Quo line may not text).
   quoResult = { ok: false, code: "quo_refused", status: 403, reason: "Destination not allowed." };
   await appointment("appt-refused", 15, "+2348153169177");
