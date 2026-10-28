@@ -50,7 +50,12 @@
  *     Devices and this is the bridge process that was running then (the body's
  *     started_at; lib/devices/reconnect.ts). The bridge starts fresh once idle.
  *
- * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded, reconnect }
+ *   - Records the house agents' heartbeats (agent_ticks: name, time, count,
+ *     health only) when the computer is the workspace's agents owner's, on
+ *     OASIS's own workspace (lib/bridge/fleet-ticks.ts). Best effort: a bad or
+ *     unwritable tick is logged and never fails the heartbeat.
+ *
+ * Returns: { ok, pairing_id, services_recorded, real_results_kept, tool_capabilities_recorded, agent_ticks_recorded, reconnect }
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -58,8 +63,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { bad, getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
-import { resolvePairingFromBearer } from "@/lib/bridge/pairing-auth";
+import { resolvePairingFromBearer, type ResolvedPairing } from "@/lib/bridge/pairing-auth";
 import { liveSeat } from "@/lib/os/seat";
+import { isAgentsOwner } from "@/lib/agents-owner";
+import { isOasisWorkspace } from "@/lib/ai/agent-engine-store";
+import { parseAgentTicks, recordAgentTicks } from "@/lib/bridge/fleet-ticks";
 import { CLI_INVENTORY_SERVICE, buildCliMachinePatch, type CliMachinePatch } from "@/lib/bridge-cli-status";
 import {
   BRIDGE_REPORT_KEY,
@@ -143,6 +151,8 @@ export async function POST(req: NextRequest) {
     capacity?: unknown;
     in_flight?: unknown;
     blocked_reason?: unknown;
+    /** The house agents' heartbeats (lib/bridge/fleet-ticks.ts), from the agents owner's computer only. */
+    agent_ticks?: unknown;
   };
   try {
     body = await req.json();
@@ -214,6 +224,7 @@ export async function POST(req: NextRequest) {
     console.error("[bridge.ping.pairing]", pairingWrite.error.message);
     return bad(503, "pairing_heartbeat_persist_failed");
   }
+  const agentTicksRecorded = await recordFleetTicks(pairing, body.agent_ticks);
 
   // Upsert per-service health rows, tenant-scoped
   const tenantId = pairing.tenantId;
@@ -293,6 +304,7 @@ export async function POST(req: NextRequest) {
     services_recorded: recorded,
     real_results_kept: realResultsKept,
     tool_capabilities_recorded: toolCapsRecorded,
+    agent_ticks_recorded: agentTicksRecorded,
     runtime_state_recorded: runtimeState.state !== null,
     claim_state_recorded: hasClaimState,
     // Refresh in Settings > Devices asked this computer to start fresh (lib/devices/reconnect.ts).
@@ -335,6 +347,30 @@ async function recordPresence(payload: Record<string, unknown>): Promise<boolean
   } catch (error) {
     console.error("[bridge.ping.presence]", { service: payload.service, error: error instanceof Error ? error.message : String(error) });
     return null;
+  }
+}
+
+/**
+ * The house agents' heartbeats from this computer, written forward-only (lib/bridge/fleet-ticks.ts).
+ * Only the workspace's agents owner's computer, on OASIS's own workspace, is listened to; anyone else's
+ * ticks are ignored without a word. Never throws: the heartbeat answers whatever happens here.
+ */
+async function recordFleetTicks(pairing: ResolvedPairing, raw: unknown): Promise<number> {
+  if (raw === undefined || raw === null) return 0;
+  try {
+    if (!pairing.userId) return 0;
+    if (!(await isAgentsOwner(pairing.tenantId, pairing.userId))) return 0;
+    if (!(await isOasisWorkspace(pairing.tenantId))) return 0;
+    const now = Date.now();
+    const ticks = parseAgentTicks(raw, now);
+    if (ticks === null) {
+      console.error("[bridge.ping.agent_ticks] malformed; ignored", { pairingId: pairing.pairingId });
+      return 0;
+    }
+    return ticks.length > 0 ? await recordAgentTicks(getTursoClient(), ticks, now, pairing.pairingId) : 0;
+  } catch (error) {
+    console.error("[bridge.ping.agent_ticks]", { pairingId: pairing.pairingId, error: error instanceof Error ? error.message : String(error) });
+    return 0;
   }
 }
 

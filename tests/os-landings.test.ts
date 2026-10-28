@@ -211,7 +211,7 @@ async function main() {
       target_agent TEXT, severity TEXT, correlation_id TEXT, payload TEXT, published_at TEXT, created_at TEXT,
       status TEXT);
     CREATE TABLE agent_state_snapshot (agent_name TEXT PRIMARY KEY, tick_count INTEGER, last_tick_at TEXT,
-      working_memory TEXT, health_status TEXT);
+      working_memory TEXT, health_status TEXT, reported_by_pairing_id TEXT);
     CREATE TABLE integrations_health (id TEXT PRIMARY KEY, tenant_id TEXT, service TEXT, status TEXT,
       last_ping_at TEXT, metadata TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
@@ -489,11 +489,18 @@ async function main() {
       | undefined;
     assert.ok(fleetProp, "the fleet reached the page");
     assert.equal(fleetProp.signalsKnown, true);
-    // W4a, decision 21: the fleet is OASIS's house agents, CC's own included,
-    // not the business workspace's roster (its leads and built teammates).
-    const { FAMILY_AGENT_KEYS } = await import("../lib/agents");
-    assert.deepEqual(fleetProp.agents, [...FAMILY_AGENT_KEYS]);
-    assert.ok(fleetProp.agents.includes("aura") && fleetProp.agents.includes("lex"), "CC's own agents live in Admin > Fleet");
+    // CC, 2026-10-28: the fleet is his four agents (Bravo, Atlas, Maven, Aura),
+    // not the business workspace's roster and not the whole catalog family.
+    const { OASIS_RUNTIME_AGENT_KEYS } = await import("../lib/agents");
+    assert.deepEqual(fleetProp.agents, [...OASIS_RUNTIME_AGENT_KEYS]);
+    assert.deepEqual(fleetProp.agents, ["bravo", "atlas", "maven", "aura"]);
+    assert.ok(!fleetProp.agents.includes("lex") && !fleetProp.agents.includes("hermes"), "the catalog's other agents leave this view");
+    // Codex review, #769: only an agent the Coding harness can open gets that link; Aura has no repo target.
+    const { AgentFleet } = await import("../components/os/landings/AgentFleet");
+    const harnessHrefs = walk(AgentFleet({ fleet: fleetProp as never }))
+      .elements.map((e) => e.props.href)
+      .filter((href): href is string => typeof href === "string" && href.startsWith("/agent?"));
+    assert.deepEqual(harnessHrefs, ["/agent?agent=bravo", "/agent?agent=atlas", "/agent?agent=maven"]);
     assert.ok(!fleetProp.agents.includes("sdr") && !fleetProp.agents.includes("customer-support"), "a library template is not a fleet process");
     assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo's scheduler process checked in 2 minutes ago");
     assert.equal(fleetProp.signals.get("bravo")?.tickCount, 41);
