@@ -435,6 +435,71 @@ async function main() {
     assert.equal(row.last_error, "meeting_moved");
   });
 
+  // Pass 5b: queued by the watcher before the close landed: held, not dropped.
+  await appointment("appt-closing", -20);
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-closing", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-closing" })],
+  });
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('closing-email', ?, 'appt-closing', 'lead-appt-closing', 'no_show_rebook', NULL, 'email', ?, 'taylor@example.com', ?,
+      'Sorry we missed each other', 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, 'dedupe-closing-email')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), HOST],
+  });
+  await dispatch();
+  await check("a rebook message queued before its meeting is closed waits for the close", async () => {
+    const row = await rowOf("closing-email");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "waiting_for_no_show_close");
+  });
+
+  // Pass 5c: a real-length signed rebook link survives the text whole.
+  const longLink = `https://oasisai.work/book/rebook/${"e".repeat(210)}.${"s".repeat(43)}`;
+  await appointment("appt-longsms", -30, "+14165550177");
+  await seed.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='appt-longsms'", args: [] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-longsms", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-longsms" })],
+  });
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('long-sms', ?, 'appt-longsms', 'lead-appt-longsms', 'no_show_rebook', NULL, 'sms', ?, '+14165550177', ?, NULL, ?, 'pending', 0, 1, 'dedupe-long-sms')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), HOST, `OASIS AI: Sorry we missed each other for your AI automation audit. Pick a new time here: ${longLink}`],
+  });
+  await dispatch();
+  await check("a rebook text carries its whole signed link, never the meeting-link fallback", async () => {
+    const row = await rowOf("long-sms");
+    assert.equal(row.status, "sent");
+    const text = quoSends.find((q) => q.to === "+14165550177")?.text || "";
+    assert.ok(text.includes(longLink), "the full link is in the text");
+    assert.match(text, /Reply STOP to opt out/);
+  });
+
+  // Pass 5d: another delivery holds the meeting's lock: a follow-up waits its turn.
+  await seed.execute({
+    sql: "UPDATE call_appointments SET notification_lease_token = 'someone-else', notification_lease_expires_at = ? WHERE id = 'appt-longsms'",
+    args: [new Date(Date.now() + 10 * 60_000).toISOString()],
+  });
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('locked-followup', ?, 'appt-longsms', 'lead-appt-longsms', 'no_show_followup', NULL, 'email', ?, 'taylor@example.com', ?,
+      'Still want your AI automation audit?', 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, 'dedupe-locked-followup')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), HOST],
+  });
+  await dispatch();
+  await check("a follow-up waits while the meeting is locked (a rebook can never race it)", async () => {
+    const row = await rowOf("locked-followup");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "appointment_delivery_or_transition_in_progress");
+  });
+
   // Pass 6: the founder's "lead is waiting" note during the call.
   await appointment("appt-live", -3);
   await seed.execute({

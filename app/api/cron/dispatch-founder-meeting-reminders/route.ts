@@ -15,6 +15,7 @@ import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
+import { countSegments } from "@/lib/sms-segments";
 import { watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
@@ -263,6 +264,8 @@ async function acquireAppointmentLease(
   row: NotificationRow,
   appointment: AppointmentState,
   now: string,
+  /** The meeting state the row is for: a live meeting (reminders) or a closed no-show (its rebook messages). */
+  expected: { status: string; workflowStatus: string } = { status: "scheduled", workflowStatus: "active" },
 ): Promise<string | null> {
   const currentToken = appointment.notification_lease_token;
   const currentExpiry = appointment.notification_lease_expires_at;
@@ -279,8 +282,8 @@ async function acquireAppointmentLease(
     .eq("tenant_id", row.tenant_id)
     .eq("lead_id", row.lead_id)
     .eq("id", row.appointment_id)
-    .eq("status", "scheduled")
-    .eq("workflow_status", "active")
+    .eq("status", expected.status)
+    .eq("workflow_status", expected.workflowStatus)
     .eq("calendar_status", "verified")
     .eq("revision", row.appointment_revision);
   query = currentToken
@@ -423,6 +426,13 @@ async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: 
     if (Date.now() - Date.parse(appointment.scheduled_for) > 60 * 60_000) return "meeting_window_passed";
     return "send";
   }
+  if (appointment.status === "scheduled" && appointment.workflow_status === "active") {
+    // Not closed out yet (the watcher queues before it closes): wait, but not
+    // past the watcher's own window, after which nothing will close it.
+    const startedMs = Date.parse(appointment.scheduled_for);
+    if (Number.isFinite(startedMs) && startedMs <= Date.now() && Date.now() - startedMs < 48 * 3_600_000) return "hold";
+    return "no_show_never_closed";
+  }
   if (appointment.status !== "no_answer" || appointment.workflow_status !== "no_show") return "meeting_rebooked_or_closed";
   const lead = await db.from("tenant_records")
     .select("data")
@@ -465,10 +475,17 @@ async function processRow(
   const decisionAt = new Date().toISOString();
   // After the start (lib/booking/meeting-watch.ts): the founder's "lead is
   // waiting" note, and a missed meeting's rebook link and follow-ups. Each has
-  // its own rule; none moves the meeting, so none takes the appointment lease.
+  // its own rule, and each still takes the appointment lease (for the state it
+  // expects), so a rebook landing mid-send waits for it (Codex review).
   const afterStart = row.kind === "host_guest_waiting" || isNoShowKind(row.kind);
   if (afterStart) {
     const verdict = await afterStartRowStillDue(db, row, appointment);
+    if (verdict === "hold") {
+      // Queued by the watcher before the meeting is closed out: it goes once
+      // the close lands (the watcher retries a close that failed).
+      await mark(db, row, "pending", { error: "waiting_for_no_show_close" });
+      return "held";
+    }
     if (verdict !== "send") {
       await mark(db, row, "skipped", { error: verdict });
       return "skipped";
@@ -494,8 +511,14 @@ async function processRow(
     }
   }
 
-  const leaseToken = afterStart ? null : await acquireAppointmentLease(db, row, appointment, decisionAt);
-  if (!afterStart && !leaseToken) {
+  const leaseToken = await acquireAppointmentLease(
+    db,
+    row,
+    appointment,
+    decisionAt,
+    isNoShowKind(row.kind) ? { status: "no_answer", workflowStatus: "no_show" } : undefined,
+  );
+  if (!leaseToken) {
     await mark(db, row, "pending", { error: "appointment_delivery_or_transition_in_progress" });
     return "held";
   }
@@ -702,12 +725,20 @@ async function processRow(
         await retryOrFail(db, row, `sms_conversation_lookup_failed:${priorSms.error.message}`);
         return "failed";
       }
-      deliveryRow = {
-        ...deliveryRow,
-        body: clampSmsBody(withSmsFooter(deliveryRow.body, {
-          firstInConversation: (priorSms.data || []).length === 0,
-        })),
-      };
+      const footed = withSmsFooter(deliveryRow.body, { firstInConversation: (priorSms.data || []).length === 0 });
+      if (isNoShowKind(row.kind)) {
+        // The signed rebook link is the whole point of this text and runs to
+        // ~280 characters: it is sent whole in up to four segments, never
+        // shortened to the meeting-link fallback that would drop it (Codex
+        // review). Longer than that, the email carries it.
+        if (countSegments(footed) > 4) {
+          await mark(db, row, "skipped", { error: "sms_rebook_text_too_long" });
+          return "skipped";
+        }
+        deliveryRow = { ...deliveryRow, body: footed };
+      } else {
+        deliveryRow = { ...deliveryRow, body: clampSmsBody(footed) };
+      }
       // OASIS texts through Quo since 2026-10-26 (Twilio broke). Its own
       // switches and the workspace's STOP list are re-checked in sendQuoSms.
       // A STOP texted back to the Quo number is not read by OASIS yet

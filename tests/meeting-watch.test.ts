@@ -21,12 +21,23 @@ import {
 } from "../lib/booking/meeting-watch";
 
 const TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+const OTHER_TENANT = "00000000-0000-4000-8000-0000000000aa";
+const KEY = "k".repeat(48);
+process.env.FORM_LINK_HMAC_KEY = KEY;
 const HOST = "host-cc";
 const NOW = Date.parse("2026-10-28T16:20:00.000Z");
 const START = "2026-10-28T16:00:00.000Z";
 
 function participant(role: string, joinedAt: string, opts: Partial<ParticipantRow> = {}): ParticipantRow {
-  return { role, joined_at: joinedAt, left_at: opts.left_at ?? "2026-10-28T16:10:00.000Z", removed_at: null, last_seen_at: opts.last_seen_at ?? joinedAt, ...opts };
+  return {
+    role,
+    user_id: role === "host" ? HOST : null,
+    joined_at: joinedAt,
+    left_at: opts.left_at ?? "2026-10-28T16:10:00.000Z",
+    removed_at: null,
+    last_seen_at: opts.last_seen_at ?? joinedAt,
+    ...opts,
+  };
 }
 
 function testAttendance() {
@@ -47,6 +58,11 @@ function testAttendance() {
     slot,
   );
   assert.equal(gone.guestPresentNow, false, "not heard from in two minutes is not in the room now");
+
+  // A signed-in teammate who is not the room's host joins as "guest": still OASIS, never the lead.
+  const opener = attendanceFrom([participant("guest", "2026-10-28T16:01:00.000Z", { user_id: "opener-1" })], slot);
+  assert.equal(opener.guestJoined, false, "a signed-in opener is not the lead");
+  assert.equal(opener.hostJoined, true, "a signed-in opener is OASIS in the room");
 
   assert.equal(classifyMeeting({ guestJoined: true, hostJoined: true }), "held");
   assert.equal(classifyMeeting({ guestJoined: true, hostJoined: false }), "host_absent");
@@ -94,8 +110,10 @@ async function testWatch() {
       actor_user_id TEXT, metadata TEXT, created_at TEXT);
     CREATE TABLE meet_participants (
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL, room_id TEXT NOT NULL,
-      role TEXT NOT NULL, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT
+      role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT
     );
+    CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
@@ -103,31 +121,39 @@ async function testWatch() {
     ${readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8")}
   `);
   const db = createTursoPostgrest(raw) as never;
-  const appointment = (id: string, start: string, opts: { room?: string | null; consent?: number } = {}) =>
-    raw.execute({
+  const appointment = async (id: string, start: string, opts: { room?: string | null; consent?: number; tenant?: string } = {}) => {
+    await raw.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+      args: [`lead-${id}`, opts.tenant ?? TENANT, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: id })],
+    });
+    return raw.execute({
       sql: `INSERT INTO call_appointments (id, tenant_id, lead_id, scheduled_for, assigned_to, created_by, meeting_kind,
               duration_minutes, timezone, client_name_snapshot, company_snapshot, client_email_snapshot, client_phone_snapshot,
               google_meet_link, calendar_status, organizer_email_snapshot, revision, workflow_status, sms_consent, offer_label, meet_room_id)
             VALUES (?, ?, ?, ?, ?, ?, 'founder_audit', 15, 'America/Toronto', ?, 'Rice farm', ?, '+14165550101',
               'https://oasisai.work/meet/vbj-mhtn-ndp', 'verified', 'conaugh@oasisai.work', 1, 'active', ?, 'AI automation audit', ?)`,
-      args: [id, TENANT, `lead-${id}`, start, HOST, HOST, `Lead ${id}`, `${id}@example.com`, opts.consent ?? 0,
+      args: [id, opts.tenant ?? TENANT, `lead-${id}`, start, HOST, HOST, `Lead ${id}`, `${id}@example.com`, opts.consent ?? 0,
         opts.room === undefined ? `room-${id}` : opts.room],
     });
-  const joinRoom = (room: string, role: string, at: string, opts: { left?: string | null; seen?: string } = {}) =>
+  };
+  const joinRoom = (room: string, role: string, at: string, opts: { left?: string | null; seen?: string; userId?: string | null } = {}) =>
     raw.execute({
-      sql: "INSERT INTO meet_participants (tenant_id, room_id, role, joined_at, last_seen_at, left_at) VALUES (?, ?, ?, ?, ?, ?)",
-      args: [TENANT, room, role, at, opts.seen ?? at, opts.left === undefined ? at : opts.left],
+      sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      args: [TENANT, room, role, opts.userId === undefined ? (role === "host" ? HOST : null) : opts.userId, at, opts.seen ?? at, opts.left === undefined ? at : opts.left],
     });
   const marked: Array<{ appointmentId: string; who: string }> = [];
   const alerts: string[] = [];
+  const failCloseOnce = new Set<string>(["flaky"]);
   const deps = {
     db,
     now: () => NOW,
     origin: "https://oasisai.work",
+    env: { FORM_LINK_HMAC_KEY: KEY },
     markNoShow: (async (input: { appointmentId: string; who: string }) => {
+      if (failCloseOnce.delete(input.appointmentId)) throw new Error("meeting_close_failed:row_changed");
       marked.push({ appointmentId: input.appointmentId, who: input.who });
       await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id=?", args: [input.appointmentId] });
-      return { leadStage: "founder_meeting_booked", rebookUrl: `https://oasisai.work/book/rebook/${input.appointmentId}.sig` };
+      return { alreadyClosed: false, leadStage: "founder_meeting_booked" };
     }) as never,
     alert: (async (_tenant: string, text: string) => {
       alerts.push(text);
@@ -147,23 +173,32 @@ async function testWatch() {
   await appointment("now", "2026-10-28T16:15:00.000Z"); // in its slot, lead in the room, no host
   await joinRoom("room-now", "guest", "2026-10-28T16:14:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
   await appointment("early", "2026-10-28T16:10:00.000Z"); // 10 min in: not yet past the grace minutes
+  await appointment("opener-only", START); // only a signed-in opener came: the lead never did
+  await joinRoom("room-opener-only", "guest", "2026-10-28T16:01:00.000Z", { userId: "opener-1" });
+  await appointment("flaky", START); // its close fails once: the next run finishes it
+  await appointment("elsewhere", START, { tenant: OTHER_TENANT }); // another workspace: never touched
+  for (let i = 0; i < 30; i++) await appointment(`gmeet-${i}`, "2026-10-28T08:00:00.000Z", { room: null }); // no join data
 
   const first = await watchFounderMeetings(deps);
-  assert.deepEqual(first.errors, []);
+  assert.equal(first.errors.length, 1, "the failed close is reported");
+  assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
     marked.map((m) => `${m.appointmentId}:${m.who}`).sort(),
-    ["lead-only:host_absent", "nobody:both_absent"],
-    "only the two missed meetings past their grace minutes are closed, each with what the room saw",
+    ["lead-only:host_absent", "nobody:both_absent", "opener-only:lead_absent"],
+    "only the missed meetings past their grace minutes are closed, each with what the room saw",
   );
   assert.equal(first.held, 1);
-  assert.equal(first.noShows, 2);
+  assert.equal(first.noShows, 3);
+  assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
+  const flakyQueued = await rows("flaky");
+  assert.equal(flakyQueued.filter((r) => r.kind === "no_show_rebook").length, 1, "the rebook email is queued before the close is tried");
   const nobody = await rows("nobody");
   assert.deepEqual(
     nobody.map((r) => `${r.kind}:${r.channel}`),
     ["no_show_followup:email", "no_show_followup:email", "no_show_rebook:email", "no_show_rebook:sms"],
     "rebook email and text now, two follow-ups later",
   );
-  assert.ok(nobody.every((r) => String(r.body).includes("https://oasisai.work/book/rebook/nobody.sig")));
+  assert.ok(nobody.every((r) => /https:\/\/oasisai\.work\/book\/rebook\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(String(r.body))), "a real signed link in every message");
   const leadOnly = await rows("lead-only");
   assert.ok(leadOnly.some((r) => r.kind === "no_show_rebook" && String(r.body).includes("I wasn't there")), "the lead who waited gets the apology");
   assert.ok(!leadOnly.some((r) => r.channel === "sms"), "no text without the SMS tick");
@@ -172,12 +207,15 @@ async function testWatch() {
   assert.equal((await rows("held")).length, 0);
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 2, "the founder hears about each missed meeting");
+  assert.equal(alerts.length, 3, "the founder hears about each missed meeting that closed");
 
-  // The next minute: nothing twice.
+  // The next minute: the failed close finishes, nothing else happens twice.
   const second = await watchFounderMeetings(deps);
   assert.deepEqual(second.errors, []);
-  assert.equal(second.noShows, 0, "a closed meeting is not closed again");
+  assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
+  assert.ok(marked.some((m) => m.appointmentId === "flaky"));
+  assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
+  assert.equal(alerts.length, 4, "and the founder hears about it once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
 }
 

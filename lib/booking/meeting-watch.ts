@@ -28,6 +28,9 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { markFounderMeetingNoShow, type NoShowWho } from "@/lib/booking/no-show";
+import { loadRebookLead, REBOOK_LEAD_STAGE } from "@/lib/booking/rebook";
+import { rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { MEET_PRESENCE_MS } from "@/lib/meet/participants";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
@@ -51,6 +54,8 @@ export type Attendance = {
 
 export type ParticipantRow = {
   role: string;
+  /** Set for a signed-in OASIS teammate (host, opener, second host); null for the lead, who joins from the public link. */
+  user_id?: string | null;
   joined_at: string;
   left_at: string | null;
   removed_at?: string | null;
@@ -71,8 +76,12 @@ export function attendanceFrom(
   };
   const presentNow = (row: ParticipantRow) =>
     !row.left_at && !row.removed_at && Date.parse(row.last_seen_at) > input.nowMs - MEET_PRESENCE_MS;
-  const guests = rows.filter((row) => row.role === "guest");
-  const hosts = rows.filter((row) => row.role === "host");
+  // The lead joins from the public link, signed out: a participant with no
+  // user_id. Anyone signed in is OASIS (the host, an opener, a second host),
+  // whatever room role they got: a teammate who is not the room's host joins
+  // as "guest" and must never be read as the lead (Codex review).
+  const guests = rows.filter((row) => !row.user_id);
+  const hosts = rows.filter((row) => !!row.user_id);
   return {
     guestJoined: guests.some(inSlot),
     hostJoined: hosts.some(inSlot),
@@ -229,6 +238,7 @@ export type WatchDependencies = {
   db: SupabaseClient;
   now: () => number;
   origin: string;
+  env?: Readonly<Record<string, string | undefined>>;
   markNoShow?: typeof markFounderMeetingNoShow;
   alert?: typeof pushWorkspaceAlert;
 };
@@ -238,7 +248,7 @@ export type WatchResult = { guestWaiting: number; noShows: number; held: number;
 async function readParticipants(db: SupabaseClient, tenantId: string, roomId: string): Promise<ParticipantRow[]> {
   const result = await db
     .from("meet_participants")
-    .select("role,joined_at,left_at,removed_at,last_seen_at")
+    .select("role,user_id,joined_at,left_at,removed_at,last_seen_at")
     .eq("tenant_id", tenantId)
     .eq("room_id", roomId);
   if (result.error) throw new Error(`meet_participants_read_failed:${result.error.message}`);
@@ -252,6 +262,16 @@ async function insertNotification(db: SupabaseClient, row: Record<string, unknow
     throw new Error(`meeting_watch_insert_failed:${inserted.error.message}`);
   }
   return true;
+}
+
+function signedRebookUrl(deps: WatchDependencies, appointment: WatchedAppointment, nowMs: number): string {
+  return rebookUrl(
+    deps.origin,
+    signRebookToken(
+      { tenantId: appointment.tenant_id, appointmentId: appointment.id, leadId: appointment.lead_id },
+      { nowMs, env: deps.env },
+    ),
+  );
 }
 
 function firstNameOf(name: string | null): string {
@@ -269,18 +289,23 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
 
-  // Meetings in their slot now, or past it within the lookback.
+  // Meetings in their slot now, or past it within the lookback: OASIS's own
+  // workspace only (founder meetings are its program; a retired workspace is
+  // never written to), Oasis Meet rooms only (no join data otherwise), newest
+  // first so meetings left open for an outcome never crowd out a fresh one.
   const candidates = await deps.db
     .from("call_appointments")
     .select(WATCH_COLUMNS)
+    .eq("tenant_id", AI_AUDIT_TENANT_ID)
     .eq("meeting_kind", "founder_audit")
     .eq("status", "scheduled")
     .eq("workflow_status", "active")
     .eq("calendar_status", "verified")
+    .not("meet_room_id", "is", null)
     .lte("scheduled_for", new Date(nowMs + 2 * 60_000).toISOString())
     .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
-    .order("scheduled_for", { ascending: true })
-    .limit(25);
+    .order("scheduled_for", { ascending: false })
+    .limit(100);
   if (candidates.error) {
     result.errors.push(`meeting_watch_query_failed:${candidates.error.message}`);
     return result;
@@ -290,7 +315,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     try {
       const startMs = Date.parse(appointment.scheduled_for);
       const duration = Number(appointment.duration_minutes) || 15;
-      if (!appointment.meet_room_id) continue; // a Google Meet link: no join data, the founder records it
+      if (!appointment.meet_room_id) continue; // excluded above; a Google Meet link has no join data
       const att = attendanceFrom(await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id), {
         startsAt: appointment.scheduled_for,
         durationMinutes: duration,
@@ -336,73 +361,82 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         result.held += 1;
         continue;
       }
-      const closed = await markNoShow(
-        { tenantId: appointment.tenant_id, appointmentId: appointment.id, who: verdict, actorUserId: "system:meeting-watch" },
-        { db: deps.db, now: deps.now, close: closeVerifiedFounderMeeting, origin: deps.origin },
-      );
-      result.noShows += 1;
-      if (closed.leadStage !== "founder_meeting_booked") continue; // the lead moved on: nothing to send
-      const messages = buildNoShowMessages({
-        firstName: firstNameOf(appointment.client_name_snapshot),
-        offerLabel: appointment.offer_label || "call",
-        missedAt: appointment.scheduled_for,
-        rebookUrl: closed.rebookUrl,
-        who: verdict,
-      });
-      const base = {
-        tenant_id: appointment.tenant_id,
-        appointment_id: appointment.id,
-        lead_id: appointment.lead_id,
-        reminder_minutes_before: null,
-        sender_user_id: appointment.assigned_to || "system",
-        appointment_revision: appointment.revision,
-        updated_at: nowIso,
-      };
-      if (appointment.client_email_snapshot) {
-        await insertNotification(deps.db, {
-          ...base,
-          id: randomUUID(),
-          kind: "no_show_rebook",
-          channel: "email",
-          due_at: nowIso,
-          recipient: appointment.client_email_snapshot,
-          subject: messages.email.subject,
-          body: messages.email.body,
-          dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "email"),
+      const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
+      const reachable =
+        !!lead &&
+        lead.stage === REBOOK_LEAD_STAGE &&
+        lead.calendar_appointment_id === appointment.id;
+      if (reachable) {
+        const rebookUrl = signedRebookUrl(deps, appointment, nowMs);
+        const messages = buildNoShowMessages({
+          firstName: firstNameOf(appointment.client_name_snapshot),
+          offerLabel: appointment.offer_label || "call",
+          missedAt: appointment.scheduled_for,
+          rebookUrl,
+          who: verdict,
         });
-        for (const followUp of messages.followUps) {
+        const base = {
+          tenant_id: appointment.tenant_id,
+          appointment_id: appointment.id,
+          lead_id: appointment.lead_id,
+          reminder_minutes_before: null,
+          sender_user_id: appointment.assigned_to || "system",
+          appointment_revision: appointment.revision,
+          updated_at: nowIso,
+        };
+        if (appointment.client_email_snapshot) {
           await insertNotification(deps.db, {
             ...base,
             id: randomUUID(),
-            kind: "no_show_followup",
+            kind: "no_show_rebook",
             channel: "email",
-            due_at: new Date(nowMs + followUp.hours * 3_600_000).toISOString(),
+            due_at: nowIso,
             recipient: appointment.client_email_snapshot,
-            subject: followUp.subject,
-            body: followUp.body,
-            dedupe_key: `${appointment.id}:${appointment.revision}:no_show_followup_${followUp.hours}h:email`,
+            subject: messages.email.subject,
+            body: messages.email.body,
+            dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "email"),
+          });
+          for (const followUp of messages.followUps) {
+            await insertNotification(deps.db, {
+              ...base,
+              id: randomUUID(),
+              kind: "no_show_followup",
+              channel: "email",
+              due_at: new Date(nowMs + followUp.hours * 3_600_000).toISOString(),
+              recipient: appointment.client_email_snapshot,
+              subject: followUp.subject,
+              body: followUp.body,
+              dedupe_key: `${appointment.id}:${appointment.revision}:no_show_followup_${followUp.hours}h:email`,
+            });
+          }
+        }
+        if (appointment.sms_consent && appointment.client_phone_snapshot) {
+          await insertNotification(deps.db, {
+            ...base,
+            id: randomUUID(),
+            kind: "no_show_rebook",
+            channel: "sms",
+            due_at: nowIso,
+            recipient: appointment.client_phone_snapshot,
+            subject: null,
+            body: messages.sms,
+            dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "sms"),
           });
         }
       }
-      if (appointment.sms_consent && appointment.client_phone_snapshot) {
-        await insertNotification(deps.db, {
-          ...base,
-          id: randomUUID(),
-          kind: "no_show_rebook",
-          channel: "sms",
-          due_at: nowIso,
-          recipient: appointment.client_phone_snapshot,
-          subject: null,
-          body: messages.sms,
-          dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "sms"),
-        });
-      }
+      const closed = await markNoShow(
+        { tenantId: appointment.tenant_id, appointmentId: appointment.id, who: verdict, actorUserId: "system:meeting-watch" },
+        { db: deps.db, now: deps.now, close: closeVerifiedFounderMeeting, origin: deps.origin, env: deps.env },
+      );
+      result.noShows += 1;
+      if (closed.alreadyClosed) continue; // told the founder when it was closed
+      const sent = reachable ? " Their rebook link is going out now." : " The lead has moved on in the Pipeline, so nothing was sent.";
       const who =
         verdict === "host_absent"
-          ? "The lead joined and nobody from OASIS did. An apology with their rebook link is going out now."
+          ? `The lead joined and nobody from OASIS did.${reachable ? " An apology with their rebook link is going out now." : sent}`
           : verdict === "lead_absent"
-            ? "You joined and the lead did not. Their rebook link is going out now."
-            : "Nobody joined. Their rebook link is going out now.";
+            ? `You joined and the lead did not.${sent}`
+            : `Nobody joined.${sent}`;
       await alert(
         appointment.tenant_id,
         [
