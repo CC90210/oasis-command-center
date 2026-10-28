@@ -122,7 +122,7 @@ const TARGETS: Record<Exclude<SetupNeed, `connector:${string}`>, SetupTarget> = 
     audience: "manage",
     label: "Set a revenue goal",
     ask: "Ask your workspace owner to set the revenue goal.",
-    anchorIn: SETTINGS_CONTENT,
+    anchorIn: "app/money/page.tsx",
   },
   // Invites, roles, active status.
   team: {

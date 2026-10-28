@@ -687,6 +687,15 @@ async function PersonalSettingsView({
         />
       )}
 
+      {/* A sales manager's Team tab (Codex review of #771): the scorecard moved to the Activity log. */}
+      {show("team") && showTeamPerformance && (
+        <SettingsSection defaultOpen title="Team" subtitle="Your team's scorecard and every rep's lead actions are in the Activity log.">
+          <Link href="/settings/audit-log" prefetch={false} className="text-sm text-accent hover:underline">
+            Open the Activity log
+          </Link>
+        </SettingsSection>
+      )}
+
       {show("profile") && accessDegraded && (
         <Card
           title="Team access status unavailable"

@@ -1063,7 +1063,8 @@ async function main() {
     assert.ok(links.includes(REVENUE_GOAL_SETTINGS_HREF), `the link goes to ${links.join(", ")}`);
     const money = readFileSync(join(ROOT, "app/money/page.tsx"), "utf8");
     assert.match(money, /<section id="revenue-goal"/, "Money carries the fragment's target");
-    assert.match(money, /<RevenueGoalPanel canEdit=\{canEditGoal\} \/>/);
+    assert.match(money, /<RevenueGoalSection canEdit=\{canEditGoal\} \/>/, "the finance owner's Money page");
+    assert.match(money, /surface\.capabilities\.canSeeCompanyFinancials\) notFound\(\);/, "an admin who is not the books' owner gets the goal alone");
     await login("cc");
     const team = await withContent(await settingsTeam());
     assert.equal(walk(team).elements.find((e) => e.props.id === "revenue-goal"), undefined, "Settings > Team no longer holds the goal");

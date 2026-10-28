@@ -41,6 +41,7 @@ import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { formatCents } from "@/lib/founders-finances/money";
 import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { getActiveProfile } from "@/lib/queries";
+import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Money" };
@@ -64,9 +65,41 @@ const LEVEL_BAR: Record<string, string> = {
   unconfirmed: "bg-status-warm",
 };
 
+/** Saving the goal is owner/admin (app/api/goals POST); the editor shows it either way. */
+async function canEditRevenueGoal(): Promise<boolean> {
+  const profile = (await getActiveProfile().catch(() => null)) as { is_owner?: boolean; team_role?: string } | null;
+  return !!profile && (profile.is_owner === true || profile.team_role === "owner" || profile.team_role === "admin");
+}
+
+function RevenueGoalSection({ canEdit }: { canEdit: boolean }) {
+  return (
+    // id="revenue-goal": Today's Goal pace card links here (lib/setup-links.ts).
+    <section id="revenue-goal" aria-label="Revenue goal" className="scroll-mt-24">
+      <Card
+        title="Revenue goal"
+        subtitle="The one goal Today counts down to: money collected in a period, from the books. MRR is read live from Stripe, never typed."
+      >
+        <RevenueGoalPanel canEdit={canEdit} />
+      </Card>
+    </section>
+  );
+}
+
 export default async function MoneyPage() {
   const viewer = await resolveFinanceViewer();
-  if (!viewer) notFound();
+  if (!viewer) {
+    // Not the books' owner, but allowed to see the company goal (the same rule
+    // app/api/goals reads with): the goal alone, never the ledger. An OASIS
+    // admin kept the editor when it moved here from Settings > Team (Codex
+    // review of #771).
+    const surface = await resolveViewerSurface().catch(() => null);
+    if (!surface?.ok || !surface.capabilities.canSeeCompanyFinancials) notFound();
+    return (
+      <PageFrame title="Revenue goal" subtitle="The goal Today counts down to. The books themselves are the finance owner's.">
+        <RevenueGoalSection canEdit={await canEditRevenueGoal()} />
+      </PageFrame>
+    );
+  }
   let entity: EntityRow;
   try {
     entity = await financeBook(viewer);
@@ -92,9 +125,8 @@ export default async function MoneyPage() {
     );
   }
   const tiles = moneyTiles(loaded, formatCents);
-  // Revenue goal (moved from Settings > Team, 2026-10-28). Saving stays owner/admin (app/api/goals).
-  const profile = (await getActiveProfile().catch(() => null)) as { is_owner?: boolean; team_role?: string } | null;
-  const canEditGoal = !!profile && (profile.is_owner === true || profile.team_role === "owner" || profile.team_role === "admin");
+  // Revenue goal (moved from Settings > Team, 2026-10-28).
+  const canEditGoal = await canEditRevenueGoal();
 
   return (
     <PageFrame
@@ -120,15 +152,7 @@ export default async function MoneyPage() {
           ))}
         </section>
 
-        {/* id="revenue-goal": Today's Goal pace card links here (lib/setup-links.ts). */}
-        <section id="revenue-goal" aria-label="Revenue goal" className="scroll-mt-24">
-          <Card
-            title="Revenue goal"
-            subtitle="The one goal Today counts down to: money collected in a period, from the books. MRR is read live from Stripe, never typed."
-          >
-            <RevenueGoalPanel canEdit={canEditGoal} />
-          </Card>
-        </section>
+        <RevenueGoalSection canEdit={canEditGoal} />
 
         {loaded ? <Details loaded={loaded} /> : <p className="text-sm text-fg-muted">Couldn&rsquo;t load the rest of the overview. The error has been logged.</p>}
 
