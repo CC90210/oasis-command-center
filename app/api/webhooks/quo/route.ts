@@ -13,7 +13,11 @@
  *      shouldHonorTwilioOptOut) goes through applyInboundSmsStop: the number
  *      goes on the STOP list and every pending meeting text to it is
  *      cancelled. START / UNSTOP lifts an SMS opt-out (releasePhoneSuppression).
- *   4. 200 once handled. A failed STOP write answers 503 so Quo retries: a STOP
+ *   4. ORDER. Quo retries and does not promise order, so each STOP/START first
+ *      claims its number in quo_inbound_consent by the event's own time: an
+ *      older event than the newest seen is ignored (an old START never lifts a
+ *      newer STOP), and only the same delivery may replay (Codex review of #776).
+ *   5. 200 once handled. A failed STOP write answers 503 so Quo retries: a STOP
  *      honoured late is the violation. Quo is OASIS's own line (client
  *      workspaces cannot connect it), so the tenant is OASIS's.
  *
@@ -28,7 +32,12 @@ import {
   QUO_WEBHOOK_MAX_BODY_BYTES,
   verifyQuoWebhook,
 } from "@/lib/integrations/quo-webhook";
-import { applyInboundSmsStop, isInvalidSuppressionPhoneError, releasePhoneSuppression } from "@/lib/sms-opt-out";
+import {
+  applyInboundSmsStop,
+  isInvalidSuppressionPhoneError,
+  normalizeInboundSmsPhone,
+  releasePhoneSuppression,
+} from "@/lib/sms-opt-out";
 import { shouldHonorTwilioOptOut, twilioCarrierKeyword } from "@/lib/sms/twilio-inbound";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
@@ -67,6 +76,35 @@ async function recordHealth(input: {
   });
 }
 
+/**
+ * Claim this number's consent order for this event. True when the event is
+ * the newest seen for the number, or a replay of the same delivery; false
+ * when a newer STOP/START has already been applied.
+ */
+async function claimConsentOrder(input: {
+  tenantId: string;
+  phoneLast10: string;
+  occurredAt: string;
+  action: "stop" | "start";
+  webhookId: string;
+  nowIso: string;
+}): Promise<boolean> {
+  const result = await getTursoClient().execute({
+    sql: `INSERT INTO quo_inbound_consent (tenant_id, phone_last10, last_event_at, last_action, last_webhook_id, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(tenant_id, phone_last10) DO UPDATE SET
+            last_event_at = excluded.last_event_at,
+            last_action = excluded.last_action,
+            last_webhook_id = excluded.last_webhook_id,
+            updated_at = excluded.updated_at
+          WHERE excluded.last_event_at > quo_inbound_consent.last_event_at
+             OR (excluded.last_event_at = quo_inbound_consent.last_event_at
+                 AND excluded.last_webhook_id = quo_inbound_consent.last_webhook_id)`,
+    args: [input.tenantId, input.phoneLast10, input.occurredAt, input.action, input.webhookId, input.nowIso],
+  });
+  return result.rowsAffected > 0;
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const declared = Number(req.headers.get("content-length") || "0");
   if (declared > QUO_WEBHOOK_MAX_BODY_BYTES) return NextResponse.json({ ok: false, error: "body_too_large" }, { status: 413 });
@@ -102,10 +140,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     !!event.from &&
     !!event.text;
   const text = event.text || "";
-  const stop = inbound && shouldHonorTwilioOptOut(text);
-  const start = inbound && !stop && twilioCarrierKeyword(text) === "start";
+  let stop = inbound && shouldHonorTwilioOptOut(text);
+  let start = inbound && !stop && twilioCarrierKeyword(text) === "start";
+  let stale = false;
 
   try {
+    if (stop || start) {
+      const fresh = await claimConsentOrder({
+        tenantId: AI_AUDIT_TENANT_ID,
+        phoneLast10: normalizeInboundSmsPhone(event.from!).replace(/\D/g, "").slice(-10),
+        occurredAt: event.occurredAt || new Date(Number(req.headers.get("webhook-timestamp")) * 1000).toISOString(),
+        action: stop ? "stop" : "start",
+        webhookId: (req.headers.get("webhook-id") || "").slice(0, 200),
+        nowIso,
+      });
+      if (!fresh) {
+        // A newer STOP/START for this number already won: this one is history.
+        stale = true;
+        stop = false;
+        start = false;
+      }
+    }
     if (stop) {
       await applyInboundSmsStop(getServiceSupabase(), {
         tenantId: AI_AUDIT_TENANT_ID,
@@ -146,5 +201,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } catch (error) {
     console.error("[quo-webhook] health row write failed", error instanceof Error ? error.message.slice(0, 200) : error);
   }
-  return NextResponse.json({ ok: true, stop, start });
+  return NextResponse.json({ ok: true, stop, start, stale });
 }

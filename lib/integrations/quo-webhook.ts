@@ -14,11 +14,15 @@
  * matching v1 entry passes; a timestamp more than 5 minutes off is refused.
  * Nothing is parsed or read before the signature passes.
  *
- * PAYLOAD. Read defensively, because Quo has two shapes in the wild:
- *   versioned  { id, type, resource: { id, text, direction? },
- *                context: { senderIdentifier, recipientIdentifiers } }
- *   legacy     { id, type, data: { object: { id, from, to, body, direction } } }
+ * PAYLOAD (https://www.quo.com/docs/2026-03-30/webhooks-event-payloads):
+ *   versioned  { id, apiVersion, createdAt, type,
+ *                data: { resource: { id, text, direction, createdAt },
+ *                        context: { senderIdentifier, recipientIdentifiers } } }
+ *   legacy     { id, type, createdAt, data: { object: { id, from, to, body, direction, createdAt } } }
  * A field that is not where either shape puts it is null, never guessed.
+ * `occurredAt` (the envelope's createdAt, else the message's) orders consent
+ * changes: Quo retries and does not promise order, so an older START must
+ * never lift a newer STOP (app/api/webhooks/quo).
  *
  * ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -82,6 +86,8 @@ export type QuoInboundEvent = {
   from: string | null;
   text: string | null;
   messageId: string | null;
+  /** When it happened (ISO), from the event itself, never from the delivery attempt. */
+  occurredAt: string | null;
 };
 
 function obj(value: unknown): Record<string, unknown> | null {
@@ -101,11 +107,19 @@ function phoneOf(value: unknown): string | null {
   return str(o.phoneNumber, 40) || str(o.phone_number, 40) || str(o.value, 40) || str(o.identifier, 40);
 }
 
+function isoOf(value: unknown): string | null {
+  const text = str(value, 64);
+  if (!text) return null;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
 export function parseQuoEvent(payload: unknown): QuoInboundEvent {
   const root = obj(payload) || {};
-  const resource = obj(root.resource);
-  const context = obj(root.context);
-  const legacy = obj(obj(root.data)?.object);
+  const data = obj(root.data);
+  const resource = obj(data?.resource) || obj(root.resource);
+  const context = obj(data?.context) || obj(root.context);
+  const legacy = obj(data?.object);
   return {
     eventId: str(root.id, 200),
     type: str(root.type, 100) || "",
@@ -113,5 +127,6 @@ export function parseQuoEvent(payload: unknown): QuoInboundEvent {
     from: phoneOf(context?.senderIdentifier) || phoneOf(legacy?.from),
     text: str(resource?.text) || str(legacy?.body),
     messageId: str(resource?.id, 200) || str(legacy?.id, 200),
+    occurredAt: isoOf(root.createdAt) || isoOf(resource?.createdAt) || isoOf(legacy?.createdAt),
   };
 }

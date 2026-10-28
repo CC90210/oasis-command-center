@@ -27,6 +27,21 @@ delete process.env.BRAVO_FORCE_DRY_RUN;
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const LEAD_PHONE = "+14165550123";
 
+/** Quo's versioned envelope (https://www.quo.com/docs/2026-03-30/webhooks-event-payloads). */
+function received(eventId: string, text: string, createdAt: string, from = LEAD_PHONE) {
+  return {
+    id: eventId,
+    apiVersion: "2026-03-30",
+    createdAt,
+    type: "message.received",
+    data: {
+      resource: { id: `msg-${eventId}`, text, direction: "incoming", createdAt },
+      context: { senderIdentifier: from, recipientIdentifiers: ["+13653603976"] },
+      links: { quo: null },
+    },
+  };
+}
+
 function sign(id: string, ts: number, body: string, key: Buffer = KEY_BYTES): string {
   return `v1,${createHmac("sha256", key).update(`${id}.${ts}.${body}`).digest("base64")}`;
 }
@@ -58,14 +73,17 @@ async function main() {
   assert.equal(quoWebhookKeyConfigured({ QUO_WEBHOOK_SIGNING_KEY: "whsec_short" }), false);
   assert.equal(quoWebhookKeyConfigured({ QUO_WEBHOOK_SIGNING_KEY: SECRET }), true);
 
-  // Both payload shapes read; anything else is null, never guessed.
+  // Quo's real versioned envelope (resource/context under data), and the legacy shape.
   assert.deepEqual(
-    parseQuoEvent({ id: "e1", type: "message.received", resource: { id: "m1", text: "STOP", direction: "incoming" }, context: { senderIdentifier: { phoneNumber: LEAD_PHONE } } }),
-    { eventId: "e1", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "STOP", messageId: "m1" },
+    parseQuoEvent(received("e1", "STOP", "2026-10-28T23:00:00.000Z")),
+    {
+      eventId: "e1", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "STOP",
+      messageId: "msg-e1", occurredAt: "2026-10-28T23:00:00.000Z",
+    },
   );
   assert.deepEqual(
-    parseQuoEvent({ id: "e2", type: "message.received", data: { object: { id: "m2", from: LEAD_PHONE, to: ["+13653603976"], body: "stop", direction: "incoming" } } }),
-    { eventId: "e2", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "stop", messageId: "m2" },
+    parseQuoEvent({ id: "e2", type: "message.received", data: { object: { id: "m2", from: LEAD_PHONE, to: ["+13653603976"], body: "stop", direction: "incoming", createdAt: "2026-10-28T23:01:00Z" } } }),
+    { eventId: "e2", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "stop", messageId: "m2", occurredAt: "2026-10-28T23:01:00.000Z" },
   );
   assert.equal(parseQuoEvent({ type: "call.completed" }).from, null);
 
@@ -101,11 +119,11 @@ async function main() {
     (await seed.execute({ sql: "SELECT * FROM quo_inbound_health WHERE tenant_id = ?", args: [OASIS] })).rows[0];
 
   assert.equal(await quoStopIntakeConnected(OASIS), false, "no verified delivery yet: automated texts stay off");
-  const unsigned = await deliver({ id: "e0", type: "message.received", resource: { text: "STOP" }, context: { senderIdentifier: LEAD_PHONE } }, { signed: false });
+  const unsigned = await deliver(received("e0", "STOP", "2026-10-28T22:59:00.000Z"), { signed: false });
   assert.equal(unsigned.status, 401, "an unsigned delivery is refused");
   assert.equal(await health(), undefined, "and writes nothing");
 
-  const stop = await deliver({ id: "e1", type: "message.received", resource: { id: "m1", text: "Stop please", direction: "incoming" }, context: { senderIdentifier: LEAD_PHONE } });
+  const stop = await deliver(received("e1", "Stop please", "2026-10-28T23:10:00.000Z"), { id: "delivery-stop" });
   assert.equal(stop.status, 200);
   assert.equal(stop.body.stop, true);
   const suppressed = await seed.execute({ sql: "SELECT reason, source FROM sunbiz_phone_suppressions WHERE tenant_id = ? AND phone_last10 = ?", args: [OASIS, "4165550123"] });
@@ -122,21 +140,35 @@ async function main() {
   assert.equal(refused.ok, false);
   if (!refused.ok) assert.equal(refused.code, "recipient_opted_out");
 
-  // START lifts an SMS opt-out.
-  const start = await deliver({ id: "e2", type: "message.received", data: { object: { id: "m2", from: LEAD_PHONE, body: "START", direction: "incoming" } } });
+  // ORDER (Codex review of #776): an OLDER START arriving late never lifts the newer STOP.
+  const staleStart = await deliver(received("e-old", "START", "2026-10-28T23:05:00.000Z"));
+  assert.equal(staleStart.status, 200);
+  assert.equal(staleStart.body.stale, true);
+  const stillOptedOut = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
+  assert.equal(Number(stillOptedOut.rows[0].n), 1, "the newer STOP stands");
+  // A replay of the SAME STOP delivery still goes through (idempotent finish of a failed write).
+  const replay = await deliver(received("e1", "Stop please", "2026-10-28T23:10:00.000Z"), { id: "delivery-stop" });
+  assert.equal(replay.body.stop, true);
+  // A NEWER START lifts it.
+  const start = await deliver({ id: "e2", type: "message.received", createdAt: "2026-10-28T23:20:00Z", data: { object: { id: "m2", from: LEAD_PHONE, body: "START", direction: "incoming", createdAt: "2026-10-28T23:20:00Z" } } });
   assert.equal(start.status, 200);
   assert.equal(start.body.start, true);
   const after = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
   assert.equal(Number(after.rows[0].n), 0);
+  // And an older STOP replayed after that START does not re-suppress.
+  const oldStop = await deliver(received("e-older-stop", "STOP", "2026-10-28T23:15:00.000Z"));
+  assert.equal(oldStop.body.stale, true);
+  const stillLifted = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
+  assert.equal(Number(stillLifted.rows[0].n), 0);
 
   // An ordinary reply is recorded as intake proof but changes nothing.
-  const hello = await deliver({ id: "e3", type: "message.received", resource: { text: "See you at 2!", direction: "incoming" }, context: { senderIdentifier: LEAD_PHONE } });
+  const hello = await deliver(received("e3", "See you at 2!", "2026-10-28T23:30:00.000Z"));
   assert.equal(hello.status, 200);
   assert.equal(hello.body.stop, false);
 
   // No key on the Worker: the route says it is not installed.
   delete process.env.QUO_WEBHOOK_SIGNING_KEY;
-  const noKey = await deliver({ id: "e4", type: "message.received", resource: { text: "STOP" }, context: { senderIdentifier: LEAD_PHONE } });
+  const noKey = await deliver(received("e4", "STOP", "2026-10-28T23:40:00.000Z"));
   assert.equal(noKey.status, 503);
 
   console.log("quo-stop-intake: OK");

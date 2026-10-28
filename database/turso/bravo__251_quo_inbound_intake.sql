@@ -15,6 +15,21 @@
 -- Additive only. No comment after a semicolon on the same line (the applier
 -- splits on ';' plus newline).
 
+-- quo_inbound_consent: the newest STOP/START seen per number, so a retried
+-- or late older delivery never overrides a newer choice (Quo retries and does
+-- not promise order). A replay of the SAME delivery (same webhook id) is
+-- allowed through so a failed write can finish.
+
+CREATE TABLE IF NOT EXISTS quo_inbound_consent (
+  tenant_id         TEXT NOT NULL,
+  phone_last10      TEXT NOT NULL,
+  last_event_at     TEXT NOT NULL,
+  last_action       TEXT NOT NULL,
+  last_webhook_id   TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, phone_last10)
+);
+
 CREATE TABLE IF NOT EXISTS quo_inbound_health (
   tenant_id         TEXT PRIMARY KEY,
   last_verified_at  TEXT NOT NULL,
