@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   assert.match(component, /stats\.degraded[\s\S]{0,260}Couldn&apos;t read the training material, so this is not an empty list/, "a failed count is said, not shown as zero");
   assert.match(component, /items\.degraded[\s\S]{0,260}the list did not load/, "a failed list is said, not shown as empty");
   assert.match(component, /Nothing learned yet\./, "a genuinely empty corpus says so");
-  assert.match(component, /Before it answers, an agent reads its \{TRAINING_NOTES_MAX\} newest notes as examples of how to write/, "the footer says what the agent does with them");
+  assert.match(component, /Before it answers, an agent reads up to \{TRAINING_NOTES_MAX\} notes as examples of how to write: the ones that best match what it is asked, then its newest/, "the footer says what the agent does with them");
   assert.match(component, /They never change what it is allowed to do\./, "and what it does not");
   assert.match(component, /Trains: \{trainsLabel\(row\.trains/, "each row says which agent it trains");
   const { rowsFor } = await import("../components/tools/LearnedNotes");
@@ -65,7 +65,8 @@ async function main(): Promise<void> {
   assert.match(page, /key=\{agent \?\? TRAINS_ALL\}/, "a new tab starts the form again");
   assert.match(page, /async function safely/, "a rejected read becomes degraded instead of a crashed page");
   assert.match(page, /\{ \.\.\.EMPTY_CORPUS_STATS, degraded: true \}/);
-  assert.match(page, /<LearnedNotes stats=\{stats\} items=\{items\} agent=\{agent\} \/>/);
+  assert.match(page, /<LearnedNotes stats=\{stats\} items=\{items\} agent=\{agent\} memory=\{memory\} \/>/);
+  assert.match(page, /safely\("memory", noteMemoryFor\(tenantId, agent\), \{\}\)/, "the memory cards read beside the list and degrade to none");
   assert.ok(page.indexOf("requireOperator()") < page.indexOf("getCorpusStats("), "the gate runs before any read");
   console.log("  ok - the page is gated first and degrades a failed read");
 

@@ -147,6 +147,7 @@ export const USAGE_SURFACES = [
   "document_extract", //     lib/ai-document-extractor.ts
   "tools.learn_from_link", // lib/tools/worker/learn-from-link.ts, Content > Tools "Learn from a link"
   "tools.repurpose_post", //  lib/tools/worker/repurpose-post.ts, Content > Tools "Repurpose a post"
+  "training.recall", //      app/api/admin/agent-training/[[...path]]/route.ts, Admin > Agent training "Ask it to recall this"
   "automations.run", //      a department task's run (lib/os/department-agent.ts AgentTurnRequest.surface; jobId = the run)
   "automations.draft", //    the department-task drafter on a workspace AI account (lib/tools/worker/ai.ts runToolModelCall)
   "offer_pages.write", //    app/api/forms/[id]/offer/write, "Write my page" on a workspace AI account (runToolModelCall)

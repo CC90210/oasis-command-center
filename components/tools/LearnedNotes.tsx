@@ -18,6 +18,8 @@ import type { CorpusItems, CorpusStats } from "@/lib/founders/marketing-queries"
 import { ingestStateCopy, type IngestState } from "@/lib/founders/ingest-core";
 import { TRAINING_NOTES_MAX, notesTrain, trainsLabel, type Trains } from "@/lib/training/trains";
 import type { DepartmentKey } from "@/lib/os/types";
+import type { NoteMemory } from "@/lib/os/training-notes";
+import { RecallTest } from "@/components/tools/RecallTest";
 
 const SHOWN = 15;
 export const TRAINING_HREF = "/founders/marketing/train";
@@ -56,7 +58,18 @@ export function rowsFor(rows: CorpusItems["rows"], agent: DepartmentKey | null):
   return agent ? rows.filter((r) => notesTrain(r.trains, agent)) : rows;
 }
 
-export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStats; items: CorpusItems; agent?: DepartmentKey | null }) {
+export function LearnedNotes({
+  stats,
+  items,
+  agent = null,
+  memory = {},
+}: {
+  stats: CorpusStats;
+  items: CorpusItems;
+  agent?: DepartmentKey | null;
+  /** What each learned note holds and what it is picked for (lib/os/training-notes.ts noteMemoryFor). */
+  memory?: Record<string, NoteMemory>;
+}) {
   const rows = rowsFor(items.rows, agent);
   const who = agent ? trainsLabel(agent) : null;
   // The All tab knows its true total (stats counts every row); an agent's tab
@@ -123,6 +136,7 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
                 {state.tone === "bad" && row.last_error && (
                   <div className="text-[11px] text-status-warm">{row.last_error.slice(0, 160)}</div>
                 )}
+                {memory[row.id] && <NoteMemoryCard row={row} memory={memory[row.id]} agent={agent} who={who} />}
               </li>
             );
           })}
@@ -144,8 +158,53 @@ export function LearnedNotes({ stats, items, agent = null }: { stats: CorpusStat
         <a href={TRAINING_HREF} className="underline underline-offset-2 hover:text-fg-muted">
           Content &gt; Training
         </a>
-        ). Before it answers, an agent reads its {TRAINING_NOTES_MAX} newest notes as examples of how to write: openings, techniques and tone. They never change what it is allowed to do.
+        ). Before it answers, an agent reads up to {TRAINING_NOTES_MAX} notes as examples of how to write: the ones that best match what it is asked, then its newest: openings, techniques and tone. They never change what it is allowed to do.
       </p>
     </section>
+  );
+}
+
+/**
+ * Under a learned note: what was extracted from the link, the words a question needs for the agent to
+ * pick it, and (on one agent's tab) the recall test that proves it.
+ */
+function NoteMemoryCard({
+  row,
+  memory,
+  agent,
+  who,
+}: {
+  row: CorpusItems["rows"][number];
+  memory: NoteMemory;
+  agent: DepartmentKey | null;
+  who: string | null;
+}) {
+  const learned = [memory.hook && `Opening: ${memory.hook}`, memory.steal && `Technique: ${memory.steal}`, memory.tone && `Tone: ${memory.tone}`].filter(Boolean) as string[];
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-bg-border bg-bg-deep/30 px-3 py-2">
+      {learned.length > 0 && (
+        <ul className="space-y-0.5 text-xs text-fg-muted">
+          {learned.map((line) => (
+            <li key={line} className="line-clamp-2">
+              {line}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-[11px] text-fg-dim">
+        {memory.topTerms.length > 0
+          ? `Picked when a question mentions: ${memory.topTerms.join(", ")}.`
+          : "Picked only when nothing else matches the question."}
+      </p>
+      {agent && who && (
+        <RecallTest
+          noteId={row.id}
+          department={agent}
+          agentLabel={who}
+          title={row.title || row.source_url || "this note"}
+          topTerms={memory.topTerms}
+        />
+      )}
+    </div>
   );
 }

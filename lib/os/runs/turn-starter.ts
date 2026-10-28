@@ -201,6 +201,8 @@ export function turnStarterFor(session: RunSession) {
       engineChoice: runSession.apiEngineChoice,
       apiAccountSnapshot: runSession.apiAccountSnapshot,
       fallbackFrom: runSession.fallbackFrom,
+      // The training notes this turn reads are the ones its question matches.
+      trainingQuery: run.userText,
     });
     if (!prepared.ok) {
       return {

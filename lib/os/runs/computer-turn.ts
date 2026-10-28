@@ -153,6 +153,8 @@ export async function buildComputerTurn(input: BuildComputerTurnInput): Promise<
     userId: run.userId,
     chatMode: run.chatMode,
     engineInput: { kind: "computer", label, engine: runtime.engine },
+    // The training notes this turn reads are the ones its question matches.
+    trainingQuery: run.userText,
   });
   if (!prepared.ok) return { ok: false, status: prepared.status, error: prepared.error };
   const t = prepared.turn;

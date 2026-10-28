@@ -18,9 +18,11 @@
  * (README.md, readme.md, README.rst, README, in that order); api.github.com is
  * not used, its unauthenticated limit is shared by every Cloudflare egress.
  *
- * WHAT A NOTE IS NOT (yet): no agent reads these notes until the training
- * material reaches the agents; the card says only "Saved to Training
- * material."
+ * WHO READS A NOTE: the department agent it trains, before it answers: the
+ * notes that best match the question, then its newest (lib/os/training-notes.ts,
+ * from lib/os/department-agent.ts). Admin > Agent training shows what each note
+ * holds and can ask the agent to recall it. Video links are refused here; nothing
+ * is transcribed.
  */
 import "server-only";
 import { randomUUID } from "node:crypto";

@@ -336,6 +336,8 @@ export async function POST(req: NextRequest) {
     // Device choices must use the v2 department-run lane; only a saved,
     // explicit workspace_api policy may spend credits here instead.
     failClosedWithoutComputerDispatch: true,
+    // The training notes this turn reads are the ones its question matches.
+    trainingQuery: lastUser.content,
   });
   if (!prepared.ok) {
     // A refusal that is a verdict on the workspace's AI account (an unreadable
