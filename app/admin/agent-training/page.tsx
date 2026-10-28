@@ -4,8 +4,10 @@
  * "Learn from a link" (moved off Content > Content Tools, 2026-10-10, Adon) reads a web page or GitHub
  * repo and writes its hook, pacing and tone as a training note (a marketing_corpus row). Since
  * 2026-10-15 every note says WHICH agent it trains (lib/training/trains.ts), and that agent reads its
- * newest notes before it answers (lib/os/training-notes.ts, from lib/os/department-agent.ts). CC: "we
- * need to specify which agent is getting trained. Right now it's just general."
+ * notes before it answers (lib/os/training-notes.ts, from lib/os/department-agent.ts): since
+ * 2026-10-28 the ones that best match the question, then its newest. CC: "we need to specify which
+ * agent is getting trained. Right now it's just general." Each note shows what was learned and the words
+ * that pick it, and the recall test (app/api/admin/agent-training) asks the agent about it.
  *
  * ONE AGENT AT A TIME. The tabs across the top pick the agent (`?agent=sales`): the Learn form starts on
  * that agent ("Which agent learns this?", always sent, so the choice is never lost), and the list shows
@@ -40,7 +42,7 @@ import {
   getCorpusStats,
 } from "@/lib/founders/marketing-queries";
 import { TRAINS_ALL, TRAINS_VALUES, isTrains, trainsLabel } from "@/lib/training/trains";
-import { trainingRowsFor } from "@/lib/os/training-notes";
+import { noteMemoryFor, trainingRowsFor } from "@/lib/os/training-notes";
 import type { DepartmentKey } from "@/lib/os/types";
 
 export const dynamic = "force-dynamic";
@@ -78,15 +80,17 @@ async function LearnedNotesLoader({ tenantId, agent }: { tenantId: string; agent
   // Both reads side by side, so the placeholder waits for the slower of the two,
   // not their sum (audit, 2026-10-26); the general read follows an agent read
   // only off Turso, where trainingRowsFor answers null.
-  const [stats, read] = await Promise.all([
+  const [stats, read, memory] = await Promise.all([
     safely("stats", getCorpusStats(tenantId), { ...EMPTY_CORPUS_STATS, degraded: true }),
     // One agent's tab: filtered in the database by the rule the agent's own read uses (null off Turso).
     agent
       ? safely("agent_items", trainingRowsFor(tenantId, agent, ITEMS_READ), { rows: [], degraded: true })
       : safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }),
+    // What each learned note holds and what a question needs to pick it (never throws; {} on failure).
+    safely("memory", noteMemoryFor(tenantId, agent), {}),
   ]);
   const items = read ?? (await safely("items", getCorpusItems(tenantId, ITEMS_READ), { rows: [], degraded: true }));
-  return <LearnedNotes stats={stats} items={items} agent={agent} />;
+  return <LearnedNotes stats={stats} items={items} agent={agent} memory={memory} />;
 }
 
 const TAB = "inline-flex min-h-11 items-center rounded-md border px-3 text-sm motion-safe:transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
@@ -127,7 +131,7 @@ export default async function AgentTrainingPage({ searchParams }: { searchParams
   return (
     <PageFrame
       title="Agent training"
-      subtitle="Pick an agent, then teach it from a link: it reads its newest notes before it answers. Operators only can run this here. The notes join the workspace's Training material, which the Content team can also see on Training."
+      subtitle="Pick an agent, then teach it from a link. Before it answers, it reads the notes that best match the question. Each note shows what was learned, and you can ask the agent to recall it. Operators only can run this here; the notes also join the workspace's Training material."
     >
       <div className="space-y-8">
         <AgentTabs current={agent} />

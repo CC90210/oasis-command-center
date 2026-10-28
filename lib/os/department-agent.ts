@@ -47,7 +47,7 @@ import {
   type TurnFailureCode,
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
-import { trainingBlockFor } from "@/lib/os/training-notes";
+import { trainingSelectionFor } from "@/lib/os/training-notes";
 import { LOCAL_MODEL_PROVIDER, hasUsableKey, readWorkspaceAiAccount, type WorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import {
   billingForBridge,
@@ -105,7 +105,12 @@ export type AgentTurnRequest = {
    * health check (lib/health/department-chat-checks.ts NOT_CHAT_SURFACES
    * leaves those rows out, department key and all).
    */
-  surface?: "agents.chat" | "automations.run";
+  surface?: "agents.chat" | "automations.run" | "training.recall";
+  /**
+   * The person's question this turn answers, so the training notes it reads are the ones that match it
+   * (lib/os/training-notes.ts readTrainingNotes). Absent, it reads its newest notes, as before.
+   */
+  trainingQuery?: string | null;
   chatMode?: "plan" | "build";
   /**
    * The caller verified the person is the platform operator: a workspace
@@ -216,6 +221,8 @@ export type PreparedTurn = {
   localModelAllowed: boolean;
   /** What the turn runs on; kind "api" is a hosted provider call (streamChat). */
   engine: TurnEngine;
+  /** The training notes in this turn's instructions (marketing_corpus ids), best match first. */
+  trainingNoteIds: string[];
 };
 
 export type PrepareRefusal = {
@@ -352,7 +359,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
     });
     const overlay = binding?.prompt_overlay?.trim();
     // What the owner trained this department's agent on (Admin > Agent training), before the lock.
-    const training = dept ? await trainingBlockFor(tenantId, dept.key) : "";
+    const trainingPick = dept
+      ? await trainingSelectionFor(tenantId, dept.key, { query: req.trainingQuery })
+      : { block: "", noteIds: [] as string[] };
+    const training = trainingPick.block;
     const baseSystem =
       (overlay ? `${interpolated}\n\nTENANT OVERLAY:\n${overlay}` : interpolated) +
       training +
@@ -402,6 +412,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
         revealModel: req.revealModel,
         localModelAllowed: computerEngine.kind === "local",
         engine,
+        trainingNoteIds: trainingPick.noteIds,
       },
     };
   }
@@ -657,7 +668,10 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
   const overlay = binding?.prompt_overlay?.trim();
   // What the owner trained this department's agent on (Admin > Agent training). Before the lock, so
   // the lock still has the last word.
-  const training = dept ? await trainingBlockFor(tenantId, dept.key) : "";
+  const trainingPick = dept
+    ? await trainingSelectionFor(tenantId, dept.key, { query: req.trainingQuery })
+    : { block: "", noteIds: [] as string[] };
+  const training = trainingPick.block;
   // The identity lock: the model never says which model or persona it is; a
   // department's own lock names only the department.
   const baseSystem =
@@ -726,6 +740,7 @@ export async function prepareAgentTurn(req: AgentTurnRequest): Promise<PrepareRe
       revealModel: req.revealModel,
       localModelAllowed,
       engine,
+      trainingNoteIds: trainingPick.noteIds,
     },
   };
 }

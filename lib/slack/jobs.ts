@@ -491,6 +491,9 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
       revealModel: false,
       userId: null,
       jobId: key,
+      // The notes this agent reads are picked by the question it was asked
+      // (lib/os/training-notes.ts), the same as in its web channel.
+      trainingQuery: picked.question,
       engineChoice: canonical.engine,
       // The canonical read above chose the API branch. If settings change to
       // a device before preparation re-reads them, fail closed instead of

@@ -238,7 +238,8 @@ async function main(): Promise<void> {
 
   await check("both turn paths add the notes to a department's instructions, before the identity lock", () => {
     const src = readFileSync(join(ROOT, "lib/os/department-agent.ts"), "utf8");
-    const reads = src.match(/const training = dept \? await trainingBlockFor\(tenantId, dept\.key\) : "";/g) ?? [];
+    // Since 2026-10-28 the pick is steered by the turn's own question (tests/training-relevance.test.ts).
+    const reads = src.match(/const trainingPick = dept\s*\?\s*await trainingSelectionFor\(tenantId, dept\.key, \{ query: req\.trainingQuery \}\)[\s\S]{0,120}?const training = trainingPick\.block;/g) ?? [];
     assert.equal(reads.length, 2, "the hosted turn and the paired-computer turn");
     const uses = src.match(/: interpolated\) \+\s*training \+\s*\(dept \? departmentIdentityLock\(dept\.label\) : IDENTITY_LOCK_OVERLAY\)/g) ?? [];
     assert.equal(uses.length, 2, "added after the overlay and before the lock, in both");

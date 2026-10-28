@@ -94,7 +94,7 @@ const READ_LIMIT = 5000;
  * turn: a department task's run and its drafter (lib/ai/usage.ts
  * USAGE_SURFACES). See "WHAT IS NOT A CHAT TURN" above.
  */
-export const NOT_CHAT_SURFACES: readonly UsageSurface[] = ["automations.run", "automations.draft"];
+export const NOT_CHAT_SURFACES: readonly UsageSurface[] = ["automations.run", "automations.draft", "training.recall"];
 
 export type DepartmentTurn = {
   occurredAt: string;
