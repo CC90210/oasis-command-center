@@ -102,7 +102,26 @@ export async function markFounderMeetingNoShow(
   const leadStage = text(lead.stage);
   const pointsHere = text(lead.calendar_appointment_id) === appointment.id;
   let leadUpdated = false;
-  if (leadStage === REBOOK_LEAD_STAGE && pointsHere && text(lead.founder_meeting_status) !== "no_show") {
+  // The lead is written only while the meeting is still this closed no-show
+  // and the lead still carries its time: a rebook landing between the close and
+  // here (a lead reusing an old link) moved both, and must not be overwritten
+  // (Codex review of #773, round 3).
+  const latest = await loadRebookAppointment(deps.db, input.tenantId, input.appointmentId);
+  const stillMissed =
+    !!latest &&
+    latest.status === "no_answer" &&
+    latest.workflow_status === "no_show" &&
+    latest.revision === appointment.revision &&
+    Date.parse(latest.scheduled_for) === Date.parse(appointment.scheduled_for);
+  const leadMeetingAt = Date.parse(text(lead.founder_meeting_at));
+  const leadShowsThisMeeting = !Number.isFinite(leadMeetingAt) || leadMeetingAt === Date.parse(appointment.scheduled_for);
+  if (
+    stillMissed &&
+    leadShowsThisMeeting &&
+    leadStage === REBOOK_LEAD_STAGE &&
+    pointsHere &&
+    text(lead.founder_meeting_status) !== "no_show"
+  ) {
     const occurredAt = new Date(nowMs).toISOString();
     const transition = await deps.db.rpc("transition_pipeline_lead", {
       p_tenant_id: input.tenantId,

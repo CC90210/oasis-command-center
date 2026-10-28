@@ -361,7 +361,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     workers.push({
       service: "cloud.founder-meeting-reminders",
       label: "Founder meeting reminders",
-      purpose: "Sends consent-aware booking confirmations and 10-minute reminders from the verified Google Calendar handoff.",
+      purpose: "Every minute: the reminder ladder (day before, 1 hour, 30, 15 and 5 minutes; texts only with consent), the founder's 15-minute heads-up and lead-waiting alert, and missed calls closed out with the lead's rebook link.",
       runtime: "cloud",
       control_mode: "none",
       status_source: "website_sales_meeting_worker_health",

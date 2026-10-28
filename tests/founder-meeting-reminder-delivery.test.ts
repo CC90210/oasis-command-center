@@ -86,6 +86,13 @@ stubModule(require.resolve("../lib/tcpa-window"), {
   nextTcpaWindowStart: () => DAYTIME_OPENS,
 });
 stubModule(require.resolve("../lib/notify/agent-alert"), { writeAgentAlert: async () => undefined });
+const founderAlerts: string[] = [];
+stubModule(require.resolve("../lib/notify/alert-route"), {
+  pushWorkspaceAlert: async (_tenant: string, text: string) => {
+    founderAlerts.push(text);
+    return { delivered: true, outcome: "sent" };
+  },
+});
 stubModule(require.resolve("../lib/leads/canonical-touch"), { persistCanonicalLeadTouch: async () => undefined });
 stubModule(require.resolve("../lib/website-sales-founder-meeting"), {
   reconcileFounderMeetingSagas: async () => ({
@@ -142,6 +149,10 @@ async function main() {
       tenant_id TEXT, lead_id TEXT, type TEXT, channel TEXT, direction TEXT, agent_source TEXT,
       to_phone TEXT, to_email TEXT, subject TEXT, content TEXT, content_preview TEXT,
       actor_user_id TEXT, metadata TEXT, created_at TEXT);
+    CREATE TABLE meet_participants (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL,
+      room_id TEXT NOT NULL, role TEXT NOT NULL, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
+    CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, full_name TEXT,
       display_name TEXT, invited_by TEXT, joined_at TEXT, manager_user_id TEXT,
@@ -151,6 +162,7 @@ async function main() {
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
     ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
     ${readFileSync("database/turso/bravo__214_consent_events.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8")}
   `);
   await seed.execute({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, full_name, joined_at)
@@ -358,6 +370,12 @@ async function main() {
     assert.equal(Number(row.attempts), 1);
     assert.match(String(row.last_error), /^quo_refused:/);
   });
+  await check("a reminder that fails is told to the founder in the same run", async () => {
+    const alert = founderAlerts.find((text) => text.includes("Meeting reminder failed"));
+    assert.ok(alert, "an alert went out");
+    assert.match(alert, /reminder_15 text: quo_refused/);
+    assert.match(alert, /\/pipeline\/lead-appt-refused/);
+  });
   quoResult = null;
 
   // Pass 4: the shared mailbox fails outright: retried, not dropped.
@@ -372,6 +390,69 @@ async function main() {
     assert.match(String(row.last_error), /operator:not_connected; shared:send_failed/);
   });
   sharedResult = null;
+
+  // Pass 5: after a missed meeting. The rebook email goes out while the meeting
+  // is still the closed no-show and the lead is still at Founder Meeting; its
+  // text waits for daytime; a follow-up queued before a rebook is dropped.
+  await appointment("appt-missed", -30);
+  await seed.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='appt-missed'", args: [] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-missed", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-missed" })],
+  });
+  const queueAfter = (id: string, kind: string, channel: "email" | "sms", recipient: string, body: string) =>
+    seed.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (
+        id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+        recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+      ) VALUES (?, ?, 'appt-missed', 'lead-appt-missed', ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', 0, 1, ?)`,
+      args: [id, OASIS, kind, channel, new Date(Date.now() - 60_000).toISOString(), recipient, HOST,
+        channel === "email" ? "Sorry we missed each other" : null, body, `dedupe-${id}`],
+    });
+  await queueAfter("rebook-email", "no_show_rebook", "email", "taylor@example.com", "Hi Taylor,\n\nHere is your link: https://oasisai.work/book/rebook/x.y");
+  window = { usedFallback: false, withinWindow: false };
+  await queueAfter("rebook-sms", "no_show_rebook", "sms", PHONE, "OASIS AI: Sorry we missed each other. Pick a new time here: https://oasisai.work/book/rebook/x.y");
+  await dispatch();
+  window = { usedFallback: false, withinWindow: true };
+  await check("a missed meeting's rebook email goes out with its own stored text", async () => {
+    const row = await rowOf("rebook-email");
+    assert.equal(row.status, "sent");
+    const sent = sharedSends.find((s) => s.subject === "Sorry we missed each other");
+    assert.ok(sent);
+    assert.match(sent.body, /book\/rebook\/x\.y/);
+  });
+  await check("a rebook text at night waits for the lead's daytime", async () => {
+    const row = await rowOf("rebook-sms");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "held_for_recipient_daytime");
+  });
+  await seed.execute({ sql: "UPDATE call_appointments SET status='scheduled', workflow_status='active', revision=2, scheduled_for=? WHERE id='appt-missed'", args: [new Date(Date.now() + 864e5).toISOString()] });
+  await queueAfter("follow-up", "no_show_followup", "email", "taylor@example.com", "Still want it? https://oasisai.work/book/rebook/x.y");
+  await dispatch();
+  await check("a follow-up queued before the lead rebooked is dropped, not sent", async () => {
+    const row = await rowOf("follow-up");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.last_error, "meeting_moved");
+  });
+
+  // Pass 6: the founder's "lead is waiting" note during the call.
+  await appointment("appt-live", -3);
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('waiting', ?, 'appt-live', 'lead-appt-live', 'host_guest_waiting', NULL, 'email', ?, ?, ?,
+      'Taylor Smith is waiting in the call room now', 'Join now: https://meet.google.com/abc-defg-hij', 'pending', 0, 1, 'dedupe-waiting')`,
+    args: [OASIS, new Date(Date.now() - 30_000).toISOString(), HOST_EMAIL, HOST],
+  });
+  await dispatch();
+  await check("the founder's lead-is-waiting note goes out as internal mail during the call", async () => {
+    const row = await rowOf("waiting");
+    assert.equal(row.status, "sent");
+    const sent = sharedSends.find((s) => s.subject === "Taylor Smith is waiting in the call room now");
+    assert.ok(sent);
+    assert.equal(sent.internalAlert, true);
+  });
 
   if (failures) {
     console.error(`founder-meeting-reminder-delivery: ${failures} failure(s)`);

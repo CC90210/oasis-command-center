@@ -15,6 +15,11 @@ import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
+import { watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
+import { SITE_ORIGIN } from "@/lib/marketing/routes";
+import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
+import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -394,9 +399,48 @@ async function persistReminderTracking(db: Db, row: NotificationRow): Promise<vo
   await markTrackingComplete(db, row);
 }
 
-/** Mail to OASIS's own founder about a meeting (heads-up), never to the lead. */
+/** Mail to OASIS's own founder about a meeting (heads-up, lead waiting), never to the lead. */
 function isHostKind(kind: string): boolean {
-  return kind === "host_15";
+  return kind === "host_15" || kind === "host_guest_waiting";
+}
+
+function isNoShowKind(kind: string): boolean {
+  return kind === "no_show_rebook" || kind === "no_show_followup";
+}
+
+/**
+ * Whether a row queued after the start still goes out.
+ *  - host_guest_waiting: while the meeting is still on the books (not closed
+ *    or moved), within an hour of its start; later, it would only be noise.
+ *  - no_show_rebook / no_show_followup: while the meeting is still the closed
+ *    no-show they were queued for (a rebook moves it back to "scheduled"), and
+ *    the lead is still at Founder Meeting (not lost, not further on).
+ */
+async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: AppointmentState): Promise<string> {
+  if (Number(appointment.revision) !== Number(row.appointment_revision)) return "meeting_moved";
+  if (row.kind === "host_guest_waiting") {
+    if (appointment.status !== "scheduled" || appointment.workflow_status !== "active") return "meeting_closed";
+    if (Date.now() - Date.parse(appointment.scheduled_for) > 60 * 60_000) return "meeting_window_passed";
+    return "send";
+  }
+  if (appointment.status !== "no_answer" || appointment.workflow_status !== "no_show") return "meeting_rebooked_or_closed";
+  const lead = await db.from("tenant_records")
+    .select("data")
+    .eq("tenant_id", row.tenant_id)
+    .eq("entity_type", "lead")
+    .eq("id", row.lead_id)
+    .maybeSingle();
+  if (lead.error) throw new Error(`no_show_lead_read_failed:${lead.error.message}`);
+  const raw = (lead.data as { data?: unknown } | null)?.data;
+  let data: Record<string, unknown> = {};
+  try {
+    data = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : ((raw as Record<string, unknown>) ?? {});
+  } catch {
+    data = {};
+  }
+  if (data.stage !== "founder_meeting_booked") return "lead_moved_on";
+  if (data.calendar_appointment_id !== row.appointment_id) return "lead_has_other_meeting";
+  return "send";
 }
 
 async function processRow(
@@ -419,27 +463,39 @@ async function processRow(
     return "skipped";
   }
   const decisionAt = new Date().toISOString();
-  const decision = meetingNotificationDecision({
-    workflowStatus: appointment.workflow_status,
-    appointmentStatus: appointment.status,
-    calendarStatus: appointment.calendar_status,
-    appointmentRevision: Number(appointment.revision),
-    notificationRevision: Number(row.appointment_revision),
-    meetingAt: appointment.scheduled_for,
-    now: decisionAt,
-    transitionStartedAt: appointment.pending_started_at,
-  });
-  if (decision === "hold") {
-    await mark(db, row, "pending", { error: "waiting_for_lifecycle_transition" });
-    return "held";
-  }
-  if (decision === "skip") {
-    await mark(db, row, "skipped", { error: "appointment_no_longer_sendable" });
-    return "skipped";
+  // After the start (lib/booking/meeting-watch.ts): the founder's "lead is
+  // waiting" note, and a missed meeting's rebook link and follow-ups. Each has
+  // its own rule; none moves the meeting, so none takes the appointment lease.
+  const afterStart = row.kind === "host_guest_waiting" || isNoShowKind(row.kind);
+  if (afterStart) {
+    const verdict = await afterStartRowStillDue(db, row, appointment);
+    if (verdict !== "send") {
+      await mark(db, row, "skipped", { error: verdict });
+      return "skipped";
+    }
+  } else {
+    const decision = meetingNotificationDecision({
+      workflowStatus: appointment.workflow_status,
+      appointmentStatus: appointment.status,
+      calendarStatus: appointment.calendar_status,
+      appointmentRevision: Number(appointment.revision),
+      notificationRevision: Number(row.appointment_revision),
+      meetingAt: appointment.scheduled_for,
+      now: decisionAt,
+      transitionStartedAt: appointment.pending_started_at,
+    });
+    if (decision === "hold") {
+      await mark(db, row, "pending", { error: "waiting_for_lifecycle_transition" });
+      return "held";
+    }
+    if (decision === "skip") {
+      await mark(db, row, "skipped", { error: "appointment_no_longer_sendable" });
+      return "skipped";
+    }
   }
 
-  const leaseToken = await acquireAppointmentLease(db, row, appointment, decisionAt);
-  if (!leaseToken) {
+  const leaseToken = afterStart ? null : await acquireAppointmentLease(db, row, appointment, decisionAt);
+  if (!afterStart && !leaseToken) {
     await mark(db, row, "pending", { error: "appointment_delivery_or_transition_in_progress" });
     return "held";
   }
@@ -616,11 +672,12 @@ async function processRow(
       // daytime: moved to the next 8 am-9 pm opening while that is still more
       // than an hour ahead, else left to the email (Codex review of #774).
       const minutesToCall = (Date.parse(appointment.scheduled_for) - Date.now()) / 60_000;
-      if (minutesToCall > 60) {
+      if (isNoShowKind(row.kind) || minutesToCall > 60) {
         const quietHours = checkTcpaWindow(row.recipient, new Date());
         if (!quietHours.usedFallback && !quietHours.withinWindow) {
           const opens = nextTcpaWindowStart(row.recipient, new Date());
-          if (Date.parse(appointment.scheduled_for) - opens.getTime() > 60 * 60_000) {
+          // A missed meeting's rebook text has no call to beat: it always waits for daytime.
+          if (isNoShowKind(row.kind) || Date.parse(appointment.scheduled_for) - opens.getTime() > 60 * 60_000) {
             await deferRow(db, row, opens.toISOString(), "held_for_recipient_daytime");
             return "held";
           }
@@ -735,13 +792,43 @@ async function processRow(
     }
     return "sent";
   } finally {
-    if (!retainLeaseUntilRecovery) {
+    if (leaseToken && !retainLeaseUntilRecovery) {
       try {
         await releaseAppointmentLease(db, row, leaseToken);
       } catch (error) {
         console.error("[founder-meeting-reminders] appointment lease release failed", row.id, error);
       }
     }
+  }
+}
+
+/**
+ * Every reminder that ended "failed" in this run, told to the founder at once
+ * (CC, 2026-10-28: two months of reminders failed and nobody heard). One alert
+ * per run that had failures, through the same route as booking alerts, which
+ * emails the founder when Telegram refuses and caps itself per hour.
+ */
+async function alertFailedReminders(db: Db, runStartedAt: string): Promise<void> {
+  const failed = await db.from("website_sales_meeting_notifications")
+    .select("tenant_id,lead_id,kind,channel,last_error")
+    .eq("status", "failed")
+    .gte("updated_at", runStartedAt)
+    .order("updated_at", { ascending: true })
+    .limit(20);
+  if (failed.error || !failed.data?.length) return;
+  const byTenant = new Map<string, Array<{ lead_id: string; kind: string; channel: string; last_error: string | null }>>();
+  for (const row of failed.data as Array<{ tenant_id: string; lead_id: string; kind: string; channel: string; last_error: string | null }>) {
+    byTenant.set(row.tenant_id, [...(byTenant.get(row.tenant_id) || []), row]);
+  }
+  for (const [tenantId, rows] of byTenant) {
+    const lines = rows.slice(0, 5).map((row) =>
+      `- ${escapeTelegramHtml(row.kind)} ${row.channel === "sms" ? "text" : "email"}: ${escapeTelegramHtml((row.last_error || "unknown").slice(0, 140))} <a href="${pipelineLeadUrl(row.lead_id)}">lead</a>`,
+    );
+    await pushWorkspaceAlert(
+      tenantId,
+      [`<b>Meeting reminder failed</b>`, `${rows.length} reminder(s) could not be sent:`, ...lines].join("\n"),
+      { desk: "sales" },
+    ).catch((error) => console.error("[founder-meeting-reminders] failure alert threw", error));
   }
 }
 
@@ -832,6 +919,17 @@ async function handle(req: NextRequest) {
     }
   }
 
+  // Calls in their slot or just past it: the founder's "lead is waiting" note,
+  // and missed meetings closed out with the lead's rebook link queued. Before
+  // the due query, so what it queues goes out in this same run.
+  let watch: WatchResult;
+  try {
+    watch = await watchFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
+  } catch (error) {
+    watch = { guestWaiting: 0, noShows: 0, held: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
+  }
+  if (watch.errors.length) console.error("[founder-meeting-reminders] meeting watch degraded", watch.errors);
+
   // Founder meetings are OASIS-only today; the retired-tenant exclusion keeps
   // it that way if a retired tenant ever carries a queued reminder.
   const due = await db.from("website_sales_meeting_notifications")
@@ -849,7 +947,7 @@ async function handle(req: NextRequest) {
   let processed = 0;
   let sent = 0;
   let skipped = 0;
-  let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0);
+  let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0) + watch.errors.length;
   const senderPass: SenderPass = { standings: new Map(), withheld: [] };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
@@ -886,6 +984,7 @@ async function handle(req: NextRequest) {
     }
   }
   if (senderPass.withheld.length) await alertWithheldReminders(senderPass.withheld);
+  await alertFailedReminders(db, now);
 
   await setHealth({
     status: failures ? "degraded" : "healthy",
@@ -899,6 +998,7 @@ async function handle(req: NextRequest) {
     expired_leases: expiredLeases.data?.length || 0,
     reconciliation,
     backfill,
+    meeting_watch: watch,
     tracking_reconciled: tracked,
     tracking_failed: trackingFailures,
     claimed: processed,

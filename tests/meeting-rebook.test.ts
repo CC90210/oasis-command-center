@@ -19,7 +19,7 @@ import {
   signRebookToken,
   verifyRebookToken,
 } from "../lib/booking/rebook-token";
-import { firstNameOf, pickRebookSlot, readRebookState, rebookHosts, rebookLeadPatch } from "../lib/booking/rebook";
+import { firstNameOf, pickRebookSlot, readRebookState, rebookHosts, rebookLeadPatch, rebookOpener } from "../lib/booking/rebook";
 import { markFounderMeetingNoShow } from "../lib/booking/no-show";
 import {
   activateVerifiedFounderMeeting,
@@ -366,7 +366,7 @@ function testSourceContracts() {
   assert.match(route, /rateLimit\(/, "the rebook POST is rate-limited");
   assert.match(route, /rescheduleVerifiedFounderMeeting/, "a rebook MOVES the meeting, never creates a second one");
   assert.equal((route.match(/requireStartedBefore:/g) || []).length, 2, "both moves (new and resumed) carry the past-only guard");
-  assert.equal((route.match(/openerAttendee: openerOf\(slot\)/g) || []).length, 2, "both moves keep the slot's second host on the invite");
+  assert.equal((route.match(/openerAttendee: await rebookOpener\(/g) || []).length, 2, "both moves keep whoever else was on the invite");
   const replay = route.slice(route.indexOf("const moved ="), route.indexOf("const state = await readRebookState"));
   assert.ok(
     replay.indexOf("if (!recorded.ok)") > 0 && replay.indexOf("if (!recorded.ok)") < replay.indexOf("activateVerifiedFounderMeeting"),
@@ -389,12 +389,54 @@ function testSourceContracts() {
   assert.doesNotMatch(internal, /console\.\w+\([^)]*rebook_?url/i, "the rebook link is never logged");
 }
 
+async function testOpener() {
+  const live = (async (_t: string, id: string) =>
+    id === "rep-live"
+      ? { standing: "active", member: { email: "Rep@OASISai.work", full_name: "Ria Rep" } }
+      : id === "rep-gone"
+        ? { standing: "deactivated", member: null }
+        : { standing: "active", member: { email: ORGANIZER, full_name: "CC" } }) as never;
+  const coHostSlot = { start: NEW_TIME, hosts: [{ userId: HOST, role: "organizer", email: ORGANIZER, displayName: "CC" }, { userId: "b", role: "attendee", email: "b@oasisai.work", displayName: "B" }] } as never;
+  assert.deepEqual(await rebookOpener(TENANT, { public_booking_host_ids: [HOST, "b"] }, coHostSlot, live), { email: "b@oasisai.work", displayName: "B" });
+  assert.equal(await rebookOpener(TENANT, { public_booking_host_ids: [HOST] }, null, live), null, "a public booking with one host has nobody else");
+  assert.deepEqual(
+    await rebookOpener(TENANT, { attributed_rep_user_id: "rep-live", audit_host_email: ORGANIZER }, null, live),
+    { email: "rep@oasisai.work", displayName: "Ria Rep" },
+    "a rep-booked meeting keeps its opener on the moved invite",
+  );
+  assert.equal(await rebookOpener(TENANT, { attributed_rep_user_id: "rep-gone" }, null, live), null, "a deactivated opener is not re-invited");
+  assert.equal(await rebookOpener(TENANT, { assigned_to: HOST, audit_host_email: ORGANIZER }, null, live), null, "the host is never their own copy");
+}
+
+async function testNoShowYieldsToARebook() {
+  const { raw, db, meetingDeps } = await fixture();
+  // A rebook lands between the close and the lead write (a lead reusing an old link).
+  const close = async (input: Parameters<typeof closeVerifiedFounderMeeting>[0]) => {
+    await closeVerifiedFounderMeeting(input, meetingDeps);
+    await raw.execute({ sql: "UPDATE call_appointments SET status='scheduled', workflow_status='active', revision=2, scheduled_for=? WHERE id=?", args: [NEW_TIME, APPT] });
+    await raw.execute({
+      sql: "UPDATE tenant_records SET data=? WHERE id=?",
+      args: [JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: APPT, founder_meeting_at: NEW_TIME, founder_meeting_status: "rescheduled" }), LEAD],
+    });
+  };
+  const result = await markFounderMeetingNoShow(
+    { tenantId: TENANT, appointmentId: APPT, who: "lead_absent", actorUserId: "system:test" },
+    { db: db as never, now: () => NOW, close, origin: "https://oasisai.work", env: ENV },
+  );
+  assert.equal(result.leadUpdated, false, "the rebooked lead is not marked a no-show");
+  const lead = await leadData(raw);
+  assert.equal(lead.founder_meeting_status, "rescheduled");
+  assert.equal(lead.founder_meeting_at, NEW_TIME);
+}
+
 async function main() {
   testToken();
   testPureHelpers();
   testSourceContracts();
   await testNoShowThenRebook();
   await testClosedLinks();
+  await testOpener();
+  await testNoShowYieldsToARebook();
   console.log("meeting-rebook: OK");
 }
 
