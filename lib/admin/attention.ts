@@ -501,7 +501,8 @@ export type AttentionSummary = {
   warnings: number | null;
   cronFailures: number | null;
   workersDown: number | null;
-  coldLeads: number | null;
+  /** /operations only (loadAttentionSummary): System health dropped leads on 2026-10-28. */
+  coldLeads?: number | null;
   /** O2: present only for the agents owner (undefined for everyone else —
    *  there is no house scheduler item to show a non-owner, not even a null
    *  "couldn't check" one). See loadHouseSchedulerStatus. */

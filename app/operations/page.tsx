@@ -218,7 +218,7 @@ export default async function OperationsPage({
         <HealthMiniTile label="Warnings today" count={attention.warnings} tone={attention.warnings === 0 ? "engaged" : "accent"} href="/health" hint="Warnings in the last 24 hours: things that went wrong but kept running." />
         <HealthMiniTile label="Failed automations" count={attention.cronFailures} tone={attention.cronFailures === 0 ? "engaged" : "warm"} href="/health" hint="Schedules whose run in the last 24 hours errored. System health says what to do about each." />
         <HealthMiniTile label="Workers down" count={attention.workersDown} tone={attention.workersDown === 0 ? "engaged" : "warm"} href="/health" hint="Background processes on your computer that stopped reporting or report themselves down." />
-        <HealthMiniTile label="Cold leads" count={attention.coldLeads} tone={attention.coldLeads === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads nobody has touched in 14 days or more." />
+        <HealthMiniTile label="Cold leads" count={attention.coldLeads ?? null} tone={attention.coldLeads === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads nobody has touched in 14 days or more." />
       </div>
       {allClear && (
         <div className="text-xs text-status-engaged">All clear — nothing needs your attention.</div>
