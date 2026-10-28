@@ -43,7 +43,6 @@ import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
 import { timeAgo } from "@/lib/devices/presence";
 import type { StatusReporter } from "@/lib/automations/worker-status";
 import {
-  countColdLeads,
   describeBackground,
   loadAttentionEvents,
   loadCronFailures,
@@ -312,7 +311,7 @@ export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps 
   const db = deps.db ?? getServiceSupabase();
   const now = deps.now ?? Date.now();
   const viewer = deps.viewer;
-  const [machines, cloud, guardRow, workerRows, cron, events, coldLeads] = await Promise.all([
+  const [machines, cloud, guardRow, workerRows, cron, events] = await Promise.all([
     safe("system_health.machines", loadMachines(db, tenantId, now, viewer), null),
     safe("system_health.cloud_reach", (deps.probeCloud ?? probeCloudReach)(), null),
     // Wrapped so "no report" (null) and "the read failed" (safe's null) differ.
@@ -320,7 +319,6 @@ export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps 
     safe("system_health.workers", loadWorkerRows(db, tenantId), null),
     safe("system_health.cron_failures", loadCronFailures(db, tenantId, now), null),
     safe("system_health.events", loadAttentionEvents(db, tenantId, now), null),
-    safe("system_health.cold_leads", countColdLeads(db, tenantId, now), null),
   ]);
   const guards = guardRow === null ? null : describeGuards(guardRow.row, now);
   const background = describeBackground(workerRows, machines, now, viewer);
@@ -339,7 +337,6 @@ export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps 
       warnings: events?.warnings ?? null,
       cronFailures: cron?.count ?? null,
       workersDown: background.workersDown,
-      coldLeads,
     },
   };
 }

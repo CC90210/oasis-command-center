@@ -17,9 +17,13 @@
  *      never "off" for a report that is missing or old.
  *   4. Background work: the OASIS workers, and every schedule that failed in
  *      the last 24 hours with a one-line what-to-do.
- *   5. Automation signals: the buckets that might need you (errors, warnings,
- *      failed automations, workers down, cold leads by COUNT), the founder-
- *      booking check, the event list and the cold-lead list.
+ *   5. Platform vitals (lib/admin/platform-vitals.ts): the database round trip,
+ *      AI calls, browser errors, health-check runs and the Cloudflare Worker,
+ *      each live, "no data yet", "not connected" or failed, never a guessed 0.
+ *   6. Automation signals: the buckets that might need you (errors, warnings,
+ *      failed automations, workers down), the founder-booking check and the
+ *      event list. Leads are not infrastructure: the cold-lead list and tile
+ *      left this page on 2026-10-28 (the Pipeline and /operations keep them).
  *
  * Every number comes from lib/admin/system-health.ts, which reads in-process
  * (no HTTP self-fetch; that fetch carried no session and got the middleware's
@@ -27,9 +31,11 @@
  * /operations tiles use. A read that failed says "Couldn't check", never 0.
  */
 
-import { PageHeader, Card, Tag } from "@/components/Card";
+import { Card, Tag } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
+import { loadPlatformVitals } from "@/lib/admin/platform-vitals";
+import { VitalsStrip } from "@/components/health/VitalsStrip";
 import { OutcomeChecksPanel } from "@/components/health/OutcomeChecksPanel";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { safe } from "@/lib/api-helpers";
 import { requireOperator } from "@/lib/role-surfaces-session";
@@ -39,7 +45,7 @@ import { isAgentsOwner } from "@/lib/agents-owner";
 import type { AttentionViewer } from "@/lib/admin/attention";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
-import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
+import { loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
 import { loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
 import { timeAgo } from "@/lib/devices/presence";
 import { redirect } from "next/navigation";
@@ -47,29 +53,6 @@ import { setupHref } from "@/lib/setup-links";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-
-type StuckLead = {
-  id: string;
-  data: Record<string, unknown>;
-  updated_at: string;
-};
-
-/** The oldest untouched leads, for the list. The tile's number is COUNT(*), not this list's length. */
-async function loadColdLeadList(tenantId: string, now: number): Promise<StuckLead[]> {
-  const r = await getServiceSupabase()
-    .from("tenant_records")
-    .select("id, data, updated_at")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .lt("updated_at", new Date(now - COLD_LEAD_MS).toISOString())
-    .order("updated_at", { ascending: true })
-    .limit(ATTENTION_LIST_LIMIT);
-  if (r.error) throw new Error(`cold lead list read failed: ${r.error.message}`);
-  return ((r.data as StuckLead[]) || []).map((l) => ({
-    ...l,
-    data: typeof l.data === "string" ? (JSON.parse(l.data) as Record<string, unknown>) : l.data || {},
-  }));
-}
 
 export default async function HealthPage() {
   await requireOperator();
@@ -91,14 +74,13 @@ export default async function HealthPage() {
     isAgentsOwner: viewerAuthId ? await safe("health.agents_owner", isAgentsOwner(tenantId, viewerAuthId), false) : false,
   };
 
-  const [system, tenant] = await Promise.all([
+  const [system, tenant, vitals] = await Promise.all([
     loadSystemHealth(tenantId, { now, viewer }),
     safe("health.tenant", getTenant(tenantId), null),
+    loadPlatformVitals(tenantId, now),
   ]);
   const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;
   const isOasisTenant = tenantId === WEBDEV_TENANT_ID;
-
-  const coldLeadRows = await safe("health.cold_lead_list", loadColdLeadList(tenantId, now), null);
 
   // The outcome checks (OASIS: the founder-booking check), loaded once for the
   // card below and the header count, so the two cannot disagree.
@@ -110,22 +92,22 @@ export default async function HealthPage() {
   const total = needsYouCount(a, outcome);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="System health"
-        subtitle="Whether your computer, its guards and your automations are working, in plain words. Every line says when it can't tell."
-        action={
-          total === null ? (
-            <Tag tone="neutral">Couldn&apos;t check everything</Tag>
-          ) : total === 0 ? (
-            <Tag tone="engaged">Nothing needs you</Tag>
-          ) : (
-            <Tag tone="warm">{total} need{total === 1 ? "s" : ""} you</Tag>
-          )
-        }
-      />
-
+    <PageFrame
+      title="System health"
+      subtitle="Whether your computer, its guards, your automations and the Command Center itself are working, in plain words. Every line says when it can't tell."
+      actions={
+        total === null ? (
+          <Tag tone="neutral">Couldn&apos;t check everything</Tag>
+        ) : total === 0 ? (
+          <Tag tone="engaged">Nothing needs you</Tag>
+        ) : (
+          <Tag tone="warm">{total} need{total === 1 ? "s" : ""} you</Tag>
+        )
+      }
+    >
+    <div className="space-y-6">
       <VerdictLine verdict={system.verdict} />
+      <VitalsStrip vitals={vitals} />
 
       <ComputerCard system={system} now={now} />
       <GuardsCard system={system} now={now} />
@@ -136,12 +118,11 @@ export default async function HealthPage() {
         <p className="text-[13px] leading-5 text-fg-muted">
           The buckets that might need you today. A tile that says Couldn&apos;t check could not be read; it is not a zero.
         </p>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <HealthTile label="Errors today" count={a.errors} alarm hint="Things that broke in the last 24 hours: crashes, failed calls, anything an agent flagged as an error or critical." />
           <HealthTile label="Warnings today" count={a.warnings} hint="Things that went wrong but kept running in the last 24 hours. Worth a look, not an emergency." />
           <HealthTile label="Failed automations" count={a.cronFailures} alarm hint="Schedules whose run in the last 24 hours errored. Each one is listed under Background work with what to do." />
           <HealthTile label="Workers down" count={a.workersDown} alarm hint="Background processes on your computer that stopped reporting or report themselves down." />
-          <HealthTile label="Cold leads" count={a.coldLeads} hint="Leads nobody has touched in 14 days or more. Move them forward or close them out (won, lost or pass)." />
         </div>
       </section>
 
@@ -201,50 +182,8 @@ export default async function HealthPage() {
         )}
       </Card>
 
-      <Card
-        title="Cold leads (14 days or more)"
-        subtitle="Leads nobody has touched in two weeks. Either a follow-up should have moved them, or it's time to close them out."
-      >
-        {coldLeadRows === null ? (
-          <div className="text-sm text-fg-muted">Couldn&apos;t check the pipeline just now. Reload to try again.</div>
-        ) : coldLeadRows.length === 0 ? (
-          <div className="text-sm text-fg-muted">No lead has gone 14 days untouched.</div>
-        ) : (
-          <ul className="space-y-2 text-sm">
-            {coldLeadRows.map((l) => {
-              const ageDays = Math.floor((now - new Date(l.updated_at).getTime()) / 86400000);
-              const stage =
-                (typeof l.data.stage === "string" && l.data.stage) ||
-                (typeof l.data.status === "string" && l.data.status) ||
-                "no stage set";
-              const name =
-                (typeof l.data.name === "string" && l.data.name) ||
-                (typeof l.data.company === "string" && l.data.company) ||
-                "Unnamed lead";
-              return (
-                <li key={l.id} className="flex items-center justify-between gap-2 rounded-lg border border-hairline bg-bg-panel p-3">
-                  <div>
-                    <Link href={`/pipeline/${l.id}`} className="font-semibold text-fg hover:text-accent">
-                      {name}
-                    </Link>
-                    <div className="mt-0.5 text-[11px] text-fg-dim">
-                      Stage: <span className="text-fg-muted">{stage}</span>
-                    </div>
-                  </div>
-                  <Tag tone={ageDays > 30 ? "warm" : "accent"}>{ageDays} days</Tag>
-                </li>
-              );
-            })}
-            {a.coldLeads !== null && a.coldLeads > coldLeadRows.length && (
-              <li className="text-xs text-fg-dim">
-                Showing the {coldLeadRows.length} oldest of {a.coldLeads}.
-              </li>
-            )}
-          </ul>
-        )}
-      </Card>
-
     </div>
+    </PageFrame>
   );
 }
 

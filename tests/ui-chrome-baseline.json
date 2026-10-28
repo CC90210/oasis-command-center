@@ -20,7 +20,6 @@
     "app/founders/marketing/page.tsx",
     "app/founders/marketing/performance/page.tsx",
     "app/founders/marketing/train/page.tsx",
-    "app/health/page.tsx",
     "app/import/page.tsx",
     "app/inbox/page.tsx",
     "app/interactions/[id]/page.tsx",

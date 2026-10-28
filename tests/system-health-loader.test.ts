@@ -18,7 +18,8 @@
  *   - the newest heartbeat per service wins over stale duplicates;
  *   - cron failures and events are this tenant's (events: its own or
  *     untenanted), inside 24 h, with 'warning' read as 'warn';
- *   - cold leads is COUNT(*), not a 50-row list's length;
+ *   - leads are not infrastructure: System health no longer reads or shows cold leads (2026-10-28);
+ *     /operations keeps them, still as COUNT(*), not a 50-row list's length;
  *   - a failed read is null ("Couldn't check"), never 0;
  *   - the rendered /health page names no retired host or engine and has no
  *     integration-heartbeat card; connections live under Settings.
@@ -486,11 +487,14 @@ async function main() {
     assert.equal(at.attentionSeverity("CRITICAL"), "critical");
     assert.equal(at.attentionSeverity("warning"), "warn");
   });
-  await check("cold leads: COUNT(*) of 60, not the 50-row list", () => {
-    assert.equal(health.attention.coldLeads, 60);
-  });
-  await check("the /operations tiles read the same numbers", async () => {
+  await check("System health reads no leads; /operations still counts cold leads as COUNT(*) of 60", async () => {
+    assert.equal(health.attention.coldLeads, undefined, "leads are not infrastructure");
     const tiles = await at.loadAttentionSummary(OASIS, { now: NOW });
+    assert.equal(tiles.coldLeads, 60, "the /operations tile is the count, not the 50-row list");
+  });
+  await check("the /operations tiles read the same alarm numbers", async () => {
+    const { coldLeads: _cold, ...tiles } = await at.loadAttentionSummary(OASIS, { now: NOW });
+    void _cold;
     assert.deepEqual(tiles, health.attention);
     assert.equal(at.nothingNeedsYou(tiles, null), false);
   });
@@ -532,11 +536,10 @@ async function main() {
   const text = out.join(" ").replace(/\s+/g, " ");
   await check("/health: the verdict, the sections and the COUNT tile render", () => {
     assert.match(text, /Everything is protected\. CCPC \(Windows\) checked in just now\./);
-    for (const section of ["Your computer", "Safety guards", "Background work", "Automation signals"]) {
+    for (const section of ["Your computer", "Safety guards", "Background work", "Platform vitals", "Automation signals"]) {
       assert.ok(text.includes(section), `missing section: ${section}`);
     }
-    assert.match(text, /Cold leads 60 /, "the tile is the count, not the list length");
-    assert.match(text, /Showing the 50 oldest of 60/);
+    assert.ok(!/Cold leads/.test(text), "no cold-lead tile or list on System health");
     assert.match(text, /What to do: It ran past its time limit/);
     assert.match(text, /Errors today 2 /, "a critical event is in the errors tile");
     assert.match(text, /Critical .{0,40}BRAVO|Critical .{0,80}classifier/i, "the critical event is listed and labelled Critical");
