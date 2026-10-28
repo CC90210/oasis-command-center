@@ -130,6 +130,9 @@ async function main(): Promise<void> {
     const src = readFileSync(join(process.cwd(), "workers/oasis-cc-cron/src/index.ts"), "utf8");
     assert.match(src, /return \{ path, status: first\.status, ok: first\.ok, attempts: 1, ms: Date\.now\(\) - started \};/);
     assert.match(src, /await recordRuns\(env, origin, at\.toISOString\(\), results\);/);
+    // Codex review of #772: a stalled long dispatcher never holds back the quick routes' report.
+    assert.match(src, /quick\.map\(\(e\) => forward\(env, origin, e\.path\)\)\)\.then\(report\)/);
+    assert.match(src, /\.\.\.long\.map\(\(e\) => forward\(env, origin, e\.path\)\.then\(\(r\) => report\(\[r\]\)\)\)/);
     assert.match(src, /origin \+ "\/api\/cron\/runs"/);
   });
 

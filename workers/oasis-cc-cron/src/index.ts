@@ -80,6 +80,9 @@ export function forwardingEnabled(env: Env): boolean {
   return ["on", "true", "1", "yes"].includes((env.CRON_FORWARD ?? "").trim().toLowerCase());
 }
 
+/** Routes that own a streamed model turn (maxDuration=800): an 840-second timeout, and their own report. */
+const LONG_RUNNING_PATHS: readonly string[] = ["/api/cron/dispatch-engine-fallbacks", "/api/cron/dispatch-automations"];
+
 interface ForwardResult {
   path: string;
   status: number | string;
@@ -93,7 +96,7 @@ async function callOnce(env: Env, origin: string, path: string): Promise<{ statu
     // This route owns a streamed model turn and advertises maxDuration=800.
     // The scheduler must outlive that contract; the old blanket 120-second
     // abort killed a healthy fallback driver and stranded its running lease.
-    const timeoutMs = ["/api/cron/dispatch-engine-fallbacks", "/api/cron/dispatch-automations"].includes(path) ? 840_000 : 120_000;
+    const timeoutMs = LONG_RUNNING_PATHS.includes(path) ? 840_000 : 120_000;
     const res = await fetch(origin + path, {
       method: "GET",
       headers: {
@@ -187,18 +190,26 @@ export default {
     }
     if (!due.length) return;
     const origin = env.APP_ORIGIN || "https://oasisai.work";
+    const report = async (results: ForwardResult[]) => {
+      const failed = results.filter((r) => !r.ok);
+      console.log(JSON.stringify({ tick: at.toISOString(), mode: "forward", ok: results.length - failed.length, failed: failed.length, results }));
+      if (failed.length) {
+        // Error-level so Workers observability alerting can page on it.
+        // Phase B wires this into the Telegram ops lane (needs the
+        // OASIS_TELEGRAM secrets from CC's fill list).
+        console.error(JSON.stringify({ cron_failures: failed, tick: at.toISOString() }));
+      }
+      await recordRuns(env, origin, at.toISOString(), results);
+    };
+    // The two long dispatchers (up to 840 s, and a retry) report on their own, so a stalled one
+    // can never hold back, or outlive, the rest of the tick's report (Codex review of #772).
+    const quick = due.filter((e) => !LONG_RUNNING_PATHS.includes(e.path));
+    const long = due.filter((e) => LONG_RUNNING_PATHS.includes(e.path));
     ctx.waitUntil(
-      Promise.all(due.map((e) => forward(env, origin, e.path))).then(async (results) => {
-        const failed = results.filter((r) => !r.ok);
-        console.log(JSON.stringify({ tick: at.toISOString(), mode: "forward", ok: results.length - failed.length, failed: failed.length, results }));
-        if (failed.length) {
-          // Error-level so Workers observability alerting can page on it.
-          // Phase B wires this into the Telegram ops lane (needs the
-          // OASIS_TELEGRAM secrets from CC's fill list).
-          console.error(JSON.stringify({ cron_failures: failed, tick: at.toISOString() }));
-        }
-        await recordRuns(env, origin, at.toISOString(), results);
-      }),
+      Promise.all([
+        quick.length ? Promise.all(quick.map((e) => forward(env, origin, e.path))).then(report) : Promise.resolve(),
+        ...long.map((e) => forward(env, origin, e.path).then((r) => report([r]))),
+      ]),
     );
   },
 };
