@@ -246,7 +246,7 @@ async function main() {
   const db = createClient({ url: `file:${dbFile}` });
   await seedIdentity(db);
 
-  const RunsPage = (await import("../app/runs/page")).default;
+  const TracePage = (await import("../app/agent-ops/trace/page")).default;
   const ReasoningPage = (await import("../app/reasoning/page")).default;
   const OperationsPage = (await import("../app/operations/page")).default;
   const AnalyticsPage = (await import("../app/analytics/page")).default;
@@ -259,10 +259,10 @@ async function main() {
   console.log("queries-fail-loud-callers:");
 
   // ── Phase 1: every read's table is missing ──────────────────────────────
-  await check("/runs: a failed audit-log read says Couldn't check, not 'No agent mutations recorded yet'", async () => {
-    const { text } = await render(await RunsPage());
+  await check("/agent-ops/trace: a failed audit-log read says Couldn't check, not 'No agent has changed your data yet'", async () => {
+    const { text } = await render(await TracePage());
     assert.match(text, /Couldn't check the agent actions/);
-    assert.doesNotMatch(text, /No agent mutations recorded yet/);
+    assert.doesNotMatch(text, /No agent has changed your data yet/);
   });
   await check("/reasoning: a failed decisions read says Couldn't check, not 'No decisions yet'", async () => {
     const { text } = await render(await ReasoningPage());
@@ -417,7 +417,7 @@ async function main() {
   );
 
   await check("control: readable tables bring back the real empty and offline states", async () => {
-    assert.match((await render(await RunsPage())).text, /No agent mutations recorded yet/);
+    assert.match((await render(await TracePage())).text, /No agent has changed your data yet/);
     assert.match((await render(await ReasoningPage())).text, /No decisions yet/);
     const opsRender = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
     const ops = opsRender.text;

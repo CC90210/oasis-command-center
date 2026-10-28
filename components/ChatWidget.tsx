@@ -2931,7 +2931,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, welcomeMessages, a
                   {needsAck && (
                     <div className="flex items-center gap-1.5 flex-shrink-0">
                       <Link
-                        href="/runs"
+                        href="/agent-ops/trace"
                         className="text-[10px] uppercase tracking-wider underline decoration-accent/40 hover:decoration-accent"
                         title="See full mutation history"
                       >

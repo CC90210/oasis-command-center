@@ -1102,7 +1102,7 @@ export async function POST(req: NextRequest) {
         if (injectedInboxIds.length > 0 && !streamError && replySaved) {
           await Promise.all(
             injectedInboxIds.map(async (id) => {
-              const marked = await markReadDb(tenantId, id).catch((err: unknown) => ({
+              const marked = await markReadDb(tenantId, id, "cloud_chat").catch((err: unknown) => ({
                 ok: false,
                 error: err instanceof Error ? err.message : String(err),
               }));

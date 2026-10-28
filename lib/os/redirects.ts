@@ -16,6 +16,9 @@
 export const OS_REDIRECTS: Readonly<Record<string, string>> = {
   // Connections moved into Settings (plan W13). Was → /settings.
   "/integrations": "/settings/connections",
+  // Runs and Inbox became the two views of Admin > Agent ops (2026-10-28).
+  "/runs": "/agent-ops/trace",
+  "/inbox": "/agent-ops",
 };
 
 /**

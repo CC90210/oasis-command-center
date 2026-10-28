@@ -40,7 +40,8 @@ const ROOT = process.cwd();
  * reaches them). They are real debt, and they are written down rather than
  * excluded quietly:
  *
- *   lib/agent-inbox-fs.ts          -> /api/inbox/{post,mark-read}, /inbox
+ *   lib/agent-inbox-fs.ts          -> no runtime importer since 2026-10-28 (Agent ops
+ *                                     writes the database only); kept for local tools
  *   lib/agent-stats.ts             -> /agents
  *   lib/cloud-knowledge-tools.ts   -> no importers found; likely dead
  *
