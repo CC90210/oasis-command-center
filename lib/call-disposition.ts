@@ -33,9 +33,15 @@
  *
  * Type-only imports below, so this module can be imported by both paths without
  * creating a runtime cycle.
+ *
+ * 2026-10-28: the board's call mode retired with the Prospects surface, so
+ * lib/web-leads/outcome.ts is gone and nothing writes its vocabulary any more.
+ * Its words are kept here (CallOutcome) because rows it wrote still carry them.
  */
-import type { CallOutcome } from "./web-leads/outcome";
 import type { RepDisposition } from "./website-sales-workflow";
+
+/** The retired board's call outcomes, as its rows stored them. */
+export type CallOutcome = "no_answer" | "connected" | "interested" | "not_interested" | "do_not_call";
 
 /** The CHECK constraint on leadgen_call_outcomes.outcome, in its own order. */
 export const CANONICAL_DISPOSITIONS = [

@@ -18,10 +18,10 @@ import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/Card";
 import { PracticeTrainer } from "@/components/objections/PracticeTrainer";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { mayViewObjectionLibrary } from "@/lib/web-leads/objections/admin-access";
-import { fetchApprovedCatalog } from "@/lib/web-leads/objections/catalog";
-import { isObjectionPosture } from "@/lib/web-leads/objections/types";
-import type { PracticeObjection } from "@/lib/web-leads/objections/practice";
+import { mayViewObjectionLibrary } from "@/lib/objections/admin-access";
+import { fetchApprovedCatalog } from "@/lib/objections/catalog";
+import { isObjectionPosture } from "@/lib/objections/types";
+import type { PracticeObjection } from "@/lib/objections/practice";
 
 export const dynamic = "force-dynamic";
 

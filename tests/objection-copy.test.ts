@@ -1,13 +1,13 @@
 import assert from "node:assert";
 
-import { OBJECTIONS, ANGLES } from "@/lib/web-leads/angles";
+import { OBJECTIONS, ANGLES } from "@/lib/objections/angles";
 import {
   ALTERNATE_ANSWERS,
   POSTURE_LABEL,
   mergeAnswers,
   type SeedAnswer,
-} from "@/lib/web-leads/objections/alternate-answers";
-import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
+} from "@/lib/objections/alternate-answers";
+import { SEEDED_SLUGS } from "@/lib/objections/seed-slugs";
 
 // ---------------------------------------------------------------------------
 // Copy rules for every sentence a rep says out loud when handling an

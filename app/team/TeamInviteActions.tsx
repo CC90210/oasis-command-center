@@ -361,15 +361,15 @@ export function MemberActivationToggle({
     if (impact.leadHandling) {
       lines.push(
         "",
-        `• ${plural(impact.leads.pool, "early-stage lead")} go back to the Leads pool`,
-        `• ${plural(impact.leads.board, "warm lead")} stay on the board, unassigned, for you to pick up`,
+        `• ${plural(impact.leads.pool, "unworked prospect")} lose their owner and stay in the records`,
+        `• ${plural(impact.leads.board, "open lead")} stay on the board, unassigned, for you to pick up`,
         `• ${plural(impact.leads.keep, "closed or delivery lead")} keep ${name} as owner (history)`,
         "",
         "Lead moves are not undone by reactivating.",
       );
     }
     if (impact.unpaidCommissions > 0) {
-      lines.push("", `${plural(impact.unpaidCommissions, "unpaid commission line")} stay open for your review.`);
+      lines.push("", `${plural(impact.unpaidCommissions, "unpaid commission line")} stay recorded as unpaid.`);
     }
     if (!confirm(lines.join("\n"))) return;
 

@@ -184,16 +184,15 @@ export const SUN_NAV: NavItem[] = [];
  * The web-design leads browser (Adon 2026-08-20). This is NOT a separate
  * client portal — the leads and the operators who work them both live in
  * the OASIS AI command-center tenant (slug `oasis-ai-cc`), the same tenant
- * CC_NAV serves. So this is CC_NAV plus one Leads entry, not a standalone
+ * CC_NAV serves. So this is CC_NAV plus the sales entries below, not a standalone
  * nav: binding that tenant to a WEBDEV_NAV-only profile would strip the 11
  * tabs its operators already use every day. (An earlier version of this
  * feature shipped as a 4-entry standalone nav bound to a zero-user tenant
- * slug `oasis-webdev` — invisible to everyone, see lib/web-leads/data.ts.)
+ * slug `oasis-webdev` — invisible to everyone.) The Leads and Commissions
+ * entries retired with their pages on 2026-10-28.
  */
 export const WEBDEV_NAV: NavItem[] = [
   ...CC_NAV,
-  { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
-  { group: "Leads", href: "/commissions", label: "Commissions", icon: "DollarSign" },
   // Training, and the objection library underneath it.
   //
   // A nav row is only half of being reachable: `lib/role-surfaces.ts` narrows

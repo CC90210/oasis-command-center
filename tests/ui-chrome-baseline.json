@@ -3,7 +3,6 @@
   "known": [
     "app/analytics/page.tsx",
     "app/client-portal/page.tsx",
-    "app/commissions/page.tsx",
     "app/drip-tracker/page.tsx",
     "app/forms/[id]/edit/page.tsx",
     "app/forms/page.tsx",
@@ -67,7 +66,6 @@
     "components/automations/AutomationsContent.tsx",
     "components/founders/GrowthPlaceholder.tsx",
     "components/settings/SettingsContent.tsx",
-    "components/sunbiz/SunBizDashboard.tsx",
-    "components/web-leads/WebLeadsBrowser.tsx"
+    "components/sunbiz/SunBizDashboard.tsx"
   ]
 }

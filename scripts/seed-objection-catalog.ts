@@ -75,14 +75,14 @@ loadEnv();
 // anywhere in this file would be hoisted and evaluated before loadEnv's call
 // above runs. Both are imported dynamically inside main() instead, after the
 // env is loaded.
-import { OBJECTIONS, ANGLES } from "@/lib/web-leads/angles";
-import type { ObjectionFamily, ObjectionPosture, WebsitePremise } from "@/lib/web-leads/objections/types";
-import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
+import { OBJECTIONS, ANGLES } from "@/lib/objections/angles";
+import type { ObjectionFamily, ObjectionPosture, WebsitePremise } from "@/lib/objections/types";
+import { SEEDED_SLUGS } from "@/lib/objections/seed-slugs";
 import {
   ALTERNATE_ANSWERS,
   mergeAnswers,
   type SeedAnswer,
-} from "@/lib/web-leads/objections/alternate-answers";
+} from "@/lib/objections/alternate-answers";
 
 const DRY = process.argv.includes("--dry-run");
 const SEEDED_BY = "seed:angles.ts";
@@ -431,7 +431,7 @@ async function main() {
   }
 
   const { getServiceSupabase } = await import("@/lib/supabase-server");
-  const { WEBDEV_TENANT_ID } = await import("@/lib/web-leads/data");
+  const { WEBDEV_TENANT_ID } = await import("@/lib/oasis-tenant");
   const db = getServiceSupabase();
   const nowIso = new Date().toISOString();
 

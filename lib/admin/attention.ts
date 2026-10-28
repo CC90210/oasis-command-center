@@ -50,7 +50,7 @@ import {
 } from "@/lib/automations/worker-status";
 import { loadOutcomeChecks, type OutcomeCheckData } from "@/lib/health/outcome-panel-data";
 import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { machineState, type MachineState } from "@/lib/devices/presence";
 
 export type AdminDb = ReturnType<typeof getServiceSupabase>;

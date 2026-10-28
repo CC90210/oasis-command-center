@@ -40,7 +40,7 @@ import {
   OASIS_COLD_OUTBOUND_MOTION,
   OASIS_WEBSITE_SALES_PROGRAM,
 } from "../lib/leads/canonical-lead-fields";
-import { availability, CLAIM_STALE_DAYS, factsFrom } from "../lib/web-leads/claim";
+import { availability, factsFrom } from "../lib/leads/claim";
 
 function run(name: string, fn: () => void) {
   fn();
@@ -152,14 +152,11 @@ run("a rep's lead is theirs, in Assigned, stamped with the sales_motion the boar
   assert.equal(plan.data.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
   assert.equal(plan.data.lead_source_track, "self", "a rep-entered lead must retain self-sourced commission provenance");
   assert.equal(plan.data.sourced_by_user_id, REP_ID.toLowerCase(), "self-source credit must be frozen to the creator");
-  assert.equal(plan.data.claimed_at, NOW.toISOString(), "manual creates must use the same expiry clock as pool claims");
+  assert.equal(plan.data.claimed_at, NOW.toISOString(), "a create stamps when its owner took the lead");
   assert.equal(
-    availability(
-      factsFrom(plan.data),
-      NOW.getTime() + (CLAIM_STALE_DAYS + 1) * 24 * 60 * 60 * 1_000,
-    ).reason,
-    "claim_expired",
-    "manual creates must return to Leads under the same stale-claim rule as claimed inventory",
+    availability(factsFrom(plan.data), NOW.getTime() + 400 * 24 * 60 * 60 * 1_000).reason,
+    "held",
+    "a rep's own lead stays in their book however long it sits: nothing ages out (2026-10-28)",
   );
   // The board's filter is the other half of the contract, on every OASIS slug.
   for (const slug of ["oasis", "oasis-ai-cc", "oasis-webdev"]) {

@@ -12,7 +12,7 @@
  * in these lists must never reach an INSERT: every write goes through a
  * validate* function below first.
  */
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 
 /**
  * OASIS's own workspace (slug oasis-ai-cc). Every workspace now runs its own

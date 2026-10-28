@@ -11,7 +11,6 @@ import {
   canOpenOasisSalesRecord,
   canMutateOasisSalesRecord,
   filterWebsiteSalesRows,
-  isReleasedOasisPipelineRow,
   isOasisPipelineAdmin,
   mayOperateOasisDeliveryStage,
   ownsOasisDeliveryRecord,
@@ -96,52 +95,44 @@ const rows = [
   { id: "post-handoff", data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-1", stage: "proposal_sent" } },
 ];
 
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "admin", userId: "admin" }).map((r) => r.id), ["fresh", "other-rep", "post-handoff"]);
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
+// "expired" is an old, never-dialled claim. Nothing ages out (2026-10-28), so
+// it stays on the board for admins and in its owner's book.
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "admin", userId: "admin" }).map((r) => r.id), ["fresh", "expired", "other-rep", "post-handoff"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-1" }).map((r) => r.id), ["fresh", "expired", "post-handoff"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh", "expired", "post-handoff"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["fresh", "expired", "post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: null }), []);
 
+// NOTHING AGES OFF THE BOARD (2026-10-28). Until the Prospects pool retired, an
+// untouched Assigned claim and a 90-day-old loss left the board for that pool.
+// With no pool, either would vanish, so both stay where their owner and an
+// admin can see them, alongside handoff and delivery records with old claims.
 const staleClaimAt = "2000-01-01T00:00:00.000Z";
-for (const stage of ["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"]) {
-  assert.equal(
-    isReleasedOasisPipelineRow({
+const agedRows = [
+  ...["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].map(
+    (stage) => ({
       id: `active-${stage}`,
-      data: {
-        assigned_to: "rep-1",
-        stage,
-        claimed_at: staleClaimAt,
-        last_call_at: null,
-      },
+      data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-1", stage, claimed_at: staleClaimAt, last_call_at: null },
     }),
-    false,
-    `${stage} is an active handoff/delivery record, not an expiring prospect claim`,
-  );
-}
-assert.equal(
-  isReleasedOasisPipelineRow({
+  ),
+  {
     id: "stale-assigned",
-    data: {
-      assigned_to: "rep-1",
-      stage: "assigned",
-      claimed_at: staleClaimAt,
-      last_call_at: null,
-    },
-  }),
-  true,
-  "an untouched Assigned prospect still returns to Leads after the claim window",
+    data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-1", stage: "assigned", claimed_at: staleClaimAt, last_call_at: null },
+  },
+  {
+    id: "old-lost",
+    data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-1", stage: "lost", lost_at: staleClaimAt },
+  },
+];
+assert.deepEqual(
+  filterWebsiteSalesRows(agedRows, { role: "admin", userId: "admin" }).map((r) => r.id),
+  agedRows.map((r) => r.id),
+  "an admin sees every aged row: nothing ages off the board",
 );
-assert.equal(
-  isReleasedOasisPipelineRow({
-    id: "recyclable-lost",
-    data: {
-      assigned_to: "rep-1",
-      stage: "lost",
-      lost_at: staleClaimAt,
-    },
-  }),
-  true,
-  "the independent 90-day Lost recycle rule remains intact",
+assert.deepEqual(
+  filterWebsiteSalesRows(agedRows, { role: "agent", userId: "rep-1" }).map((r) => r.id),
+  agedRows.map((r) => r.id),
+  "the owner keeps every aged row in their own book",
 );
 
 const managerReadable = {

@@ -39,9 +39,7 @@ assert.match(route, /Video call: \$\{meeting\.receipt\.meetLink\}/);
 assert.doesNotMatch(route, /Google Meet: \$\{meeting\.receipt\.meetLink\}/);
 
 
-const founderPanel = readFileSync("components/web-leads/BookMeetPanel.tsx", "utf8");
-assert.match(founderPanel, />Video call<\/dt>/);
-assert.doesNotMatch(founderPanel, />Google Meet<\/dt>/);
+// (The call screen's Book the Meet panel retired with the Prospects surface on 2026-10-28.)
 
 const bookingCopy = readFileSync("lib/website-sales-booking.ts", "utf8");
 assert.match(bookingCopy, /short video call with one of our founders/);

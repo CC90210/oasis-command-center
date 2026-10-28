@@ -118,8 +118,6 @@ for (const path of [
   "app/api/leads/[id]/assign/route.ts",
   "app/api/manifest/[slug]/cold-leads/[id]/promote/route.ts",
   "app/api/manifest/[slug]/records/[entity]/route.ts",
-  "app/api/web-leads/claim/route.ts",
-  "app/api/web-leads/assignable-reps/route.ts",
   "app/api/bridge/records/[entity]/route.ts",
   "app/pipeline/new/page.tsx",
   "components/import/ImportWizard.tsx",

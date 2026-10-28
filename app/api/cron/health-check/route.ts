@@ -24,7 +24,7 @@ import {
 } from "@/lib/health/runner";
 import { brokenSummary, runDepartmentChatHealth } from "@/lib/health/department-chat-run";
 import { worstVerdict } from "@/lib/health/checks-core";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

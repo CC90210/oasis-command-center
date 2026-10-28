@@ -43,7 +43,7 @@ import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-d
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
 import { MEMBER_DEACTIVATED_MESSAGE, getOasisPipelineAssignmentRoster, memberStanding } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

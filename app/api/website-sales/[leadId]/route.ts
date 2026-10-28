@@ -69,8 +69,8 @@ import {
   type MemberRow,
   type MemberStanding,
 } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
-import { factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
+import { factsFrom } from "@/lib/leads/claim";
 import {
   isCompleteQualificationPayload,
   normalizeQualificationForStorage,
@@ -570,18 +570,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     ) {
       return NextResponse.json({ok:false,error:"booking_confirmations_required"},{status:400});
     }
-    // Same claim rule lib/leads/rep-lead-access.ts applies to logging a call:
-    // a rep whose claim lapsed back into the pool no longer holds the lead.
-    // isActionableBy also refuses every do-not-call lead, so the lapse is
-    // judged with dnc set aside; do-not-call has its own rule below.
+    // (A claim no longer lapses, 2026-10-28, so there is no released-claim
+    // refusal here; lib/leads/claim.ts says why.)
     const claimFacts = factsFrom(current);
-    if (
-      !session.isAdmin &&
-      isInBookOf(claimFacts, session.userId) &&
-      !isActionableBy({ ...claimFacts, dnc:false }, session.userId, Date.now())
-    ) {
-      return NextResponse.json({ok:false,error:"claim_released"},{status:409});
-    }
     // Do-not-call (Adon, 2026-10-02: "allow"). A do-not-call business may still
     // be booked when the owner asks for the meeting on this call, but only on
     // an explicit, literal-true confirmation from the rep, which is stored

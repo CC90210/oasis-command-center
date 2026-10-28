@@ -220,7 +220,6 @@ const NOT_MOVED_YET: Record<string, string> = {
   "components/underwriting/ApplicationUnderwritingReport.tsx": "'Started N minutes ago' on an underwriting run",
   "lib/founders-performance-core.ts": "'Last posted N days ago', a whole-day count",
   "lib/skills/view.ts": "'Last checked in N days ago' marks a stale skill by whole days",
-  "lib/web-leads/trust.ts": "'Measured N months ago', a month count on a lead's site evidence",
 };
 
 check("nothing works out a time ago under another name", () => {

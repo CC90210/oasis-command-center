@@ -9,7 +9,6 @@ import {
   DEAL_CLOSING_ROLES,
   OASIS_SALES_ROLE_OPTIONS,
 } from "../lib/team-roles";
-import { isScopedContractor } from "../lib/web-leads/data";
 import { resolvePersona } from "../lib/role-surfaces";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
@@ -36,9 +35,9 @@ const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(
 
 // ---------------------------------------------------------------------------
 // 1. THE LEAK. A rep invited as Opener or Closer was NOT scoped to their own
-// book, so the Web Leads browser served them every lead in the tenant --
-// exactly the leak PR #237 closed for `agent`, reopened by the roles that
-// replaced it.
+// book, so the Web Leads browser (retired 2026-10-28) served them every lead in
+// the tenant -- exactly the leak PR #237 closed for `agent`, reopened by the
+// roles that replaced it.
 //
 // This is the assertion that would have failed before the fix.
 // ---------------------------------------------------------------------------
@@ -46,19 +45,6 @@ for (const role of ["agent", "opener", "closer", "builder", "marketing"]) {
   assert.ok(
     isSelfScopedRole(role),
     `${role} must be scoped to its own records -- a tenant check alone does not stop someone who sits INSIDE the tenant`,
-  );
-  assert.ok(
-    isScopedContractor({ userId: "u1", teamRole: role, isAdmin: false }),
-    `the Web Leads viewer predicate must scope ${role}`,
-  );
-}
-
-// An admin is never scoped, whatever their nominal role.
-for (const role of ["agent", "opener", "closer", "builder", "marketing", "owner"]) {
-  assert.equal(
-    isScopedContractor({ userId: "u1", teamRole: role, isAdmin: true }),
-    false,
-    `an admin must not be scoped as a contractor (role=${role})`,
   );
 }
 
@@ -213,7 +199,6 @@ assert.doesNotMatch(
 // role list.
 // ---------------------------------------------------------------------------
 for (const door of [
-  "lib/web-leads/data.ts",
   "app/api/manifest/[slug]/records/[entity]/route.ts",
 ]) {
   const src = stripComments(read(door));

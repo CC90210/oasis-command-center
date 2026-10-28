@@ -16,7 +16,8 @@ import "server-only";
  *      except a login that still has an ACTIVE profile in another workspace,
  *      where banning it would lock them out of work they still do;
  *   3. on the OASIS sales tenant, moves their open leads per the disposition
- *      rule (cold → pool, warm → board unassigned, closed → kept);
+ *      rule (unworked prospects → released, open work → board unassigned,
+ *      closed → kept);
  *   4. writes the tenant audit event.
  *
  * Step 3 is safe to repeat: a second deactivate of an already-inactive member
@@ -30,8 +31,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { dbBool } from "@/lib/db-bool";
 import { canonicalizeTenantMembers, isTrueAdminRole, type MemberRow, type SessionContext } from "@/lib/team";
-import { releaseLeads } from "@/lib/web-leads/claim-ops";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { releaseLeads } from "@/lib/leads/release";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import {
   DEACTIVATION_BAN_UNTIL,

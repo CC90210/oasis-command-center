@@ -22,9 +22,11 @@
  * handlers — POST /api/manifest/<slug>/records/lead and POST
  * /api/leads/quick-add — through the real session check, profile resolution,
  * tenant gate and data layer, against a local libSQL database, then reads the
- * rows back through the same query /pipeline runs and the same read /web-leads
- * runs. The only stand-in is the request cookie jar (next/headers), because a
- * route handler called outside a Next request has no cookies() to read.
+ * rows back through the same query /pipeline runs and the ownership rules a
+ * rep's book is defined by (lib/leads/claim.ts; the /web-leads list that used to
+ * read it retired 2026-10-28). The only stand-in is the request cookie jar
+ * (next/headers), because a route handler called outside a Next request has no
+ * cookies() to read.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
@@ -129,7 +131,7 @@ async function main() {
     "../lib/leads/canonical-lead-fields"
   );
   const { OASIS_SEED } = await import("../lib/manifest/seeds");
-  const { countryOf } = await import("../lib/web-leads/filters");
+  const { countryOf } = await import("../lib/leads/regions");
 
   console.log("oasis-create-stage-contract:");
 
@@ -386,7 +388,7 @@ async function main() {
   // ───────────────────────────────────────────────────────────────────────
   // (c) behavioural: the real route handlers against a real libSQL database
   // ───────────────────────────────────────────────────────────────────────
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const seed = createClient({ url: `file:${dbFile}` });
   const NOW_SQL = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
   await seed.executeMultiple(`
@@ -508,15 +510,11 @@ async function main() {
   const genericImport = await import("../app/api/import/[entity]/route");
   const { importLeadsForTenant } = await import("../lib/leads-import-service");
   const coldPromotion = await import("../app/api/manifest/[slug]/cold-leads/[id]/promote/route");
-  const assignableReps = await import("../app/api/web-leads/assignable-reps/route");
-  const territoryAssign = await import("../app/api/web-leads/territories/[id]/assign/route");
   const { CURRENT_OASIS_PIPELINE_CYCLE, isInPipelineCycle } = await import("../lib/pipeline-cycle");
   const { listOasisPipelineWindow, resolveOasisPipelineAssigneeScope } = await import(
     "../lib/oasis-pipeline-query"
   );
-  const { fetchLeads } = await import("../lib/web-leads/data");
-  const { parseFilters, filtersToParams, switchCountry } = await import("../lib/web-leads/filters");
-  const { EMPTY_SCORE_INDEX } = await import("../lib/web-leads/scores");
+  const { factsFrom, isInBookOf } = await import("../lib/leads/claim");
 
   let activeUserId: string | null = null;
   const login = (userId: string, email: string) => {
@@ -626,18 +624,25 @@ async function main() {
   const leadCount = async () =>
     Number((await seed.execute("SELECT count(*) AS n FROM tenant_records WHERE entity_type = 'lead'")).rows[0].n);
 
-  const CA = parseFilters(new URLSearchParams());
-  const US = parseFilters(new URLSearchParams("country=us"));
-  const ownerViewer = { userId: OWNER, teamRole: "owner", isAdmin: true };
-  const openerViewer = { userId: OPENER, teamRole: "opener", isAdmin: false };
-  const closerViewer = { userId: OTHER_REP, teamRole: "closer", isAdmin: false };
-  const memberViewer = { userId: MEMBER, teamRole: "member", isAdmin: false };
-  const mineIds = async (viewer: typeof ownerViewer, filters = CA, scope: "mine" | "team" = "mine") =>
-    new Set(
-      (await fetchLeads(filters, [], viewer, EMPTY_SCORE_INDEX, { scope, now: Date.now() })).leads.map(
-        (l) => l.id,
-      ),
-    );
+  // A rep's BOOK, by the ownership rules themselves (lib/leads/claim.ts) over
+  // the stored rows: the Prospects list that used to answer this retired on
+  // 2026-10-28. "team" is every lead some rep holds; the unassigned pool is in
+  // nobody's book.
+  const ownerViewer = { userId: OWNER };
+  const openerViewer = { userId: OPENER };
+  const closerViewer = { userId: OTHER_REP };
+  const mineIds = async (viewer: { userId: string }, scope: "mine" | "team" = "mine") => {
+    const rs = await seed.execute({
+      sql: "SELECT id, data FROM tenant_records WHERE entity_type = 'lead' AND tenant_id = ?",
+      args: [WEBDEV_TENANT_ID],
+    });
+    const ids = new Set<string>();
+    for (const r of rs.rows) {
+      const facts = factsFrom(JSON.parse(String(r.data)) as Record<string, unknown>);
+      if (scope === "mine" ? isInBookOf(facts, viewer.userId) : Boolean(facts.assignedTo)) ids.add(String(r.id));
+    }
+    return ids;
+  };
   // /pipeline's query, with the arguments app/pipeline/page.tsx builds for
   // this viewer: its board stages, its program filter, its assignee scope.
   const pipelineRows = async (
@@ -671,10 +676,9 @@ async function main() {
     return window.rows.map((row) => row.id);
   };
 
-  // Prime every read a memo could hide behind BEFORE anything is created, so a
-  // cached book cannot pass the "appears immediately" check below.
+  // Before anything is created: the owner holds nothing, one rep holds a lead.
   assert.equal((await mineIds(ownerViewer)).size, 0);
-  assert.deepEqual([...(await mineIds(ownerViewer, CA, "team"))], ["other-rep-1"]);
+  assert.deepEqual([...(await mineIds(ownerViewer, "team"))], ["other-rep-1"]);
   assert.equal(
     (await pipelineRows({ userId: OWNER, teamRole: "owner", isOwner: true }, "assigned")).includes(
       "unassigned-working-1",
@@ -682,37 +686,11 @@ async function main() {
     false,
     "the admin pipeline paginated an unassigned working-stage row",
   );
-  // A role with no scoping reads every row it is handed, so the only thing
-  // keeping another rep's leads off a member's Team tab is that the team read
-  // fetches its own book plus a roster it does not have. (Verifier, 2026-09-10.)
-  assert.deepEqual([...(await mineIds(memberViewer, CA, "team"))], [],
-    "a member's Team tab listed leads another rep holds");
 
   // An OWNER creates one lead at the single manual entry point. Every later
   // stage must be reached through the audited lifecycle rather than creation.
   login(OWNER, "conaugh@oasisai.work");
   const created: Record<string, string> = {};
-
-  // A missing sole-owner roster is an availability failure, not an uncaught 500.
-  // Exercise both routes against the real roster query by removing CC's
-  // canonical owner-email match (the signed-in profile itself remains) for
-  // exactly these requests, then restore the fixture before pipeline writes.
-  await seed.execute({ sql: "UPDATE user_profiles SET email = ? WHERE id = ?", args: ["former-owner@test.invalid", "p-owner"] });
-  const unavailableReps = await assignableReps.GET();
-  assert.equal(unavailableReps.status, 503);
-  assert.equal((await unavailableReps.json() as ApiBody).error, "sales_roster_unavailable");
-  const unavailableTerritory = await territoryAssign.PATCH(
-    new NextRequest("http://localhost/api/web-leads/territories/0d0d0d0d-0000-4000-8000-000000000099/assign", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ assignedTo: OTHER_REP }),
-    }),
-    { params: Promise.resolve({ id: "0d0d0d0d-0000-4000-8000-000000000099" }) },
-  );
-  assert.equal(unavailableTerritory.status, 503);
-  assert.equal((await unavailableTerritory.json() as ApiBody).error, "sales_roster_unavailable");
-  await seed.execute({ sql: "UPDATE user_profiles SET email = ? WHERE id = ?", args: ["conaugh@oasisai.work", "p-owner"] });
-  run("(c) assignment surfaces report an unavailable CC-only roster explicitly");
 
   const beforeColdPromotion = await leadCount();
   const ownerlessColdPromotion = await postColdPromotion({});
@@ -968,58 +946,18 @@ async function main() {
   const assignedRepMine = await mineIds(closerViewer);
   assert.ok(assignedRepMine.has(created.assigned), "the selected rep's My leads misses the new lead");
   assert.equal(assignedRepMine.size, 2, "the selected rep's book has an unexpected row count");
-  const ownerTeam = await mineIds(ownerViewer, CA, "team");
+  const ownerTeam = await mineIds(ownerViewer, "team");
   assert.ok(ownerTeam.has(created.assigned), "Team leads misses the new Assigned lead");
   assert.ok(ownerTeam.has("other-rep-1"), "an admin's Team leads must show every rep's book");
   assert.ok(!ownerTeam.has("pool-1"), "Team leads is a book — the prospect pool must not flood it");
-  run("(c) each lead appears in /web-leads My leads and Team leads immediately, with no phone");
+  run("(c) each lead lands in the selected rep's book immediately, with no phone");
 
-  // D7: the region code decides the board, and it is normalised.
+  // D7: the region code is stored normalised (it decides CASL vs US rules).
   const us = await postRecord("oasis-ai-cc", { name: "Miami Lead", state: "fl", stage: "assigned" });
   assert.equal(us.status, 200, us.body.message);
   assert.equal((await storedLead(us.body.record!.id)).data.state, "FL");
-  assert.ok(!(await mineIds(closerViewer)).has(us.body.record!.id), "a US lead appeared on the Canada board");
-  assert.ok((await mineIds(closerViewer, US)).has(us.body.record!.id), "a US lead is missing from the US board");
-  run("(c) a US region code puts the lead on the US board, not the Canada one");
-
-  // ...and the book the page opens on SAYS where it is. My leads and Team
-  // leads show one country board at a time and open on Canada; until this
-  // change neither tab had a country switch, so this lead was on no screen CC
-  // could reach from the page (review, 2026-09-10). The book read now counts
-  // both boards, and the book tabs render the rail's own switch.
-  const caBook = await fetchLeads(CA, [], closerViewer, EMPTY_SCORE_INDEX, { scope: "mine", now: Date.now() });
-  assert.deepEqual(caBook.boards, { ca: 2, us: 1 }, "My leads on Canada must report the US lead");
-  assert.equal(caBook.total, caBook.boards!.ca, "the board count disagrees with the list it labels");
-  const caTeam = await fetchLeads(CA, [], ownerViewer, EMPTY_SCORE_INDEX, { scope: "team", now: Date.now() });
-  assert.equal(caTeam.boards?.us, 1, "Team leads on Canada must report the US lead");
-  // Driven the way the switch drives it: switchCountry, then the URL it pushes.
-  const switched = parseFilters(
-    filtersToParams(switchCountry(parseFilters(new URLSearchParams("view=mine")), "us")),
-  );
-  assert.equal(switched.view, "mine", "switching boards must stay on My leads");
-  assert.equal(switched.country, "us");
-  assert.ok(
-    (await mineIds(closerViewer, switched)).has(us.body.record!.id),
-    "the My leads switch does not reach the US lead",
-  );
-  // The pool keeps its rail's facet counts and gets no book count.
-  const poolRead = await fetchLeads(CA, ["terr-toronto"], ownerViewer, EMPTY_SCORE_INDEX, {
-    scope: "pool",
-    now: Date.now(),
-  });
-  assert.equal(poolRead.boards, null);
-  assert.deepEqual(poolRead.leads.map((l) => l.id), ["pool-1"], "the pool read changed");
-  const browserSrc = readFileSync("components/web-leads/WebLeadsBrowser.tsx", "utf8");
-  assert.match(
-    browserSrc,
-    /\{\(mine \|\| team\) && \([\s\S]{0,400}?<CountrySwitch filters=\{filters\} onChange=\{push\} counts=\{boards\}/,
-    "My leads and Team leads must render the country switch with the server's board counts",
-  );
-  assert.match(browserSrc, /setBoards\(body\.boards \?\? null\)/, "the counts must come from the list's own response");
-  const railSrc = readFileSync("components/web-leads/FilterRail.tsx", "utf8");
-  assert.match(railSrc, /<CountrySwitch filters=\{filters\} onChange=\{onChange\} \/>/, "the rail must use the same switch");
-  assert.match(railSrc, /onChange\(switchCountry\(filters, c\.key\)\)/, "the switch must change boards through switchCountry");
-  run("(c) My leads and Team leads report the other board, and their switch reaches it");
+  assert.ok((await mineIds(closerViewer)).has(us.body.record!.id), "the US lead is missing from the rep's book");
+  run("(c) a US region code is stored normalised, and the lead is in the rep's book");
 
   // Nothing a person types into /pipeline/new is dropped: a value in every
   // field the form offers goes through the real route and comes back from the
@@ -1132,11 +1070,6 @@ async function main() {
   assert.ok(repBoard.includes(repLead.body.record!.id), "the closer's own lead is missing from their pipeline");
   assert.ok((await mineIds(closerViewer)).has(repLead.body.record!.id));
   assert.equal((await mineIds(openerViewer)).has(repLead.body.record!.id), false);
-  assert.deepEqual(
-    [...(await mineIds(openerViewer, CA, "team"))],
-    [],
-    "a rep's Team read must be their own book — never the pool or another rep's leads",
-  );
   // An ACTIVE rep (David, the opener) keeps working their own book.
   login(OPENER, "opener@oasis.test");
   const activeRepLead = await postRecord("oasis-ai-cc", { name: "Active Rep Sourced", state: "ON", stage: "assigned" });
@@ -1195,7 +1128,7 @@ async function main() {
   const refusedSingleClear = await postSingleAssign(SINGLE_ELIGIBLE, null);
   assert.equal(refusedSingleClear.status, 422, "single assignment left an active OASIS lead ownerless");
   assert.equal(refusedSingleClear.body.error, "assignee_required");
-  assert.match(refusedSingleClear.body.message!, /Leads.*Release/i);
+  assert.match(refusedSingleClear.body.message!, /need an owner/i);
   assert.equal((await storedLead(SINGLE_ELIGIBLE)).data.assigned_to, OPENER);
 
   const singlePool = await postSingleAssign(SINGLE_POOL, OTHER_REP);
@@ -1204,10 +1137,12 @@ async function main() {
   assert.equal((await storedLead(SINGLE_POOL)).data.assigned_to, null);
   assert.equal((await storedLead(SINGLE_POOL)).data.stage, "researched");
 
+  // NOTHING AGES OUT (2026-10-28): an old, never-dialled claim is a held lead
+  // like any other, and an admin may hand it to someone else. Before the
+  // Prospects pool retired it was refused here and re-claimed from Leads.
   const singleExpired = await postSingleAssign(EXPIRED_CLAIM, OTHER_REP);
-  assert.equal(singleExpired.status, 409, "generic single assignment bypassed the Leads claim path for an expired claim");
-  assert.equal(singleExpired.body.error, "use_web_leads_claim");
-  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER);
+  assert.equal(singleExpired.status, 200, JSON.stringify(singleExpired.body));
+  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OTHER_REP);
 
   await seed.execute(lead(SAME_OWNER, WEBDEV_TENANT_ID, {
     name: "Same owner active lead", state: "ON", stage: "assigned", assigned_to: OTHER_REP,
@@ -1246,7 +1181,7 @@ async function main() {
 
   const guardedBulk = await postBulk({
     op: "assign",
-    ids: [BULK_ELIGIBLE, BULK_WON, BULK_DELIVERY, BULK_POOL, EXPIRED_CLAIM],
+    ids: [BULK_ELIGIBLE, BULK_WON, BULK_DELIVERY, BULK_POOL],
     assigned_to: OTHER_REP,
   });
   assert.equal(guardedBulk.status, 200, guardedBulk.body.message);
@@ -1256,11 +1191,11 @@ async function main() {
       skipped: guardedBulk.body.skipped,
       failed: guardedBulk.body.failed,
     },
-    { updated: 1, skipped: 4, failed: 0 },
+    { updated: 1, skipped: 3, failed: 0 },
     "bulk assignment must update only the eligible pre-handoff lead",
   );
-  assert.equal(guardedBulk.body.claim_required, 2);
-  assert.match(guardedBulk.body.message!, /Leads.*Assign/i);
+  assert.equal(guardedBulk.body.claim_required, 1);
+  assert.match(guardedBulk.body.message!, /parked prospect/i);
   const reassignedEligible = await storedLead(BULK_ELIGIBLE);
   assert.equal(reassignedEligible.data.assigned_to, OTHER_REP);
   assert.equal(reassignedEligible.data.stage, "assigned");
@@ -1272,7 +1207,6 @@ async function main() {
   assert.equal((await storedLead(BULK_WON)).data.assigned_to, OPENER, "Won ownership changed out of band");
   assert.equal((await storedLead(BULK_DELIVERY)).data.assigned_to, OPENER, "delivery ownership changed out of band");
   assert.equal((await storedLead(BULK_POOL)).data.assigned_to, null, "bulk assign partially claimed a pool row");
-  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER, "bulk assign bypassed canonical re-claim for an expired row");
   run("(c)/(d) bulk assignment accepts a sales-roster target and refuses guarded stages");
 
   // ── quick-add: the second create door, same planner on OASIS ────────────
@@ -1290,8 +1224,8 @@ async function main() {
   assert.equal(qaOwner.body.error, "use_pipeline_new");
   assert.match(qaOwner.body.message!, /New lead/i);
   assertReadable(qaOwner.body, "quick-add admin assigned");
-  // Claim facts cannot ride in on a create: a claimed_at in the past would
-  // make a hand-made lead read as an expired claim and release it to the pool.
+  // Claim facts cannot ride in on a create: the claim clock is stamped by
+  // assignment, never typed into a form.
   const claimForge = await postRecord("oasis-ai-cc", {
     name: "Claim Forge Co", state: "ON", stage: "assigned", claimed_at: "2000-01-01T00:00:00.000Z",
   });

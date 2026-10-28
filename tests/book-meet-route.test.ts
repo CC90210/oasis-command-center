@@ -4,8 +4,8 @@
  * Proves the call screen can qualify and book in ONE request, and that the
  * booking route applies the same claim rules logging a call already has:
  *
- *   - a lead whose claim lapsed back into the pool cannot be booked by the
- *     rep who used to hold it (claim_released);
+ *   - an old, never-dialled claim is still the rep's to book: nothing ages
+ *     out of a book since the Prospects pool retired (2026-10-28);
  *   - a do-not-call lead CAN be booked, but only when the rep confirms the
  *     owner asked for the meeting on this call (Adon, 2026-10-02: "allow").
  *     Without that confirmation it is refused (do_not_call) and Google is
@@ -152,7 +152,7 @@ async function check(name: string, fn: () => Promise<void>) {
 
 async function main() {
   console.log("book-meet-route:");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { OASIS_WEBSITE_SALES_PROGRAM, OASIS_COLD_OUTBOUND_MOTION } = await import(
     "../lib/leads/canonical-lead-fields"
   );
@@ -382,20 +382,22 @@ async function main() {
     assert.equal((await stored(L_DNC_ADMIN)).dnc_meeting_override !== undefined, true);
   });
 
-  await check("a lapsed claim (8 days, never dialled) cannot be booked by the rep", async () => {
+  await check("an old claim (8 days, never dialled) is still the rep's to book", async () => {
     signIn(OPENER, "opener@oasis.test");
     const res = await book(L_LAPSED, "assigned");
-    assert.equal(res.status, 409);
-    assert.equal(res.body.error, "claim_released");
-    assert.equal(creates(L_LAPSED), 0);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(creates(L_LAPSED), 1);
   });
 
-  await check("a lapsed do-not-call claim reports claim_released even with the confirmation", async () => {
+  await check("an old do-not-call claim follows the do-not-call rule, not a lapse", async () => {
     signIn(OPENER, "opener@oasis.test");
-    const res = await book(L_DNC_LAPSED, "assigned", { confirmations: { ...CONFIRMED, ownerRequestedMeeting: true } });
-    assert.equal(res.status, 409);
-    assert.equal(res.body.error, "claim_released");
+    const refused = await book(L_DNC_LAPSED, "assigned");
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, "do_not_call");
     assert.equal(creates(L_DNC_LAPSED), 0);
+    const res = await book(L_DNC_LAPSED, "assigned", { confirmations: { ...CONFIRMED, ownerRequestedMeeting: true } });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(creates(L_DNC_LAPSED), 1);
   });
 
   await check("Pipeline-shaped booking of a legacy qualified record still succeeds", async () => {

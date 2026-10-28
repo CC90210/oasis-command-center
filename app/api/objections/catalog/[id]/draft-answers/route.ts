@@ -20,9 +20,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { resolveSessionContext } from "@/lib/api-auth";
-import { mayAuthorObjections } from "@/lib/web-leads/objections/admin-access";
-import { ObjectionAdminError, ObjectionRejected } from "@/lib/web-leads/objections/admin";
-import { DraftRejected, draftAnswersFor } from "@/lib/web-leads/objections/draft-answers";
+import { mayAuthorObjections } from "@/lib/objections/admin-access";
+import { ObjectionAdminError, ObjectionRejected } from "@/lib/objections/admin";
+import { DraftRejected, draftAnswersFor } from "@/lib/objections/draft-answers";
 
 export const dynamic = "force-dynamic";
 /** The model call is queued and polled, so this outlives a default budget. */

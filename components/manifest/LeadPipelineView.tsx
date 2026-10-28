@@ -12,7 +12,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  BarChart3,
   CheckSquare,
   ChevronDown,
   ChevronRight,
@@ -28,11 +27,11 @@ import {
   Zap,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
-// Shared with the /web-leads list so one hardening rule covers both surfaces:
+// One hardening rule for every website href:
 // 217 stored websites have no scheme (a bare domain in an href navigates inside
 // our own dashboard) and these values come from OpenStreetMap, which anyone can
 // edit, so a `javascript:` href would run in our origin.
-import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { preferredSiteUrl } from "@/lib/leads/site-url";
 import { AcceleratedToggle } from "@/components/manifest/AcceleratedToggle";
 import {
   SUNBIZ_BULK_SAFE_TEMPLATES,
@@ -1753,10 +1752,8 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // click and view the website as well as see all of the leads information...
   // on the pipeline tab, which is our CRM."
   //
-  // These fields were already on every row and simply never read here. The CRM
-  // board and the /web-leads list are the same `tenant_records` rows in the
-  // same tenant, so this reads the lead's own stored values rather than
-  // deriving anything new. `industry` falls back across the two spellings the
+  // These fields were already on every row and simply never read here, so this
+  // reads the lead's own stored values rather than deriving anything new. `industry` falls back across the two spellings the
   // ingest writes; `webdev_industry` is the rep-facing collapse of 212 raw OSM
   // categories into 18, so it is preferred when present.
   const websiteUrl = str(d.website);
@@ -1770,23 +1767,6 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // re-worded, or turned into a badge.
   const websiteCondition = str(d.website_condition);
   const auditFindings = str(d.audit_findings);
-  // Resolved server-side by lib/web-leads/attach-scores.ts against the same
-  // memoised index the leads tab uses, so the two screens cannot disagree.
-  // Absent (undefined) means nobody attached it -- a caller that did not opt in
-  // -- which is NOT the same as "not scored" and must not render as a number.
-  // Is this row actually a web-lead? Caught by review 2026-08-25: the battle
-  // card lives at /web-leads/<id>, whose fetchLead is pinned to WEBDEV_TENANT_ID,
-  // so linking there from any other tenant's row -- or from an ordinary CRM lead
-  // typed in by hand -- hands a rep a button that always 404s. `oasis-webdev`
-  // holds 53 real leads, so this was live. Keyed on the business id the score
-  // join already needs, which is the same thing that makes a row a web-lead.
-  const webLeadBusinessId = str(d.webdev_source_business_id);
-  const webScoreRaw = d.derived_website_score;
-  const webScore = typeof webScoreRaw === "number" ? webScoreRaw : null;
-  const webScoreState =
-    typeof d.derived_website_score_state === "string"
-      ? (d.derived_website_score_state as WebScoreState)
-      : null;
   // Hostname only, kept from origin/main (#295). On a website-sales board the
   // site IS the qualifier, and a rep triaging thirty rows should see WHICH
   // domain without opening anything. A full URL would swamp the cell.
@@ -1816,10 +1796,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     address,
     websiteCondition,
     auditFindings,
-    webScore,
-    webScoreState,
     businessLine,
-    isWebLead: Boolean(webLeadBusinessId),
     auditStep,
     auditHref: auditStep && auditEngagementId ? `/ai-audits/${encodeURIComponent(auditEngagementId)}` : null,
   };
@@ -1850,45 +1827,19 @@ function hostOf(raw: string): string {
   }
 }
 
-/** Mirrors ScoreState in lib/web-leads/scores.ts. Declared locally rather than
- *  imported so this client component does not pull in the server-only score
- *  module (it reaches getServiceSupabase) just to name a union. */
-type WebScoreState = "scored" | "unreachable" | "not_scored" | "no_website" | "parked";
-
 /**
- * The website block on a CRM row: open the site, open the battle card, and the
- * honest state of what we know about it.
+ * The website block on a CRM row: which domain, a link to open it, and, for a
+ * lead with no site we can link to, the lead's own stored wording about that.
  *
- * ═══ NO COLOUR IS KEYED TO THE SCORE, ANYWHERE IN HERE ═══
- * Not on the number, not on a bar, not on a marker. A red 22 renders a
- * judgement the measurement does not support, and a rep who sees red says
- * something on a live call they cannot back up. The number is `text-fg` and the
- * track is one neutral fill whether the score is 4 or 94. Pinned by
- * tests/web-leads-guards.test.ts, which bans the colour utilities on every
- * audit-rendering component by name -- this one included.
+ * The website score and the battle card link retired with the Prospects
+ * surface (2026-10-28); the lead's own website facts stay.
  */
-function PipelineWebsiteCell({
-  m,
-  leadId,
-}: {
-  m: ReturnType<typeof oasisRowModel>;
-  leadId: string;
-}) {
+function PipelineWebsiteCell({ m }: { m: ReturnType<typeof oasisRowModel> }) {
   const href = preferredSiteUrl(m.websiteUrl);
-  // THE NON-SCORED STATES RENDER AS SENTENCES, never a zero, a dash, a blank or
-  // an empty chart. `no_website` uses the lead's OWN stored wording, which is
-  // OpenStreetMap's hedge -- absence of a website tag means nobody mapped one,
-  // not that no site exists.
-  const sentence =
-    m.webScoreState === "parked"
-      ? "Domain listed for sale, no live site"
-      : m.webScoreState === "unreachable"
-        ? "We could not check this site"
-        : m.webScoreState === "not_scored"
-          ? "Not scored yet"
-          : m.webScoreState === "no_website"
-            ? m.websiteCondition || "No website found yet, needs checking"
-            : null;
+  // The lead's OWN stored wording (OpenStreetMap's hedge for a missing website
+  // tag: nobody mapped one, which is not proof that no site exists). Never a
+  // zero, a dash or a blank.
+  const sentence = !href && m.websiteCondition ? m.websiteCondition : null;
   return (
     <div className="flex min-w-0 flex-col items-start gap-1.5">
       {/* WHICH domain, at a glance, before any control. Kept from origin/main
@@ -1913,31 +1864,8 @@ function PipelineWebsiteCell({
             <ExternalLink className="h-3 w-3" />View site
           </a>
         )}
-        {/* Only for rows that ARE web-leads. The battle card lives at
-            /web-leads/<id>, whose lookup is pinned to WEBDEV_TENANT_ID, so
-            linking there from any other tenant's row -- or from an ordinary CRM
-            lead typed in by hand -- is a button that always 404s. */}
-        {m.isWebLead && (
-          <Link
-            href={`/web-leads/${encodeURIComponent(leadId)}`}
-            title={`Open the full battle card for ${m.name}`}
-            className="relative z-10 inline-flex shrink-0 items-center gap-1 rounded-md border border-bg-border/70 px-2 py-1 text-[10px] font-semibold text-fg-dim opacity-80 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-          >
-            <BarChart3 className="h-3 w-3" />Battle card
-          </Link>
-        )}
       </div>
-      {m.webScoreState === "scored" && m.webScore != null ? (
-        <div className="flex w-full items-center gap-2">
-          <span className="text-sm font-bold leading-none tabular-nums text-fg">{m.webScore}</span>
-          <span className="block h-1.5 w-full max-w-[4rem] overflow-hidden rounded-full bg-bg-border/80" aria-hidden>
-            <span
-              className="block h-full rounded-full bg-fg-muted"
-              style={{ width: `${Math.min(100, Math.max(0, m.webScore))}%` }}
-            />
-          </span>
-        </div>
-      ) : sentence ? (
+      {sentence ? (
         <span className="block text-[10px] italic leading-snug text-fg-dim">{sentence}</span>
       ) : null}
     </div>
@@ -1960,7 +1888,7 @@ function OasisDesktopRow({
     // ═══ WHY THIS IS NO LONGER A <Link> WRAPPING THE WHOLE ROW ═════════════
     //
     // It used to be, and that made the row a single anchor. The moment this row
-    // gained its own "View site" and "Battle card" links, that shape became an
+    // gained its own "View site" link, that shape became an
     // anchor inside an anchor -- which is invalid HTML, and browsers do not
     // render it as written: the parser closes the outer <a> early and the row
     // silently comes apart. React will happily emit it and nothing throws.
@@ -2040,7 +1968,7 @@ function OasisDesktopRow({
       <Cell title={m.address || ""}>{m.address || "-"}</Cell>
       <Cell title={m.phone} mono>{m.phone || "-"}</Cell>
       <Cell>
-        <PipelineWebsiteCell m={m} leadId={row.id} />
+        <PipelineWebsiteCell m={m} />
       </Cell>
       <Cell className={m.cold ? "font-semibold text-red-300" : ""}>{m.lastTouchLabel}</Cell>
       <Cell>{m.createdLabel}</Cell>
@@ -2106,7 +2034,7 @@ function OasisMobileRow({
               rather than inside the two-column grid because the non-scored
               sentence is a full clause and would be crushed into a 50% column. */}
           <div className="mt-2.5">
-            <PipelineWebsiteCell m={m} leadId={row.id} />
+            <PipelineWebsiteCell m={m} />
           </div>
         </div>
       </div>

@@ -31,7 +31,7 @@ async function main() {
   if (!tursoConfigured()) throw new Error("turso_not_configured: refusing to run without the Turso data client");
 
   const { getServiceSupabase } = await import("../lib/supabase-server");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { deactivateMember, previewDeactivation } = await import("../lib/team-activation");
 
   const db = getServiceSupabase();

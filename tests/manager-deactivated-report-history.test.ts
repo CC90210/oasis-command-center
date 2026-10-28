@@ -14,13 +14,13 @@
  *   /pipeline/[id]           opened the rep's won deal as "Lead not found"
  *   lib/lead-access.ts       the same denial on every lead-adjacent GET route
  *   /pipeline                the manager's board lost the rep's leads and name
- *   commissions API          the rep's rows left the manager's list and totals
+ *   commissions API          (retired with the Commissions page, 2026-10-28)
  *
  * Every check below EXECUTES the real page / route / policy against a local
  * libSQL file, with a signed session, so it proves behaviour rather than
  * source shape. The live controls stay active-only and are asserted too: the
- * board's rep chips and the lead page's operate mode. The lead page's battle
- * card is a read, so it follows the history roster (read-only) like its API.
+ * board's rep chips and the lead page's operate mode. (The lead page's battle
+ * card retired with the Prospects surface on 2026-10-28.)
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
@@ -291,7 +291,6 @@ async function main() {
   const leadAccess = await import("../lib/lead-access");
   const leadPage = (await import("../app/pipeline/[id]/page")).default;
   const boardPage = (await import("../app/pipeline/page")).default;
-  const commissions = await import("../app/api/website-sales/commissions/route");
 
   console.log("manager-deactivated-report-history:");
 
@@ -328,19 +327,11 @@ async function main() {
     assert.equal(titleOf(els), "Gone Rep Won Deal Co", "must not render 'Lead not found'");
     const lifecycle = els.find((el) => "viewerMode" in el.props);
     assert.equal(lifecycle?.props.viewerMode, "coaching", "a retired rep's deal is coached, never operated");
-    assert.equal(
-      els.some((el) => el.props.title === "Website battle card"),
-      true,
-      "the battle card API resolves the history roster (lib/web-leads/viewer.ts), so the page must render the card",
-    );
-    const card = els.find((el) => "embedded" in el.props && el.props.leadId === LEADS.goneWon);
-    assert.equal(card?.props.canMutate, false, "the former report's card renders read-only for the manager");
   });
-  await check("/pipeline/[id]: an active report's lead still opens in operate mode with its battle card", async () => {
+  await check("/pipeline/[id]: an active report's lead still opens in operate mode", async () => {
     const els = await openLead(LEADS.active);
     assert.equal(titleOf(els), "Active Rep Deal Co");
     assert.equal(els.find((el) => "viewerMode" in el.props)?.props.viewerMode, "operate");
-    assert.equal(els.some((el) => el.props.title === "Website battle card"), true);
   });
   await check("/pipeline/[id]: a founder's lead stays closed to the manager", async () => {
     assert.equal(titleOf(await openLead(LEADS.founder)), "Lead not found");
@@ -382,25 +373,6 @@ async function main() {
     assert.equal(rows.find((row) => row.id === LEADS.goneWon)?.data.assigned_to_name, "Former Rep");
     assert.equal(chips.some((href) => href.includes(`rep=${USERS.gone.id}`)), false);
     assert.ok(chips.some((href) => href.includes(`rep=${USERS.active.id}`)));
-  });
-
-  // ── FINDING 7: the manager's commission ledger ─────────────────────────────
-  await login(USERS.manager);
-  await check("commissions (manager): a deactivated report's rows stay in the list and the totals", async () => {
-    const res = await commissions.GET();
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      viewer: { ledgerScope: string };
-      data: { repUserId: string }[];
-      summary: { entryCount: number; byRep: Record<string, unknown> };
-    };
-    assert.equal(body.viewer.ledgerScope, "manager_team");
-    const reps = new Set(body.data.map((row) => row.repUserId));
-    assert.ok(reps.has(USERS.gone.id), "the deactivated report's commission row must stay listed");
-    assert.ok(reps.has(USERS.active.id));
-    assert.equal(reps.has(USERS.other.id), false, "another team's rep is outside the direct-report scope");
-    assert.ok(USERS.gone.id in body.summary.byRep, "the deactivated report must stay in the totals");
-    assert.equal(body.summary.entryCount, 2);
   });
 
   if (failures) {

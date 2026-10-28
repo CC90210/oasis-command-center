@@ -10,11 +10,10 @@ const notesRoute = readFileSync("app/api/leads/[id]/notes/route.ts", "utf8");
 const pipeline = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
 const pipelinePage = readFileSync("app/pipeline/page.tsx", "utf8");
 const pipelineQuery = readFileSync("lib/oasis-pipeline-query.ts", "utf8");
-const claimOps = readFileSync("lib/web-leads/claim-ops.ts", "utf8");
+const claimRules = readFileSync("lib/leads/claim.ts", "utf8");
 const assignRoute = readFileSync("app/api/leads/[id]/assign/route.ts", "utf8");
 const assignmentCore = readFileSync("lib/lifecycle-assignment.ts", "utf8");
 const kixieWebhook = readFileSync("app/api/webhooks/kixie/route.ts", "utf8");
-const webLeadOutcome = readFileSync("lib/web-leads/outcome.ts", "utf8");
 const emailRoute = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
 const textRoute = readFileSync("app/api/leads/[id]/texttorrent/route.ts", "utf8");
 const textInbound = readFileSync("app/api/webhooks/texttorrent/sms-inbound/route.ts", "utf8");
@@ -139,7 +138,7 @@ assert(
 // tests/oasis-create-stage-contract.test.ts.
 const boardFilterModule = readFileSync("lib/oasis-lead-create.ts", "utf8");
 assert(
-  claimOps.includes("claimPatch") &&
+  claimRules.includes("export function claimPatch") &&
     pipelinePage.includes("oasisBoardProgramFilter(tenantSlug)") &&
     pipelinePage.includes(
       "salesMotion: warmInbound ? OASIS_INBOUND_WARM_MOTION : boardFilter.salesMotion",
@@ -301,10 +300,6 @@ assert(
   "note writes use the same owned-lead access rule as the rest of the lead file",
 );
 assert(
-  claimOps.includes('from("lead_interactions")') && claimOps.includes("actor_user_id"),
-  "claiming a lead creates an attributed lifecycle touch",
-);
-assert(
   assignmentCore.includes("last_contacted_at") && assignRoute.includes("actor_user_id"),
   "assigning or transferring a lead updates Last Touch and attributes the event",
 );
@@ -316,10 +311,6 @@ assert.equal(
 assert(
   kixieWebhook.includes("last_contacted_at") && kixieWebhook.includes("last_call_at"),
   "real Kixie contact updates the same canonical Last Touch fields on Turso",
-);
-assert(
-  webLeadOutcome.includes("persistCanonicalLeadTouch") && webLeadOutcome.includes('from("lead_interactions")'),
-  "the Leads-page call outcome updates Pipeline Last Touch and the unified touch ledger",
 );
 for (const [name, source] of [
   ["dashboard email", emailRoute],

@@ -12,7 +12,7 @@ import {
   similarity,
   slugify,
   uniqueSlug,
-} from "@/lib/web-leads/objections/admin";
+} from "@/lib/objections/admin";
 import {
   approverName,
   changesCopy,
@@ -20,8 +20,8 @@ import {
   mayAuthorObjections,
   mayViewObjectionLibrary,
   needsApprovalRights,
-} from "@/lib/web-leads/objections/admin-access";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+} from "@/lib/objections/admin-access";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 
 // ---------------------------------------------------------------------------
 // The authoring surface, tested where it can be tested without a database.
@@ -258,7 +258,7 @@ console.log("objection-admin: editing live copy requires closer rights OK");
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
 const adminSource = stripComments(
-  fs.readFileSync(path.join(process.cwd(), "lib/web-leads/objections/admin.ts"), "utf8"),
+  fs.readFileSync(path.join(process.cwd(), "lib/objections/admin.ts"), "utf8"),
 );
 const updateResponseSource = (() => {
   const start = adminSource.indexOf("export async function updateResponse(");

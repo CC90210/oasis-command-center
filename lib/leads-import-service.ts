@@ -14,7 +14,7 @@ import {
   memberStanding,
   type MemberStanding,
 } from "./team";
-import { resolveAssignableTarget } from "./web-leads/assign-target";
+import { resolveAssignableTarget } from "./leads/assign-target";
 
 const MAX_ROWS = 5_000;
 const DEDUP_LOOKBACK = 20_000;

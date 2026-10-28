@@ -353,9 +353,6 @@ const DEFS: readonly CatalogEntry[] = [
   ev({ key: "call.logged", department: "sales", owningModule: "app/api/call-appointments/[id]/route.ts", subjectTypes: ["call"], requiredJoinKeys: ["contact_id"],
     payload: { provider: code(), call_id: id(), disposition: code(), duration_sec: int(0) }, idempotency: "call:{provider}:{call_id}",
     description: "A call was logged with a disposition code." }),
-  ev({ key: "objection.raised", department: "sales", owningModule: "lib/web-leads/objections/events.ts", subjectTypes: ["call", "meeting", "lead"], requiredJoinKeys: ["contact_id"],
-    payload: { objection_code: code(), source_kind: code(["call", "meeting", "message"]), confidence_pct: opt(int(0, 100)) },
-    idempotency: "obj:{meeting_or_call_id}:{code}", description: "An objection from the pack was raised." }),
 
   // ── Close ─────────────────────────────────────────────────────────────────
   ev({ key: "proposal.sent", department: "sales", owningModule: "lib/website-sales-workflow.ts", subjectTypes: ["proposal"], requiredJoinKeys: ["contact_id", "deal_id"],

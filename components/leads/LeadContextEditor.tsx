@@ -3,7 +3,7 @@
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ExternalLink, Save } from "lucide-react";
-import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { safeExternalUrl } from "@/lib/leads/site-url";
 import { LeadQuickEmail } from "@/components/leads/LeadQuickEmail";
 import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 

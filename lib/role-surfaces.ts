@@ -101,17 +101,6 @@ export type SurfaceCapabilities = {
   canSeeTeamPipeline: boolean;
   /** Only leads assigned to this viewer, only at the rep-workable stages. */
   canSeeOwnPipelineOnly: boolean;
-  /** This viewer's own commission rows (website_sales_commissions.rep_user_id = me). */
-  canSeeOwnCommissionOnly: boolean;
-  /**
-   * Commission rows for the OASIS sales roster this viewer coaches — what a
-   * manager needs to verify the override they are paid on. NOT the tenant-wide
-   * ledger. The commission API enforces this with the same canonical,
-   * manager-scoped roster used by Today and the Pipeline.
-   */
-  canSeeTeamCommission: boolean;
-  /** Every rep's commission — the payout ledger a founder approves from. */
-  canSeeCommissionLedger: boolean;
   /** Post-sale delivery: onboarding / in_build / client_review / launched. */
   canSeeDeliveryQueues: boolean;
   /** Client and company names beyond the viewer's own assigned leads. */
@@ -239,9 +228,6 @@ const FOUNDER: SurfaceCapabilities = {
   canSeeAllPipeline: true,
   canSeeTeamPipeline: true,
   canSeeOwnPipelineOnly: false,
-  canSeeOwnCommissionOnly: false,
-  canSeeTeamCommission: true,
-  canSeeCommissionLedger: true,
   canSeeDeliveryQueues: true,
   canSeeClientIdentities: true,
   canSeeInboundTape: true,
@@ -274,9 +260,6 @@ const MANAGER: SurfaceCapabilities = {
   canSeeAllPipeline: false,
   canSeeTeamPipeline: true,
   canSeeOwnPipelineOnly: true,
-  canSeeOwnCommissionOnly: true,
-  canSeeTeamCommission: true,
-  canSeeCommissionLedger: false,
   canSeeDeliveryQueues: false,
   // Their team's deals are their team's clients. Scoped by canSeeTeamPipeline,
   // not a licence to browse the tenant's client list.
@@ -299,9 +282,6 @@ const SALES: SurfaceCapabilities = {
   canSeeAllPipeline: false,
   canSeeTeamPipeline: false,
   canSeeOwnPipelineOnly: true,
-  canSeeOwnCommissionOnly: true,
-  canSeeTeamCommission: false,
-  canSeeCommissionLedger: false,
   canSeeDeliveryQueues: false,
   canSeeClientIdentities: false,
   canSeeInboundTape: false,
@@ -319,9 +299,6 @@ const WORKER: SurfaceCapabilities = {
   canSeeAllPipeline: true,
   canSeeTeamPipeline: true,
   canSeeOwnPipelineOnly: false,
-  canSeeOwnCommissionOnly: false,
-  canSeeTeamCommission: false,
-  canSeeCommissionLedger: false,
   canSeeDeliveryQueues: true,
   canSeeClientIdentities: true,
   canSeeInboundTape: false,
@@ -354,9 +331,6 @@ const MARKETING: SurfaceCapabilities = {
   canSeeAllPipeline: false,
   canSeeTeamPipeline: false,
   canSeeOwnPipelineOnly: true,
-  canSeeOwnCommissionOnly: false,
-  canSeeTeamCommission: false,
-  canSeeCommissionLedger: false,
   canSeeDeliveryQueues: false,
   canSeeClientIdentities: true,
   canSeeInboundTape: false,
@@ -399,9 +373,6 @@ const BUILDER: SurfaceCapabilities = {
   // OWN-book only — "all" stays false below, so what widened is his reach into
   // his own claimed deals, never a view of anyone else's.
   canSeeOwnPipelineOnly: true,
-  canSeeOwnCommissionOnly: true,
-  canSeeTeamCommission: false,
-  canSeeCommissionLedger: false,
   canSeeDeliveryQueues: true,
   canSeeClientIdentities: true,
   canSeeInboundTape: false,
@@ -449,13 +420,6 @@ export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   readonly: READONLY,
   legacy: LEGACY,
 };
-
-/** One shared gate for the page, API, and navigation entry to commissions. */
-export function maySeeCommissionSurface(capabilities: SurfaceCapabilities): boolean {
-  return capabilities.canSeeCommissionLedger ||
-    capabilities.canSeeTeamCommission ||
-    capabilities.canSeeOwnCommissionOnly;
-}
 
 /**
  * The capability record for a persona STANDING IN A PARTICULAR WORKSPACE.
@@ -569,18 +533,9 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
-  "/commissions",
   "/settings",
-  // The Leads browser (CC, 2026-08-21): "those sales reps should be able to
-  // access the leads page so they can import leads themselves."
-  //
-  // This is the prospecting POOL, not another rep's book — a public directory
-  // of Canadian businesses with website status, filtered by province, city and
-  // industry. Nothing in it is assigned to anyone, so opening it to reps
-  // exposes no colleague's pipeline. It is what makes self-sourcing possible,
-  // which pays 35% for finding and closing; company-supplied work pays 15%
-  // for opening or 25% for closing (70% is the separate build-it-too special).
-  "/web-leads",
+  // The Leads browser (/web-leads) and Commissions (/commissions) retired on
+  // 2026-10-28; both now answer 404, so neither is a nav row any more.
   // Training, and the objection library and trainer it leans on.
   //
   // `/objections` is listed as a FIX, not a new grant. The library and the
@@ -627,10 +582,7 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
-  "/commissions",
   "/settings",
-  // Managers assign from the same pool their reps source from.
-  "/web-leads",
   // A manager coaches against the same material a rep trains on, so they need
   // to have seen it. `/objections` also carries the APPROVAL gate: approving an
   // answer needs deal-closing rights, which a manager has.
@@ -684,12 +636,8 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
-  "/commissions",
   "/settings",
   "/founders/marketing",
-  // CC, 2026-08-25: the builder/marketing hire also sells, so he sources from
-  // the same prospecting pool the reps do and claims into his own book.
-  "/web-leads",
   // OASIS OS: the two departments his two jobs sit in, plus Chief of Staff.
   // Client Success is absent: inside OASIS, delivery is founder-only
   // (lib/delivery/access.ts), and a department over data he cannot read is a

@@ -4,7 +4,6 @@ import {
   type StageMeta,
 } from "@/lib/oasis-stage-meta";
 import { normalizeCollaborators } from "@/lib/lead-scope";
-import { factsFrom, isReleasedFromBook } from "@/lib/web-leads/claim";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 
@@ -148,22 +147,6 @@ export function stagesForOasisWarmInboundRole(
 }
 
 type PipelineRow = { id: string; data: Record<string, unknown> };
-
-/**
- * A claim returned to Leads is no longer active Pipeline work for any role.
- *
- * Claim ageing applies only while the record is still in the pre-handoff
- * prospect workflow. Once a founder meeting is booked, the stage itself proves
- * active work; an old claimed_at must never hide a paid or delivery record.
- * Lost keeps its separate 90-day recycle rule from claim.ts.
- */
-export function isReleasedOasisPipelineRow(
-  row: PipelineRow,
-  now: number = Date.now(),
-): boolean {
-  const facts = factsFrom(row.data || {});
-  return isReleasedFromBook(facts, now);
-}
 
 type OasisViewer = {
   role: string;
@@ -564,13 +547,11 @@ export function filterWebsiteSalesRows<T extends PipelineRow>(
   const programRows = (options.programScoped ?? true)
     ? rows.filter((row) => row.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM)
     : rows;
-  const now = Date.now();
-  const activeProgramRows = programRows.filter((row) => !isReleasedOasisPipelineRow(row, now));
-  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return activeProgramRows;
+  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return programRows;
   if (!viewer.userId) return [];
   const userId = viewer.userId.toLowerCase();
   const allowedStages = stageSetForOasisRole(viewer.role);
-  return activeProgramRows.filter((row) => {
+  return programRows.filter((row) => {
     const assignedTo = typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : "";
     const isBuilder = viewer.role.trim().toLowerCase() === "builder";
     const deliveryOwned = isBuilder && ownsOasisDeliveryRecord(row, userId);

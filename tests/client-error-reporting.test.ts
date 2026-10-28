@@ -12,8 +12,8 @@
  *     [client.error] line and stores a row, and still answers 204 before
  *     migration bravo__198 exists;
  *   - both error screens and the root layout are wired to it;
- *   - the roster route answers 503, not an uncaught 500, when the session
- *     read fails (the live 500 that was captured).
+ *   - (the Prospects roster route that answered 503 on a failed session read
+ *     retired on 2026-10-28, and its check with it).
  *
  * Run: node --conditions=react-server --import tsx tests/client-error-reporting.test.ts
  */
@@ -302,12 +302,6 @@ async function main() {
     assert.match(listener, /addEventListener\("error", onError\)/);
     assert.match(listener, /addEventListener\("unhandledrejection", onRejection\)/);
     assert.match(listener, /reason\.name === "AbortError"\) return;/, "an aborted fetch is not reported as a crash");
-  });
-
-  await check("the roster route turns a failed session read into a 503, not an uncaught 500", () => {
-    const src = read("app/api/web-leads/assignable-reps/route.ts");
-    assert.match(src, /try \{\s+session = await resolveSessionContext\(\);\s+\} catch/);
-    assert.match(src, /error: "session_unavailable" \}, \{ status: 503 \}/);
   });
 
   console.log(failures ? `client-error-reporting: ${failures} FAILED (${passed} ok)` : `client-error-reporting: ok (${passed} checks)`);

@@ -17,7 +17,7 @@ import {
 } from "@/lib/training/roleplay/prompt";
 import { SCENARIOS, scenarioById } from "@/lib/training/roleplay/scenarios";
 import { assertTranscriptSane } from "@/lib/training/roleplay/turn";
-import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
+import { SEEDED_SLUGS } from "@/lib/objections/seed-slugs";
 
 // ---------------------------------------------------------------------------
 // The practice call.

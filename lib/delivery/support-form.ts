@@ -32,7 +32,7 @@
  * edits the form into several steps — see handleSupportFormSubmission.
  */
 import type { FormBranding, FormStep } from "@/lib/forms/types";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 
 /** The OASIS workspace (slug `oasis-ai-cc`). Same constant the funnels use. */
 export const SUPPORT_FORM_TENANT_ID = WEBDEV_TENANT_ID;

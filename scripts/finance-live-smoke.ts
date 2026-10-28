@@ -39,7 +39,7 @@ async function main() {
   const { tursoConfigured } = await import("../lib/turso");
   if (!tursoConfigured()) throw new Error("turso_not_configured");
   const { getServiceSupabase } = await import("../lib/supabase-server");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const pc = await import("../lib/founders-finances/page-context");
 
   const profile = await getServiceSupabase()

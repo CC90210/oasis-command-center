@@ -23,7 +23,7 @@
  * instructions.
  */
 
-import { copyViolations } from "@/lib/web-leads/objections/copy-rules";
+import { copyViolations } from "@/lib/objections/copy-rules";
 import type { RoleplayScenario } from "@/lib/training/roleplay/scenarios";
 
 /** The most turns one practice call runs to. A call that will not end is a

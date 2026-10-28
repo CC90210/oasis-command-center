@@ -33,7 +33,7 @@ import {
   checkSpokenAnswer,
   type DrillKind,
   type PracticeObjection,
-} from "@/lib/web-leads/objections/practice";
+} from "@/lib/objections/practice";
 
 const BTN =
   "rounded-md border border-bg-border px-3 py-1.5 text-sm font-medium text-fg-muted transition hover:border-accent/50 hover:text-fg disabled:cursor-not-allowed disabled:opacity-50";

@@ -13,7 +13,7 @@
  */
 
 import { ExternalLink } from "lucide-react";
-import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { preferredSiteUrl } from "@/lib/leads/site-url";
 import { nonEmptyString } from "@/lib/format-helpers";
 
 /**

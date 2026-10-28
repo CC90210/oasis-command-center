@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createClient } from "@libsql/client";
 
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "../lib/pipeline-cycle";
-import { WEBDEV_TENANT_ID } from "../lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "../lib/oasis-tenant";
 
 const ROOT = resolve(process.cwd());
 const SCRIPT = resolve(ROOT, "scripts", "plan-oasis-pipeline-cycle.ts");

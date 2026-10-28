@@ -22,7 +22,7 @@ import {
   roleMayOperateOasisSalesLead,
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { availability, factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
+import { availability, factsFrom } from "@/lib/leads/claim";
 
 export type PerLeadAccess =
   | { ok: true }
@@ -142,16 +142,8 @@ export async function assertMayWorkLead(args: {
         message: "This lead is on the do-not-call list and cannot be worked.",
       };
     }
-    if (isInBookOf(facts, args.userId)) {
-      if (!isActionableBy(facts, args.userId, now)) {
-        return {
-          ok: false,
-          status: 409,
-          error: "claim_released",
-          message: "This claim has returned to the Leads pool. Claim it again before working it.",
-        };
-      }
-    }
+    // (A held lead no longer lapses back to a pool, 2026-10-28, so there is no
+    // released-claim refusal here any more; lib/leads/claim.ts says why.)
   }
 
   return mine

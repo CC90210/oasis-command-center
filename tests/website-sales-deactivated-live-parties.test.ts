@@ -176,7 +176,7 @@ async function check(name: string, fn: () => Promise<void>) {
 
 async function main() {
   console.log("website-sales-deactivated-live-parties:");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { OASIS_WEBSITE_SALES_PROGRAM, OASIS_COLD_OUTBOUND_MOTION } = await import(
     "../lib/leads/canonical-lead-fields"
   );

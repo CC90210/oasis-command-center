@@ -54,10 +54,9 @@ import {
   getOasisPipelineAssignmentRoster,
   memberStanding,
 } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 import {
   OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
-  isReleasedOasisPipelineRow,
 } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
@@ -330,14 +329,12 @@ export async function POST(req: NextRequest) {
         out.skipped += 1;
         continue;
       }
+      // The parked prospect pool retired with Prospects (2026-10-28); an
+      // unowned lead at a working stage is assignable (see the single route).
       if (
         isOasisBulkWorkspace &&
         !isWarmInboundLead &&
-        (!currentOwner ||
-          !currentStage ||
-          currentStage === "unassigned" ||
-          currentStage === "researched" ||
-          isReleasedOasisPipelineRow(bulkRecord))
+        (!currentStage || currentStage === "unassigned" || currentStage === "researched")
       ) {
         out.skipped += 1;
         claimRequired += 1;
@@ -397,7 +394,7 @@ export async function POST(req: NextRequest) {
         ? {
             claim_required: claimRequired,
             ...(claimRequired > 0
-              ? { message: `${claimRequired} pool lead${claimRequired === 1 ? "" : "s"} stayed untouched. Use Leads and its Assign action to claim them correctly.` }
+              ? { message: `${claimRequired} parked prospect${claimRequired === 1 ? "" : "s"} stayed untouched: the prospect pool retired with the Prospects page.` }
               : {}),
           }
         : {}),
@@ -797,14 +794,14 @@ export async function POST(req: NextRequest) {
   }
   // OASIS ownership and stage are one lifecycle transition. A raw bulk stage
   // patch cannot choose/verify an active OASIS assignee, stamp the revenue cycle, or retain
-  // claim provenance, so even researched -> assigned must use the canonical
-  // Leads claim flow. SunBiz keeps its existing bulk-stage behavior.
+  // claim provenance, so OASIS stages move one lead at a time, from the lead's
+  // own page. SunBiz keeps its existing bulk-stage behavior.
   if (isOasisBulkLead) {
     return NextResponse.json(
       {
         ok: false,
         error: "use_web_leads_claim",
-        message: "Claim OASIS leads from Leads so owner, cycle, and sales motion stay together.",
+        message: "Change an OASIS lead's stage from its lead page, so the owner, cycle and sales motion stay together.",
       },
       { status: 409 },
     );

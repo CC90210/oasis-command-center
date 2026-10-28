@@ -19,14 +19,14 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { Card, EmptyState } from "@/components/Card";
-import type { AdminObjection } from "@/lib/web-leads/objections/admin";
+import type { AdminObjection } from "@/lib/objections/admin";
 import {
   OBJECTION_FAMILIES,
   OBJECTION_POSTURES,
   POSTURE_LABEL,
   type ObjectionFamily,
   type ObjectionPosture,
-} from "@/lib/web-leads/objections/types";
+} from "@/lib/objections/types";
 
 const FAMILY_LABEL: Record<string, string> = {
   brush_off: "Brush off",

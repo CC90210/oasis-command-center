@@ -96,7 +96,7 @@ async function main() {
   const store = await import("../lib/tenant-integration-store");
   const { encryptField } = await import("../lib/field-encryption");
   const { TENANT_ID_BRAND } = await import("../lib/email/brand-for-tenant");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } = await import("../lib/tenant-integration-schemas");
 
   // One row per (service, field), each with its own env value so a wrong

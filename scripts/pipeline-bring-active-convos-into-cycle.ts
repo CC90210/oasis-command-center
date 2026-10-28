@@ -28,7 +28,7 @@ async function main() {
   const apply = process.argv.includes("--apply");
   const { getTursoClient, tursoConfigured } = await import("../lib/turso");
   if (!tursoConfigured()) throw new Error("turso_not_configured");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { CURRENT_OASIS_PIPELINE_CYCLE } = await import("../lib/pipeline-cycle");
   const { getOasisPipelineAssignmentRoster } = await import("../lib/team");
 

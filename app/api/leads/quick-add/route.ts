@@ -39,7 +39,7 @@ import {
   planOasisLeadCreate,
 } from "@/lib/oasis-lead-create";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

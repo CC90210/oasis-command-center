@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const workflowRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
-const commissionRoute = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
 const migration = readFileSync("database/146_website_sales_engine.sql", "utf8");
 
 assert(workflowRoute.includes("resolveSessionContext"), "workflow route authenticates through session context");
@@ -10,8 +9,6 @@ assert(workflowRoute.includes('.eq("tenant_id", session.tenantId)') && workflowR
 assert(workflowRoute.includes("session.isTrueAdmin"), "founder-only mutations use the permanent admin gate");
 assert(workflowRoute.includes("attribution_frozen_at") && workflowRoute.includes("existingRep"), "founder booking preserves frozen rep attribution");
 assert(workflowRoute.includes("rep_stage_forbidden"), "reps cannot advance founder-owned stages");
-assert(commissionRoute.includes(".eq(\"tenant_id\", session.tenantId)"), "commission reads are tenant-filtered");
-assert(commissionRoute.includes("rep_user_id",), "non-admin commission reads scope to the current rep");
 
 for (const table of ["website_deals", "website_sales_commissions", "website_onboarding"]) {
   assert(migration.includes(`alter table public.${table} enable row level security`), `${table} enables RLS`);

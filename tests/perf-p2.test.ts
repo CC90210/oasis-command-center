@@ -48,27 +48,7 @@ assert.ok(
   assert.ok(fieldReads.includes("stage") && fieldReads.includes("status"), "both projected fields are still read");
 }
 
-const scores = src("lib/web-leads/scores.ts");
-assert.ok(
-  (scores.match(/\.eq\("is_parked", 1\)/g) || []).length >= 2,
-  "both parked call sites read the stored verdict tier",
-);
-assert.ok(
-  (scores.match(/\.is\("is_parked", null\)/g) || []).length >= 2,
-  "both parked call sites keep the LIKE net over unstamped rows only",
-);
-assert.ok(
-  scores.includes("parkedSignalsOrFilter()"),
-  "the unstamped tier still uses the shared net (lists cannot drift apart)",
-);
-assert.ok(
-  scores.includes('assertCompleteRead("parked_index_stamped"') &&
-    scores.includes('assertCompleteRead("parked_index_unstamped"'),
-  "completeness is proven on BOTH parked tiers — a short read must throw, not shrink the peer group",
-);
-assert.ok(
-  scores.includes("confirmParked"),
-  "confirmParked remains the verdict on the union (a stamp is a candidate, not a sentence)",
-);
+// The parked-domain score index (lib/web-leads/scores.ts) retired with the
+// Prospects surface on 2026-10-28, and its assertions with it.
 
 console.log("perf-p2: all assertions passed");

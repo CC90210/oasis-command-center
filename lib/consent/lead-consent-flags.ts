@@ -82,7 +82,7 @@ type Reading = (value: unknown) => boolean;
 
 /** lib/drips/enroller.ts and executor.ts: isTruthyFlag. */
 const dripEngine: Reading = (v) => v === true || v === "true" || v === 1 || v === "1";
-/** lib/web-leads/claim.ts factsFrom and assign.ts isDnc. */
+/** lib/leads/claim.ts factsFrom. */
 const callQueue: Reading = (v) => v === true || v === 1;
 /** BEA scripts/integrations/send_gateway.py: lead_data.get("opted_out") is True. */
 const outboundGateway: Reading = (v) => v === true;

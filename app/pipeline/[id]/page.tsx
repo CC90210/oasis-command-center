@@ -21,9 +21,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { nonEmptyString } from "@/lib/format-helpers";
-import { BattleCard } from "@/components/web-leads/BattleCard";
-import { factsFrom } from "@/lib/web-leads/claim";
-import { visibleToViewer } from "@/lib/web-leads/data";
+import { factsFrom } from "@/lib/leads/claim";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { DeleteLeadButton } from "./DeleteLeadButton";
 import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
@@ -40,7 +38,7 @@ import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
-import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { safeExternalUrl } from "@/lib/leads/site-url";
 import { auditAnswerLabel, bottleneckLabel, funnelStageLabel, leadFunnelForm } from "@/lib/forms/ai-audit-format";
 import { leadFirstTouch } from "@/lib/offer-pages/utm";
 import { formatBookedTime } from "@/lib/forms/public-booking-alert";
@@ -101,10 +99,8 @@ export default async function PipelineLeadDetailPage({
   // One roster, two questions. OPENING a lead is a history read: a closed or
   // in-delivery deal keeps its deactivated rep's assigned_to forever
   // (lib/team-activation-rules.ts "keep"), so their former manager must still
-  // open it rather than land on "Lead not found". The battle card is a read
-  // too: its API resolves this same history roster (lib/web-leads/viewer.ts,
-  // includeInactive), and the card only mutates behind canMutateLead. OPERATING
-  // on a lead (managerWorksTeamBook) stays on ACTIVE reps.
+  // open it rather than land on "Lead not found". OPERATING on a lead
+  // (managerWorksTeamBook) stays on ACTIVE reps.
   const managerRoster =
     session.ok && canReadOasisSalesTeamPipeline({ teamRole: session.teamRole, tenantSlug: ownedSlug })
       ? await safe(
@@ -207,8 +203,7 @@ export default async function PipelineLeadDetailPage({
   // widen if that resolution is ever reused for another role. A deactivated
   // rep's kept deal opens in the coaching view, never the operate one.
   // Roster membership is answered by the shared predicate, never re-derived
-  // here: lib/web-leads/data.ts asks the identical question for the prospecting
-  // surface, and a second inline copy is how those two surfaces drift.
+  // here: a second inline copy is how two surfaces drift.
   //
   // The unassigned case is deliberately OUTSIDE the predicate. "Is this seat on
   // my roster" and "may I work a lead nobody owns" are different questions, and
@@ -240,50 +235,6 @@ export default async function PipelineLeadDetailPage({
     nonEmptyString(activeRecord.data.audit_host_user_id) ||
     nonEmptyString(activeRecord.data.booked_founder);
   const bookedHostName = founderId ? memberNames.get(founderId) || null : null;
-
-  // Is this a web-lead, i.e. does a battle card exist for it? Keyed on the
-  // pointer JARVIS's crm-sink stamps at promotion time, the same field the
-  // audit and score lookups key on. An ordinary CRM lead has no audit and
-  // /api/web-leads/[id]/battlecard would 404 for it.
-  const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
-
-  /**
-   * === TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (review, 2026-08-25) ======
-   *
-   * This page admits a viewer through `canOpenOasisSalesRecord`, which accepts
-   * the assignee OR anyone listed in `collaborators` -- that is what makes the
-   * opener-to-closer handoff work, and the comp plan pays both people.
-   *
-   * The battle card fetches /api/web-leads/[id]/battlecard, whose scoping runs
-   * through `visibleToViewer`, and that one accepts the assignee ONLY. It has
-   * no collaborator concept at all. So a collaborator opens this record and the
-   * card inside it 404s.
-   *
-   * NOBODY IS LEFT WITH NOTHING, and that is why this is a gate rather than an
-   * error left to happen: `LeadWebsiteAuditBand` renders unconditionally in
-   * the Lead details disclosure below,
-   * carrying the website, the industry, the condition and the findings for
-   * every viewer. So a collaborator who cannot load the card still sees the
-   * business; asking the same function the API asks just means they are not
-   * shown a panel that would only render an error.
-   *
-   * > FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
-   * collaborators so the two doors genuinely match rather than this page
-   * routing around the gap. That widens the boundary PR #237 established and
-   * deserves its own review.
-   */
-  const cardViewer =
-    session.ok && session.userId
-      ? {
-          userId: session.userId,
-          teamRole: session.teamRole,
-          isAdmin: session.isAdmin,
-          readableAssigneeIds: readableRepUserIds,
-        }
-      : null;
-  const willRenderBattleCard = Boolean(
-    webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
-  );
 
   // How far through the website funnel this lead got, as a chip under its name
   // (CC 2026-10-16). Only a funnel lead has one; anyone else gets no chip.
@@ -399,47 +350,6 @@ export default async function PipelineLeadDetailPage({
           <LeadWebsiteAuditBand data={activeRecord.data} />
         </div>
       </CollapsibleSection>
-
-      {/*
-        === THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) =============
-        "we have to ensure that the leads tab and the pipeline are completely
-        synonymous... The pipeline is how we're going to track whose lead is
-        who. It should be what's going to be used more than the leads tab...
-        Right now as soon as you claim a lead, you're losing a lot of the
-        information that we have on the leads tab."
-
-        He was right, and the loss was STRUCTURAL rather than a missing field.
-        Claiming a lead moves it OUT of the /web-leads pool and onto the
-        pipeline, and this page rendered a CRM workspace -- so the score, the
-        percentile, the seven-axis profile, the named competitors, the
-        everything-wrong list, the sales angles and the objection panel all
-        disappeared at precisely the moment a rep committed to calling.
-
-        THE SAME COMPONENT, NOT A PIPELINE-SHAPED COPY. It reads the same
-        /api/web-leads/[id]/battlecard payload through the same authorization
-        boundary, so there is no second implementation of any of it to drift.
-        A second rendering of one business's failings is two things that can
-        disagree mid-call.
-
-        Placed AFTER the lifecycle actions on purpose: logging a call and
-        advancing a stage are what the pipeline is FOR, and burying those
-        controls under a full-height card would trade one dysfunction for
-        another. It now stays behind the supporting-information disclosure so
-        the stage-specific next action remains the single visual priority.
-      */}
-      {willRenderBattleCard ? (
-        <CollapsibleSection
-          title="Website battle card"
-          subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
-          storageKey="oasis.pipeline.battleCard.collapsed"
-          defaultCollapsed
-        >
-          {/* `canMutate` mirrors the page: the card owns write controls (the
-              call-outcome log), and a viewer who may not mutate this lead here
-              must not be handed a writeable one inside it. */}
-          <BattleCard leadId={id} canMutate={canMutateLead} embedded />
-        </CollapsibleSection>
-      ) : null}
 
       {["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].includes(metrics.stageKey) ? (
         <CollapsibleSection
