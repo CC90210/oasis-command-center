@@ -11,14 +11,14 @@
  *   6. re-check recent receipts for refunds and disputes (each at most hourly);
  *   7. flag stalls (not opened in 3 days, opened but unpaid for 7 days), once;
  *   7b. advance profile drafting from transcripts;
- *   7b3. move an engagement still at New Lead or Research in Progress to
- *       Discovery Call Scheduled once its lead's founder call is booked;
- *   7c. build the first pre-call brief for engagements at Research in Progress
- *       or Discovery Call Scheduled (it reads the client's public website),
+ *   7b3. follow the lead on the Pipeline (lib/ai-audit/rules.ts followLead):
+ *       a founder meeting booked, the meeting held, the lead lost;
+ *   7c. build the first pre-call brief for engagements at Pre-call research
+ *       or Meeting booked (it reads the client's public website),
  *       each on its own: a try is marked before it starts, and one that fails
  *       waits before the next (lib/ai-audit/briefs.ts dueBriefs);
- *   7d. research after Gate 1: start a run for an engagement in Research &
- *       Audit Generation that has none, and move each run one phase
+ *   7d. research after Gate 1: start a run for an engagement at Research
+ *       and writing that has none, and move each run one phase
  *       (lib/ai-audit/research.ts); when a run finishes and nothing has been
  *       drafted yet, draft the audit and its proposal from it
  *       (lib/ai-audit/drafting.ts);
@@ -29,8 +29,10 @@ import "server-only";
 import type { Client } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { WAITING_ON_CLIENT_STAGES, shortName, stallReason } from "@/lib/ai-audit/rules";
-import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, readLead, type Engagement } from "@/lib/ai-audit/store";
+import { WAITING_ON_CLIENT_STAGES, followLead, shortName, stallReason } from "@/lib/ai-audit/rules";
+import { leadsOnPipeline } from "@/lib/ai-audit/pipeline-link";
+import { withdrawAuthorization } from "@/lib/ai-audit/authorize";
+import { eventStatement, listEngagements, patchEngagement, aiAuditTablesInstalled, type Engagement } from "@/lib/ai-audit/store";
 import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { PDF_MAX_FAILURES, pdfFailures, queuePdfJob } from "@/lib/ai-audit/pdf";
 import { repairUnrecordedDelivery, requestDeliveryApproval } from "@/lib/ai-audit/delivery";
@@ -79,8 +81,12 @@ export type TickReport = {
   leadsRepaired: number;
   extractionsAdvanced: number;
   briefsBuilt: number;
-  /** Engagements moved to Discovery Call Scheduled because their lead's call was booked. */
+  /** Engagements moved to Meeting booked because their lead's founder meeting was booked. */
   callsBooked: number;
+  /** Engagements moved to Profile from the call because their lead reached Meeting Held (or Proposal Sent) on the Pipeline. */
+  meetingsHeld: number;
+  /** Engagements whose lead was marked Lost on the Pipeline: declined before delivery, flagged for CC after it. */
+  lostOnPipeline: number;
   /** Oasis Meet transcripts attached to their engagement; and those listed for CC (no AI answer, a guest who did not agree, a call held for his hand). */
   meetTranscriptsAttached: number;
   meetTranscriptsWaiting: number;
@@ -127,6 +133,8 @@ export async function runAiAuditTick(
     extractionsAdvanced: 0,
     briefsBuilt: 0,
     callsBooked: 0,
+    meetingsHeld: 0,
+    lostOnPipeline: 0,
     meetTranscriptsAttached: 0,
     meetTranscriptsWaiting: 0,
     researchStarted: 0,
@@ -313,14 +321,34 @@ export async function runAiAuditTick(
       report.meetTranscriptsWaiting += r.waiting;
     });
 
-    // 7b3. A call booked on the lead after the engagement was opened: the engagement follows, forward only.
-    for (const e of open.filter((x) => x.stage === "new_lead" || x.stage === "pre_call_research")) {
+    // 7b3. ONE PIPELINE (CC, 2026-10-28): the audit follows its lead when the lead moves on the Pipeline,
+    // forward only (lib/ai-audit/rules.ts followLead). One read for every open engagement's lead.
+    let leadStages = new Map<string, { stage: string | null }>();
+    await guard("follow_lead", undefined, async () => {
+      leadStages = await leadsOnPipeline(db, tenantId, open.map((e) => e.lead_id));
+    });
+    for (const e of open) {
       if (over()) break;
-      await guard("call_booked", e.id, async () => {
-        const lead = await readLead(db, tenantId, e.lead_id);
-        if (lead?.stage !== "founder_meeting_booked") return;
-        const r = await advanceEngagement(db, { tenantId, engagementId: e.id, to: "call_scheduled", actor: { type: "system", id: null }, now: now(), expectedRowVersion: e.row_version, event: "call_booked" });
-        if (r.ok) report.callsBooked += 1;
+      const follow = followLead(e.stage, leadStages.get(e.lead_id)?.stage ?? null, e.cycle_no);
+      if (!follow) continue;
+      await guard("follow_lead", e.id, async () => {
+        const system = { type: "system" as const, id: null };
+        if (follow.kind === "flag") {
+          if (e.health === "attention" && e.health_reason === follow.reason) return;
+          const r = await patchEngagement(db, { tenantId, id: e.id, expectedRowVersion: e.row_version, patch: { health: "attention", health_reason: follow.reason }, event: "lead_lost_on_pipeline", actor: system, now: now() });
+          if (r.ok) report.lostOnPipeline += 1;
+          return;
+        }
+        // Not while the audit email is going out: the send already checked the stage (store.noDeliveryInFlight).
+        const r = await advanceEngagement(db, { tenantId, engagementId: e.id, to: follow.to, actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true });
+        if (!r.ok) return;
+        if (follow.to === "call_scheduled") report.callsBooked += 1;
+        else if (follow.to === "call_completed") report.meetingsHeld += 1;
+        else {
+          report.lostOnPipeline += 1;
+          // As a decline by hand does: a Gate 1 card still waiting no longer describes this engagement.
+          await withdrawAuthorization(db, tenantId, r.engagement, system, now(), "lead_lost");
+        }
       });
     }
 

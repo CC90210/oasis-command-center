@@ -342,7 +342,15 @@ export async function openEngagement(
   const cycle = int(cycleRs.rows[0]?.n) + 1;
   const id = newId();
   const at = input.now.toISOString();
-  const stage: AiAuditStage = lead.stage === "founder_meeting_booked" ? "call_scheduled" : "new_lead";
+  // The audit starts where the lead already is on the Pipeline (ONE PIPELINE, CC 2026-10-28): a booked founder
+  // meeting is Meeting booked, and on the lead's first audit a meeting already held (Meeting Held, or a proposal
+  // sent) is Profile from the call. A later audit holds its own meeting: the lead's stage may be the last audit's.
+  const stage: AiAuditStage =
+    lead.stage === "founder_meeting_booked"
+      ? "call_scheduled"
+      : cycle === 1 && (lead.stage === "demo_completed" || lead.stage === "proposal_sent")
+        ? "call_completed"
+        : "new_lead";
   try {
     await db.batch(
       [
@@ -527,7 +535,7 @@ export async function moveStage(
   if (current.stage === input.to) return { ok: true, engagement: current };
   if (!mayMoveStage(current.stage, input.to)) return { ok: false, error: "move_not_allowed", engagement: current };
   const at = input.now.toISOString();
-  // Active Client ends the audit cycle too: the delivery project carries the client from here, and
+  // Active client ends the audit cycle too: the delivery project carries the client from here, and
   // the lead is free for other deals (an open engagement holds website sales off it, ownership.ts).
   const closing: EngagementPatch = input.to === "declined" || input.to === "cancelled" || input.to === "active_client" ? { closed_at: at, closed_reason: input.to } : {};
   const guard = input.unlessDeliveryInFlight ? noDeliveryInFlight(tenantId, current.id, input.now) : undefined;

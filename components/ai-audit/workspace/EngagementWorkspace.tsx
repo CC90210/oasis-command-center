@@ -155,7 +155,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
     router.refresh();
   }
 
-  // Forward into Transcript Awaiting Approval only through "Ask for authorization", which files Gate 1's card;
+  // Forward into Transcript to approve only through "Ask for authorization", which files Gate 1's card;
   // the move by hand stays for going back there from a later stage.
   const manualMoves = STAGE_MOVES[e.stage].filter((s) => MANUAL_STAGE_TARGETS.includes(s) && !(s === "transcript_review" && e.stage === "call_completed"));
   const auditEditable = !view.audit || view.audit.status === "draft";
@@ -183,8 +183,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
             AI audits
           </Link>
           {" / "}
-          {view.row.stage_number ? `${view.row.stage_number}. ` : ""}
-          {view.row.stage_label}. Next: <span className="text-fg">{view.row.next_action}</span>
+          {view.row.pipeline_stage_label} · {view.row.stage_label}. Next: <span className="text-fg">{view.row.next_action}</span>
           {e.health !== "ok" ? <span className="ml-2 text-status-warm">{e.health_reason}</span> : null}
         </>
       }
@@ -280,7 +279,14 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
           <section className="grid content-start gap-2 rounded-xl border border-hairline bg-bg-panel p-4 text-sm">
             <h2 className="text-sm font-semibold text-fg">Where it stands</h2>
             <div className="text-fg-muted">
-              Stage: <span className="text-fg">{view.row.stage_label}</span>
+              Pipeline:{" "}
+              <span className="text-fg">
+                {view.row.pipeline_stage_label}
+                {view.row.queue ? `, ${view.row.queue}` : ""}
+              </span>
+            </div>
+            <div className="text-fg-muted">
+              Audit step: <span className="text-fg">{view.row.stage_label}</span>
             </div>
             <div className="text-fg-muted">
               Profile:{" "}

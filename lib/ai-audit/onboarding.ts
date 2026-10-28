@@ -15,7 +15,7 @@
  *      automatically). It links the intake form and the kickoff booking page;
  *      credentials are collected only through Connections or the intake form;
  *   6. one alert to CC.
- * When every required task is done, the engagement becomes Active Client and
+ * When every required task is done, the engagement becomes Active client and
  * the lead moves to in_build (completeOnboardingIfDone).
  */
 import "server-only";
@@ -279,7 +279,7 @@ export async function runOnboarding(
   return { ok: true, engagement, done };
 }
 
-/** Onboarding → Active Client when every checklist task is done or cancelled. */
+/** Onboarding → Active client when every checklist task is done or cancelled. */
 export async function completeOnboardingIfDone(db: Client, input: { tenantId: string; engagementId: string; now: Date }): Promise<boolean> {
   const t = requireTenant(input.tenantId);
   const engagement = await getEngagement(db, t, input.engagementId);

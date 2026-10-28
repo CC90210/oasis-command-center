@@ -2,7 +2,7 @@
  * lib/ai-audit/research.ts — the research behind a Free AI Audit, after Gate 1.
  *
  * WHEN. Only once CC has authorized the client's information (Gate 1, so the
- * engagement is in Research & Audit Generation and authorizedProfile holds),
+ * engagement is in Research and writing and authorizedProfile holds),
  * started by the tick, or again by CC's press. Every phase checks that again:
  * a move back, a delete that voids the authorization, or a decline stops it.
  *
@@ -938,7 +938,7 @@ export async function noteResearchFailure(db: Client, input: { tenantId: string;
 }
 
 /**
- * Runs whose engagement is still in Research & Audit Generation but whose
+ * Runs whose engagement is still in Research and writing but whose
  * authorization no longer holds (a transcript deleted after Gate 1): deleted.
  * The delete's own purge covers nearly every case; this is the backstop the
  * tick runs (re-review of phase 3, finding 2). Answers how many runs went.

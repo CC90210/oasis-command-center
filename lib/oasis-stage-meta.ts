@@ -53,7 +53,7 @@ export const OASIS_LEAD_STAGES: StageMeta[] = [
   { key: "connected", label: "Connected", bg: "#2B7C8A", fg: "#FFFFFF" },
   { key: "qualified", label: "Qualified", bg: "#2C8372", fg: "#FFFFFF" },
   { key: "founder_meeting_booked", label: "Founder Meeting", bg: "#5167B0", fg: "#FFFFFF" },
-  { key: "demo_completed", label: "Demo Complete", bg: "#6559A8", fg: "#FFFFFF" },
+  { key: "demo_completed", label: "Meeting Held", bg: "#6559A8", fg: "#FFFFFF" },
   { key: "proposal_sent", label: "Proposal Sent", bg: "#7057A7", fg: "#FFFFFF" },
   { key: "won", label: "Won", bg: "#357A55", fg: "#FFFFFF" },
   { key: "lost", label: "Lost", bg: "#6F2D34", fg: "#FFFFFF" },

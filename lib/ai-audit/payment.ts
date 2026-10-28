@@ -388,7 +388,7 @@ export async function verifyCheckout(
   return { status: "paid", receiptId: id, duplicate };
 }
 
-/** Stages from which a verified payment moves the engagement to Payment Confirmed: the ones waiting on the client. */
+/** Stages from which a verified payment moves the engagement to Paid: the ones waiting on the client. */
 const SETTLE_FROM = PAYABLE_STAGES;
 /** Stages a settled payment has already moved past. */
 const SETTLED = new Set(["payment_confirmed", "onboarding", "active_client"]);
@@ -399,7 +399,7 @@ const SETTLED = new Set(["payment_confirmed", "onboarding", "active_client"]);
  * whose engagement has not caught up.
  *
  *   - a second paid session for the same proposal: kept, flagged, never onboarded twice;
- *   - a payable engagement: moves to Payment Confirmed (retried on a concurrent write);
+ *   - a payable engagement: moves to Paid (retried on a concurrent write);
  *   - anything else (declined, cancelled, reopened): the money is real but has
  *     nowhere to go, so the engagement is flagged FAILED and CC gets an urgent
  *     alert. Nothing is refunded automatically.

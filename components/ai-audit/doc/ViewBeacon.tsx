@@ -3,7 +3,7 @@
 /**
  * Counts a view of the client's private audit only once the page has been
  * visible for a few seconds. A GET is not a view: mail scanners and link
- * previews open links too, and "Proposal Under Review" must mean a person
+ * previews open links too, and "Client reading it" must mean a person
  * opened it. One beacon per tab.
  */
 import { useEffect } from "react";

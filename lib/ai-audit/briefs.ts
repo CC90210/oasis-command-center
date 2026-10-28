@@ -11,7 +11,7 @@
  * on one of those rows.
  *
  * When it runs: once by itself when the engagement reaches Research in
- * Progress or Discovery Call Scheduled (the tick, which marks each try first
+ * Progress or Meeting booked (the tick, which marks each try first
  * and waits between tries), and whenever CC presses "Build the brief" before
  * Gate 1. After Gate 1 the brief is history: the audit's research takes over
  * (phase 3).
@@ -206,7 +206,7 @@ export async function buildBrief(
 }
 
 /**
- * Engagements at Research in Progress or Discovery Call Scheduled that have no
+ * Engagements at Pre-call research or Meeting booked that have no
  * brief yet, leaving out any the tick tried in the last BRIEF_RETRY_MS, or has
  * tried BRIEF_MAX_TICK_ATTEMPTS times already. One that keeps failing waits
  * its turn instead of holding up the others.

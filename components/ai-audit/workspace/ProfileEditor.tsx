@@ -113,7 +113,7 @@ export function ProfileEditor({ engagementId, fields, frozen }: { engagementId: 
           <div className="mt-1 text-fg-muted">{missing.map((m) => m.label).join(", ")}.</div>
         </div>
       ) : null}
-      {frozen ? <p className="text-sm text-fg-muted">This profile is authorized (Gate 1), so it cannot change. To correct it, move the engagement back to Transcript Awaiting Approval and authorize it again.</p> : null}
+      {frozen ? <p className="text-sm text-fg-muted">This profile is authorized (Gate 1), so it cannot change. To correct it, move the audit back to Transcript to approve and authorize it again.</p> : null}
       {error ? <p className="text-sm text-status-hot">{error}</p> : null}
       {PROFILE_GROUPS.map((g) => (
         <section key={g} className="rounded-xl border border-hairline bg-bg-panel">

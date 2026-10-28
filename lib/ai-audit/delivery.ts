@@ -201,7 +201,7 @@ export function revisionEmail(input: { contactName: string | null; businessName:
  * finding 1). The client's payment pages close first (Stripe is told each open
  * session is over), and again after the move, so nothing is paid for a version
  * being replaced; a follow-up still waiting for CC is withdrawn. The
- * engagement goes back to Research & Audit Generation with drafts copied from
+ * engagement goes back to Research and writing with drafts copied from
  * what the client has, the email worded as an update; if the drafts cannot be
  * made it goes back to where it was. The client's link keeps opening the
  * delivered version until the new one is approved and sent: that delivery
@@ -258,7 +258,7 @@ export async function reviseAfterDelivery(
   });
   if (copied.ok) return copied;
   // The drafts could not be made: back to what the client has, so Revise can be pressed again (review of phase 5:
-  // a half-done revision left Research & Audit Generation with nothing copied and no button).
+  // a half-done revision left Research and writing with nothing copied and no button).
   await rollBackRevision(db, t, engagement, audit.id, proposal.id, input);
   return copied;
 }
@@ -616,7 +616,7 @@ async function runDelivery(ctx: ExecutorContext): Promise<ExecutorOutcome> {
         alertType: "ai_audit_delivery_unrecorded",
         severity: "urgent",
         title: `Audit sent, but not yet recorded: ${shortName(engagement.business_name, "an AI audit")}`,
-        body: "The client has the email and its link. The engagement has not moved to Audit Delivered yet; the next tick finishes the record. Do not retry delivery: that would send a second email.",
+        body: "The client has the email and its link. The engagement has not moved to Audit sent yet; the next tick finishes the record. Do not retry delivery: that would send a second email.",
         subjectType: "ai_audit_engagement",
         subjectId: engagement.id,
         telegramOncePerOpen: true,

@@ -2,7 +2,7 @@
  * lib/ai-audit/drafting.ts — saving the first drafts of an audit and its
  * proposal (lib/ai-audit/draft.ts builds them), after Gate 1 and research.
  *
- * WHEN. Only in Research & Audit Generation, only while the authorization
+ * WHEN. Only in Research and writing, only while the authorization
  * holds, and only from a stored research run. The tick drafts once, right
  * after the first research run finishes, and only where nothing has been
  * drafted yet; CC's press drafts again and replaces the draft's content (the
