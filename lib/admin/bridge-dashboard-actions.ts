@@ -161,8 +161,8 @@ async function logResult(
     ok: result.ok,
     summary: result.ok ? result.summary : undefined,
     error: result.ok ? undefined : result.error,
-    // What the confirmed change asked to set, for the Execution trace (scrubbed, bounded).
-    ...(payload ? { after: actionSnapshot(payload) } : {}),
+    // What the confirmed change asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
+    ...(payload ? { requested: actionSnapshot(payload) } : {}),
   });
 }
 

@@ -31,9 +31,10 @@ function scrubbed(value: unknown, depth: number): unknown {
 }
 
 /**
- * What an agent's action asked to set, for the Execution trace (2026-10-28,
- * Codex review of #768: no producer recorded a snapshot, so the trace's field
- * view never appeared for a real action). Secrets scrubbed in every string,
+ * What an agent's action ASKED to set, for the Execution trace (2026-10-28,
+ * Codex review of #768): its request, not proof of what was written (a
+ * handler may ignore a field, and a failed action wrote nothing), so it is
+ * stored as `requested`, never as `after`. Secrets scrubbed in every string,
  * at most 40 keys, 3 levels and 4 KB; null when there is nothing to show.
  */
 export function actionSnapshot(payload: unknown): Record<string, unknown> | null {
@@ -53,6 +54,8 @@ export type LoggedAction = {
   error?: string;
   before?: unknown;
   after?: unknown;
+  /** What the action asked to set (actionSnapshot): its request, not proof of what was written. */
+  requested?: unknown;
 };
 
 export async function logAction(input: LoggedAction): Promise<boolean> {
@@ -69,6 +72,7 @@ export async function logAction(input: LoggedAction): Promise<boolean> {
         error: input.error || null,
         before: input.before ?? null,
         after: input.after ?? null,
+        requested: input.requested ?? null,
         tenant_id: input.tenant_id,
         user_id: input.user_id,
       },

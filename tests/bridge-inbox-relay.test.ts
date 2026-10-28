@@ -29,6 +29,7 @@ const ROOT = process.cwd();
 const dbFile = join(mkdtempSync(join(tmpdir(), "bridge-inbox-")), "test.db");
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "bridge-inbox-relay-field-key-long-enough-01";
 for (const key of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN", "BRAVO_SUPABASE_URL", "BRAVO_SUPABASE_SERVICE_ROLE_KEY"]) delete process.env[key];
 
 const db = createClient({ url: `file:${dbFile}` });
@@ -84,6 +85,8 @@ async function seed(): Promise<void> {
     CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, email TEXT, banned_until TEXT, deleted_at TEXT, session_version INTEGER);
     CREATE TABLE workspace_agents_owner (tenant_id TEXT PRIMARY KEY, auth_user_id TEXT, revoked_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT, publisher_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT, created_at TEXT);
+    CREATE TABLE tenant_integration_credentials (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL,
+      service TEXT NOT NULL, field_key TEXT NOT NULL, encrypted_value TEXT NOT NULL);
     -- agent_messages exactly as the live database holds it before bravo__246 (no foreign key here).
     CREATE TABLE agent_messages (
       id TEXT NOT NULL DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random())%4+1,1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
@@ -161,6 +164,12 @@ async function main(): Promise<void> {
   await seed();
   const route = await import("../app/api/bridge/inbox/[[...path]]/route");
   const inbox = await import("../lib/agent-inbox-db");
+  const { encryptField } = await import("../lib/field-encryption");
+  // A credential saved in this workspace's vault (Settings > Connections > Custom keys).
+  await db.execute({
+    sql: "INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'custom', 'acme_api', ?)",
+    args: [OASIS, encryptField("acmevault-9f8e7d6c5b4a")],
+  });
   type Json = { ok?: boolean; error?: string; messages?: Array<{ id: string; to: string; body: string; message_id: string }>; delivered?: string[]; acked?: string[] };
   const call = async (method: "GET" | "POST", verb: string, token: string | null, body?: unknown, headers?: Record<string, string>) => {
     const { req, ctx } = request(method, verb, token, body, headers);
@@ -181,7 +190,7 @@ async function main(): Promise<void> {
     inbox.postMessageDb({ tenantId, from: "cc", to, subject: body, body, relayEligible });
   const first = await post("bravo", "first directive: see https://x.test/run?token=abc123supersecret", true);
   await new Promise((r) => setTimeout(r, 5));
-  const second = await post("maven", "second directive", true);
+  const second = await post("maven", "second directive: the Acme key is acmevault-9f8e7d6c5b4a", true);
   const aura = await post("aura", "aura has no reader", true);
   const agentNote = await post("bravo", "an agent's note", false);
   const dismissed = await post("atlas", "dismissed before delivery", true);
@@ -223,6 +232,24 @@ async function main(): Promise<void> {
     }
   });
 
+  await check("a vault that cannot be read hands nothing over, and reserves nothing", async () => {
+    await db.execute("ALTER TABLE tenant_integration_credentials RENAME TO tic_parked");
+    try {
+      const res = await call("GET", "pending", mac.token);
+      assert.equal(res.status, 503);
+      assert.equal(res.json.error, "vault_unavailable");
+      assert.equal((await row(first.message!.id)).delivered_pairing_id, null, "fail closed: nothing reserved");
+    } finally {
+      await db.execute("ALTER TABLE tic_parked RENAME TO tenant_integration_credentials");
+    }
+  });
+
+  await check("a cloud chat never sees, or consumes, a relay directive", async () => {
+    const unread = (await inbox.listUnreadDb(OASIS, "bravo")).map((m) => m.id);
+    assert.ok(unread.includes(agentNote.message!.id) && unread.includes("old-note"), "ordinary notes still reach a cloud chat");
+    assert.ok(!unread.includes(first.message!.id), "never the relay directive");
+  });
+
   await check("pending: this workspace's undelivered, unread, eligible directives, oldest first, scrubbed", async () => {
     const res = await call("GET", "pending", mac.token);
     assert.equal(res.status, 200, JSON.stringify(res.json));
@@ -236,6 +263,8 @@ async function main(): Promise<void> {
     const text = JSON.stringify(res.json.messages);
     assert.ok(!text.includes("abc123supersecret"), "a credential in a directive never leaves for a model-read inbox");
     assert.match(res.json.messages![0].body, /token=\[REDACTED\]/);
+    assert.ok(!text.includes("acmevault-9f8e7d6c5b4a"), "nor does a value saved in the workspace's vault");
+    assert.match(res.json.messages![1].body, /\[REDACTED:ACME_API\]/);
   });
 
   await check("a second computer polling at once gets nothing the first reserved", async () => {
@@ -267,6 +296,20 @@ async function main(): Promise<void> {
     assert.deepEqual((await call("POST", "delivered", laptop.token, { ids: [second.message!.id] })).json.delivered, [second.message!.id]);
     assert.deepEqual((await call("POST", "delivered", mac.token, { ids: [second.message!.id] })).json.delivered, [], "the Mac lost it");
     assert.deepEqual((await call("GET", "pending", mac.token)).json.messages, [], "nothing left to deliver");
+  });
+
+  await check("acked: only after a real delivery, and a dismissal after delivery does not block it", async () => {
+    // A third computer, so this scenario stays inside its own ten-a-minute limit.
+    const spare = await computer({ label: "Spare" });
+    const late = await post("bravo", "reserved, not yet delivered", true);
+    assert.deepEqual((await call("GET", "pending", spare.token)).json.messages!.map((m) => m.id), [late.message!.id], "the spare reserved it");
+    assert.deepEqual((await call("POST", "acked", spare.token, { ids: [late.message!.id] })).json.acked, [], "a reservation is not a delivery");
+    await call("POST", "delivered", spare.token, { ids: [late.message!.id] });
+    await inbox.markReadDb(OASIS, late.message!.id, "dashboard");
+    assert.deepEqual((await call("POST", "acked", spare.token, { ids: [late.message!.id] })).json.acked, [late.message!.id]);
+    const r = await row(late.message!.id);
+    assert.ok(r.acked_at, "the agent's receipt is kept");
+    assert.equal(r.read_via, "dashboard", "and the dismissal stays what it was");
   });
 
   await check("acked: only the computer that delivered a note may say it was read, once", async () => {

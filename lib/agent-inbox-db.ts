@@ -75,12 +75,18 @@ const PRIORITY_RANK: Record<Priority, number> = {
   low: 3,
 };
 
+/**
+ * The unread notes a cloud chat puts in front of its agent (lib/agent-context.ts), and then marks read.
+ * A RELAY directive is never among them (Codex review of #768): it is for the agent on CC's computer,
+ * and a cloud chat reading it first would mark it read and keep it from ever being delivered.
+ */
 export async function listUnreadDb(tenantId: string, toAgent?: string): Promise<DbInboxMessage[]> {
   const db = getServiceSupabase();
   let q = db
     .from("agent_messages")
     .select("*")
     .eq("tenant_id", tenantId)
+    .eq("relay_eligible", 0)
     .is("read_at", null);
   if (toAgent) q = q.eq("to_agent", toAgent);
   const { data, error } = await q
@@ -208,23 +214,25 @@ export async function markDeliveredDb(
 }
 
 /**
- * Record that the agent moved these notes to its read/ folder. Only the
- * computer that delivered a note may say it was read, and only once.
+ * Record that the agent moved these notes to its read/ folder. Only the computer that DELIVERED a note
+ * (delivered_at set, not merely reserved) may say it was read, and only once (acked_at). A dismissal on
+ * the dashboard after delivery does not block the agent's own receipt; it keeps its read_at and read_via.
  */
 export async function markAckedDb(tenantId: string, ids: readonly string[], pairingId: string): Promise<string[]> {
   if (ids.length === 0) return [];
   const now = new Date().toISOString();
-  const { data, error } = await getServiceSupabase()
-    .from("agent_messages")
-    .update({ acked_at: now, read_at: now, read_via: "agent" })
-    .eq("tenant_id", tenantId)
-    .in("id", [...ids])
-    .eq("delivered_pairing_id", pairingId)
-    .is("acked_at", null)
-    .is("read_at", null)
-    .select("id");
-  if (error) throw new Error(`agent_messages acknowledgement write failed: ${error.message}`);
-  return ((data || []) as Array<{ id: string }>).map((row) => row.id);
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET acked_at = ?, read_at = COALESCE(read_at, ?), read_via = COALESCE(read_via, 'agent') ` +
+        `WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")}) ` +
+        `AND delivered_pairing_id = ? AND delivered_at IS NOT NULL AND acked_at IS NULL RETURNING id`,
+      args: [now, now, tenantId, ...ids, pairingId],
+    });
+    return rs.rows.map((row) => String(row.id));
+  } catch (err) {
+    throw new Error(`agent_messages acknowledgement write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Every note in the workspace, newest first, for Admin > Agent ops. Throws on a failed read. */

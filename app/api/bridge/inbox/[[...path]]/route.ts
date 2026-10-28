@@ -25,8 +25,10 @@
  * write the same directive; only the reserving computer may report it delivered, and only the
  * delivering one may report it read. A reservation with no delivery lapses after five minutes.
  *
- * SCRUBBED. The subject and body go through redactAll before they leave: the note lands in a folder a
- * model reads at the start of every session, so a credential pasted into a directive never reaches it.
+ * SCRUBBED. The subject and body leave scrubbed of environment secrets, URL key parameters AND the
+ * workspace's own vault credentials (Settings > Connections > Custom keys): the note lands in a folder a
+ * model reads at the start of every session. The vault is read BEFORE anything is reserved and must read
+ * completely, or nothing is handed over (fail closed).
  *
  * One module, not one per verb: each Next route compiles to its own server bundle and the Worker is
  * near Cloudflare's size limit (see app/api/automations/guided/[[...path]]/route.ts).
@@ -40,7 +42,8 @@ import { pairingCanClaim, resolvePairingFromBearer, type ResolvedPairing } from 
 import { liveSeat } from "@/lib/os/seat";
 import { rateLimit } from "@/lib/rate-limit";
 import { markAckedDb, markDeliveredDb, RELAY_BATCH_MAX, reserveRelayBatchDb } from "@/lib/agent-inbox-db";
-import { redactAll } from "@/lib/secret-redaction";
+import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
+import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { AGENT_INBOX_PROTOCOL } from "@/lib/agent-inbox-types";
 
 export const runtime = "nodejs";
@@ -119,6 +122,14 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   if (path.length !== 1 || path[0] !== "pending") return json(404, { ok: false, error: "not_found" });
   const auth = await authorize(req);
   if (!auth.ok) return auth.res;
+  let vault: VaultSecret[];
+  try {
+    vault = await fetchTenantVaultSecretsForRedaction(auth.pairing.tenantId, { requireComplete: true });
+  } catch (error) {
+    console.error("[bridge.inbox.vault]", { tenantId: auth.pairing.tenantId, error: error instanceof Error ? error.message : String(error) });
+    return json(503, { ok: false, error: "vault_unavailable" });
+  }
+  const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
   try {
     const rows = await reserveRelayBatchDb(auth.pairing.tenantId, auth.pairing.pairingId);
     return json(200, {
@@ -128,8 +139,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
         message_id: row.message_id,
         from: row.from_agent,
         to: row.to_agent,
-        subject: redactAll(row.subject ?? ""),
-        body: redactAll(row.body),
+        subject: scrub(row.subject ?? ""),
+        body: scrub(row.body),
         priority: row.priority,
         requires_response: Boolean(row.requires_response),
         in_reply_to: row.in_reply_to,

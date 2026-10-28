@@ -1011,8 +1011,8 @@ export async function POST(req: NextRequest) {
             ok: r.ok,
             summary: r.ok ? r.summary : undefined,
             error: !r.ok ? r.error : undefined,
-            // What it asked to set, for the Execution trace (scrubbed, bounded).
-            after: actionSnapshot(spec.payload),
+            // What it asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
+            requested: actionSnapshot(spec.payload),
           });
         }
       } catch (err) {

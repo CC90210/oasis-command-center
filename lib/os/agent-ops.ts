@@ -59,10 +59,11 @@ const stamp = (iso: string | null | undefined, now: number) => timeAgo(iso ?? nu
  */
 export function deliveryStateOf(note: NoteFacts, computer: DeliveryComputer | null | undefined, now: number): DeliveryState {
   const who = agentName(note.to_agent);
+  // The agent's own receipt first: it outranks a dismissal made after the note was delivered.
+  if (note.acked_at) return { key: "read", tone: "engaged", text: `Read by ${who} · ${stamp(note.acked_at, now)}` };
   if (note.read_at && note.read_via === "dashboard") {
     return { key: "dismissed", tone: "neutral", text: `Dismissed here · ${stamp(note.read_at, now)}` };
   }
-  if (note.acked_at) return { key: "read", tone: "engaged", text: `Read by ${who} · ${stamp(note.acked_at, now)}` };
   if (note.read_at && note.read_via === "cloud_chat") {
     return { key: "read_cloud", tone: "engaged", text: `Read by ${who} in a cloud chat · ${stamp(note.read_at, now)}` };
   }

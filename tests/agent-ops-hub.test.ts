@@ -57,6 +57,7 @@ async function main(): Promise<void> {
   assert.equal(key({ delivered_at: minutesAgo(3), acked_at: minutesAgo(1), read_at: minutesAgo(1), read_via: "agent" }), "read");
   assert.match(deliveryStateOf(note({ acked_at: minutesAgo(1), read_at: minutesAgo(1), read_via: "agent" }) as never, mac, NOW).text, /^Read by Bravo/);
   assert.equal(key({ read_at: minutesAgo(2), read_via: "dashboard" }), "dismissed");
+  assert.equal(key({ delivered_at: minutesAgo(9), read_at: minutesAgo(5), read_via: "dashboard", acked_at: minutesAgo(1) }), "read", "the agent's receipt outranks a later dismissal");
   assert.equal(key({ read_at: minutesAgo(2), read_via: "cloud_chat" }), "read_cloud");
   assert.equal(key({ read_at: minutesAgo(2), read_via: null }), "read_earlier", "a note read before read_via existed");
   assert.equal(key({ to_agent: "cc", relay_eligible: 0 }), "for_you");
@@ -111,9 +112,12 @@ async function main(): Promise<void> {
     assert.ok(!JSON.stringify(snap).includes("abc123supersecret"), "secrets are scrubbed before they are stored");
     assert.deepEqual(snap.deep, { a: { b: "[nested]" } }, "three levels at most");
     assert.deepEqual(actionSnapshot({ big: "y".repeat(400), more: "z".repeat(400), lots: Array.from({ length: 40 }, () => "w".repeat(400)) }), { note: "too large to keep" });
-    assert.match(read("app/api/chat/route.ts"), /after: actionSnapshot\(spec\.payload\),/, "the cloud chat records what it set");
+    assert.match(read("app/api/chat/route.ts"), /requested: actionSnapshot\(spec\.payload\),/, "the cloud chat records what it asked for");
     assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /await logResult\(result, ctx, log, spec\.payload\);/, "so does a confirmed harness change");
-    assert.match(read("app/agent-ops/trace/page.tsx"), /\{setOnly \? "What it set" : "What changed"\}/);
+    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /requested: actionSnapshot\(payload\)/);
+    assert.doesNotMatch(read("app/api/chat/route.ts"), /after: actionSnapshot/, "a request is never stored as a write");
+    const tracePage = read("app/agent-ops/trace/page.tsx");
+    assert.match(tracePage, /"What changed" : ok \? "What it asked to set" : "What it tried to set"/, "a request is labelled as one");
     console.log("  ok    action snapshots");
   }
 
@@ -153,7 +157,9 @@ async function main(): Promise<void> {
   assert.match(read("app/api/bridge/ping/route.ts"), /"coding_harness_task_v1", AGENT_INBOX_PROTOCOL\]/, "the ping accepts agent_inbox_v1");
   const relay = read("app/api/bridge/inbox/[[...path]]/route.ts");
   assert.match(relay, /reserveRelayBatchDb\(auth\.pairing\.tenantId, auth\.pairing\.pairingId\)/, "pending reserves for the asking computer");
-  assert.match(relay, /subject: redactAll\(row\.subject \?\? ""\),\n\s*body: redactAll\(row\.body\),/, "the text leaves scrubbed");
+  assert.match(relay, /const scrub = \(text: string\) => redactTenantVaultSecrets\(redactAll\(text\), vault\);/, "env, URL keys and the workspace's vault");
+  assert.match(relay, /subject: scrub\(row\.subject \?\? ""\),\n\s*body: scrub\(row\.body\),/, "the text leaves scrubbed");
+  assert.ok(relay.indexOf("fetchTenantVaultSecretsForRedaction(") < relay.indexOf("reserveRelayBatchDb(auth"), "the vault is read before anything is reserved");
   const { AGENT_INBOX_PROTOCOL } = await import("../lib/agent-inbox-types");
   assert.equal(AGENT_INBOX_PROTOCOL, "agent_inbox_v1");
   console.log("  ok    routes");

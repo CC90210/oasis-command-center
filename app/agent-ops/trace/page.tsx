@@ -28,6 +28,8 @@ type ActionPayload = {
   error?: string | null;
   before?: unknown;
   after?: unknown;
+  /** What the action asked to set (lib/action-log.ts actionSnapshot): a request, not proof of a write. */
+  requested?: unknown;
 };
 
 export default async function AgentOpsTracePage() {
@@ -64,10 +66,11 @@ export default async function AgentOpsTracePage() {
               {events.map((ev) => {
                 const p = (ev.payload || {}) as ActionPayload;
                 const ok = Boolean(p.ok);
-                const { changes, more } = keyChanges(p.before, p.after);
-                // Producers record what an action asked to set (lib/action-log.ts actionSnapshot);
-                // a before is shown only when one was recorded.
-                const setOnly = p.before === null || p.before === undefined;
+                // A recorded before/after is what changed; otherwise the producers' snapshot is only
+                // what the action ASKED for, and says so (it is not proof of what was written).
+                const hasDiff = (p.before !== null && p.before !== undefined) || (p.after !== null && p.after !== undefined);
+                const { changes, more } = hasDiff ? keyChanges(p.before, p.after) : keyChanges(undefined, p.requested);
+                const caption = hasDiff ? "What changed" : ok ? "What it asked to set" : "What it tried to set";
                 return (
                   <li key={ev.id} className="space-y-1.5 py-3 text-sm">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -80,7 +83,7 @@ export default async function AgentOpsTracePage() {
                       {redactAll(ok ? p.summary || "(no summary)" : p.error || "(no error message)")}
                     </div>
                     {changes.length > 0 ? (
-                      <div className="text-[11px] uppercase tracking-[0.06em] text-fg-dim">{setOnly ? "What it set" : "What changed"}</div>
+                      <div className="text-[11px] uppercase tracking-[0.06em] text-fg-dim">{caption}</div>
                     ) : null}
                     {changes.length > 0 ? (
                       <dl className="grid gap-x-3 gap-y-1 rounded-md border border-bg-border bg-bg-deep/40 px-3 py-2 font-mono text-[11.5px] sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
