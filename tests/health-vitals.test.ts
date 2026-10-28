@@ -68,6 +68,18 @@ async function main(): Promise<void> {
     assert.deepEqual(sent!.body.variables, { accountTag: "acct", from: "2026-10-27T12:00:00Z", to: "2026-10-28T12:00:00Z", script: "oasis-command-center" });
   });
 
+  await check("Worker: the deadline covers the body too, and aborts the stalled request", async () => {
+    let signal: AbortSignal | undefined;
+    const stalled = (async (_url: string, init: RequestInit) => {
+      signal = init.signal ?? undefined;
+      return { ok: true, status: 200, json: () => new Promise(() => {}) } as unknown as Response;
+    }) as unknown as Fetch;
+    const started = Date.now();
+    assert.equal((await vitals.workerVitals(NOW, env, stalled, 50)).state, "error");
+    assert.ok(Date.now() - started < 2_000, "answered at the deadline, not whenever the body arrives");
+    assert.equal(signal?.aborted, true, "the stalled request is aborted");
+  });
+
   await check("Worker: an HTTP or GraphQL error is a failed read; an empty answer is no data", async () => {
     assert.equal((await vitals.workerVitals(NOW, env, answer(403, {}))).state, "error");
     assert.equal((await vitals.workerVitals(NOW, env, answer(200, { errors: [{ message: "denied" }] }))).state, "error");
@@ -81,8 +93,14 @@ async function main(): Promise<void> {
   const rows = [
     ["a1", T, hoursAgo(1), "ok", 900],
     ["a2", T, hoursAgo(2), "ok", 1200],
-    ["a3", T, hoursAgo(3), "provider_error", 300],
+    ["a3", T, hoursAgo(3), "error", 300],
     ["a4", T, hoursAgo(30), "ok", 99999],
+    // In flight, refused by the budget, cancelled: not failures. Timed out, never finished: failures.
+    ["a6", T, hoursAgo(1), "pending", null],
+    ["a7", T, hoursAgo(4), "timeout", 30000],
+    ["a8", T, hoursAgo(5), "expired", null],
+    ["a9", T, hoursAgo(6), "refused", 5],
+    ["a10", T, hoursAgo(7), "cancelled", 400],
     ["a5", OTHER, hoursAgo(1), "ok", 5],
   ];
   for (const r of rows) await db.execute({ sql: "INSERT INTO ai_usage_events VALUES (?, ?, ?, ?, ?)", args: r });
@@ -93,7 +111,7 @@ async function main(): Promise<void> {
   await check("the strip: tenant-scoped, 24 hours, and one missing table fails only its own tile", async () => {
     const v = await vitals.loadPlatformVitals(T, NOW);
     assert.equal(v.databaseMs.state, "live");
-    assert.deepEqual(v.ai24h, { state: "live", value: { calls: 3, failed: 1, p50Ms: 900 } }, "the 30-hour-old call and the other workspace's are not counted");
+    assert.deepEqual(v.ai24h, { state: "live", value: { calls: 8, failed: 3, p50Ms: 400 } }, "the 30-hour-old call and the other workspace's are not counted; an in-flight call is not a failure");
     assert.deepEqual(v.browserErrors24h, { state: "live", value: 1 });
     assert.equal(v.checks24h.state, "error", "health_check_runs is missing here: that tile fails, the rest stand");
     assert.equal(v.worker24h.state, "not_connected");

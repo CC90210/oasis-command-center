@@ -61,7 +61,9 @@ async function aiCalls(tenantId: string, sinceIso: string): Promise<PlatformVita
   try {
     const db = getTursoClient();
     const totals = await db.execute({
-      sql: "SELECT count(*) AS calls, sum(CASE WHEN outcome = 'ok' THEN 0 ELSE 1 END) AS failed FROM ai_usage_events WHERE tenant_id = ? AND occurred_at >= ?",
+      // Failed = ended in an error, a timeout, or never finished (expired). An in-flight call (pending),
+      // one the budget refused, or one the person cancelled is not a failure (Codex review, #770).
+      sql: "SELECT count(*) AS calls, sum(CASE WHEN outcome IN ('error', 'timeout', 'expired') THEN 1 ELSE 0 END) AS failed FROM ai_usage_events WHERE tenant_id = ? AND occurred_at >= ?",
       args: [tenantId, sinceIso],
     });
     const calls = Number(totals.rows[0]?.calls ?? 0);
@@ -127,19 +129,28 @@ const WORKER_QUERY = `query Vitals($accountTag: string!, $from: Time!, $to: Time
   }
 }`;
 
-/** The Worker's own 24 hours. `fetchImpl` and `env` are seams for tests. */
+type WorkerAnswer = {
+  data?: { viewer?: { accounts?: Array<{ workersInvocationsAdaptive?: Array<{ sum?: { requests?: number; errors?: number }; quantiles?: { cpuTimeP50?: number; cpuTimeP99?: number } }> }> } };
+  errors?: unknown;
+};
+
+/** The Worker's own 24 hours. `env`, `fetchImpl` and `deadlineMs` are seams for tests. */
 export async function workerVitals(
   now: number,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
+  deadlineMs: number = 5_000,
 ): Promise<PlatformVitals["worker24h"]> {
   const token = env.CLOUDFLARE_ANALYTICS_TOKEN?.trim();
   const account = env.CLOUDFLARE_ACCOUNT_ID?.trim();
   if (!token || !account) {
     return { state: "not_connected", reason: "Add a read-only Cloudflare Analytics token and the account id to the Worker to see its requests, errors and CPU." };
   }
+  const abort = new AbortController();
   try {
-    const res = await withDeadline(
+    // The deadline covers the whole exchange, body included, and aborts the request when it passes
+    // (Codex review, #770): fetch resolves at the headers, so a stalled body used to hold the page.
+    const body = await withDeadline(
       fetchImpl("https://api.cloudflare.com/client/v4/graphql", {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -152,14 +163,13 @@ export async function workerVitals(
             script: WORKER_SCRIPT,
           },
         }),
+        signal: abort.signal,
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`analytics_http_${res.status}`);
+        return (await res.json()) as WorkerAnswer;
       }),
-      5_000,
-    );
-    if (!res.ok) throw new Error(`analytics_http_${res.status}`);
-    const body = (await res.json()) as {
-      data?: { viewer?: { accounts?: Array<{ workersInvocationsAdaptive?: Array<{ sum?: { requests?: number; errors?: number }; quantiles?: { cpuTimeP50?: number; cpuTimeP99?: number } }> }> } };
-      errors?: unknown;
-    };
+      deadlineMs,
+    ).finally(() => abort.abort());
     if (Array.isArray(body.errors) && body.errors.length > 0) throw new Error("analytics_graphql_error");
     const row = body.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive?.[0];
     if (!row) return { state: "no_data" };
