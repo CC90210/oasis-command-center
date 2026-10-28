@@ -423,6 +423,9 @@ const HOST_TO_PROCESSOR: Record<string, string> = {
   "api.twilio.com": "Twilio Inc.",
   "api.quo.com": "Quo",
   "api.telegram.org": "Telegram",
+  // The Worker's own request counts for System health (lib/admin/platform-vitals.ts): aggregate numbers
+  // about OASIS's own Worker, read from the provider that already hosts it.
+  "api.cloudflare.com": "Cloudflare, Inc.",
 };
 
 function processorForHost(host: string): string | null {
