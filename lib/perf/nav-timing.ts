@@ -8,7 +8,9 @@
  *     loading skeleton or its content);
  *   - OASIS-board-soft: a link click to the board being drawn;
  *   - OASIS-board-full: a full page load (navigation start) to the board being
- *     drawn, only when the board is part of that first document.
+ *     drawn, only when the board is part of that first document;
+ *   - OASIS-board-query: a click that keeps the route and changes its search
+ *     (a stage chip, a page of results) to the board showing that search.
  *
  * Browser-only: every function here runs from an event handler or an effect.
  * The state below is one browser tab's, never a request's. Same payload rules
@@ -52,6 +54,13 @@ export function sendVital(name: string, value: number, rating: string | null, pa
  */
 type Click = { at: number; from: string; committed: boolean; boardReported: boolean };
 let lastClick: Click | null = null;
+/**
+ * The last plain link click that stayed on its route and changed only the
+ * search (a stage chip, Next, a queue tab). The board credits it once it is
+ * drawn for exactly that URL; a redirect to another search is never credited.
+ */
+type QueryClick = { at: number; path: string; search: string; reported: boolean };
+let lastQueryClick: QueryClick | null = null;
 /** True once any client-side route change has happened in this tab (a click or a router.push). */
 let routeChanged = false;
 let lastSeenPath: string | null = null;
@@ -60,6 +69,7 @@ let fullBoardReported = false;
 /** Forget this tab's state. For tests: each scenario starts as a fresh page would. */
 export function resetNavTiming(): void {
   lastClick = null;
+  lastQueryClick = null;
   routeChanged = false;
   lastSeenPath = null;
   fullBoardReported = false;
@@ -83,9 +93,18 @@ export function recordLinkClick(event: MouseEvent): void {
     const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
     if (!anchor || (anchor.target && anchor.target !== "_self") || anchor.hasAttribute("download")) return;
     const url = new URL(anchor.href, window.location.href);
-    // Same route, other search params: the page swaps in place, nothing to time here.
-    if (url.origin !== window.location.origin || url.pathname === window.location.pathname) return;
+    if (url.origin !== window.location.origin) return;
+    if (url.pathname === window.location.pathname) {
+      // Same route, other search params: the page swaps in place, and the
+      // board times it when it is drawn for that search (reportBoardVisible).
+      if (url.search === window.location.search) return;
+      lastQueryClick = { at: performance.now(), path: url.pathname, search: url.search, reported: false };
+      return;
+    }
     lastClick = { at: performance.now(), from: window.location.pathname, committed: false, boardReported: false };
+    // A click to another route supersedes a same-route click still in flight:
+    // if that board is ever drawn later, the time in between is not its wait.
+    lastQueryClick = null;
   } catch {
     // fail-open
   }
@@ -102,7 +121,12 @@ function clickLeadingTo(path: string): Click | null {
 export function reportRouteCommit(pathname: string | null): void {
   try {
     if (!pathname) return;
-    if (lastSeenPath !== null && pathname !== lastSeenPath) routeChanged = true;
+    if (lastSeenPath !== null && pathname !== lastSeenPath) {
+      routeChanged = true;
+      // Left the route (a click, Back, a router.push): a same-route click made
+      // there is abandoned and must never be credited to a later return.
+      lastQueryClick = null;
+    }
     lastSeenPath = pathname;
     const click = clickLeadingTo(pathname);
     if (!click || click.committed) return;
@@ -115,7 +139,9 @@ export function reportRouteCommit(pathname: string | null): void {
 }
 
 /**
- * The board calls this once on mount. After a click it reports click → board.
+ * The board calls this when it is drawn: on mount, and again whenever it shows
+ * another stage, search or page. After a same-route click it reports click →
+ * board for that search (OASIS-board-query). After a click it reports click → board.
  * For the board that came with the first document (no route change yet, and
  * the URL is still the one the browser loaded) it reports navigation start →
  * board. A board reached any other way (a router.push with no click, a route
@@ -125,6 +151,18 @@ export function reportRouteCommit(pathname: string | null): void {
 export function reportBoardVisible(): void {
   try {
     const path = window.location.pathname;
+    const query = lastQueryClick;
+    if (
+      query &&
+      !query.reported &&
+      query.path === path &&
+      query.search === window.location.search &&
+      performance.now() - query.at <= CLICK_WINDOW_MS
+    ) {
+      query.reported = true;
+      sendVital("OASIS-board-query", performance.now() - query.at, null, path);
+      return;
+    }
     const click = clickLeadingTo(path);
     if (click) {
       if (click.boardReported) return;

@@ -29,6 +29,7 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import Link from "next/link";
+import { LinkPending } from "@/components/os/LinkPending";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
@@ -322,10 +323,10 @@ export default async function PipelinePage({
     ? assigneeScope.assignedTo
     : undefined;
 
-  // Read the complete bounded sales scope, then remove released claims before
-  // calculating exact stage totals and the selected 100-row page. Program,
-  // role/rep, working stages, and search stay server-side. Reaching the 2,000
-  // row safety ceiling fails loudly instead of rendering partial counts.
+  // Read the complete bounded sales scope, then calculate exact stage totals
+  // and the selected 100-row page. Program, role/rep, working stages, and
+  // search stay server-side. Reaching the 2,000 row safety ceiling fails
+  // loudly instead of rendering partial counts.
   let pipelineWindow;
   let memberNameMap: Map<string, string>;
   let ownedSlug: string | null;
@@ -451,6 +452,7 @@ export default async function PipelinePage({
         }`}
       >
         {label}
+        <LinkPending className="ml-1.5 align-middle" />
       </Link>
     );
   };
@@ -468,6 +470,7 @@ export default async function PipelinePage({
           }`}
         >
           Cold outbound
+          <LinkPending className="ml-1.5 align-middle" />
         </Link>
         <Link
           href="/pipeline?motion=inbound"
@@ -487,6 +490,7 @@ export default async function PipelinePage({
               <span className="sr-only"> new in the last 14 days</span>
             </span>
           )}
+          <LinkPending />
         </Link>
       </nav>
       {/* WHOSE BOARD. Admins and managers get one chip per rep plus the

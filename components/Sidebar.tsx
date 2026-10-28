@@ -29,6 +29,7 @@ import type { ConnectionsStatus } from "@/components/os/RailFooter";
 import { CC_NAV, type NavItem } from "@/lib/nav-config";
 import type { OsNavSection } from "@/lib/os/types";
 import { demoHref } from "@/lib/demo-href";
+import { warmRoute } from "@/lib/perf/warm-route";
 
 /** A status field that is not a real boolean was not checked: null, not false. */
 function knownOrNull(v: unknown): boolean | null {
@@ -506,15 +507,12 @@ function NavLink({
   const Icon = iconFor(item.icon);
   const href = demoHref(item.href, { demoMode, landingPath: demoLandingPath });
   const router = useRouter();
-  // Warm the route only when the operator SHOWS INTENT. Hover/focus fires
-  // router.prefetch for this one destination, plus any data warm the parent
-  // wired through onIntent.
+  // Warm the route only when the operator SHOWS INTENT. Hover/focus fires an
+  // AUTO prefetch for this one destination (its loading.tsx, never its data:
+  // lib/perf/warm-route.ts), plus any data warm the parent wired through
+  // onIntent.
   const warm = useCallback(() => {
-    try {
-      router.prefetch(href);
-    } catch {
-      // prefetch is best-effort; never let it break a click
-    }
+    warmRoute(router, href);
     onIntent?.();
   }, [router, href, onIntent]);
   return (

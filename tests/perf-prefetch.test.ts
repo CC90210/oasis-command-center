@@ -51,11 +51,12 @@ assert.ok(
 );
 
 // 3. Intent warming must actually warm the ROUTE, not just the data. Without
-// router.prefetch here, turning viewport prefetch off would make clicks
-// slower rather than the page quieter.
+// a prefetch here, turning viewport prefetch off would make clicks slower
+// rather than the page quieter. Since 2026-10-28 it is an AUTO prefetch
+// (lib/perf/warm-route.ts): down to the route's loading.tsx, never its data.
 assert.ok(
-  /router\.prefetch\(/.test(sidebar),
-  "hover/focus must call router.prefetch — it is what pays for turning viewport prefetch off",
+  /warmRoute\(router, href\);/.test(sidebar),
+  "hover/focus must warm the route — it is what pays for turning viewport prefetch off",
 );
 
 // 4. The intent-driven path is the one that SURVIVES — this is the win we kept.

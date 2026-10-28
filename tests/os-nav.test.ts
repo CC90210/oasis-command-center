@@ -346,7 +346,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     assert.equal(off, links, `components/os/${name}: ${links} <Link> but ${off} prefetch={false}`);
   }
   const railRow = readFileSync(join(dir, "RailRow.tsx"), "utf8");
-  assert.ok(/router\.prefetch\(/.test(railRow), "intent warming must still warm the route");
+  assert.ok(/warmRoute\(router, href\);/.test(railRow), "intent warming must still warm the route (an AUTO prefetch, lib/perf/warm-route.ts)");
   assert.ok(/onMouseEnter=\{warm\}/.test(railRow) && /onFocus=\{warm\}/.test(railRow), "warm on hover and focus");
   // The OS rail's source must not reintroduce the looks #464 removed.
   for (const name of SHELL_FILES) {

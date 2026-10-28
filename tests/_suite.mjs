@@ -30,6 +30,7 @@ const TESTS = [
   "tests/perf-p1.test.ts",
   "tests/perf-p2.test.ts",
   "tests/perf-prefetch.test.ts",
+  "tests/perf-nav-warm.test.ts",
   "tests/lead-source-attribution.test.ts",
   "tests/lead-source-rollup.test.ts",
   "tests/robots-tiers.test.ts",
