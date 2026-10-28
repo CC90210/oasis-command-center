@@ -18,9 +18,11 @@ import {
   timed,
   logPerfSummary,
   navKindOf,
+  startPagePerf,
   instrumentTursoClient,
   type PerfSpan,
 } from "../lib/perf/server-timing";
+import { NAV_KIND_HEADER, navKindFromRequestHeaders } from "../lib/perf/nav-kind";
 import { POST as vitalsPost } from "../app/api/perf/vitals/route";
 import type { Client } from "@libsql/client";
 
@@ -99,33 +101,69 @@ function testSummary(): void {
 
 function testNavKind(): void {
   const h = (entries: Record<string, string>) => new Headers(entries);
-  assert.equal(navKindOf(h({})), "doc", "no RSC header is a full document load");
-  assert.equal(navKindOf(h({ rsc: "1" })), "rsc", "RSC alone is a client navigation (or a FULL prefetch)");
-  assert.equal(navKindOf(h({ rsc: "1", "next-router-prefetch": "1" })), "prefetch", "an AUTO prefetch says so");
+  // Middleware reads the RAW request, where Next's flight headers still are.
+  assert.equal(navKindFromRequestHeaders(h({})), "doc", "no RSC header is a full document load");
+  assert.equal(navKindFromRequestHeaders(h({ rsc: "1" })), "rsc", "RSC alone is a client navigation (or a FULL prefetch)");
+  assert.equal(navKindFromRequestHeaders(h({ rsc: "1", "next-router-prefetch": "1" })), "prefetch", "an AUTO prefetch says so");
+  // Pages read what middleware forwarded: Next strips RSC from headers() (Codex review 2026-10-28).
+  assert.equal(navKindOf(h({ [NAV_KIND_HEADER]: "rsc" })), "rsc", "the forwarded kind wins");
+  assert.equal(navKindOf(h({ [NAV_KIND_HEADER]: "prefetch" })), "prefetch");
+  assert.equal(navKindOf(h({ [NAV_KIND_HEADER]: "<script>" })), "doc", "a forwarded value that is not a kind is ignored");
+  assert.equal(navKindOf(h({ rsc: "1" })), "rsc", "raw headers still count when present");
   const broken = { get: () => { throw new Error("headers broke"); } };
   assert.equal(navKindOf(broken), "doc", "a throwing headers object is fail-open");
+  assert.equal(navKindFromRequestHeaders(broken), "doc");
+
+  const mw = readFileSync(join(__dirname, "..", "middleware.ts"), "utf8");
+  assert.match(mw, /const navKind = navKindFromRequestHeaders\(req\.headers\);\n\s*requestHeaders\.set\(NAV_KIND_HEADER, navKind\);/,
+    "middleware decides the kind from the raw request and forwards it");
+  assert.match(mw, /refreshedHeaders\.set\(NAV_KIND_HEADER, navKind\);/, "the refreshed-cookie path forwards it too");
 }
 
-/** The pipeline page logs its own [perf] line through the same seam, around the unchanged render. */
+function testPagePerf(): void {
+  const cap = captureLogs();
+  try {
+    const perf = startPagePerf("pipeline", "/pipeline", new Headers({ [NAV_KIND_HEADER]: "rsc", "cf-ray": "8f3a1b2c3d4e5f60-YUL" }));
+    perf.spans.push({ label: "window", ms: 7 });
+    const element = { kind: "the page element" };
+    assert.equal(perf.done("ok", element), element, "done() hands back exactly what it was given");
+    perf.done("error");
+    assert.equal(cap.lines.length, 1, "one line per render, however many times done() runs");
+    const line = JSON.parse(cap.lines[0].slice("[perf] ".length)) as Record<string, unknown>;
+    assert.equal(line.scope, "pipeline");
+    assert.equal(line.nav, "rsc");
+    assert.equal(line.outcome, "ok");
+    assert.deepEqual(line.spans, { window: 7 });
+  } finally {
+    cap.restore();
+  }
+}
+
+/** The pipeline page logs its own [perf] line through the same seam, inside its own default export. */
 function testPipelineWiring(): void {
   const page = readFileSync(join(__dirname, "..", "app", "pipeline", "page.tsx"), "utf8");
-  assert.match(page, /logPerfSummary\("pipeline", "\/pipeline", perfSpans/);
-  assert.match(page, /return await renderPipeline\(props, perfSpans\)/);
+  assert.match(page, /const perf = startPagePerf\("pipeline", "\/pipeline", await headers\(\)\);/);
+  // The JSX stays in the default export (tests/ui-chrome.test.ts judges pages by it).
+  assert.match(page, /return perf\.done\("ok", \(\n\s*<div className="animate-fade-in space-y-4">/);
+  assert.equal((page.match(/return perf\.done\("error", \(/g) || []).length, 3, "every error state is logged");
+  assert.match(page, /perf\.done\("redirect"\);\n\s*throw err;/, "a tenant redirect is logged before it is re-thrown");
   assert.match(page, /timed\("window", listOasisPipelineWindow\(\{/);
   const layout = readFileSync(join(__dirname, "..", "app", "layout.tsx"), "utf8");
   assert.match(layout, /nav: navKindOf\(hdrs\)/, "the layout line carries its nav kind for the join");
 }
 
 /**
- * lib/perf/nav-timing.ts in a stub browser: click → commit → board, each
- * reported once; a fresh load reports navigation start → board once.
+ * lib/perf/nav-timing.ts in a stub browser: click -> commit -> board, each
+ * reported once, credited through a redirect; a fresh load reports navigation
+ * start -> board once; a board reached without a click reports nothing.
  */
 async function testNavTiming(): Promise<void> {
   const sent: Array<{ name: string; path: string }> = [];
-  const location = { pathname: "/today", href: "https://app.test/today", origin: "https://app.test" };
+  const location = { pathname: "/pipeline", href: "https://app.test/pipeline", origin: "https://app.test" };
   const g = globalThis as Record<string, unknown>;
   const savedWindow = g.window;
   const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const savedEntries = performance.getEntriesByType.bind(performance);
   g.window = { location };
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -137,8 +175,12 @@ async function testNavTiming(): Promise<void> {
       },
     },
   });
+  // The document this tab loaded was /pipeline.
+  (performance as unknown as { getEntriesByType: (type: string) => unknown[] }).getEntriesByType = (type: string) =>
+    type === "navigation" ? [{ name: "https://app.test/pipeline" }] : [];
   try {
     const nav = await import("../lib/perf/nav-timing");
+    nav.resetNavTiming();
     const click = (href: string, extra: Partial<MouseEvent> = {}) =>
       ({
         button: 0,
@@ -150,32 +192,75 @@ async function testNavTiming(): Promise<void> {
         ...extra,
       }) as unknown as MouseEvent;
 
+    // The board that came with the first document: navigation start -> board, once.
+    nav.reportRouteCommit("/pipeline");
     nav.reportBoardVisible();
     nav.reportBoardVisible();
     assert.deepEqual(sent.map((s) => s.name), ["OASIS-board-full"], "a fresh load reports the board once");
 
+    // Clicks that are not route changes are not timed.
+    location.pathname = "/today";
     nav.recordLinkClick(click("https://app.test/today?stage=x"));
     nav.recordLinkClick(click("https://evil.test/pipeline"));
     nav.recordLinkClick(click("https://app.test/pipeline", { metaKey: true }));
-    nav.reportRouteCommit("/pipeline");
     assert.equal(sent.length, 1, "same-route, cross-origin and modified clicks are not timed");
 
+    // A click to /pipeline that the server redirects to a tenant board is still credited.
     nav.recordLinkClick(click("https://app.test/pipeline"));
-    nav.reportRouteCommit("/pipeline");
-    nav.reportRouteCommit("/pipeline");
-    location.pathname = "/pipeline";
+    nav.reportRouteCommit("/t/acme/leads");
+    nav.reportRouteCommit("/t/acme/leads");
+    location.pathname = "/t/acme/leads";
     nav.reportBoardVisible();
     nav.reportBoardVisible();
     assert.deepEqual(
       sent.map((s) => s.name),
       ["OASIS-board-full", "OASIS-nav-commit", "OASIS-board-soft"],
-      "a click reports its commit and its board exactly once each",
+      "a click reports its commit and its board exactly once each, even through a redirect",
     );
-    assert.ok(sent.every((s) => s.path === "/today" || s.path === "/pipeline"), "pathname only, never a query");
+    assert.ok(sent.every((s) => !s.path.includes("?")), "pathname only, never a query");
   } finally {
     if (savedWindow === undefined) delete g.window;
     else g.window = savedWindow;
     if (savedNavigator) Object.defineProperty(globalThis, "navigator", savedNavigator);
+    (performance as unknown as { getEntriesByType: typeof savedEntries }).getEntriesByType = savedEntries;
+  }
+}
+
+/**
+ * A board reached by router.push with no link click (DeleteLeadButton after a
+ * direct load of a lead page) has no honest start time: it reports nothing,
+ * never the age of the tab (Codex review 2026-10-28). resetNavTiming() gives
+ * it a fresh tab's state, so nothing from the scenario above leaks in.
+ */
+async function testNavTimingNoClick(): Promise<void> {
+  const sent: string[] = [];
+  const location = { pathname: "/pipeline/lead-1", href: "https://app.test/pipeline/lead-1", origin: "https://app.test" };
+  const g = globalThis as Record<string, unknown>;
+  const savedWindow = g.window;
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const savedEntries = performance.getEntriesByType.bind(performance);
+  g.window = { location };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { sendBeacon: (_url: string, body: string) => { sent.push((JSON.parse(body) as { name: string }).name); return true; } },
+  });
+  (performance as unknown as { getEntriesByType: (type: string) => unknown[] }).getEntriesByType = (type: string) =>
+    type === "navigation" ? [{ name: "https://app.test/pipeline/lead-1" }] : [];
+  try {
+    const nav = await import("../lib/perf/nav-timing");
+    nav.resetNavTiming();
+    nav.reportRouteCommit("/pipeline/lead-1");
+    // router.push("/pipeline"): the board mounts before PerfVitals sees the new path.
+    location.pathname = "/pipeline";
+    nav.reportBoardVisible();
+    nav.reportRouteCommit("/pipeline");
+    nav.reportBoardVisible();
+    assert.deepEqual(sent, [], "a board reached without a click and outside the first document reports nothing");
+  } finally {
+    if (savedWindow === undefined) delete g.window;
+    else g.window = savedWindow;
+    if (savedNavigator) Object.defineProperty(globalThis, "navigator", savedNavigator);
+    (performance as unknown as { getEntriesByType: typeof savedEntries }).getEntriesByType = savedEntries;
   }
 }
 
@@ -330,8 +415,10 @@ async function main(): Promise<void> {
   await testTimed();
   testSummary();
   testNavKind();
+  testPagePerf();
   testPipelineWiring();
   await testNavTiming();
+  await testNavTimingNoClick();
   await testDbWrapper();
   await testVitalsRoute();
   console.log("perf-instrumentation: all assertions passed");

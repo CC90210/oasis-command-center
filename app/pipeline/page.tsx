@@ -58,7 +58,7 @@ import { OASIS_INBOUND_WARM_MOTION } from "@/lib/leads/canonical-lead-fields";
 import { inboundQueueFromWindow, readOasisInboundQueue, type OasisInboundQueue } from "@/components/os/department/inbound-load";
 import { tileCount } from "@/components/os/department/count-rules";
 import { auditStepsForLeads, withAuditSteps } from "@/lib/ai-audit/pipeline-link";
-import { timed, logPerfSummary, navKindOf, type PerfSpan } from "@/lib/perf/server-timing";
+import { startPagePerf, timed } from "@/lib/perf/server-timing";
 
 export const dynamic = "force-dynamic";
 
@@ -76,48 +76,28 @@ export const dynamic = "force-dynamic";
  */
 const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENANT_SLUG]);
 
-type PipelineSearchParams = { stage?: string; q?: string; rep?: string; page?: string; motion?: string };
-
 /**
  * One `[perf] pipeline` line per render (2026-10-28), beside the layout's and
  * joined to it by cf-ray, so the board's own cost is in the logs before
  * anything about it is restructured: each awaited read as a span, the nav kind
  * (document load, client navigation, prefetch) and the isolate's line count
- * (`iso` 1-2 is a freshly started isolate, i.e. a cold start). The render is
- * renderPipeline below, unchanged apart from the timed() wrappers, which pass
- * every value and every rejection through untouched.
+ * (`iso` 1-2 is a freshly started isolate, i.e. a cold start). The timed()
+ * wrappers pass every value and every rejection through untouched, and each
+ * return hands its element through perf.done() unchanged.
  */
-export default async function PipelinePage(props: { searchParams?: Promise<PipelineSearchParams> }) {
-  const perfT0 = Date.now();
-  const perfSpans: PerfSpan[] = [];
-  const hdrs = await headers();
-  let outcome: "ok" | "redirect" | "error" = "ok";
-  try {
-    return await renderPipeline(props, perfSpans);
-  } catch (err) {
-    const digest = (err as { digest?: unknown } | null)?.digest;
-    outcome = typeof digest === "string" && digest.startsWith("NEXT_REDIRECT") ? "redirect" : "error";
-    throw err;
-  } finally {
-    logPerfSummary("pipeline", "/pipeline", perfSpans, Date.now() - perfT0, {
-      nav: navKindOf(hdrs),
-      ray: hdrs.get("cf-ray"),
-      outcome,
-    });
-  }
-}
-
-async function renderPipeline(
-  { searchParams }: { searchParams?: Promise<PipelineSearchParams> },
-  perfSpans: PerfSpan[],
-) {
+export default async function PipelinePage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ stage?: string; q?: string; rep?: string; page?: string; motion?: string }>;
+}) {
+  const perf = startPagePerf("pipeline", "/pipeline", await headers());
   // Tenant-aware redirect. Non-OASIS operators land in their own
   // tenant's leads view rather than seeing CC's OASIS personal stages.
   // Try/catch so an unexpected DB hiccup falls through to the OASIS
   // render — strictly no worse than the pre-redirect behavior.
   // Captured for the query below: every OASIS sales tenant is narrowed to the
   // cold-outbound motion, and oasis-webdev also retains its program predicate.
-  const session = await timed("session", resolveSessionContext(), perfSpans);
+  const session = await timed("session", resolveSessionContext(), perf.spans);
   const tenantId = session.ok ? session.tenantId : "";
   let tenantSlug: string | null = null;
   let tenantScopeError: Error | null = null;
@@ -129,7 +109,7 @@ async function renderPipeline(
       // and "row missing" into null; both threw to the same catch below
       // before, so the failure behavior is unchanged — only the label is
       // shared now.
-      const tenant = await timed("tenant", getTenant(session.tenantId), perfSpans);
+      const tenant = await timed("tenant", getTenant(session.tenantId), perf.spans);
       const slug = tenant?.slug;
       if (!slug) {
         throw new Error("pipeline_tenant_lookup_failed_or_slug_missing");
@@ -146,6 +126,7 @@ async function renderPipeline(
     // OASIS render, strictly no worse than the pre-redirect behavior.
     const digest = (err as { digest?: unknown } | null)?.digest;
     if (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT")) {
+      perf.done("redirect");
       throw err;
     }
     tenantScopeError = err instanceof Error ? err : new Error("pipeline_tenant_lookup_failed");
@@ -162,25 +143,25 @@ async function renderPipeline(
   const warmInbound = sp.motion === "inbound";
 
   if (!tenantId) {
-    return (
+    return perf.done("error", (
       <div className="space-y-6 animate-fade-in">
         <PageHeader title="Pipeline" subtitle="Sign in to see your pipeline." />
         <Card>
           <EmptyState message="No tenant on this session. Finish onboarding to connect this workspace." />
         </Card>
       </div>
-    );
+    ));
   }
 
   if (tenantScopeError) {
-    return (
+    return perf.done("error", (
       <div className="space-y-6 animate-fade-in">
         <PageHeader title="Pipeline unavailable" subtitle="We could not verify this workspace's access boundary." />
         <Card>
           <EmptyState message="Refresh to try again. No reduced or partial lead view was shown." />
         </Card>
       </div>
-    );
+    ));
   }
 
   // Only oasis-webdev consistently carries the legacy sales_program marker.
@@ -302,7 +283,7 @@ async function renderPipeline(
   // (lib/team-activation-rules.ts "keep"), so the board scope and the names
   // include inactive reps; only the filter chips (activeIds) are active-only.
   const managerRoster = managerTeamRead
-    ? await timed("roster", getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true }), perfSpans)
+    ? await timed("roster", getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true }), perf.spans)
     : [];
   const managerRepRoster = new Map(
     managerRoster.map((member) => [
@@ -380,20 +361,20 @@ async function renderPipeline(
         // that cycle would make the new queue look empty while the rows exist.
         cycle: warmInbound ? undefined : CURRENT_OASIS_PIPELINE_CYCLE,
         query,
-      }), perfSpans),
-      timed("directory_wait", memberNameMapPromise, perfSpans),
-      timed("owned_slug_wait", ownedSlugPromise, perfSpans),
+      }), perf.spans),
+      timed("directory_wait", memberNameMapPromise, perf.spans),
+      timed("owned_slug_wait", ownedSlugPromise, perf.spans),
     ]);
   } catch (error) {
     console.error("[pipeline.rows]", error);
-    return (
+    return perf.done("error", (
       <div className="space-y-6 animate-fade-in">
         <PageHeader title="Pipeline unavailable" subtitle="The live lead query failed; no counts were guessed." />
         <Card>
           <EmptyState message="Refresh to retry. If this continues, check the Turso data connection." />
         </Card>
       </div>
-    );
+    ));
   }
 
   const named = pipelineWindow.rows.map((row) => ({
@@ -404,7 +385,7 @@ async function renderPipeline(
   // audit's step on its row, for the founders who can open it. Read alongside
   // the website scores below; a failed read draws the rows without the step.
   const auditStepsPromise = session.ok
-    ? timed("audit_steps", auditStepsForLeads(named.map((row) => row.id), { tenantId, isTrueAdmin: session.isTrueAdmin }), perfSpans)
+    ? timed("audit_steps", auditStepsForLeads(named.map((row) => row.id), { tenantId, isTrueAdmin: session.isTrueAdmin }), perf.spans)
     : Promise.resolve(new Map());
   /**
    * The website score, joined server-side.
@@ -433,7 +414,7 @@ async function renderPipeline(
    */
   const scored =
     tenantId === WEBDEV_TENANT_ID
-      ? await timed("scores", attachWebsiteScores(named), perfSpans)
+      ? await timed("scores", attachWebsiteScores(named), perf.spans)
       : named;
   const rows = withAuditSteps(scored, await auditStepsPromise);
   // Counts on the old rep chips came from the current row slice and looked
@@ -482,7 +463,7 @@ async function renderPipeline(
     stages.map((stage) => [stage.key, hrefWith({ stage: stage.key, page: null })]),
   );
   const inboundBadge =
-    session.ok && pipelineAdmin && badgeFromBoard ? badgeOf(inboundQueueFromWindow(pipelineWindow)) : await timed("badge_wait", inboundBadgePromise, perfSpans);
+    session.ok && pipelineAdmin && badgeFromBoard ? badgeOf(inboundQueueFromWindow(pipelineWindow)) : await timed("badge_wait", inboundBadgePromise, perf.spans);
 
   const repChip = (label: string, value: string | null) => {
     const active = (value ?? null) === repFilter;
@@ -507,7 +488,7 @@ async function renderPipeline(
     );
   };
 
-  return (
+  return perf.done("ok", (
     <div className="animate-fade-in space-y-4">
       <nav aria-label="Lead queue" className="flex flex-wrap items-center gap-2">
         <span className="mr-1 text-[11px] uppercase tracking-wider text-fg-dim">Queue</span>
@@ -599,5 +580,5 @@ async function renderPipeline(
         }}
       />
     </div>
-  );
+  ));
 }

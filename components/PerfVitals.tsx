@@ -21,19 +21,21 @@ import { usePathname } from "next/navigation";
 import { useReportWebVitals } from "next/web-vitals";
 import { recordLinkClick, reportRouteCommit, sendVital } from "@/lib/perf/nav-timing";
 
+/**
+ * Module scope, so its identity never changes: useReportWebVitals subscribes
+ * again whenever its callback changes and never unsubscribes the old one, and
+ * this component re-renders on every route change (Codex review, 2026-10-28).
+ */
+function reportVital(metric: { name: string; value: number; rating?: string }): void {
+  try {
+    sendVital(metric.name, metric.value, metric.rating ?? null, window.location.pathname);
+  } catch {
+    // fail-open
+  }
+}
+
 export function PerfVitals() {
-  useReportWebVitals((metric) => {
-    try {
-      sendVital(
-        metric.name,
-        metric.value,
-        (metric as { rating?: string }).rating ?? null,
-        window.location.pathname,
-      );
-    } catch {
-      // fail-open
-    }
-  });
+  useReportWebVitals(reportVital);
 
   useEffect(() => {
     document.addEventListener("click", recordLinkClick, true);

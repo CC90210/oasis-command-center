@@ -21,6 +21,7 @@
  */
 
 import type { Client, InStatement } from "@libsql/client";
+import { NAV_KIND_HEADER, isNavKind, navKindFromRequestHeaders, type NavKind } from "./nav-kind";
 
 export interface PerfSpan {
   label: string;
@@ -56,19 +57,19 @@ export async function timed<T>(label: string, p: Promise<T>, sink: PerfSpan[]): 
 }
 
 /**
- * How a render was asked for, from the request headers Next sets:
- *   - "prefetch": a router prefetch that stops at the loading boundary
- *     (Next sends Next-Router-Prefetch: 1 for these);
- *   - "rsc": a client navigation's RSC fetch, or a FULL prefetch, which
- *     carries RSC: 1 but no prefetch header;
- *   - "doc": a full document load (typed URL, reload, first visit).
+ * How a render was asked for: document load, client navigation or prefetch
+ * (lib/perf/nav-kind.ts). Next strips its RSC and prefetch headers from what
+ * headers() returns, so middleware decides the kind from the raw request and
+ * forwards it as NAV_KIND_HEADER; this reads that, then falls back to the raw
+ * headers in case they are present (a direct call, a test).
  */
-export type NavKind = "doc" | "rsc" | "prefetch";
+export type { NavKind } from "./nav-kind";
 
 export function navKindOf(h: { get(name: string): string | null }): NavKind {
   try {
-    if (h.get("next-router-prefetch") === "1") return "prefetch";
-    return h.get("rsc") === "1" ? "rsc" : "doc";
+    const forwarded = h.get(NAV_KIND_HEADER);
+    if (isNavKind(forwarded)) return forwarded;
+    return navKindFromRequestHeaders(h);
   } catch {
     return "doc";
   }
@@ -121,6 +122,38 @@ export function logPerfSummary(
   } catch {
     // fail-open
   }
+}
+
+/**
+ * One [perf] line for a page render, the way the root layout writes its own:
+ * spans go into `spans` (pass it to timed()), and done() writes the line once,
+ * with the nav kind and cf-ray read from the request headers, then hands back
+ * whatever it was given, unchanged, so a page can `return perf.done("ok", (...))`.
+ */
+export function startPagePerf(
+  scope: string,
+  path: string,
+  hdrs: { get(name: string): string | null },
+): { spans: PerfSpan[]; done<T>(outcome: "ok" | "redirect" | "error", value?: T): T } {
+  const t0 = Date.now();
+  const spans: PerfSpan[] = [];
+  let logged = false;
+  return {
+    spans,
+    done<T>(outcome: "ok" | "redirect" | "error", value?: T): T {
+      if (!logged) {
+        logged = true;
+        let ray: string | null = null;
+        try {
+          ray = hdrs.get("cf-ray");
+        } catch {
+          // fail-open
+        }
+        logPerfSummary(scope, path, spans, Date.now() - t0, { nav: navKindOf(hdrs), ray, outcome });
+      }
+      return value as T;
+    },
+  };
 }
 
 // ------------------------------------------------------------- db wrapper

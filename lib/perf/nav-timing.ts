@@ -8,7 +8,7 @@
  *     loading skeleton or its content);
  *   - OASIS-board-soft: a link click to the board being drawn;
  *   - OASIS-board-full: a full page load (navigation start) to the board being
- *     drawn.
+ *     drawn, only when the board is part of that first document.
  *
  * Browser-only: every function here runs from an event handler or an effect.
  * The state below is one browser tab's, never a request's. Same payload rules
@@ -44,10 +44,36 @@ export function sendVital(name: string, value: number, rating: string | null, pa
   }
 }
 
-/** The last plain same-origin link click that leaves the current route. */
-type Click = { at: number; path: string; committed: boolean; boardReported: boolean };
+/**
+ * The last plain same-origin link click that left the route it was made on.
+ * `from` is that route: the click is credited to whatever route comes next,
+ * not to its href, because a server redirect can land somewhere else
+ * (/pipeline sends a non-OASIS workspace to /t/<slug>/leads).
+ */
+type Click = { at: number; from: string; committed: boolean; boardReported: boolean };
 let lastClick: Click | null = null;
+/** True once any client-side route change has happened in this tab (a click or a router.push). */
+let routeChanged = false;
+let lastSeenPath: string | null = null;
 let fullBoardReported = false;
+
+/** Forget this tab's state. For tests: each scenario starts as a fresh page would. */
+export function resetNavTiming(): void {
+  lastClick = null;
+  routeChanged = false;
+  lastSeenPath = null;
+  fullBoardReported = false;
+}
+
+/** The pathname of the document this tab loaded, from the browser's own navigation record. */
+function documentPath(): string | null {
+  try {
+    const entry = performance.getEntriesByType?.("navigation")?.[0] as PerformanceEntry | undefined;
+    return entry ? new URL(entry.name).pathname : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Capture-phase document click listener (installed by components/PerfVitals.tsx). */
 export function recordLinkClick(event: MouseEvent): void {
@@ -59,24 +85,29 @@ export function recordLinkClick(event: MouseEvent): void {
     const url = new URL(anchor.href, window.location.href);
     // Same route, other search params: the page swaps in place, nothing to time here.
     if (url.origin !== window.location.origin || url.pathname === window.location.pathname) return;
-    lastClick = { at: performance.now(), path: url.pathname, committed: false, boardReported: false };
+    lastClick = { at: performance.now(), from: window.location.pathname, committed: false, boardReported: false };
   } catch {
     // fail-open
   }
 }
 
-function recentClickTo(path: string): Click | null {
+/** The recent click that led to `path`, if this route is where it went. */
+function clickLeadingTo(path: string): Click | null {
   const click = lastClick;
-  if (!click || click.path !== path) return null;
+  if (!click || click.from === path) return null;
   return performance.now() - click.at <= CLICK_WINDOW_MS ? click : null;
 }
 
-/** The route on screen changed to `pathname`: report click → commit once per click. */
+/** The route on screen is now `pathname`: notes the change, and reports click → commit once per click. */
 export function reportRouteCommit(pathname: string | null): void {
   try {
-    const click = pathname ? recentClickTo(pathname) : null;
-    if (!pathname || !click || click.committed) return;
+    if (!pathname) return;
+    if (lastSeenPath !== null && pathname !== lastSeenPath) routeChanged = true;
+    lastSeenPath = pathname;
+    const click = clickLeadingTo(pathname);
+    if (!click || click.committed) return;
     click.committed = true;
+    routeChanged = true;
     sendVital("OASIS-nav-commit", performance.now() - click.at, null, pathname);
   } catch {
     // fail-open
@@ -84,24 +115,28 @@ export function reportRouteCommit(pathname: string | null): void {
 }
 
 /**
- * The board calls this once on mount. After a click it reports click → board;
- * on a fresh page load (nobody has clicked a link yet) it reports navigation
- * start → board. At most once per click, and once per document.
+ * The board calls this once on mount. After a click it reports click → board.
+ * For the board that came with the first document (no route change yet, and
+ * the URL is still the one the browser loaded) it reports navigation start →
+ * board. A board reached any other way (a router.push with no click, a route
+ * change back to the first page) has no honest start time, so it reports
+ * nothing rather than the whole age of the tab.
  */
 export function reportBoardVisible(): void {
   try {
     const path = window.location.pathname;
-    const click = recentClickTo(path);
+    const click = clickLeadingTo(path);
     if (click) {
       if (click.boardReported) return;
       click.boardReported = true;
       sendVital("OASIS-board-soft", performance.now() - click.at, null, path);
       return;
     }
-    if (lastClick === null && !fullBoardReported) {
-      fullBoardReported = true;
-      sendVital("OASIS-board-full", performance.now(), null, path);
-    }
+    if (fullBoardReported || routeChanged || lastClick !== null) return;
+    const first = documentPath();
+    if (first === null || first !== path) return;
+    fullBoardReported = true;
+    sendVital("OASIS-board-full", performance.now(), null, path);
   } catch {
     // fail-open
   }
