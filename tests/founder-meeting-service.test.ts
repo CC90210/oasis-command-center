@@ -149,13 +149,14 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
 
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
-  const [migration167, migration169, migration224, migration232] = await import("node:fs").then(({ readFileSync }) => [
+  const [migration167, migration169, migration224, migration232, migration250] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
     readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
     readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8"),
     readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8"),
+    readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8"),
   ]);
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration224}\n${migration232}`);
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration224}\n${migration232}\n${migration250}`);
   const db = createTursoPostgrest(raw);
   const calls: CalendarCalls = {
     created: 0,
@@ -380,12 +381,18 @@ async function testCreateAuditAndFullIdempotency() {
           ORDER BY reminder_minutes_before DESC, channel`,
     args: [meeting.appointmentId],
   });
-  assert.equal(notificationRows.rows.length, 8, "confirmation plus three email/SMS reminder tiers are planned");
+  // Two hours out: email at 60 and 15, texts at 30, 15 and 5, both
+  // confirmations, and the founder's own 15-minute heads-up.
+  assert.equal(notificationRows.rows.length, 8, "confirmations, the ladder inside the hour, and the host heads-up are planned");
   const reminders = notificationRows.rows.filter((notification) => notification.reminder_minutes_before !== null);
   assert.equal(reminders.length, 6);
   assert.deepEqual(
     [...new Set(reminders.map((notification) => Number(notification.reminder_minutes_before)))].sort((a, b) => b - a),
-    [60, 30, 10],
+    [60, 30, 15, 5],
+  );
+  assert.deepEqual(
+    reminders.map((notification) => `${notification.kind}:${notification.channel}`).sort(),
+    ["host_15:email", "reminder_15:email", "reminder_15:sms", "reminder_30:sms", "reminder_5:sms", "reminder_60:email"],
   );
 
   await createVerifiedFounderMeeting(bookingInput(), deps);

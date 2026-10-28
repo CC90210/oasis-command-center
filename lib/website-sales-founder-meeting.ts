@@ -8,14 +8,18 @@ import { firstNameOf } from "@/lib/leads/quick-email-draft";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
+  buildFounderHostHeadsUp,
   buildFounderMeetingMessages,
+  FOUNDER_HOST_HEADS_UP_MINUTES,
   FOUNDER_MEETING_DURATION_MINUTES,
   FOUNDER_MEETING_TIMEZONE,
   founderMeetingOfferLabel,
   founderMeetingDedupeKey,
+  hostHeadsUpPlanned,
   normalizeFounderMeetingContact,
   normalizeFounderMeetingPhone,
   plannedReminderTiers,
+  reminderChannelsFor,
   reminderDueAt,
   reminderKindFor,
   type FounderMeetingContact,
@@ -701,6 +705,7 @@ async function ensureNotificationRows(
     },
   ];
   for (const tier of tiers) {
+    if (!reminderChannelsFor(tier).includes("email")) continue;
     const kind = reminderKindFor(tier);
     const messages = buildFounderMeetingMessages({
       company: meeting.contact.company,
@@ -735,6 +740,7 @@ async function ensureNotificationRows(
       updated_at: now,
     });
     for (const tier of tiers) {
+      if (!reminderChannelsFor(tier).includes("sms")) continue;
       const kind = reminderKindFor(tier);
       const messages = buildFounderMeetingMessages({
         company: meeting.contact.company,
@@ -758,6 +764,34 @@ async function ensureNotificationRows(
         updated_at: now,
       });
     }
+  }
+
+  // The founder's own heads-up (CC, 2026-10-28: a lead joined on time and
+  // waited for a host who never came). To the organizer's mailbox, the same
+  // address Google confirmed as the event's owner.
+  if (hostHeadsUpPlanned(meeting.meetingAt, now) && meeting.receipt.organizerEmail) {
+    const heads = buildFounderHostHeadsUp({
+      contactName: meeting.contact.name,
+      company: meeting.contact.company,
+      email: meeting.contact.email,
+      phone: meeting.contact.phone,
+      meetingAt: meeting.meetingAt,
+      timezone: meeting.timezone,
+      meetLink: meeting.receipt.meetLink,
+      clientAgenda: agenda,
+      offerLabel: meeting.offerLabel,
+      leadId,
+    });
+    rows.push({
+      id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
+      lead_id: leadId, kind: "host_15", reminder_minutes_before: FOUNDER_HOST_HEADS_UP_MINUTES,
+      channel: "email", due_at: reminderDueAt(meeting.meetingAt, FOUNDER_HOST_HEADS_UP_MINUTES),
+      recipient: meeting.receipt.organizerEmail.toLowerCase(), sender_user_id: hostUserId,
+      subject: heads.subject, body: heads.body,
+      appointment_revision: meeting.revision,
+      dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "host_15", "email"),
+      updated_at: now,
+    });
   }
 
   // This context read used to filter only by appointment id. Service-role reads
@@ -865,13 +899,18 @@ function expectedNotificationDedupeKeys(appointment: AppointmentRow, nowIso: str
   const tiers = plannedReminderTiers({ meetingAt: appointment.scheduled_for, nowIso });
   const keys = [founderMeetingDedupeKey(appointment.id, revision, "confirmation", "email")];
   for (const tier of tiers) {
+    if (!reminderChannelsFor(tier).includes("email")) continue;
     keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "email"));
   }
   if (appointment.sms_consent && appointment.client_phone_snapshot) {
     keys.push(founderMeetingDedupeKey(appointment.id, revision, "confirmation", "sms"));
     for (const tier of tiers) {
+      if (!reminderChannelsFor(tier).includes("sms")) continue;
       keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "sms"));
     }
+  }
+  if (hostHeadsUpPlanned(appointment.scheduled_for, nowIso) && appointment.organizer_email_snapshot) {
+    keys.push(founderMeetingDedupeKey(appointment.id, revision, "host_15", "email"));
   }
   return keys;
 }

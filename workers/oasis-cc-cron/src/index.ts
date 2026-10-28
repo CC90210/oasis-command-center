@@ -34,7 +34,9 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
   { path: "/api/cron/dispatch-scheduled-sends", schedule: "*/5 * * * *" },
-  { path: "/api/cron/dispatch-founder-meeting-reminders", schedule: "*/5 * * * *" },
+  // Every minute (CC, 2026-10-28): the reminder ladder ends at 5 minutes
+  // before the call, which a 5-minute cadence could deliver at the start time.
+  { path: "/api/cron/dispatch-founder-meeting-reminders", schedule: "* * * * *" },
   { path: "/api/cron/sms-reply-agent", schedule: "*/5 * * * *" },
   { path: "/api/cron/enroll-drips", schedule: "*/15 * * * *" },
   { path: "/api/cron/dispatch-drips", schedule: "*/5 * * * *" },

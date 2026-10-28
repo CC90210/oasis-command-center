@@ -105,6 +105,7 @@ async function fixture() {
     "database/turso/169_founder_meeting_reminder_tiers.turso.sql",
     "database/turso/bravo__224_public_booking_offer_label.sql",
     "database/turso/bravo__232_booking_meet_room.sql",
+    "database/turso/bravo__250_founder_meeting_reminder_ladder.sql",
   ].map((path) => readFileSync(path, "utf8"));
   await raw.executeMultiple(`${SCHEMA}\n${migrations.join("\n")}`);
   const base = createTursoPostgrest(raw) as unknown as { from: (table: string) => unknown };

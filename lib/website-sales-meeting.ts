@@ -1,6 +1,7 @@
 import { countSegments } from "./sms-segments";
 import { isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 import { teamInviteOrigin } from "./team-invite-email";
+import { pipelineLeadUrl } from "./forms/lead-link";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/;
@@ -9,9 +10,28 @@ const OASIS_MEET_PATH_RE = /^\/meet\/[abcdefghijkmnopqrstuvwxyz]{3}-[abcdefghijk
 export const FOUNDER_MEETING_TIMEZONE = "America/Toronto";
 export const FOUNDER_MEETING_DURATION_MINUTES = 15;
 export const FOUNDER_MEETING_TRANSITION_HOLD_MINUTES = 15;
-export const FOUNDER_REMINDER_TIERS = [60, 30, 10] as const;
-export type FounderReminderTier = (typeof FOUNDER_REMINDER_TIERS)[number];
-export type FounderReminderKind = "reminder_60" | "reminder_30" | "ten_minute";
+/**
+ * The lead's reminder ladder (CC, 2026-10-28: "texts them 30 minutes before,
+ * 15 minutes before, five minutes before ... text them and email them,
+ * incrementally"). Each step says which channels go out; a text only goes to a
+ * lead who ticked the SMS box. The day-before text is held to the lead's
+ * daytime by the dispatcher; every step inside the hour goes out, because the
+ * lead chose that time.
+ */
+export const FOUNDER_REMINDER_SCHEDULE = [
+  { minutes: 1440, kind: "reminder_1440", channels: ["email", "sms"] },
+  { minutes: 60, kind: "reminder_60", channels: ["email"] },
+  { minutes: 30, kind: "reminder_30", channels: ["sms"] },
+  { minutes: 15, kind: "reminder_15", channels: ["email", "sms"] },
+  { minutes: 5, kind: "reminder_5", channels: ["sms"] },
+] as const;
+export const FOUNDER_REMINDER_TIERS = FOUNDER_REMINDER_SCHEDULE.map((step) => step.minutes);
+/** 10 is the retired T-10 (`ten_minute`): rows queued before the ladder still carry it. */
+export type FounderReminderTier = (typeof FOUNDER_REMINDER_SCHEDULE)[number]["minutes"] | 10;
+export type FounderReminderKind = (typeof FOUNDER_REMINDER_SCHEDULE)[number]["kind"] | "ten_minute";
+export type FounderReminderChannel = "email" | "sms";
+/** The founder's own heads-up, this long before the call (CC missed calls a lead joined on time). */
+export const FOUNDER_HOST_HEADS_UP_MINUTES = 15;
 
 export const SMS_STOP_FOOTER =
   "Reply STOP to opt out. HELP for help. Msg & data rates may apply.";
@@ -133,10 +153,23 @@ export function reminderDueAt(meetingAt: string, minutesBefore: number): string 
 }
 
 export function reminderKindFor(minutes: number): FounderReminderKind {
-  if (minutes === 60) return "reminder_60";
-  if (minutes === 30) return "reminder_30";
   if (minutes === 10) return "ten_minute";
-  throw new Error("unsupported_reminder_tier");
+  const step = FOUNDER_REMINDER_SCHEDULE.find((item) => item.minutes === minutes);
+  if (!step) throw new Error("unsupported_reminder_tier");
+  return step.kind;
+}
+
+/** The channels one step of the ladder uses. The retired T-10 was email and text. */
+export function reminderChannelsFor(minutes: number): readonly FounderReminderChannel[] {
+  if (minutes === 10) return ["email", "sms"];
+  const step = FOUNDER_REMINDER_SCHEDULE.find((item) => item.minutes === minutes);
+  if (!step) throw new Error("unsupported_reminder_tier");
+  return step.channels;
+}
+
+/** A tier the dispatcher may still deliver: the ladder's, or the retired T-10 on an old row. */
+export function isKnownReminderTier(minutes: number): minutes is FounderReminderTier {
+  return minutes === 10 || FOUNDER_REMINDER_SCHEDULE.some((item) => item.minutes === minutes);
 }
 
 export function plannedReminderTiers(input: {
@@ -150,7 +183,7 @@ export function plannedReminderTiers(input: {
   if (!Number.isFinite(meetingEpoch) || !Number.isFinite(nowEpoch) || minLeadMs < 0) {
     throw new Error("invalid_meeting_time");
   }
-  return FOUNDER_REMINDER_TIERS.filter(
+  return FOUNDER_REMINDER_SCHEDULE.map((step) => step.minutes).filter(
     (tier) => meetingEpoch - tier * 60_000 - nowEpoch >= minLeadMs,
   );
 }
@@ -160,15 +193,16 @@ export function reminderTierStillValid(
   actualRemainingMinutes: number,
 ): boolean {
   if (!Number.isFinite(actualRemainingMinutes)) return false;
-  if (tier === 60) return actualRemainingMinutes > 30;
-  if (tier === 30) return actualRemainingMinutes > 10;
-  return actualRemainingMinutes > 0;
+  // A late step is dropped once the next step down is due: a day-before
+  // reminder that only gets its turn inside the hour would just repeat it.
+  const next = tier === 10 ? 0 : (FOUNDER_REMINDER_SCHEDULE.map((step) => step.minutes as number).find((m) => m < tier) ?? 0);
+  return actualRemainingMinutes > next;
 }
 
 export function founderMeetingDedupeKey(
   appointmentId: string,
   revision: number,
-  kind: "confirmation" | FounderReminderKind,
+  kind: "confirmation" | FounderReminderKind | "host_15",
   channel: "email" | "sms",
 ): string {
   return `${appointmentId}:${revision}:${kind}:${channel}`;
@@ -264,6 +298,13 @@ export function minutesUntilMeeting(meetingAt: string, now: string): number {
   return Math.max(0, Math.ceil((meetingEpoch - nowEpoch) / 60_000));
 }
 
+/** "5 minutes", "1 hour", "about 24 hours": how far off the call is, as a reminder says it. */
+export function reminderWindowText(minutes: number): string {
+  if (minutes >= 90) return `about ${Math.round(minutes / 60)} hours`;
+  if (minutes >= 55) return "1 hour";
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
 function displayMeetingTime(meetingAt: string, timezone: string): string {
   const instant = new Date(meetingAt);
   if (Number.isNaN(instant.getTime())) throw new Error("invalid_meeting_time");
@@ -301,9 +342,7 @@ export function buildFounderMeetingMessages(input: {
   const reminderMinutes = Number.isInteger(input.reminderMinutesBefore) && Number(input.reminderMinutesBefore) > 0
     ? Number(input.reminderMinutesBefore)
     : 10;
-  const reminderWindow = reminderMinutes === 60
-    ? "1 hour"
-    : `${reminderMinutes} ${reminderMinutes === 1 ? "minute" : "minutes"}`;
+  const reminderWindow = reminderWindowText(reminderMinutes);
   const reminderBody = [
     greeting,
     "",
@@ -323,3 +362,52 @@ export function buildFounderMeetingMessages(input: {
     },
   };
 }
+
+/** The founder's heads-up is queued only when its time is still ahead (the same 90 s margin as the lead's steps). */
+export function hostHeadsUpPlanned(meetingAt: string, nowIso: string, minLeadMs = 90_000): boolean {
+  const due = Date.parse(meetingAt) - FOUNDER_HOST_HEADS_UP_MINUTES * 60_000;
+  const now = Date.parse(nowIso);
+  return Number.isFinite(due) && Number.isFinite(now) && due - now >= minLeadMs;
+}
+
+/**
+ * The founder's own heads-up before a call: who, what, how to reach them, and
+ * the room. Plain text to the organizer's mailbox; it is internal, so it says
+ * everything the founder needs to walk in prepared.
+ */
+export function buildFounderHostHeadsUp(input: {
+  contactName: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+  meetingAt: string;
+  timezone: string;
+  meetLink: string;
+  clientAgenda: string;
+  offerLabel?: string | null;
+  leadId: string;
+  minutesBefore?: number;
+}): { subject: string; body: string } {
+  const meetLink = validateMeetingLink(input.meetLink);
+  const when = displayMeetingTime(input.meetingAt, input.timezone);
+  const who = input.contactName || "Your lead";
+  const minutes = Number.isInteger(input.minutesBefore) && Number(input.minutesBefore) > 0
+    ? Number(input.minutesBefore)
+    : FOUNDER_HOST_HEADS_UP_MINUTES;
+  const label = (input.offerLabel || "call").trim();
+  const body = [
+    `${who}${input.company ? ` (${input.company})` : ""} is due on your ${label} in ${reminderWindowText(minutes)}.`,
+    "",
+    `When: ${when}`,
+    `Join: ${meetLink}`,
+    input.email ? `Email: ${input.email}` : null,
+    input.phone ? `Phone: ${input.phone}` : null,
+    `Agenda: ${input.clientAgenda}`,
+    "",
+    `Lead: ${pipelineLeadUrl(input.leadId)}`,
+    "",
+    "If you cannot make it, open the lead and reschedule now so they are not left waiting.",
+  ].filter((line): line is string => line !== null).join("\n");
+  return { subject: `In ${reminderWindowText(minutes)}: ${who}${input.company ? `, ${input.company}` : ""}`, body };
+}
+

@@ -2,7 +2,7 @@
  * founder-meeting-reminders-deactivated-host.test.ts — a founder-meeting
  * reminder EMAIL goes out from the host's own Gmail, so a row queued before the
  * host was deactivated must never fire from the retired person's mailbox. SMS
- * reminders leave from the tenant's Twilio line and are unchanged.
+ * reminders leave from OASIS's Quo number and are unchanged.
  *
  * Mirrors tests/dispatch-scheduled-sends-deactivated-sender.test.ts. Drives
  * GET /api/cron/dispatch-founder-meeting-reminders for real against a local
@@ -10,7 +10,7 @@
  * (lib/team memberStanding over user_profiles), the queue state transitions,
  * the lead_interactions touch and the worker-health row all execute. Stand-ins
  * record what they were asked instead of reaching the network: the Gmail
- * sender, the Twilio sender, the TCPA clock, the operator alert, the
+ * sender, the Quo sender, the TCPA clock, the operator alert, the
  * canonical-touch writer, and the saga reconciler/backfill (run first by the
  * route; tested in tests/founder-meeting-service.test.ts).
  *
@@ -29,10 +29,10 @@ delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
 process.env.CRON_SECRET = "founder-reminders-deactivated-cron-secret";
 delete process.env.CRON_ALLOW_LOCAL;
-// SMS must take the LIVE Twilio branch so an SMS send is observable; the
+// SMS must take the LIVE Quo branch so an SMS send is observable; the
 // sender below is a recorder.
 delete process.env.BRAVO_FORCE_DRY_RUN;
-process.env.LIVE_SEND_TWILIO = "1";
+process.env.LIVE_SEND_QUO = "1";
 
 function stubModule(path: string, exports: Record<string, unknown>) {
   require.cache[path] = {
@@ -71,16 +71,17 @@ stubModule(require.resolve("../lib/integrations/gmail-oauth-send"), {
   },
 });
 const smsSends: Array<{ tenantId: string; to: string }> = [];
-stubModule(require.resolve("../lib/sms-direct-twilio"), {
-  tenantHasDirectTwilio: async () => true,
-  sendSmsDirectTwilio: async (input: { tenantId: string; to: string }) => {
-    smsSends.push({ tenantId: input.tenantId, to: input.to });
-    return { ok: true, provider: "twilio_direct", message_sid: `SM${smsSends.length}`, status: "queued" };
+stubModule(require.resolve("../lib/integrations/quo"), {
+  quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: "+13653603976" }),
+  sendQuoSms: async (creds: { tenantId: string }, input: { to: string }) => {
+    smsSends.push({ tenantId: creds.tenantId, to: input.to });
+    return { ok: true, id: `QU${smsSends.length}`, status: "queued" };
   },
 });
 stubModule(require.resolve("../lib/tcpa-window"), {
   checkTcpaWindow: () => ({ usedFallback: false, withinWindow: true }),
   dispatchByTcpaWindow: async (_check: unknown, effects: { send: () => unknown }) => effects.send(),
+  nextTcpaWindowStart: (_phone: unknown, from: Date) => from,
 });
 type Alert = { tenantId: string; alertType: string; severity: string; lane?: string; payload?: Record<string, unknown> };
 const alerts: Alert[] = [];
@@ -139,6 +140,8 @@ async function main() {
       deactivated_at TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
   `);
   const profile = (id: string, authId: string, name: string, deactivatedAt: string | null = null) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, full_name, joined_at, deactivated_at)
