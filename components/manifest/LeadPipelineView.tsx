@@ -274,9 +274,12 @@ export function LeadPipelineView({
 }: Props) {
   const router = useRouter();
   // Navigation timing: the board is on screen (lib/perf/nav-timing.ts). On
-  // mount, and again each time it is drawn for another stage, search or page,
-  // so a same-route click (a stage chip, Next) is timed as well.
-  const boardKey = `${stageFilter ?? ""}|${query ?? ""}|${resultWindow?.page ?? ""}`;
+  // mount, and again each time it is drawn for another view, so a same-route
+  // click (a stage chip, Next, a queue or rep tab) is timed as well. Next keeps
+  // this component across search-param navigation, so the key must change with
+  // EVERY filter: allStagesHref is the server's own URL for this view minus its
+  // stage and page, i.e. its search, rep and queue (Codex review, 2026-10-28).
+  const boardKey = `${stageFilter ?? ""}|${query ?? ""}|${resultWindow?.page ?? ""}|${resultWindow?.allStagesHref ?? ""}`;
   useEffect(() => {
     reportBoardVisible();
   }, [boardKey]);

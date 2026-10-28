@@ -102,6 +102,9 @@ export function recordLinkClick(event: MouseEvent): void {
       return;
     }
     lastClick = { at: performance.now(), from: window.location.pathname, committed: false, boardReported: false };
+    // A click to another route supersedes a same-route click still in flight:
+    // if that board is ever drawn later, the time in between is not its wait.
+    lastQueryClick = null;
   } catch {
     // fail-open
   }
@@ -118,7 +121,12 @@ function clickLeadingTo(path: string): Click | null {
 export function reportRouteCommit(pathname: string | null): void {
   try {
     if (!pathname) return;
-    if (lastSeenPath !== null && pathname !== lastSeenPath) routeChanged = true;
+    if (lastSeenPath !== null && pathname !== lastSeenPath) {
+      routeChanged = true;
+      // Left the route (a click, Back, a router.push): a same-route click made
+      // there is abandoned and must never be credited to a later return.
+      lastQueryClick = null;
+    }
     lastSeenPath = pathname;
     const click = clickLeadingTo(pathname);
     if (!click || click.committed) return;

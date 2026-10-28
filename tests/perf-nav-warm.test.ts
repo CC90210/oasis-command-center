@@ -68,7 +68,8 @@ async function main(): Promise<void> {
   assert.match(board, /warmRoute\(router, href\);/);
   assert.equal((board.match(/<LinkPendingBar \/>/g) || []).length, 2, "a row being opened says so");
   assert.ok((board.match(/<LinkPending /g) || []).length >= 4, "stage chips, All stages, Previous and Next say so too");
-  assert.match(board, /useEffect\(\(\) => \{\n\s*reportBoardVisible\(\);\n\s*\}, \[boardKey\]\);/, "the board reports each redraw for a new stage, search or page");
+  assert.match(board, /useEffect\(\(\) => \{\n\s*reportBoardVisible\(\);\n\s*\}, \[boardKey\]\);/, "the board reports each redraw for a new view");
+  assert.match(board, /const boardKey = `[^`]*resultWindow\?\.page[^`]*resultWindow\?\.allStagesHref[^`]*`;/, "the key changes with every filter: stage, search, page, rep and queue");
   assert.ok(existsSync(join(ROOT, "app/pipeline/[id]/loading.tsx")), "the lead page has a loading boundary for the warm to stop at");
   assert.match(read("app/pipeline/page.tsx"), /<LinkPending/, "the queue and rep links show a pending state");
   const pending = read("components/os/LinkPending.tsx");

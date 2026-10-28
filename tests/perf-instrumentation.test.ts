@@ -324,6 +324,26 @@ async function testNavTimingQuery(): Promise<void> {
     location.search = "?stage=won&page=1";
     nav.reportBoardVisible();
     assert.deepEqual(sent, [], "a board drawn for another search is not this click's");
+
+    // An abandoned same-route click: All stages is slow, Settings is opened
+    // instead, then the Pipeline again. The return is timed as its own click,
+    // never as the abandoned one plus the time spent on Settings.
+    sent.length = 0;
+    location.search = "?stage=won&page=1";
+    nav.recordLinkClick(click("https://app.test/pipeline"));
+    nav.recordLinkClick(click("https://app.test/settings"));
+    location.pathname = "/settings";
+    location.search = "";
+    nav.reportRouteCommit("/settings");
+    nav.recordLinkClick(click("https://app.test/pipeline"));
+    location.pathname = "/pipeline";
+    nav.reportRouteCommit("/pipeline");
+    nav.reportBoardVisible();
+    assert.deepEqual(
+      sent.map((s) => s.name),
+      ["OASIS-nav-commit", "OASIS-nav-commit", "OASIS-board-soft"],
+      "a newer navigation discards the pending same-route click",
+    );
   } finally {
     if (savedWindow === undefined) delete g.window;
     else g.window = savedWindow;
