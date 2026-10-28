@@ -1,6 +1,7 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { bookingCallRecorded, bookingMeetRoomDeps } from "@/lib/booking/meet-room";
+import { bookingSmsConsent } from "@/lib/booking/sms-consent";
 import { sameOrigin } from "@/lib/calendar/http";
 import { AI_AUDIT_ALERT_SOURCE, ensureAiAuditSalesEvent } from "@/lib/forms/ai-audit-notify";
 import { recordAlertFailure } from "@/lib/forms/alert-failure";
@@ -326,6 +327,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const giveBackClaim = () => releasePublicBooking(getTursoClient(), claim);
 
   const endAt = new Date(Date.parse(startsAt) + durationMinutes * 60_000).toISOString();
+  // The "text me" box they ticked on the form, read back from the consent
+  // ledger for this phone: the reminders text them only if they said yes.
+  const bookingContact = buildPublicBookingContact(combined);
+  const smsConsent = await bookingSmsConsent(db, context.tenantId, bookingContact.phone);
   let meeting: Awaited<ReturnType<typeof createVerifiedFounderMeeting>> | null = null;
   try {
     meeting = await createVerifiedFounderMeeting({
@@ -337,12 +342,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       meetingAt: startsAt,
       durationMinutes,
       offerLabel,
-      contact: buildPublicBookingContact(combined),
+      contact: bookingContact,
       clientAgenda: `A ${durationMinutes}-minute ${context.formName} call with OASIS AI Solutions.`,
       // A form answer has no length limit on the server, and one over the
       // service's limit would refuse this lead's every booking.
       handoffNote: (bottleneck || `Public ${context.formSlug} booking.`).slice(0, HANDOFF_NOTE_MAX),
-      smsConsent: false,
+      smsConsent,
       expectedOrganizerEmail: organizer.email,
       openerAttendee: attendee ? { email: attendee.email, displayName: attendee.displayName } : null,
       confirmations: {

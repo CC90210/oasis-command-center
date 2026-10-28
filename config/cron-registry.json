@@ -23,7 +23,7 @@
     },
     {
       "path": "/api/cron/dispatch-founder-meeting-reminders",
-      "schedule": "*/5 * * * *"
+      "schedule": "* * * * *"
     },
     {
       "path": "/api/cron/sms-reply-agent",

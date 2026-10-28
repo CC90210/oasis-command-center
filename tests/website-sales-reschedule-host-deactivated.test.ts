@@ -135,6 +135,7 @@ async function main() {
     );
     ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
   `);
 
   const bookedFor = new Date(Date.now() + 864e5).toISOString();

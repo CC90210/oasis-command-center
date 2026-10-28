@@ -4,16 +4,24 @@ import { createClient } from "@libsql/client";
 import {
   buildFounderMeetingMessages,
   clampSmsBody,
+  buildFounderHostHeadsUp,
+  FOUNDER_REMINDER_SCHEDULE,
   FOUNDER_REMINDER_TIERS,
   founderMeetingDedupeKey,
+  hostHeadsUpPlanned,
+  isKnownReminderTier,
+  normalizeFounderMeetingPhone,
   plannedReminderTiers,
+  reminderChannelsFor,
   reminderKindFor,
   reminderTierStillValid,
+  reminderWindowText,
   SMS_STOP_FOOTER,
   validateMeetingLink,
   withSmsFooter,
 } from "../lib/website-sales-meeting";
 import { countSegments } from "../lib/sms-segments";
+import { quoStopIntakeConnected } from "../lib/integrations/quo";
 import { teamInviteOrigin } from "../lib/team-invite-email";
 
 const migration167 = readFileSync(
@@ -56,36 +64,93 @@ const invalidMeetingLinks = [
 for (const link of invalidMeetingLinks) {
   assert.throws(() => validateMeetingLink(link), /google_meet_link_missing/, link);
 }
-assert.deepEqual(FOUNDER_REMINDER_TIERS, [60, 30, 10]);
+// The ladder CC asked for (2026-10-28): the day before, an hour, then texts at
+// 30, 15 and 5 minutes, with email at the day before, the hour and 15 minutes.
+assert.deepEqual(FOUNDER_REMINDER_TIERS, [1440, 60, 30, 15, 5]);
+assert.deepEqual(
+  FOUNDER_REMINDER_SCHEDULE.map((step) => [step.minutes, [...step.channels]]),
+  [[1440, ["email", "sms"]], [60, ["email"]], [30, ["sms"]], [15, ["email", "sms"]], [5, ["sms"]]],
+);
+assert.equal(reminderKindFor(1440), "reminder_1440");
 assert.equal(reminderKindFor(60), "reminder_60");
 assert.equal(reminderKindFor(30), "reminder_30");
-assert.equal(reminderKindFor(10), "ten_minute");
-assert.throws(() => reminderKindFor(15 as never), /unsupported_reminder_tier/);
+assert.equal(reminderKindFor(15), "reminder_15");
+assert.equal(reminderKindFor(5), "reminder_5");
+assert.equal(reminderKindFor(10), "ten_minute", "rows queued before the ladder keep their kind");
+assert.deepEqual([...reminderChannelsFor(30)], ["sms"], "T-30 is a text only");
+assert.deepEqual([...reminderChannelsFor(10)], ["email", "sms"]);
+assert.throws(() => reminderKindFor(20 as never), /unsupported_reminder_tier/);
+assert(isKnownReminderTier(10) && isKnownReminderTier(5) && !isKnownReminderTier(20));
 
+assert.deepEqual(
+  plannedReminderTiers({
+    meetingAt: "2026-09-02T15:15:00.000Z",
+    nowIso: "2026-09-01T14:00:00.000Z",
+  }),
+  [1440, 60, 30, 15, 5],
+  "a booking more than a day out plans the whole ladder",
+);
 assert.deepEqual(
   plannedReminderTiers({
     meetingAt: "2026-09-01T15:15:00.000Z",
     nowIso: "2026-09-01T14:00:00.000Z",
   }),
-  [60, 30, 10],
-  "a 75-minute lead time plans all three tiers",
+  [60, 30, 15, 5],
+  "a 75-minute lead time plans everything inside the hour",
 );
 assert.deepEqual(
   plannedReminderTiers({
     meetingAt: "2026-09-01T14:20:00.000Z",
     nowIso: "2026-09-01T14:00:00.000Z",
   }),
-  [10],
+  [15, 5],
   "a 20-minute lead time never invents T-60/T-30 reminders",
 );
-assert(!reminderTierStillValid(60, 30), "T-60 is superseded exactly when T-30 becomes due");
-assert(reminderTierStillValid(60, 31));
-assert(!reminderTierStillValid(60, 29));
-assert(!reminderTierStillValid(30, 10), "T-30 is superseded exactly when T-10 becomes due");
-assert(reminderTierStillValid(30, 11));
-assert(!reminderTierStillValid(30, 9));
-assert(reminderTierStillValid(10, 1));
-assert(!reminderTierStillValid(10, 0));
+// Superseded only by the next step on the SAME channel (Codex review of #774).
+// Email steps: 1440, 60, 15. Text steps: 1440, 30, 15, 5.
+assert(!reminderTierStillValid(1440, 60, "email"), "the day-before email is dropped once the hour email is due");
+assert(reminderTierStillValid(1440, 61, "email"));
+assert(!reminderTierStillValid(1440, 30, "sms"), "the day-before text is dropped once the 30-minute text is due");
+assert(reminderTierStillValid(60, 30, "email"), "no 30-minute email exists, so the hour email still goes out at 30");
+assert(!reminderTierStillValid(60, 15, "email"), "T-60 email is superseded when the 15-minute email is due");
+assert(!reminderTierStillValid(30, 15, "sms"), "T-30 text is superseded exactly when the T-15 text is due");
+assert(reminderTierStillValid(30, 16, "sms"));
+assert(reminderTierStillValid(15, 4, "email"), "the 15-minute email is the last email: a 5-minute TEXT never drops it");
+assert(!reminderTierStillValid(15, 5, "sms"), "the T-15 text is superseded exactly when the T-5 text is due");
+assert(reminderTierStillValid(5, 1, "sms"));
+assert(!reminderTierStillValid(5, 0, "sms"));
+assert(reminderTierStillValid(10, 1, "email"), "an old T-10 row still goes out until the call starts");
+assert(!reminderTierStillValid(10, 0, "sms"));
+// Automated texts stay off until an authenticated Quo STOP intake exists (Codex review of #774).
+assert.equal(quoStopIntakeConnected(), false);
+assert.equal(reminderWindowText(1440), "about 24 hours");
+assert.equal(reminderWindowText(58), "1 hour");
+assert.equal(reminderWindowText(5), "5 minutes");
+assert.equal(reminderWindowText(1), "1 minute");
+assert(hostHeadsUpPlanned("2026-09-01T15:00:00.000Z", "2026-09-01T14:00:00.000Z"));
+assert(!hostHeadsUpPlanned("2026-09-01T14:16:00.000Z", "2026-09-01T14:00:00.000Z"), "no heads-up already past due");
+const heads = buildFounderHostHeadsUp({
+  contactName: "Gideon Boniface",
+  company: "Rice farm",
+  email: "gideon@example.com",
+  phone: "+2348153169177",
+  meetingAt: "2026-09-01T15:15:00.000Z",
+  timezone: "America/Toronto",
+  meetLink: "https://meet.google.com/abc-defg-hij",
+  clientAgenda: "A 15-minute AI audit call.",
+  offerLabel: "AI automation audit",
+  leadId: "lead-1",
+});
+assert.equal(heads.subject, "In 15 minutes: Gideon Boniface, Rice farm");
+assert.match(heads.body, /Join: https:\/\/meet\.google\.com\/abc-defg-hij/);
+assert.match(heads.body, /Phone: \+2348153169177/);
+assert.match(heads.body, /\/pipeline\/lead-1/, "the heads-up links the lead");
+// A number written with its country code keeps it (Codex review of #774).
+assert.equal(normalizeFounderMeetingPhone("+65 9823 4567"), "+6598234567", "+65 is never read as +1 659...");
+assert.equal(normalizeFounderMeetingPhone("+234 815 316 9177"), "+2348153169177");
+assert.equal(normalizeFounderMeetingPhone("(416) 555-0101"), "+14165550101", "a bare 10-digit number is North American");
+assert.equal(normalizeFounderMeetingPhone("+1 (416) 555-0101"), "+14165550101");
+assert.throws(() => normalizeFounderMeetingPhone("+12"), /invalid_client_phone/);
 assert.equal(
   founderMeetingDedupeKey("appointment-1", 2, "ten_minute", "sms"),
   "appointment-1:2:ten_minute:sms",

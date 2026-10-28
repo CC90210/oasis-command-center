@@ -84,7 +84,8 @@ async function fixture() {
   const raw = createClient({ url: ":memory:" });
   const migration167 = readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8");
   const migration169 = readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8");
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}`);
+  const migration250 = readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8");
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}\n${migration250}`);
   const db = createTursoPostgrest(raw);
   let calendarCreates = 0;
   const deps = {

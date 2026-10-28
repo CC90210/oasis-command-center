@@ -40,6 +40,7 @@ import {
 import { BOOK_FORM_SLUG, publicBookingOfferLabel } from "@/lib/forms/public-booking-config";
 import { AI_AUDIT_TENANT_SLUG } from "@/lib/forms/oasis-ai-audit-seed";
 import { MEET_RECORDING_NOTICE } from "@/lib/meet/recording-notice";
+import { bookingSmsConsent } from "@/lib/booking/sms-consent";
 import type { createVerifiedFounderMeeting, VerifiedFounderMeeting } from "@/lib/website-sales-founder-meeting";
 
 /** The general call /book offers: 30 minutes (the "book" form's length). */
@@ -373,6 +374,9 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
 
   const endsAt = new Date(Date.parse(request.startsAt) + durationMinutes * 60_000).toISOString();
   const handoff = request.note || `Booked from ${sourceLabel(request.source)}${request.instagramHandle ? ` (@${request.instagramHandle})` : ""}.`;
+  // Texts only if this phone ticked "text me" on a form (the consent ledger).
+  const bookingContact = buildPublicBookingContact({ ...answers, company: request.contact.company });
+  const smsConsent = await bookingSmsConsent(deps.db, tenantId, bookingContact.phone);
   let meeting: VerifiedFounderMeeting | null = null;
   try {
     meeting = await deps.createMeeting({
@@ -384,10 +388,10 @@ export async function handleAgentBook(req: Request, deps: AgentBookingDeps): Pro
       meetingAt: request.startsAt,
       durationMinutes,
       offerLabel,
-      contact: buildPublicBookingContact({ ...answers, company: request.contact.company }),
+      contact: bookingContact,
       clientAgenda: `A ${durationMinutes}-minute ${offerLabel} with OASIS AI Solutions.`,
       handoffNote: handoff.slice(0, HANDOFF_NOTE_MAX),
-      smsConsent: false,
+      smsConsent,
       expectedOrganizerEmail: organizer.email,
       openerAttendee: attendee ? { email: attendee.email, displayName: attendee.displayName } : null,
       confirmations: { contactConfirmed: true, clientAgreedToTime: true, handoffComplete: true },

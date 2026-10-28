@@ -95,7 +95,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
   ].sort());
 });
 
-test("the books' daily jobs each fire once a day, sharing only the two every-minute dispatchers (engine fallbacks, guided automations), in order", () => {
+test("the books' daily jobs each fire once a day, sharing only the every-minute dispatchers (engine fallbacks, guided automations, meeting reminders), in order", () => {
   // lib/founders-finances/books-cron.ts: rates, then Stripe (payouts leave
   // clearing before the bank feed looks), then Wise invoice matches, then the
   // feed. Each on its own minute, off the 5-minute grid, so none shares a
@@ -110,7 +110,13 @@ test("the books' daily jobs each fire once a day, sharing only the two every-min
       fired.push({ job: p.slice("/api/cron/finance-books?job=".length), minute: m });
       assert.deepEqual(
         due.sort(),
-        ["/api/cron/dispatch-automations", "/api/cron/dispatch-engine-fallbacks", p].sort(),
+        [
+          "/api/cron/dispatch-automations",
+          "/api/cron/dispatch-engine-fallbacks",
+          // Every minute since 2026-10-28: the reminder ladder ends 5 minutes out.
+          "/api/cron/dispatch-founder-meeting-reminders",
+          p,
+        ].sort(),
         `${p} shares minute ${m} with an unexpected route: ${due.join(", ")}`,
       );
     }

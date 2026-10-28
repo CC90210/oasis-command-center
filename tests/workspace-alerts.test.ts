@@ -463,6 +463,7 @@ async function main() {
       to_phone TEXT, content TEXT, content_preview TEXT, actor_user_id TEXT, metadata TEXT, created_at TEXT);
     ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
     ${readFileSync("database/turso/170_sms_reply_agent.turso.sql", "utf8")}
   `);
   const stamp = "2026-09-01T00:00:00Z";

@@ -371,6 +371,20 @@ export async function quoSender(
   return { ok: true, number: sole.number.number, source: "workspace" };
 }
 
+/**
+ * Is a STOP texted back to the Quo number read by OASIS? Not yet: there is no
+ * authenticated Quo inbound handler that puts a STOP on the workspace's STOP
+ * list (lib/sms-opt-out.ts applyInboundSmsStop). Automated texts (the
+ * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
+ * until it exists. Closed in code, not by a setting, so no key or switch can
+ * open it early (Codex review of #774): the PR that adds the verified handler,
+ * with its STOP-then-blocked-resend canary, replaces this body. A person's own
+ * reply in Conversations is not automated and is unaffected.
+ */
+export function quoStopIntakeConnected(): boolean {
+  return false;
+}
+
 // -- Sending --------------------------------------------------------------------------
 
 /**

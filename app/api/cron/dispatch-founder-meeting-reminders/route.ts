@@ -5,10 +5,12 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
+import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
+import { quoCredentialsOrNull, quoSender, quoStopIntakeConnected, sendQuoSms } from "@/lib/integrations/quo";
+import { smsConsentStillGiven } from "@/lib/booking/sms-consent";
 import { isDryRun } from "@/lib/integrations/send-mode";
-import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
-import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
+import { checkTcpaWindow, dispatchByTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
@@ -20,13 +22,14 @@ import {
   type FounderMeetingReconciliationResult,
 } from "@/lib/website-sales-founder-meeting";
 import {
+  buildFounderHostHeadsUp,
   buildFounderMeetingMessages,
   clampSmsBody,
+  isKnownReminderTier,
   meetingNotificationDecision,
   minutesUntilMeeting,
   reminderTierStillValid,
   withSmsFooter,
-  type FounderReminderTier,
 } from "@/lib/website-sales-meeting";
 
 export const runtime = "nodejs";
@@ -43,7 +46,10 @@ type NotificationRow = {
   tenant_id: string;
   appointment_id: string;
   lead_id: string;
-  kind: "confirmation" | "reminder_60" | "reminder_30" | "ten_minute";
+  kind:
+    | "confirmation"
+    | "reminder_1440" | "reminder_60" | "reminder_30" | "reminder_15" | "reminder_5" | "ten_minute"
+    | "host_15" | "host_guest_waiting" | "no_show_rebook" | "no_show_followup";
   reminder_minutes_before: number | null;
   channel: "email" | "sms";
   due_at: string;
@@ -69,9 +75,12 @@ type AppointmentState = {
   revision: number;
   sms_consent: number | boolean;
   client_phone_snapshot: string | null;
+  client_email_snapshot: string | null;
   client_name_snapshot: string | null;
   company_snapshot: string | null;
   client_agenda: string | null;
+  offer_label: string | null;
+  duration_minutes: number | null;
   timezone: string;
   google_meet_link: string | null;
   organizer_email_snapshot: string | null;
@@ -146,6 +155,25 @@ async function mark(
   if (!result.data) throw new Error("notification_status_conflict");
 }
 
+/** Back to pending at a later due time (a day-before text held to the lead's daytime). */
+async function deferRow(db: Db, row: NotificationRow, dueAt: string, reason: string) {
+  const result = await db.from("website_sales_meeting_notifications").update({
+    status: "pending",
+    due_at: dueAt,
+    claimed_at: null,
+    last_error: reason,
+    updated_at: new Date().toISOString(),
+  })
+    .eq("tenant_id", row.tenant_id)
+    .eq("appointment_id", row.appointment_id)
+    .eq("id", row.id)
+    .eq("status", "sending")
+    .select("id")
+    .maybeSingle();
+  if (result.error) throw new Error(`notification_status_write_failed:${result.error.message}`);
+  if (!result.data) throw new Error("notification_status_conflict");
+}
+
 async function retryOrFail(db: Db, row: NotificationRow, reason: string) {
   const nextAttempts = row.attempts + 1;
   await mark(db, row, nextAttempts >= MAX_ATTEMPTS ? "failed" : "pending", {
@@ -166,7 +194,7 @@ type SenderPass = {
  * app/api/cron/dispatch-scheduled-sends senderMayDispatch. A founder-meeting
  * email goes out from the host's own Gmail, so a row queued before the host
  * was deactivated must not fire. Returns false once the row has been marked.
- * SMS rows never come here: they leave from the tenant's Twilio line.
+ * SMS rows never come here: they leave from OASIS's Quo number.
  *
  *  - deactivated -> permanent fail `sender_deactivated`; retrying cannot bring
  *    the host back. Collected for the pass's operator alert.
@@ -360,8 +388,15 @@ async function persistReminderTracking(db: Db, row: NotificationRow): Promise<vo
   if (!row.provider || !row.provider_receipt || !row.sent_at || !row.attempt_token) {
     throw new Error("reminder_tracking_receipt_missing");
   }
-  await recordTouch(db, row, row.provider, row.provider_receipt, row.sent_at);
+  // Mail to the founder is not contact with the lead: no timeline "email
+  // sent", no Last Touch, no outreach count (Codex review of #774).
+  if (!isHostKind(row.kind)) await recordTouch(db, row, row.provider, row.provider_receipt, row.sent_at);
   await markTrackingComplete(db, row);
+}
+
+/** Mail to OASIS's own founder about a meeting (heads-up), never to the lead. */
+function isHostKind(kind: string): boolean {
+  return kind === "host_15";
 }
 
 async function processRow(
@@ -370,7 +405,7 @@ async function processRow(
   senderPass: SenderPass,
 ): Promise<"sent" | "skipped" | "failed" | "held"> {
   const appointmentResult = await db.from("call_appointments")
-    .select("id,scheduled_for,status,calendar_status,workflow_status,revision,sms_consent,client_phone_snapshot,client_name_snapshot,company_snapshot,client_agenda,timezone,google_meet_link,organizer_email_snapshot,pending_started_at,updated_at,notification_lease_token,notification_lease_expires_at")
+    .select("id,scheduled_for,status,calendar_status,workflow_status,revision,sms_consent,client_phone_snapshot,client_email_snapshot,client_name_snapshot,company_snapshot,client_agenda,offer_label,duration_minutes,timezone,google_meet_link,organizer_email_snapshot,pending_started_at,updated_at,notification_lease_token,notification_lease_expires_at")
     .eq("tenant_id", row.tenant_id)
     .eq("id", row.appointment_id)
     .maybeSingle();
@@ -419,28 +454,48 @@ async function processRow(
         await mark(db, row, "skipped", { error: "meeting_already_started" });
         return "skipped";
       }
-      if (![60, 30, 10].includes(tier)) {
+      if (!isKnownReminderTier(tier)) {
         await mark(db, row, "skipped", { error: "reminder_tier_invalid" });
         return "skipped";
       }
-      if (!reminderTierStillValid(tier as FounderReminderTier, actualMinutes)) {
-        await mark(db, row, "skipped", { error: "reminder_tier_superseded" });
-        return "skipped";
+      if (row.kind === "host_15") {
+        // The founder's heads-up: who, company, how to reach them, the room.
+        const heads = buildFounderHostHeadsUp({
+          contactName: appointment.client_name_snapshot,
+          company: appointment.company_snapshot,
+          email: appointment.client_email_snapshot,
+          phone: appointment.client_phone_snapshot,
+          meetingAt: appointment.scheduled_for,
+          timezone: appointment.timezone,
+          meetLink: appointment.google_meet_link || "",
+          clientAgenda: appointment.client_agenda || "Not given.",
+          offerLabel: appointment.offer_label,
+          leadId: row.lead_id,
+          minutesBefore: actualMinutes,
+        });
+        deliveryRow = { ...row, subject: heads.subject, body: heads.body };
+      } else {
+        if (!reminderTierStillValid(tier, actualMinutes, row.channel)) {
+          await mark(db, row, "skipped", { error: "reminder_tier_superseded" });
+          return "skipped";
+        }
+        const messages = buildFounderMeetingMessages({
+          company: appointment.company_snapshot,
+          contactName: appointment.client_name_snapshot,
+          meetingAt: appointment.scheduled_for,
+          timezone: appointment.timezone,
+          meetLink: appointment.google_meet_link || "",
+          clientAgenda: appointment.client_agenda || "Review your current website and next steps.",
+          durationMinutes: appointment.duration_minutes ?? undefined,
+          offerLabel: appointment.offer_label,
+          reminderMinutesBefore: actualMinutes,
+        });
+        deliveryRow = {
+          ...row,
+          subject: messages.reminder.subject,
+          body: row.channel === "email" ? messages.reminder.body : messages.reminder.sms,
+        };
       }
-      const messages = buildFounderMeetingMessages({
-        company: appointment.company_snapshot,
-        contactName: appointment.client_name_snapshot,
-        meetingAt: appointment.scheduled_for,
-        timezone: appointment.timezone,
-        meetLink: appointment.google_meet_link || "",
-        clientAgenda: appointment.client_agenda || "Review your current website and next steps.",
-        reminderMinutesBefore: actualMinutes,
-      });
-      deliveryRow = {
-        ...row,
-        subject: messages.reminder.subject,
-        body: row.channel === "email" ? messages.reminder.body : messages.reminder.sms,
-      };
     }
 
     let provider = "";
@@ -464,40 +519,121 @@ async function processRow(
         });
         return "failed";
       }
-      const sent = await sendGmailAsOperator({
-        tenantId: row.tenant_id,
-        userId: row.sender_user_id,
-        to: row.recipient,
-        subject: deliveryRow.subject || "Your OASIS meeting reminder",
-        body: deliveryRow.body,
-        expectedFromAddress: appointment.organizer_email_snapshot,
-        idempotencyKey: row.attempt_token,
-        brand: reminderBrand,
-      });
-      if (!sent.ok) {
-        if (sent.reason === "sender_mismatch" || sent.reason === "delivery_unknown") {
-          await mark(db, row, "failed", { error: `${sent.reason}:${sent.error}`, incrementAttempt: true });
-        } else {
-          await retryOrFail(db, row, `${sent.reason}:${sent.error}`);
+      const subject = deliveryRow.subject || "Your OASIS meeting reminder";
+      if (isHostKind(row.kind)) {
+        // Mail to OASIS's own founder, not a lead: always the shared mailbox as
+        // an internal team alert, so an opt-out filed against a founder's
+        // address cannot silence it (Codex review of #774).
+        const shared = await sendOasisSharedGmail({
+          tenantId: row.tenant_id,
+          to: row.recipient,
+          subject,
+          body: deliveryRow.body,
+          idempotencyKey: row.attempt_token,
+          internalAlert: true,
+        });
+        if (!shared.ok) {
+          if (shared.reason === "delivery_unknown") {
+            await mark(db, row, "failed", { error: `shared:${shared.reason}:${shared.error}`, incrementAttempt: true });
+          } else {
+            await retryOrFail(db, row, `shared:${shared.reason}:${shared.error}`);
+          }
+          return "failed";
         }
-        return "failed";
+        provider = shared.provider;
+        receipt = shared.gmail_message_id || row.attempt_token;
+      } else {
+        const sent = await sendGmailAsOperator({
+          tenantId: row.tenant_id,
+          userId: row.sender_user_id,
+          to: row.recipient,
+          subject,
+          body: deliveryRow.body,
+          expectedFromAddress: appointment.organizer_email_snapshot,
+          idempotencyKey: row.attempt_token,
+          brand: reminderBrand,
+        });
+        if (sent.ok) {
+          provider = sent.provider;
+          receipt = sent.gmail_message_id;
+        } else if (sent.reason === "not_connected" || sent.reason === "refresh_failed") {
+          // The host's own Gmail login is not connected: every reminder from
+          // 2026-09-04 to 2026-10-28 failed right here ("no gmail_oauth bundle")
+          // and nobody heard. OASIS's shared mailbox sends it instead.
+          const shared = await sendOasisSharedGmail({
+            tenantId: row.tenant_id,
+            to: row.recipient,
+            subject,
+            body: deliveryRow.body,
+            idempotencyKey: row.attempt_token,
+            // A lead answering "can we move it?" reaches the host, as from the
+            // host's own Gmail (Codex review of #774).
+            replyTo: appointment.organizer_email_snapshot,
+          });
+          if (!shared.ok) {
+            const detail = `operator:${sent.reason}; shared:${shared.reason}:${shared.error}`;
+            if (shared.reason === "suppressed") {
+              await mark(db, row, "skipped", { error: "recipient_suppressed" });
+              return "skipped";
+            }
+            if (shared.reason === "delivery_unknown") {
+              await mark(db, row, "failed", { error: detail, incrementAttempt: true });
+            } else {
+              await retryOrFail(db, row, detail);
+            }
+            return "failed";
+          }
+          provider = shared.provider;
+          receipt = shared.gmail_message_id || row.attempt_token;
+        } else {
+          if (sent.reason === "sender_mismatch" || sent.reason === "delivery_unknown") {
+            await mark(db, row, "failed", { error: `${sent.reason}:${sent.error}`, incrementAttempt: true });
+          } else {
+            await retryOrFail(db, row, `${sent.reason}:${sent.error}`);
+          }
+          return "failed";
+        }
       }
-      provider = sent.provider;
-      receipt = sent.gmail_message_id;
     } else {
       if (!appointment.sms_consent || appointment.client_phone_snapshot !== row.recipient) {
         await mark(db, row, "skipped", { error: "sms_consent_missing_or_recipient_changed" });
         return "skipped";
       }
-      const quietHours = checkTcpaWindow(row.recipient, new Date());
-      const windowDisposition = await dispatchByTcpaWindow(quietHours, {
-        skip: async (error) => {
-          await mark(db, row, "skipped", { error });
-          return "skipped" as const;
-        },
-        send: () => "send" as const,
-      });
-      if (windowDisposition === "skipped") return "skipped";
+      // The snapshot is from booking: a later "no" in the consent ledger wins.
+      const consent = await smsConsentStillGiven(db, row.tenant_id, row.recipient);
+      if (consent === "no") {
+        await mark(db, row, "skipped", { error: "sms_consent_withdrawn" });
+        return "skipped";
+      }
+      if (consent === "unknown") {
+        await retryOrFail(db, row, "sms_consent_check_failed");
+        return "failed";
+      }
+      // Quiet hours, by the real time left before the call. Inside the last
+      // hour a text always goes out: the lead picked that time, and one held
+      // to 8 am would be for a call already over. Further out (the day-before
+      // text, a confirmation for a call days away) it keeps the lead's
+      // daytime: moved to the next 8 am-9 pm opening while that is still more
+      // than an hour ahead, else left to the email (Codex review of #774).
+      const minutesToCall = (Date.parse(appointment.scheduled_for) - Date.now()) / 60_000;
+      if (minutesToCall > 60) {
+        const quietHours = checkTcpaWindow(row.recipient, new Date());
+        if (!quietHours.usedFallback && !quietHours.withinWindow) {
+          const opens = nextTcpaWindowStart(row.recipient, new Date());
+          if (Date.parse(appointment.scheduled_for) - opens.getTime() > 60 * 60_000) {
+            await deferRow(db, row, opens.toISOString(), "held_for_recipient_daytime");
+            return "held";
+          }
+        }
+        const windowDisposition = await dispatchByTcpaWindow(quietHours, {
+          skip: async (error) => {
+            await mark(db, row, "skipped", { error });
+            return "skipped" as const;
+          },
+          send: () => "send" as const,
+        });
+        if (windowDisposition === "skipped") return "skipped";
+      }
       const priorSms = await db.from("website_sales_meeting_notifications")
         .select("id")
         .eq("tenant_id", row.tenant_id)
@@ -515,25 +651,56 @@ async function processRow(
           firstInConversation: (priorSms.data || []).length === 0,
         })),
       };
-      if (!(await tenantHasDirectTwilio(row.tenant_id))) {
+      // OASIS texts through Quo since 2026-10-26 (Twilio broke). Its own
+      // switches and the workspace's STOP list are re-checked in sendQuoSms.
+      // A STOP texted back to the Quo number is not read by OASIS yet
+      // (lib/integrations/quo.ts), and an automated text must honour one. So
+      // reminders are texted only once that intake is connected; until then
+      // the email carries them (Codex review of #774).
+      if (!quoStopIntakeConnected()) {
+        await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
+        return "skipped";
+      }
+      const quo = await quoCredentialsOrNull(row.tenant_id);
+      if (!quo) {
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
         return "skipped";
       }
-      if (isDryRun("twilio")) {
-        await mark(db, row, "skipped", { error: "twilio_live_send_disabled" });
+      if (isDryRun("quo")) {
+        await mark(db, row, "skipped", { error: "quo_live_send_disabled" });
         return "skipped";
       }
-      const sent = await sendSmsDirectTwilio({
-        tenantId: row.tenant_id,
-        to: row.recipient,
-        body: deliveryRow.body,
-      });
-      if (!sent.ok) {
-        await retryOrFail(db, row, sent.error);
+      // Which number it leaves from is settled BEFORE anything is sent: a
+      // failed lookup sent nothing, so it retries instead of dropping the text.
+      const sender = await quoSender(quo);
+      if (!sender.ok) {
+        await retryOrFail(db, row, `quo_sender:${sender.code}:${sender.reason}`);
         return "failed";
       }
-      provider = sent.provider;
-      receipt = sent.message_sid;
+      const sent = await sendQuoSms({ ...quo, fromNumber: sender.number }, { to: row.recipient, text: deliveryRow.body });
+      if (!sent.ok) {
+        const detail = `${sent.code}:${sent.reason}`;
+        if (["recipient_opted_out", "invalid_recipient", "quo_switched_off", "live_send_disabled", "tenant_retired"].includes(sent.code)) {
+          await mark(db, row, "skipped", { error: detail });
+          return "skipped";
+        }
+        if (sent.code === "quo_refused" && sent.status === 429) {
+          // Quo said "slow down": nothing was sent, so the next run (a minute
+          // on) tries again, within MAX_ATTEMPTS (Codex review of #774).
+          await retryOrFail(db, row, detail);
+          return "failed";
+        }
+        if (sent.code === "quo_unreachable" || sent.code === "quo_unexpected" || sent.code === "quo_refused") {
+          // Unknown or refused by Quo (a destination the number may not text,
+          // like an international one): never retried into a double text.
+          await mark(db, row, "failed", { error: detail, incrementAttempt: true });
+          return "failed";
+        }
+        await retryOrFail(db, row, detail);
+        return "failed";
+      }
+      provider = "quo";
+      receipt = sent.id;
     }
 
     const sentAt = new Date().toISOString();
