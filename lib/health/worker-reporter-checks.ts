@@ -20,7 +20,7 @@ import "server-only";
 import type { DripCheck } from "./drip-checks";
 import { isProductionRuntime } from "./runtime-environment";
 import { FLEET_REPORTER_SERVICE, describeStatusReporter } from "@/lib/automations/worker-status";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { isOnline } from "@/lib/devices/presence";
 
 const OK = 0;

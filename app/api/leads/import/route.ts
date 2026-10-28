@@ -21,7 +21,7 @@ import {
 } from "@/lib/leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
 import { createImportAssigneeCheck, type ImportAssigneeCheck } from "@/lib/leads-import-service";
 

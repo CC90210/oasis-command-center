@@ -331,6 +331,11 @@ function linksIn(src: string, file: string): Found[] {
   assert.equal(resolves("/welcome"), true, "a next.config redirect source resolves");
   assert.equal(resolves("/start"), false, "a page that only calls notFound() is retired, not a destination");
   assert.equal(resolves("/contacts"), false, "a route that only answers the retired 404 is not a destination");
+  // Prospects and Commissions, retired 2026-10-28: dead ends, so the link scan
+  // below fails on any href or redirect that still points at them.
+  assert.equal(resolves("/web-leads"), false, "Prospects is retired");
+  assert.equal(resolves("/web-leads/abc"), false, "a lead's retired battle card is retired too");
+  assert.equal(resolves("/commissions"), false, "Commissions is retired");
 }
 
 /**

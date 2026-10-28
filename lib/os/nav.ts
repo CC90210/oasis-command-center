@@ -28,7 +28,6 @@ import {
   capabilitiesFor,
   filterNavForPersona,
   isOasisSurfaceTenant,
-  maySeeCommissionSurface,
   type Persona,
   type SurfaceCapabilities,
 } from "@/lib/role-surfaces";
@@ -93,13 +92,11 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   { id: "pipeline", href: "/pipeline", label: "Pipeline", icon: "GitBranch", section: "growth", group: "Sales", audience: "everyone" },
   // The Free AI Audit board (2026-10-25): discovery to onboarding, with CC's two gates. Founders only.
   { id: "ai-audits", href: "/ai-audits", label: "AI audits", icon: "ClipboardCheck", section: "growth", group: "Sales", oasisOnly: true, audience: "manage" },
-  { id: "prospects", href: "/web-leads", label: "Prospects", icon: "Users", section: "growth", group: "Sales", module: "prospects", oasisOnly: true, audience: "everyone" },
   { id: "enablement", href: "/training", label: "Enablement", icon: "GraduationCap", section: "growth", group: "Sales", module: "enablement", oasisOnly: true, audience: "everyone" },
   // Its own row until Enablement grows Training · Objections tabs. Reps open
   // the objection library daily; it shipped once with no nav row and nobody
   // could find it (lib/role-surfaces.ts, SALES_NAV_ALLOWLIST).
   { id: "objections", href: "/objections", label: "Objections", icon: "MessageSquare", section: "growth", group: "Sales", module: "enablement", oasisOnly: true, audience: "everyone" },
-  { id: "commissions", href: "/commissions", label: "Commissions", icon: "DollarSign", section: "growth", group: "Sales", module: "commissions", audience: "commissions" },
 
   // ── GROWTH › Marketing ──────────────────────────────────────────────────
   // "Offers" (CC, 2026-10-08): every form can carry a full landing page now.
@@ -192,8 +189,6 @@ function audienceAllows(audience: OsAudience, ctx: VisibilityContext): boolean {
       return !ctx.oasis || ctx.persona === "founder";
     case "client_identities":
       return ctx.capabilities.canSeeClientIdentities;
-    case "commissions":
-      return maySeeCommissionSurface(ctx.capabilities);
     case "company_financials":
       // capabilitiesFor already ANDs this with an OASIS slug; ANDed again so a
       // caller passing unadjusted capabilities still cannot light Money. And

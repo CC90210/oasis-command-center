@@ -58,8 +58,6 @@ export type OsRailProps = {
   /** maySeeSettingsSection(access, "ai"): the footer's AI door for a non-operator. */
   mayOpenAiSettings?: boolean;
   notifications?: ReactNode;
-  /** Extra data warm for a row's hover/focus (e.g. the Prospects list). */
-  intentFor?: (href: string) => (() => void) | undefined;
   isMobileOpen?: boolean;
   onMobileClose?: () => void;
   onDesktopCollapse?: () => void;
@@ -83,7 +81,6 @@ export function OsRail({
   connectionsStatus = null,
   mayOpenAiSettings = false,
   notifications,
-  intentFor,
   isMobileOpen = false,
   onMobileClose,
   onDesktopCollapse,
@@ -220,7 +217,6 @@ export function OsRail({
                 icon={row.icon}
                 active={matched?.id === row.id}
                 badge={row.badgeKey ? badges?.[row.badgeKey] ?? 0 : 0}
-                onIntent={intentFor?.(row.href)}
               />
             ))}
           </RailGroup>

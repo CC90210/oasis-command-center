@@ -22,7 +22,7 @@ import {
   roleMayOperateOasisSalesLead,
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { availability, factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
+import { availability, factsFrom, isActionableBy, isInBookOf } from "@/lib/leads/claim";
 
 export type PerLeadAccess =
   | { ok: true }
@@ -148,7 +148,7 @@ export async function assertMayWorkLead(args: {
           ok: false,
           status: 409,
           error: "claim_released",
-          message: "This claim has returned to the Leads pool. Claim it again before working it.",
+          message: "This lead's claim lapsed and it went back to the unassigned pool. Ask an admin to assign it to you before working it.",
         };
       }
     }

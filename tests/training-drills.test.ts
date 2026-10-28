@@ -12,7 +12,7 @@ import {
   underpoweredGroups,
 } from "@/lib/training/session";
 import { SECTION_SLUGS, isSectionSlug } from "@/lib/training/types";
-import { copyViolations } from "@/lib/web-leads/objections/copy-rules";
+import { copyViolations } from "@/lib/objections/copy-rules";
 
 // ---------------------------------------------------------------------------
 // The Training curriculum and its drills.

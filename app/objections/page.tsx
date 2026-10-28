@@ -22,8 +22,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import {
   mayApproveObjections,
   mayViewObjectionLibrary,
-} from "@/lib/web-leads/objections/admin-access";
-import { fetchAdminCatalog, type AdminObjection } from "@/lib/web-leads/objections/admin";
+} from "@/lib/objections/admin-access";
+import { fetchAdminCatalog, type AdminObjection } from "@/lib/objections/admin";
 
 export const dynamic = "force-dynamic";
 

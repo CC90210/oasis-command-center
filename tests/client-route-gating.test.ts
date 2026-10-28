@@ -10,9 +10,10 @@
  *      /offers, /lenders, /funded-deals, /applications, /sms, /email-blast,
  *      /metrics, /templates and /renewals answer HTTP 404 to a client owner and
  *      to CC alike. Each is a route handler (lib/os/retired-routes.ts): a page
- *      calling notFound() drew the right screen with a 200 status.
- *   2. /commissions asks the rail: a client owner gets a 404 (it is OASIS's
- *      commission ledger), an OASIS closer and CC still open it.
+ *      calling notFound() drew the right screen with a 200 status. Prospects
+ *      (/web-leads and everything under it) and /commissions joined them on
+ *      2026-10-28.
+ *   2. (was /commissions asking the rail; that page retired 2026-10-28)
  *   3. /forms, /sequences and /import ask the rail too: a client owner opens
  *      them, an unprovisioned workspace and a signed-out visitor get a 404. A
  *      failed Forms or Drips read says so in one plain sentence and logs the
@@ -410,6 +411,8 @@ async function main() {
   const RETIRED = [
     "contacts", "embed", "offers", "lenders", "funded-deals", "applications",
     "sms", "email-blast", "metrics", "templates", "renewals", "t/sun/[[...path]]",
+    // Prospects and Commissions, retired 2026-10-28 (Command Center refactor).
+    "web-leads/[[...path]]", "commissions",
   ];
   // A page calling notFound() drew the not-found screen with HTTP 200 (the root
   // loading.tsx streams the shell first). Each retired folder is now only a
@@ -418,9 +421,12 @@ async function main() {
   for (const route of RETIRED) {
     await check(`/${route} is retired: its GET answers HTTP 404 with the not-found page, and no page renders`, async () => {
       assert.equal(existsSync(join(ROOT, `app/${route}/page.tsx`)), false, `app/${route}/page.tsx would render with a 200`);
-      if (route.startsWith("t/sun")) {
-        assert.equal(existsSync(join(ROOT, "app/t/sun/page.tsx")), false, "app/t/sun/page.tsx would render with a 200");
-        assert.equal(existsSync(join(ROOT, "app/t/sun/route.ts")), false, "a second handler beside the optional catch-all is a Next build error");
+      if (route.endsWith("/[[...path]]")) {
+        // An optional catch-all answers its parent path too, so the parent
+        // folder may hold neither a page (a 200) nor a second handler.
+        const parent = route.slice(0, -"/[[...path]]".length);
+        assert.equal(existsSync(join(ROOT, `app/${parent}/page.tsx`)), false, `app/${parent}/page.tsx would render with a 200`);
+        assert.equal(existsSync(join(ROOT, `app/${parent}/route.ts`)), false, "a second handler beside the optional catch-all is a Next build error");
       }
       const src = readFileSync(join(ROOT, `app/${route}/route.ts`), "utf8");
       assert.deepEqual(
@@ -442,17 +448,6 @@ async function main() {
       }
     });
   }
-
-  // ── 2. /commissions ───────────────────────────────────────────────────
-  const commissions = (await import("../app/commissions/page")).default;
-  await check("/commissions: a client owner gets a 404; an OASIS closer and CC open it", async () => {
-    await login("client");
-    assert.equal(await outcome(() => commissions()), "404", "a client owner reached OASIS's commission portal");
-    for (const who of ["closer", "cc"] as const) {
-      await login(who);
-      assert.equal(await outcome(() => commissions()), "rendered", `${who} lost /commissions`);
-    }
-  });
 
   // ── 3. /forms, /sequences, /import ask the rail ──────────────────────
   const forms = (await import("../app/forms/page")).default;

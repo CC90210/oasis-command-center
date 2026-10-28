@@ -100,8 +100,8 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   const at = (href: string) => OS_NAV_CATALOG.find((e) => e.href === href);
   const expectSection: Array<[string, OsSectionKey]> = [
     ["/", "team"], ["/feed", "team"], ["/schedule", "team"], ["/projects", "clients"], ["/playbook", "team"],
-    ["/agents", "team"], ["/team/chief-of-staff", "team"], ["/pipeline", "growth"], ["/web-leads", "growth"],
-    ["/training", "growth"], ["/commissions", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
+    ["/agents", "team"], ["/team/chief-of-staff", "team"], ["/pipeline", "growth"],
+    ["/training", "growth"], ["/forms", "growth"], ["/growth/ads", "growth"],
     ["/founders/marketing", "growth"], ["/seo", "growth"], ["/clients", "clients"], ["/tickets", "clients"], ["/money", "money"],
     ["/analytics", "money"], ["/operations", "admin"], ["/automations", "admin"], ["/health", "admin"],
     ["/agent", "admin"], ["/admin/agents", "admin"], ["/admin/agent-training", "admin"], ["/runs", "admin"], ["/inbox", "admin"],
@@ -115,6 +115,10 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     assert.equal(at(href)?.section, section, `${href} belongs in ${section}`);
   }
   assert.equal(at("/projects")?.label, "Active projects", "the aggregate names its current-client scope");
+  // Prospects and Commissions retired on 2026-10-28: both answer 404, so
+  // neither may come back as a rail row.
+  assert.equal(at("/web-leads"), undefined, "Prospects is retired");
+  assert.equal(at("/commissions"), undefined, "Commissions is retired");
 }
 
 // ── 2. Unknown and non-OASIS workspaces never see OASIS's rows ────────────
@@ -123,7 +127,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
 {
   // /agents (the AI Team) left this list in W4a (decision 22): it is every
   // workspace's own roster, for its owners and admins (section 4 below).
-  const OASIS_ONLY = ["/web-leads", "/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook", "/seo"];
+  const OASIS_ONLY = ["/training", "/objections", "/founders/marketing", "/money", "/analytics", "/playbook", "/seo"];
   for (const slug of [null, "", "acme-roofing", "sun", "submissions", "oasis-ai-cc-evil", "unprovisioned"]) {
     for (const persona of PERSONAS) {
       for (const lyingOasisFlag of [true, false]) {
@@ -235,7 +239,7 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
 
 // ── 6. Reps keep every surface they use daily ─────────────────────────────
 {
-  const DAILY = ["/", "/schedule", "/playbook", "/pipeline", "/web-leads", "/training", "/objections", "/commissions"];
+  const DAILY = ["/", "/schedule", "/playbook", "/pipeline", "/training", "/objections"];
   for (const persona of ["sales", "manager"] as const) {
     const rows = hrefs(oasisViewer(persona));
     for (const href of DAILY) assert.ok(rows.includes(href), `${persona} lost ${href}`);
@@ -256,16 +260,14 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   for (const href of ["/", "/feed", "/schedule", "/pipeline", "/playbook", "/founders/marketing", "/team/marketing", "/growth/ads"]) {
     assert.ok(marketing.includes(href), `marketing lost ${href}`);
   }
-  assert.ok(!marketing.includes("/web-leads"), "marketing does not prospect");
   const builder = hrefs(oasisViewer("builder", { founders: { content: true, finances: false } }));
-  for (const href of ["/", "/feed", "/pipeline", "/web-leads", "/commissions", "/founders/marketing", "/team/sales", "/team/marketing"]) {
+  for (const href of ["/", "/feed", "/pipeline", "/founders/marketing", "/team/sales", "/team/marketing"]) {
     assert.ok(builder.includes(href), `builder lost ${href}`);
   }
   assert.ok(!builder.includes("/automations") && !builder.includes("/operations"), "never the machine controls");
   // An internal worker sees the work, not the money or the commission ledger.
   const worker = hrefs(oasisViewer("worker"));
-  assert.ok(worker.includes("/pipeline") && worker.includes("/web-leads"));
-  assert.ok(!worker.includes("/commissions"), "the commission page 404s for a worker; no dead tab");
+  assert.ok(worker.includes("/pipeline"));
   assert.ok(!worker.includes("/projects") && !worker.includes("/tickets"), "delivery is founder-only inside OASIS");
 }
 

@@ -34,7 +34,7 @@ import { importRowsForTenant } from "@/lib/import/service";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

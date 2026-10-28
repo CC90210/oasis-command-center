@@ -126,9 +126,6 @@ assert.deepEqual(
 );
 
 for (const path of [
-  "app/api/web-leads/claim/route.ts",
-  "app/api/web-leads/assignable-reps/route.ts",
-  "app/api/web-leads/territories/[id]/assign/route.ts",
   "app/api/leads/[id]/assign/route.ts",
   "app/api/leads/bulk/route.ts",
   "app/api/manifest/[slug]/records/[entity]/route.ts",

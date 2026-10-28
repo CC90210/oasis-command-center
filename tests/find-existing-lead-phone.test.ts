@@ -73,7 +73,7 @@ async function check(name: string, fn: () => Promise<void>) {
 }
 
 async function main() {
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { findExistingLead } = await import("../lib/forms/agent-routing");
   const quickAdd = await import("../app/api/leads/quick-add/route");
 

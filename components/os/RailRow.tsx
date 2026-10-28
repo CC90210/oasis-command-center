@@ -140,8 +140,7 @@ export function iconFor(key: NavIconKey): LucideIcon {
 
 /**
  * Warm a route when the viewer shows intent (hover / keyboard focus). Also
- * runs `onIntent` — the rail passes the web-leads data warm through here so
- * the Prospects list is cached before the click lands.
+ * runs `onIntent`, for a caller that has data of its own to warm.
  */
 export function useWarmOnIntent(href: string, onIntent?: () => void): () => void {
   const router = useRouter();

@@ -70,7 +70,7 @@ import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { timeAgo } from "@/lib/devices/presence";
 import { getTursoClient } from "@/lib/turso";
 import { isRetiredTenant } from "@/lib/tenant/retired";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import type { DripCheck } from "./drip-checks";
 
 type Db = Parameters<DripCheck["observe"]>[0];

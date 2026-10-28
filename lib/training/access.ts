@@ -18,7 +18,7 @@
  * job for the objection library.
  */
 
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 
 export type TrainingSession = {

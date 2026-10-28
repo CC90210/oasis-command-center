@@ -21,7 +21,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import {
   mayAuthorObjections,
   mayViewObjectionLibrary,
-} from "@/lib/web-leads/objections/admin-access";
+} from "@/lib/objections/admin-access";
 import {
   ObjectionAdminError,
   ObjectionRejected,
@@ -31,8 +31,8 @@ import {
   findDuplicate,
   parseBatch,
   type DraftInput,
-} from "@/lib/web-leads/objections/admin";
-import { isObjectionFamily, isWebsitePremise } from "@/lib/web-leads/objections/types";
+} from "@/lib/objections/admin";
+import { isObjectionFamily, isWebsitePremise } from "@/lib/objections/types";
 
 export const dynamic = "force-dynamic";
 

@@ -52,7 +52,7 @@ import {
   getOasisPipelineAssignmentRoster,
   isActiveMember,
 } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

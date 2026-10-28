@@ -106,8 +106,8 @@ export const SECTIONS: TrainingSection[] = [
         id: "the-battlecard",
         heading: "You are not doing this from memory",
         body: [
-          "Every lead in the software carries an opening angle built from what is actually wrong with that business's website, and the words to say it. Use it. That is what it is for.",
-          "Training is for the moments the card cannot help: when they interrupt, when they push back, when the call goes somewhere you did not plan.",
+          "Every lead's page in the Pipeline carries what we already know about the business: its website, its industry, and what the audit found. Read it before you dial. That is what it is for.",
+          "Training is for the moments the lead page cannot help: when they interrupt, when they push back, when the call goes somewhere you did not plan.",
         ],
       },
     ],

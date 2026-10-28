@@ -30,8 +30,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { dbBool } from "@/lib/db-bool";
 import { canonicalizeTenantMembers, isTrueAdminRole, type MemberRow, type SessionContext } from "@/lib/team";
-import { releaseLeads } from "@/lib/web-leads/claim-ops";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { releaseLeads } from "@/lib/leads/release";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import {
   DEACTIVATION_BAN_UNTIL,

@@ -37,7 +37,6 @@ import {
   capabilitiesFor,
   filterNavForPersona,
   isOasisSurfaceTenant,
-  maySeeCommissionSurface,
   personaMayVisit,
   resolvePersona,
   type Persona,
@@ -79,7 +78,6 @@ for (const bad of [null, undefined, "", "   ", "AGENT_", "sales", "rep", "superu
 }
 // ...and readonly must actually be the least privileged thing to fail to.
 assert.equal(SURFACE_CAPABILITIES.readonly.canSeeCompanyFinancials, false);
-assert.equal(SURFACE_CAPABILITIES.readonly.canSeeCommissionLedger, false);
 assert.equal(SURFACE_CAPABILITIES.readonly.canAct, false);
 
 /* ───── the OASIS sales job titles (2026-08-21) ──────────────────────────────
@@ -134,11 +132,6 @@ for (const persona of ["manager", "sales", "marketing", "builder", "worker", "re
     false,
     `${persona} must never see company financials — only founder and the grandfathered legacy row may`,
   );
-  assert.equal(
-    SURFACE_CAPABILITIES[persona].canSeeCommissionLedger,
-    false,
-    `${persona} must never see the tenant-wide payout ledger`,
-  );
 }
 
 
@@ -153,7 +146,6 @@ for (const slug of [OASIS, SUNBIZ, null]) {
   const rep = capabilitiesFor("sales", slug);
   assert.equal(rep.canSeeCompanyFinancials, false, `rep sees no MRR on ${slug}`);
   assert.equal(rep.canSeeAllPipeline, false, `rep sees no tenant pipeline on ${slug}`);
-  assert.equal(rep.canSeeCommissionLedger, false, `rep sees no other rep's pay on ${slug}`);
   assert.equal(rep.canSeeClientIdentities, false, `rep sees no client names on ${slug}`);
   assert.equal(rep.canSeeInboundTape, false, `rep sees no company mailbox on ${slug}`);
   assert.equal(rep.canSeeMarketing, false, `rep sees no founders portal on ${slug}`);
@@ -163,7 +155,6 @@ for (const slug of [OASIS, SUNBIZ, null]) {
   assert.equal(rep.canSeeDeliveryQueues, false, `rep sees no delivery board on ${slug}`);
   // What a rep DOES get.
   assert.equal(rep.canSeeOwnPipelineOnly, true);
-  assert.equal(rep.canSeeOwnCommissionOnly, true);
   assert.equal(rep.canAct, true);
 }
 
@@ -184,8 +175,6 @@ assert.equal(capabilitiesFor("founder", SUNBIZ).canSeeMarketing, false);
 const mgr = capabilitiesFor("manager", OASIS);
 assert.equal(mgr.canSeeAllPipeline, false, "a manager must NOT get the whole tenant's pipeline");
 assert.equal(mgr.canSeeTeamPipeline, true, "a manager sees the book of the reps who roll up to them");
-assert.equal(mgr.canSeeTeamCommission, true, "a manager can verify the override they are paid");
-assert.equal(mgr.canSeeCommissionLedger, false, "team commission is not the company ledger");
 assert.equal(mgr.canSeeCompanyFinancials, false, "a manager is a contractor, not a partner — no Net MRR");
 assert.equal(mgr.canSeeInboundTape, false, "the company mailbox is not a management tool");
 assert.equal(mgr.canSeeMarketing, false, "the founders portal stays founders-only");
@@ -217,7 +206,6 @@ for (const denied of [
 }
 // A rep must not gain team scope by accident — this is the flag that separates them.
 assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamPipeline, false);
-assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamCommission, false);
 // Standing in someone else's workspace does not make a manager's money appear.
 assert.equal(capabilitiesFor("manager", SUNBIZ).canSeeCompanyFinancials, false);
 
@@ -227,8 +215,6 @@ assert.equal(capabilitiesFor("legacy", SUNBIZ).canSeeSystemSurfaces, true, "loan
 // The internal worker: the work, not the money.
 const worker = capabilitiesFor("worker", OASIS);
 assert.equal(worker.canSeeCompanyFinancials, false);
-assert.equal(worker.canSeeOwnCommissionOnly, false);
-assert.equal(worker.canSeeCommissionLedger, false);
 assert.equal(worker.canSeeDeliveryQueues, true);
 assert.equal(worker.canAct, true);
 // read_only is the worker surface minus the verbs, and nothing else differs.
@@ -275,12 +261,12 @@ const FULL_NAV = [
 const repNav = filterNavForPersona(FULL_NAV, "sales");
 assert.deepEqual(
   repNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/playbook", "/commissions", "/settings"],
-  "a rep gets work surfaces, their commission ledger, and safe personal Settings",
+  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
+  "a rep gets work surfaces and safe personal Settings (Commissions retired 2026-10-28)",
 );
 // REMOVED, not disabled. Greying a tab is not removing it, and a disabled row
 // still advertises the surface exists.
-assert.equal(repNav.length, 6);
+assert.equal(repNav.length, 5);
 assert.equal(
   repNav.some((n) => "enabled" in n),
   false,
@@ -304,8 +290,8 @@ for (const persona of ["founder", "worker", "readonly", "legacy"] as Persona[]) 
 const mgrNav = filterNavForPersona(FULL_NAV, "manager");
 assert.deepEqual(
   mgrNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/playbook", "/commissions", "/settings"],
-  "a manager gets the roster-scoped pipeline, commission ledger, and safe Settings",
+  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
+  "a manager gets the roster-scoped pipeline and safe Settings (Commissions retired 2026-10-28)",
 );
 assert.equal(
   personaMayVisit("manager", "/analytics"),
@@ -388,10 +374,12 @@ assert.equal(personaMayVisit("sales", "/analytics"), false);
 assert.equal(personaMayVisit("sales", "/founders/marketing"), false);
 assert.equal(personaMayVisit("sales", "/"), true);
 assert.equal(personaMayVisit("sales", "/settings"), true);
-assert.equal(personaMayVisit("sales", "/commissions"), true);
-assert.equal(personaMayVisit("manager", "/commissions"), true);
-assert.equal(personaMayVisit("builder", "/commissions"), true);
-assert.equal(personaMayVisit("marketing", "/commissions"), false);
+// Prospects and Commissions retired on 2026-10-28 and answer 404: no narrowed
+// persona may be offered either.
+for (const persona of ["sales", "manager", "builder", "marketing"] as Persona[]) {
+  assert.equal(personaMayVisit(persona, "/commissions"), false, `${persona} must not be offered retired /commissions`);
+  assert.equal(personaMayVisit(persona, "/web-leads"), false, `${persona} must not be offered retired /web-leads`);
+}
 assert.ok(SALES_NAV_ALLOWLIST.includes("/"), "Today is on the allowlist");
 // The OASIS OS Feed is a row for everyone (lib/os/nav.ts). None of these
 // personas has canSeeSystemSurfaces, so their Feed is Needs you only and the
@@ -399,21 +387,6 @@ assert.ok(SALES_NAV_ALLOWLIST.includes("/"), "Today is on the allowlist");
 for (const persona of ["sales", "manager", "marketing", "builder"] as Persona[]) {
   assert.equal(personaMayVisit(persona, "/feed"), true, `${persona} reaches the Feed`);
   assert.equal(capabilitiesFor(persona, OASIS).canSeeSystemSurfaces, false, `${persona} must not get the event tape`);
-}
-
-for (const persona of ["founder", "sales", "manager", "builder"] as Persona[]) {
-  assert.equal(
-    maySeeCommissionSurface(SURFACE_CAPABILITIES[persona]),
-    true,
-    `${persona} has a declared commission capability and may reach the commission surface`,
-  );
-}
-for (const persona of ["marketing", "worker", "readonly"] as Persona[]) {
-  assert.equal(
-    maySeeCommissionSurface(SURFACE_CAPABILITIES[persona]),
-    false,
-    `${persona} has no commission capability and must fail closed`,
-  );
 }
 
 /* ───────── 4. the sales render path never ASKS for company financials ────── */
@@ -506,7 +479,6 @@ assert.equal(
   false,
   "marketing works only its assigned book, never the tenant-wide pipeline",
 );
-assert.equal(capabilitiesFor("marketing", OASIS).canSeeCommissionLedger, false);
 assert.equal(capabilitiesFor("marketing", OASIS).canSeeInboundTape, false);
 assert.equal(
   capabilitiesFor("marketing", SUNBIZ).canSeeMarketing,
@@ -547,22 +519,9 @@ assert.equal(
 assert.equal(personaMayVisit("marketing", "/leads"), false);
 assert.equal(personaMayVisit("marketing", "/analytics"), false, "system surfaces stay closed");
 
-/* ───── the Leads browser is open to reps, and the rep filter is admin-only ──
- * CC, 2026-08-21: "those sales reps should be able to access the leads page so
- * they can import leads themselves."
- *
- * /web-leads is the prospecting POOL — a public directory of Canadian
- * businesses with website status — not another rep's book. Nothing in it is
- * assigned to anyone, so opening it exposes no colleague's pipeline. It is what
- * makes SELF-SOURCING possible, which is the track that pays 25/40/70 instead
- * of 20/30. */
-assert.equal(personaMayVisit("sales", "/web-leads"), true, "a rep can source their own leads");
-assert.equal(personaMayVisit("manager", "/web-leads"), true, "so can a manager, to assign from");
-assert.equal(
-  personaMayVisit("marketing", "/web-leads"),
-  false,
-  "marketing does not prospect — the pool stays out of their nav",
-);
+/* ───── the rep filter is admin-only ─────────────────────────────────────────
+ * (The Leads browser, /web-leads, retired on 2026-10-28; see the allowlist
+ * checks above.) */
 
 const pipelinePage = read("app/pipeline/page.tsx");
 const pipelineCode = stripComments(pipelinePage);
@@ -659,11 +618,6 @@ assert.equal(
 );
 assert.equal(personaMayVisit("builder", "/pipeline"), true, "his own pipeline is his tool");
 assert.equal(
-  personaMayVisit("builder", "/web-leads"),
-  true,
-  "CC 2026-08-25: he sources from the same prospecting pool the reps claim from",
-);
-assert.equal(
   capabilitiesFor("builder", OASIS).canSeeMarketing,
   true,
   "CC 2026-08-21: this hire is a builder AND a marketing specialist",
@@ -745,48 +699,14 @@ for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
 }
 
 const managerToday = read("components/today/ManagerToday.tsx");
-const commissionPage = read("app/commissions/page.tsx");
-const commissionApi = read("app/api/website-sales/commissions/route.ts");
 const managerCode = stripComments(managerToday);
 const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
 const teamPolicy = stripComments(read("lib/team.ts"));
 const commissionReader = stripComments(read("lib/website-sales-commission-summary.ts"));
 
-// Since 2026-09-30 the page asks the rail itself: requireOsRoute("/commissions")
-// is the Commissions row's own predicate (module `commissions` AND audience
-// "commissions", i.e. maySeeCommissionSurface), and it 404s when the viewer
-// cannot be resolved. The persona-only check it replaced let a client
-// workspace's owner open OASIS's commission portal.
-// tests/client-route-gating.test.ts runs the page for a client owner, an OASIS
-// closer and CC.
-assert.ok(
-  /export default async function CommissionsPage\(\) \{\s*await requireOsRoute\("\/commissions"\);/.test(commissionPage),
-  "the Commission page must apply the same capability gate as its navigation, as its first statement",
-);
-assert.ok(
-  read("lib/os/nav.ts").includes('href: "/commissions", label: "Commissions", icon: "DollarSign", section: "growth", group: "Sales", module: "commissions", audience: "commissions"'),
-  "the Commissions rail row is gated on the commission surface (audience commissions) and the commissions module",
-);
-assert.ok(
-  commissionApi.includes("resolvePersona") && commissionApi.includes("maySeeCommissionSurface"),
-  "the commission API must reject authenticated personas with no commission capability",
-);
-assert.ok(
-  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true })") &&
-    commissionApi.includes('persona === "manager"') &&
-    commissionApi.includes("repUserIds"),
-  "a manager commission ledger must use a server-resolved direct-report scope",
-);
-assert.equal(
-  (commissionApi.match(/\.\.\.repScope/g) ?? []).length,
-  2,
-  "the same manager/rep boundary must constrain both visible ledger rows and complete totals",
-);
-assert.ok(
-  commissionApi.includes('ledgerScope = "manager_team"') &&
-    read("app/commissions/CommissionPortal.tsx").includes("My team commission ledger"),
-  "the manager ledger must identify its wider scope truthfully",
-);
+// /commissions and its API retired on 2026-10-28 (both 404 now; pinned in
+// tests/client-route-gating.test.ts). The Today commission tiles below still
+// read lib/website-sales-commission-summary.ts.
 
 assert.ok(
   /surface\.persona === "manager"/.test(dispatcherCode),

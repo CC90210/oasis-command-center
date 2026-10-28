@@ -131,8 +131,9 @@ jobs:
           # because they fed enrichmentTier objects that already carried an
           # owner name while the real path fetched a projection that dropped it.
           # This suite runs every file and names every failure rather than
-          # stopping at the first.
-          npm run test:web-leads
+          # stopping at the first. Renamed test:sales on 2026-10-28, when the
+          # Prospects surface retired and its prospect-only tests went with it.
+          npm run test:sales
           # Twilio carrier commands, durable inbound queue, sender selection,
           # consent, suppression, and the existing SMS compliance invariants.
           npm run test:sms-agent

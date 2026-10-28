@@ -18,7 +18,7 @@
  */
 
 import { inferForTenant } from "@/lib/ai/infer";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import {
   MAX_REP_CHARS,
   MAX_TURNS,

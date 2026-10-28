@@ -89,9 +89,5 @@ assert.ok(
   /setFetchedStatus\(null\)/.test(sidebar),
   "status state must reset when the operator changes, not just the cache key",
 );
-assert.ok(
-  /prefetchRememberedWebLeads\(\)/.test(sidebar),
-  "the leads-list warm must still exist for operators who signal they are heading there",
-);
 
 console.log("perf-prefetch: all assertions passed");

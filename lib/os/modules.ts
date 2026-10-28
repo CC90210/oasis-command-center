@@ -40,10 +40,13 @@ export const ALL_MODULES: readonly ModuleKey[] = [
  * resolveOsModules today.
  */
 export const TIER_MODULES: Readonly<Record<"internal" | "none", readonly ModuleKey[]>> = {
-  // OASIS dogfoods everything it sells, plus the OASIS-only prospecting and
-  // enablement surfaces its reps use daily. Finance stays here because the
-  // finances tool is keyed to fin_ent_oasis until fin_* is re-tenanted.
-  internal: ["finance", "commissions", "enablement", "prospects", "content", "ads"],
+  // OASIS dogfoods everything it sells, plus the OASIS-only enablement
+  // surfaces its reps use daily. Finance stays here because the finances tool
+  // is keyed to fin_ent_oasis until fin_* is re-tenanted. `commissions` and
+  // `prospects` retired with their pages on 2026-10-28: no catalog row names
+  // them now, and they stay in ModuleKey only so a stored manifest that lists
+  // them still parses (lib/manifest/schema.ts OS_MODULE_KEYS).
+  internal: ["finance", "enablement", "content", "ads"],
   none: [],
 };
 

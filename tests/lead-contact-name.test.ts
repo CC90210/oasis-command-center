@@ -134,10 +134,8 @@ run("every REP-FACING surface shows the person, not the business", () => {
     "the business-name fallback is still feeding Kixie",
   );
 
-  // 3. THE BATTLE CARD — read WHILE the phone is ringing. The owner was
-  //    fetched, carried onto the card, and never rendered.
-  const battle = readFileSync("components/web-leads/BattleCard.tsx", "utf8");
-  assert.match(battle, /Ask for \{lead\.ownerName\}/, "the battle card does not show the owner");
+  // (3. The battle card, which named the owner while the phone rang, retired
+  //    with the Prospects surface on 2026-10-28.)
 });
 
 run("the surfaces are wired to the helper, not to data.name", () => {

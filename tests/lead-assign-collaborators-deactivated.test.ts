@@ -102,7 +102,7 @@ function assertReadable(body: ApiBody, label: string) {
 
 async function main() {
   console.log("lead-assign-collaborators-deactivated:");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { MEMBER_DEACTIVATED_MESSAGE } = await import("../lib/team");
   const { OASIS_WEBSITE_SALES_PROGRAM, OASIS_COLD_OUTBOUND_MOTION } = await import(
     "../lib/leads/canonical-lead-fields"

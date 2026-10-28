@@ -289,8 +289,8 @@ async function main() {
       fromSource(f, /function isTruthyFlag\(v: unknown\): boolean \{\s*return ([^;]+);\s*\}/, "isTruthyFlag"),
     );
     const callQueue = [
-      fromSource("lib/web-leads/claim.ts", /dnc: (data\.dnc === true \|\| data\.dnc === 1),/, "factsFrom's dnc reading"),
-      fromSource("lib/web-leads/assign.ts", /const isDnc = (data\.dnc === true \|\| data\.dnc === 1);/, "assign's isDnc"),
+      fromSource("lib/leads/claim.ts", /dnc: (data\.dnc === true \|\| data\.dnc === 1),/, "factsFrom's dnc reading"),
+      // (lib/web-leads/assign.ts, the territory assigner, retired with Prospects on 2026-10-28.)
     ];
     // Business-Empire-Agent scripts/integrations/send_gateway.py: lead_data.get("opted_out") is True
     const gateway = (v: unknown) => v === true;

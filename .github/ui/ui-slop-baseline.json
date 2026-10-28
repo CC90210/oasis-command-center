@@ -323,21 +323,6 @@
       "rule": "radial-wash"
     },
     {
-      "file": "components/web-leads/battle-hud.ts",
-      "line": 29,
-      "rule": "ai-accent"
-    },
-    {
-      "file": "components/web-leads/battle-hud.ts",
-      "line": 32,
-      "rule": "ai-accent"
-    },
-    {
-      "file": "components/web-leads/battle-hud.ts",
-      "line": 50,
-      "rule": "ai-accent"
-    },
-    {
       "file": "lib/agents.ts",
       "line": 145,
       "rule": "ai-accent"

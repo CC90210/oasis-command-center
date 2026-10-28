@@ -173,7 +173,7 @@ async function personLevelDeactivation(): Promise<void> {
   process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
   process.env.TURSO_DB_PATH = dbFile;
 
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { getTenantMembers, getOasisSalesRepRoster } = await import("../lib/team");
   const { activationErrorStatus, deactivateMember, previewDeactivation, reactivateMember } = await import(
     "../lib/team-activation"

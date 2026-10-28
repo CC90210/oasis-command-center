@@ -29,7 +29,6 @@ import type { ConnectionsStatus } from "@/components/os/RailFooter";
 import { CC_NAV, type NavItem } from "@/lib/nav-config";
 import type { OsNavSection } from "@/lib/os/types";
 import { demoHref } from "@/lib/demo-href";
-import { prefetchRememberedWebLeads } from "@/lib/web-leads/client-cache";
 
 /** A status field that is not a real boolean was not checked: null, not false. */
 function knownOrNull(v: unknown): boolean | null {
@@ -222,19 +221,6 @@ export function Sidebar({
   // Before the deferred read answers, the dots are UNKNOWN, not "off".
   const statusKnown = deferStatus ? fetchedStatus !== null : true;
   const navItems = items && items.length > 0 ? items : CC_NAV;
-  const onWebLeads = pathname === "/web-leads" || pathname.startsWith("/web-leads/");
-  const railHasWebLeads = sections
-    ? sections.some((s) => s.groups.some((g) => g.rows.some((r) => r.href === "/web-leads")))
-    : navItems.some((item) => item.href === "/web-leads");
-  const canPrefetchWebLeads = !demoMode && !onWebLeads && railHasWebLeads;
-  const prefetchWebLeads = useCallback(() => {
-    if (!canPrefetchWebLeads) return;
-    void prefetchRememberedWebLeads();
-  }, [canPrefetchWebLeads]);
-  const intentFor = useCallback(
-    (href: string) => (href === "/web-leads" ? prefetchWebLeads : undefined),
-    [prefetchWebLeads],
-  );
 
   // ═══ NO UNCONDITIONAL IDLE PREFETCH ═══════════════════════════════════════
   //
@@ -257,10 +243,9 @@ export function Sidebar({
   // 989-2,647 ms. That is the "everything feels slow" everyone was reporting,
   // and it is self-inflicted.
   //
-  // Prefetching on INTENT (hover/focus, wired via onIntent below) keeps the win
-  // this was reaching for without paying it on every page: an operator heading
-  // for Web Leads still warms the cache before the click lands, and an operator
-  // working in Pipeline is left alone.
+  // Prefetching on INTENT (hover/focus) keeps the win this was reaching for
+  // without paying it on every page. The Web Leads list it warmed retired with
+  // the Prospects surface on 2026-10-28; the rule against idle prefetch stays.
   //
   // Pinned by tests/perf-prefetch.test.ts. If you reintroduce an idle prefetch,
   // measure a real logged-in navigation first — this cost was invisible to
@@ -347,7 +332,6 @@ export function Sidebar({
           connectionsStatus={connectionsStatus}
           mayOpenAiSettings={mayOpenAiSettings}
           notifications={notifications}
-          intentFor={intentFor}
           isMobileOpen={isMobileOpen}
           onMobileClose={onMobileClose}
           onDesktopCollapse={onDesktopCollapse}
@@ -411,7 +395,6 @@ export function Sidebar({
                     badgeCount={item.badgeKey ? badgeMap[item.badgeKey] || 0 : 0}
                     demoMode={demoMode}
                     demoLandingPath={demoLandingPath}
-                    onIntent={item.href === "/web-leads" ? prefetchWebLeads : undefined}
                   />
                 ))}
               </NavGroup>

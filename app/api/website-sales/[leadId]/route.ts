@@ -69,8 +69,8 @@ import {
   type MemberRow,
   type MemberStanding,
 } from "@/lib/team";
-import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
-import { factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
+import { resolveAssignableTarget } from "@/lib/leads/assign-target";
+import { factsFrom, isActionableBy, isInBookOf } from "@/lib/leads/claim";
 import {
   isCompleteQualificationPayload,
   normalizeQualificationForStorage,

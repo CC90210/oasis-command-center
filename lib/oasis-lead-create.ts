@@ -42,7 +42,7 @@ import {
   OASIS_WEBSITE_TENANT_SLUG,
   mayWorkWebsiteSalesLifecycle,
 } from "@/lib/website-sales-workflow";
-import { CA_REGIONS, countryOf } from "@/lib/web-leads/filters";
+import { CA_REGIONS, countryOf } from "@/lib/leads/regions";
 import { US_STATE_CODES } from "@/lib/address/us-address";
 import { humanize } from "@/lib/manifest/humanize";
 import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/schema";

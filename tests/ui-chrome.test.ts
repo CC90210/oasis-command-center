@@ -63,8 +63,6 @@ const NO_FRAME_EXCEPTIONS: Readonly<Record<string, string>> = {
     "Admin > Coding harness. MainShell draws the persistent ChatWidget full-screen over this route (isChatShellPath); the page body is only the fallback shown if that chat cannot mount.",
   "app/schedule/page.tsx":
     "The calendar (CalendarApp) owns the viewport (MainShell isFullBleedPath) and draws its own week header in place of a title row.",
-  "app/web-leads/[id]/page.tsx":
-    "A rep's full-screen battle card; BattleCard draws its own hero header. U1-23 moves it inside PageFrame in the W1b sweep (an APEX-shared surface: lease and ack first).",
 };
 
 let failures = 0;

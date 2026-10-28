@@ -7,7 +7,7 @@ import {
   pipelineCycleAssignmentFacts,
 } from "../lib/pipeline-cycle";
 import { oasisLeadCreateStamp } from "../lib/oasis-lead-create";
-import { claimPatch, releasePatch } from "../lib/web-leads/claim";
+import { claimPatch, releasePatch } from "../lib/leads/claim";
 
 const assignedAt = "2026-09-23T08:00:00.000Z";
 const priorCycleRow = {

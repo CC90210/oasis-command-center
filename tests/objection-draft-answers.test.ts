@@ -8,8 +8,8 @@ import {
   buildDraftPrompt,
   freePostures,
   parseDraftAnswers,
-} from "@/lib/web-leads/objections/draft-answers";
-import type { ObjectionPosture } from "@/lib/web-leads/objections/types";
+} from "@/lib/objections/draft-answers";
+import type { ObjectionPosture } from "@/lib/objections/types";
 
 // ---------------------------------------------------------------------------
 // Model-drafted answers, and every way one is refused.
@@ -235,7 +235,7 @@ console.log("objection-draft-answers: free postures and the fenced prompt OK");
 
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 const draftSource = stripComments(
-  fs.readFileSync(path.join(process.cwd(), "lib/web-leads/objections/draft-answers.ts"), "utf8"),
+  fs.readFileSync(path.join(process.cwd(), "lib/objections/draft-answers.ts"), "utf8"),
 );
 assert.ok(
   /createDraftResponses?\(/.test(draftSource),

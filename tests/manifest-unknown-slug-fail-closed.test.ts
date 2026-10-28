@@ -209,7 +209,9 @@ async function main() {
     assert.deepEqual(hrefs(OASIS_SEED), CC, "OASIS_SEED");
     assert.deepEqual(
       hrefs(OASIS_AI_CC_SEED),
-      [...CC, "/web-leads", "/commissions", "/training", "/objections"],
+      // Leads (/web-leads) and Commissions left this seed on 2026-10-28 with
+      // their pages; both now answer 404.
+      [...CC, "/training", "/objections"],
       "OASIS_AI_CC_SEED",
     );
     assert.deepEqual(

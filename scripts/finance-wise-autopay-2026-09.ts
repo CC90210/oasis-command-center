@@ -49,7 +49,7 @@ async function main() {
   if (!tursoConfigured()) throw new Error("turso_not_configured: refusing to run without the Turso data client");
 
   const { getServiceSupabase } = await import("../lib/supabase-server");
-  const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
+  const { WEBDEV_TENANT_ID } = await import("../lib/oasis-tenant");
   const { BUSINESS_ENTITY_ID } = await import("../lib/founders-finances/chart");
   const { auditStatement, query, queryOne, writeBatch } = await import("../lib/founders-finances/db");
   const { voidBill, recordRecurringNow } = await import("../lib/founders-finances/bills-io");

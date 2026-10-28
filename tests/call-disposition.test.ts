@@ -98,23 +98,17 @@ assert.equal(dispositionLabel(null), null, "no disposition renders nothing, not 
 assert.equal(dispositionLabel(""), null, "an empty string renders nothing");
 assert.equal(dispositionLabel("   "), null, "whitespace renders nothing");
 
-// ── 4. Both write sites actually use it ────────────────────────────────────
+// ── 4. The write site actually uses it ─────────────────────────────────────
 //
 // A mapper nothing calls satisfies every assertion above and changes nothing a
-// rep sees.
+// rep sees. (The board's call mode, lib/web-leads/outcome.ts, was the second
+// write site; it retired with the Prospects surface on 2026-10-28.)
 
 const pipeline = readFileSync("lib/website-sales-workflow.ts", "utf8");
 assert.match(
   pipeline,
   /last_disposition: canonicalFromRepDisposition\(disposition\)/,
   "the pipeline must store the canonical value, not the raw RepDisposition",
-);
-
-const board = readFileSync("lib/web-leads/outcome.ts", "utf8");
-assert.match(
-  board,
-  /last_disposition: DB_OUTCOME\[outcome\]/,
-  "the board must store the canonical value here too — this field was the one place it disagreed with its own ledger and interaction writes",
 );
 
 console.log("call-disposition: OK");

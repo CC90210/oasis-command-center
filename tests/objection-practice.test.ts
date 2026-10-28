@@ -13,8 +13,8 @@ import {
   shuffle,
   type DrillKind,
   type PracticeObjection,
-} from "@/lib/web-leads/objections/practice";
-import { OBJECTION_POSTURES } from "@/lib/web-leads/objections/types";
+} from "@/lib/objections/practice";
+import { OBJECTION_POSTURES } from "@/lib/objections/types";
 
 // ---------------------------------------------------------------------------
 // The practice trainer.

@@ -7,8 +7,7 @@ import {
   matchIndustryAutomationGroup,
   type AutomationBuildType,
 } from "@/lib/industry-automations";
-import { CAPABILITIES } from "@/lib/web-leads/automations";
-import { LADDER_GATE_NOTE, STAGE_HEADING } from "@/components/web-leads/CapabilityRow";
+import { CAPABILITIES, LADDER_GATE_NOTE, STAGE_HEADING } from "@/lib/playbook/capability-ladder";
 
 const TYPES: readonly AutomationBuildType[] = ["Website", "Website + workflow", "Custom build"];
 

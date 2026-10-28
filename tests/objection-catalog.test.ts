@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { assembleCatalog } from "../lib/web-leads/objections/catalog";
+import { assembleCatalog } from "../lib/objections/catalog";
 
 // ---------------------------------------------------------------------------
 // assembleCatalog is the projection between the two tables and the shape the

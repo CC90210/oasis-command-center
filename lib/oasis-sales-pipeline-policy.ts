@@ -4,7 +4,7 @@ import {
   type StageMeta,
 } from "@/lib/oasis-stage-meta";
 import { normalizeCollaborators } from "@/lib/lead-scope";
-import { factsFrom, isReleasedFromBook } from "@/lib/web-leads/claim";
+import { factsFrom, isReleasedFromBook } from "@/lib/leads/claim";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 

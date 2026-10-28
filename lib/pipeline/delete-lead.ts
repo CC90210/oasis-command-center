@@ -322,22 +322,9 @@ async function blockersFor(
     await countLink(db, "website_sales_payment_receipts_v1_retired", "lead_id", tenantId, leadId);
   if (receipts) blockers.push("This lead has a payment receipt. Leads with payment records cannot be deleted.");
 
-  let commissions = 0;
-  if (liveDeals.length) {
-    commissions += count(await required<IdRow[]>(
-      db.from("website_sales_commissions").select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId).in("deal_id", liveDeals.map((row) => row.id)),
-      "checking website sales commissions",
-    ));
-  }
-  if (retiredDeals.length) {
-    commissions += count(await optional<IdRow[]>(
-      db.from("website_sales_commissions_v2_retired").select("id", { count: "exact", head: true })
-        .eq("tenant_id", tenantId).in("deal_id", retiredDeals.map((row) => row.id)),
-      "checking retired website sales commissions",
-    ));
-  }
-  if (commissions) blockers.push("This lead has a sales commission. Leads tied to compensation cannot be deleted.");
+  // No separate commission check (retired with the Commissions page, 2026-10-28):
+  // a commission row always hangs off a website deal, and a deal already blocks
+  // the delete above.
 
   const stage = String(objectOf(lead.data).stage ?? "").trim().toLowerCase();
   if (PROTECTED_STAGES.has(stage)) {

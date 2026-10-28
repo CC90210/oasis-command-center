@@ -54,7 +54,6 @@ export type DepartmentKey =
  *   delivery            lib/delivery/access.ts: inside OASIS only a founder;
  *                       in any other workspace, its own members (as a client)
  *   client_identities   capabilities.canSeeClientIdentities
- *   commissions         maySeeCommissionSurface(capabilities) — the page's gate
  *   company_financials  capabilities.canSeeCompanyFinancials (already OASIS-only)
  *   founders_content    the founders-portal gate the layout computes today
  *                       (FOUNDERS_TENANT_IDS + canSeeMarketing + own shell)
@@ -68,7 +67,6 @@ export type OsAudience =
   | "system"
   | "delivery"
   | "client_identities"
-  | "commissions"
   | "company_financials"
   | "founders_content"
   | "finance_owner"

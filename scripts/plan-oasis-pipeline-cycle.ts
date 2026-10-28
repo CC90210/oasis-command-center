@@ -14,7 +14,7 @@ import { loadEnvConfig } from "@next/env";
 import { getDataBackendMode } from "../lib/backend-mode";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
 import { getTursoClient, tursoConfigured } from "../lib/turso";
-import { WEBDEV_TENANT_ID } from "../lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "../lib/oasis-tenant";
 import { getOasisPipelineAssignmentRoster } from "../lib/team";
 import {
   CURRENT_OASIS_PIPELINE_CYCLE,

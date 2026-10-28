@@ -40,7 +40,7 @@ import {
   OASIS_COLD_OUTBOUND_MOTION,
   OASIS_WEBSITE_SALES_PROGRAM,
 } from "../lib/leads/canonical-lead-fields";
-import { availability, CLAIM_STALE_DAYS, factsFrom } from "../lib/web-leads/claim";
+import { availability, CLAIM_STALE_DAYS, factsFrom } from "../lib/leads/claim";
 
 function run(name: string, fn: () => void) {
   fn();

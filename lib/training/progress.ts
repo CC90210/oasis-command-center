@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { SECTION_SLUGS, type SectionSlug } from "@/lib/training/types";
 
 export class TrainingProgressError extends Error {

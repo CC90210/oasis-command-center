@@ -41,8 +41,6 @@ import {
 import { buildMemberDirectory, withAssignedName } from "@/lib/assigned-names";
 import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
-import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 import {
   creatableOasisStages,
@@ -194,16 +192,14 @@ export default async function PipelinePage({
   // pipeline stage, capped at 500, which is why it read as clogged and why
   // every profile opened thin — those are un-worked prospects, not deals.
   //
-  // HIDDEN, NOT DELETED, and the distinction is load-bearing: /web-leads reads
-  // the SAME rows from the SAME table and tenant (WEBDEV_TENANT_ID is
-  // oasis-ai-cc). Deleting the researched leads would empty the Leads browser
-  // too — there is no second copy. So the board starts at `assigned`, and
-  // assigning a lead is what puts it on the pipeline.
+  // HIDDEN, NOT DELETED. The researched rows were the pool the Prospects list
+  // (/web-leads) browsed; that surface retired on 2026-10-28 and the rows stay
+  // in tenant_records untouched (2,061 that day). So the board starts at
+  // `assigned`, and assigning a lead is what puts it on the pipeline.
   // The STAGE LIST has to drop researched too, not just the rows. Filtering one
   // without the other leaves a permanently-empty "Researched" column on the
   // board — which reads as "we have no prospects" when the truth is the
-  // opposite: 30,847 of them, deliberately parked in /web-leads until a rep
-  // picks one up. An empty column is a worse lie than no column.
+  // opposite. An empty column is a worse lie than no column.
   //
   // oasisBoardStages is that filtered list, defined once in
   // lib/oasis-lead-create.ts so the stages a lead may be CREATED in are carved
@@ -382,41 +378,12 @@ export default async function PipelinePage({
     data: withAssignedName(row.data, memberNameMap),
   }));
   // ONE PIPELINE (CC, 2026-10-28): a deal with an open Free AI Audit shows the
-  // audit's step on its row, for the founders who can open it. Read alongside
-  // the website scores below; a failed read draws the rows without the step.
+  // audit's step on its row, for the founders who can open it. A failed read
+  // draws the rows without the step.
   const auditStepsPromise = session.ok
     ? timed("audit_steps", auditStepsForLeads(named.map((row) => row.id), { tenantId, isTrueAdmin: session.isTrueAdmin }), perf.spans)
     : Promise.resolve(new Map());
-  /**
-   * The website score, joined server-side.
-   *
-   * Every other business fact -- address, city, industry, website, the
-   * condition sentence -- was already on these rows and simply never read by
-   * the board's row model. The SCORE is the one exception: it lives in
-   * leadgen_site_audits keyed by webdev_source_business_id, not on the lead.
-   *
-    * Resolved through the SAME score-index assembler /web-leads uses, but with
-    * indexed reads for only this page's business ids. The number and precedence
-    * stay identical without scanning ~50K audit rows on every cold board.
-   *
-   * GATED ON THE TENANT. Three slugs render this page (`oasis`, `oasis-ai-cc`,
-    * `oasis-webdev`) but every query inside the score resolver is pinned to
-   * WEBDEV_TENANT_ID, which is `oasis-ai-cc`. Ungated, another tenant's board
-   * would resolve its rows against a DIFFERENT tenant's audit index: a miss
-   * renders "Not scored yet" on a lead that may be scored, and a colliding
-   * business id would show one tenant a number measured from another tenant's
-   * website. `oasis-webdev` holds 53 real leads, so this was live, not
-   * theoretical. A positive check on the id we know, never a denylist.
-   *
-   * Applied to `pipelineWindow.rows`, which the database has already scoped,
-   * de-researched, rep-filtered and paged -- so this resolves one screen of
-   * rows rather than thirty-one thousand.
-   */
-  const scored =
-    tenantId === WEBDEV_TENANT_ID
-      ? await timed("scores", attachWebsiteScores(named), perf.spans)
-      : named;
-  const rows = withAuditSteps(scored, await auditStepsPromise);
+  const rows = withAuditSteps(named, await auditStepsPromise);
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.

@@ -24,7 +24,7 @@ import {
   mayApproveObjections,
   mayAuthorObjections,
   needsApprovalRights,
-} from "@/lib/web-leads/objections/admin-access";
+} from "@/lib/objections/admin-access";
 import {
   ObjectionAdminError,
   ObjectionRejected,
@@ -34,8 +34,8 @@ import {
   updateResponse,
   type ObjectionPatch,
   type ResponsePatch,
-} from "@/lib/web-leads/objections/admin";
-import { isObjectionFamily, isObjectionPosture, isWebsitePremise } from "@/lib/web-leads/objections/types";
+} from "@/lib/objections/admin";
+import { isObjectionFamily, isObjectionPosture, isWebsitePremise } from "@/lib/objections/types";
 
 export const dynamic = "force-dynamic";
 

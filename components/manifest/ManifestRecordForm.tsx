@@ -20,7 +20,6 @@ import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/sche
 import { humanize } from "@/lib/manifest/humanize";
 import { LEAD_DOC_TYPES, humanLeadDocSize } from "@/lib/lead-doc-display";
 import { AddressAutocompleteField } from "@/components/forms/AddressAutocompleteField";
-import { invalidateWebLeadsClientCache } from "@/lib/web-leads/client-cache";
 
 type Props = {
   tenantSlug: string;
@@ -417,9 +416,6 @@ export function ManifestRecordForm({
         !editId && landOnStagePath && typeof savedStage === "string" && savedStage
           ? `${landOnStagePath}?stage=${encodeURIComponent(savedStage)}`
           : resolvedBackHref;
-      // A new OASIS lead must show on the Leads page too, not only the board:
-      // drop that page's 15-second in-tab cache so its next visit reads live.
-      if (!editId && landOnStagePath) invalidateWebLeadsClientCache();
       router.push(landing);
       router.refresh();
     } catch {

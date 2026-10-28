@@ -38,7 +38,7 @@ import { getActiveProfile, getTenant } from "@/lib/queries";
 import { isAgentsOwner } from "@/lib/agents-owner";
 import type { AttentionViewer } from "@/lib/admin/attention";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { COLD_LEAD_MS, ATTENTION_LIST_LIMIT, loadWorkspaceOutcome, needsYouCount, type WorkerHealth } from "@/lib/admin/attention";
 import { loadSystemHealth, type GuardStatus, type SystemHealth } from "@/lib/admin/system-health";
 import { timeAgo } from "@/lib/devices/presence";
