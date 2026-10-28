@@ -237,7 +237,6 @@ export async function SettingsContent({
       <PersonalSettingsView
         profile={profile}
         tenantName={tenant?.name ?? null}
-        tenantId={profile.tenant_id}
         hideHeader={hideHeader}
         showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
         showKixie={enabledAgents.includes("helios")}
@@ -651,7 +650,6 @@ export async function SettingsContent({
 async function PersonalSettingsView({
   profile,
   tenantName,
-  tenantId,
   hideHeader,
   showGmail,
   showKixie,
@@ -661,7 +659,6 @@ async function PersonalSettingsView({
 }: {
   profile: NonNullable<Awaited<ReturnType<typeof getActiveProfile>>>;
   tenantName: string | null;
-  tenantId: string | null;
   hideHeader: boolean;
   showGmail: boolean;
   showKixie: boolean;
