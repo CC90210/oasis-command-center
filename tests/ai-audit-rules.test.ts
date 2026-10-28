@@ -187,29 +187,42 @@ async function main() {
       if (f?.kind === "move") assert.ok(rules.mayMoveStage(s, f.to), `${s} to ${f.to} is not a legal move`);
     }
   });
-  await check("the board files each audit under its lead's Pipeline stage, in the Pipeline's words and colours", async () => {
+  await check("the board's numbers are the Pipeline's, both queues, with each audit's step and the deals with no audit inside (CC, 2026-10-28)", async () => {
     const pv = await import("../lib/ai-audit/pipeline-view");
     const { OASIS_LEAD_STAGES } = await import("../lib/oasis-stage-meta");
-    const cols = pv.pipelineColumns([
-      { stage: "payment_pending", pipeline_stage: "proposal_sent" },
-      { stage: "delivered", pipeline_stage: "proposal_sent" },
-      { stage: "transcript_review", pipeline_stage: "demo_completed" },
-      { stage: "new_lead", pipeline_stage: "qualified" },
-      { stage: "pre_call_research", pipeline_stage: "connected" },
-    ]);
+    // CC's live screen: Warm inbound had 9 Researched, 1 Attempting Contact, 9 Founder Meeting, 1 Proposal Sent;
+    // Cold outbound had 4 founder meetings. Only the Proposal Sent deal had an audit.
+    const counts = {
+      warm: { researched: 9, attempting_contact: 1, founder_meeting_booked: 9, proposal_sent: 1, lost: 0 },
+      cold: { qualified: 3, founder_meeting_booked: 4 },
+    };
+    const deals = [{ id: "fixture" }, ...Array.from({ length: 13 }, (_, i) => ({ id: `fm${i}` }))];
+    const cols = pv.boardColumns({ counts, truncated: { warm: [], cold: [] }, deals, audits: [{ stage: "payment_pending", lead_id: "fixture", pipeline_stage: "proposal_sent", queue_key: "warm" }] });
     assert.deepEqual(cols.map((c) => c.label), ["Before the meeting", "Founder Meeting", "Meeting Held", "Proposal Sent", "Won", "Onboarding", "In Build"]);
+    const meeting = cols.find((c) => c.key === "founder_meeting_booked")!;
+    assert.deepEqual([meeting.count, meeting.warm, meeting.cold, meeting.noAudit], [13, 9, 4, 13], "every founder meeting counts, with or without an audit");
     const sent = cols.find((c) => c.key === "proposal_sent")!;
-    assert.equal(sent.count, 2);
-    assert.deepEqual(sent.steps.map((st) => [st.label, st.count]), [["Audit sent", 1], ["At checkout", 1]], "in the audit's order");
+    assert.deepEqual([sent.count, sent.noAudit], [1, 0]);
+    assert.deepEqual(sent.steps.map((st) => [st.label, st.count]), [["At checkout", 1]]);
     assert.equal(sent.bg, OASIS_LEAD_STAGES.find((st) => st.key === "proposal_sent")!.bg, "the Pipeline's colour");
-    assert.equal(cols.find((c) => c.key === pv.BEFORE_MEETING)!.count, 2, "Assigned to Qualified are one column");
-    assert.equal(cols.reduce((n, c) => n + c.count, 0), 5, "every audit counted once");
-    const odd = pv.pipelineColumns([
-      { stage: "delivered", pipeline_stage: "lost" },
-      { stage: "generating", pipeline_stage: null },
-      { stage: "generating", pipeline_stage: "not_a_stage" },
-    ]);
-    assert.deepEqual(odd.slice(7).map((c) => [c.label, c.count]), [["Lost", 1], ["Not on the Pipeline", 2]], "drawn only when an audit sits there, after the rest");
+    const before = cols.find((c) => c.key === pv.BEFORE_MEETING)!;
+    assert.deepEqual([before.count, before.warm, before.cold, before.noAudit], [13, 10, 3, 0], "Researched to Qualified, both queues; no audit is expected before the meeting");
+    // An audit whose lead is on neither queue is never counted as a Pipeline deal; a truncated stage still counts its audits.
+    const odd = pv.boardColumns({
+      counts: { warm: { founder_meeting_booked: 50 }, cold: {} },
+      truncated: { warm: ["founder_meeting_booked"], cold: [] },
+      deals: [],
+      audits: [
+        { stage: "call_scheduled", lead_id: "beyond-the-rows", pipeline_stage: "founder_meeting_booked", queue_key: "warm" },
+        { stage: "generating", lead_id: "no-queue", pipeline_stage: "demo_completed", queue_key: null },
+      ],
+    });
+    assert.deepEqual([odd.find((c) => c.key === "founder_meeting_booked")!.noAudit, odd.find((c) => c.key === "demo_completed")!.count], [49, 0]);
+    const off = odd.find((c) => c.key === pv.NOT_ON_PIPELINE)!;
+    assert.deepEqual([off.label, off.count, off.noAudit], ["Not on the Pipeline", 1, 0]);
+    assert.equal(pv.queueKey("inbound_warm"), "warm");
+    assert.equal(pv.queueKey("cold_outbound"), "cold");
+    assert.equal(pv.queueKey(null), null);
     assert.equal(pv.queueLabel("inbound_warm"), "Warm inbound");
     assert.equal(pv.queueLabel("cold_outbound"), "Cold outbound");
     assert.equal(pv.queueLabel(undefined), null);

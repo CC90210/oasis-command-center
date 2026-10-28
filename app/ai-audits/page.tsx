@@ -9,7 +9,10 @@
  * ONE PIPELINE (CC, 2026-10-28). The board used to draw the audit's 13 steps
  * as numbered stages of their own, beside the Pipeline's 14: two pipelines for
  * one deal. Its columns are now the Pipeline's own stages, names and colours
- * (lib/ai-audit/pipeline-view.ts), read from each lead's row.
+ * (lib/ai-audit/pipeline-view.ts), and their numbers are the Pipeline's own,
+ * read with the Pipeline page's query (lib/ai-audit/pipeline-deals.ts): every
+ * deal counts, with or without an audit, and a founder meeting with no audit
+ * yet is listed with its Start button.
  *
  * Not /ai-audit: that address is the public campaign link to the Free AI Audit
  * offer page (a permanent redirect in next.config.js), so the board placed
@@ -21,7 +24,9 @@ import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { boardMetrics, boardRows, type BoardMetrics } from "@/lib/ai-audit/view";
-import { pipelineColumnKey, pipelineColumnMeta, pipelineColumns } from "@/lib/ai-audit/pipeline-view";
+import { boardColumns, pipelineColumnKey, pipelineColumnMeta, pipelineStageLabel, type BoardColumn } from "@/lib/ai-audit/pipeline-view";
+import { ownerPipelineSnapshot, type PipelineDeal } from "@/lib/ai-audit/pipeline-deals";
+import { StartAiAuditButton } from "@/components/ai-audit/StartAiAuditButton";
 import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
 import { SetupChecklist } from "@/components/ai-audit/SetupChecklist";
 
@@ -30,6 +35,10 @@ export const dynamic = "force-dynamic";
 type Props = { searchParams: Promise<Record<string, string | string[] | undefined>> };
 
 const FLAG_WORDS: Record<string, string> = { stalled: "Stalled", failed: "Failed", attention: "Needs you" };
+
+/** Founder meetings and deals after them, before a sale: where an audit belongs and none is open yet. */
+const AUDIT_STAGES = new Set(["founder_meeting_booked", "demo_completed", "proposal_sent"]);
+const QUEUE_WORDS = { warm: "Warm inbound", cold: "Cold outbound" } as const;
 
 function when(iso: string): string {
   const d = new Date(iso);
@@ -58,7 +67,16 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
   }
   const tile = (value: number) => ({ value: metrics ? value : null, status: metrics ? ("live" as const) : ("error" as const) });
   const closeRate = metrics && metrics.delivered ? `${Math.round((metrics.won / metrics.delivered) * 100)}%` : null;
-  const columns = pipelineColumns(rows);
+  // The Pipeline's own deals and numbers. A failed read says so where the columns go; the audits below still load.
+  let columns: BoardColumn[] | null = null;
+  let withoutAudit: PipelineDeal[] = [];
+  try {
+    const snapshot = await ownerPipelineSnapshot(session.db, session.tenantId);
+    columns = boardColumns({ ...snapshot, audits: rows.filter((r) => !r.closed) });
+    withoutAudit = snapshot.deals.filter((d) => !d.audit && AUDIT_STAGES.has(d.stage));
+  } catch (err) {
+    console.error("[ai-audits] the Pipeline's deals could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));
+  }
   const flagged = rows.filter((r) => r.health !== "ok").length;
   // The numbers above count real clients only (boardMetrics), so a test audit on the list says so.
   const tests = rows.filter((r) => r.is_fixture).length;
@@ -116,8 +134,9 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
       <section aria-label="Audits by Pipeline stage" className="mb-5">
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold text-fg">On the Pipeline</h2>
-          <p className="text-[12px] text-fg-dim">The same stages as the Pipeline, with each audit&apos;s step inside.</p>
+          <p className="text-[12px] text-fg-dim">The Pipeline&apos;s stages and numbers, both queues, with each audit&apos;s step inside.</p>
         </div>
+        {columns ? (
         <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
           {columns.map((col) => (
             <li key={col.key} className="min-w-0 rounded-lg border border-hairline bg-bg-panel px-3 py-2" style={{ borderTop: `3px solid ${col.bg}` }}>
@@ -125,6 +144,9 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
                 {col.label}
               </div>
               <div className="mt-0.5 text-lg font-semibold tabular-nums text-fg">{col.count}</div>
+              {col.warm || col.cold ? (
+                <div className="text-[11px] text-fg-dim">{[col.warm ? `${col.warm} warm` : "", col.cold ? `${col.cold} cold` : ""].filter(Boolean).join(" · ")}</div>
+              ) : null}
               {col.steps.length ? (
                 <ul className="mt-1 space-y-0.5 text-[11px] text-fg-dim">
                   {col.steps.map((st) => (
@@ -135,10 +157,44 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
                   ))}
                 </ul>
               ) : null}
+              {col.noAudit ? <div className="mt-0.5 flex justify-between gap-2 text-[11px] text-fg-dim"><span>No audit yet</span><span className="tabular-nums">{col.noAudit}</span></div> : null}
             </li>
           ))}
         </ol>
+        ) : (
+          <div className="rounded-xl border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-status-warm">The Pipeline&apos;s numbers could not be read just now. Reload the page; the error was logged.</div>
+        )}
       </section>
+
+      {withoutAudit.length ? (
+        <section aria-label="Founder meetings with no audit yet" className="mb-5 overflow-x-auto rounded-xl border border-hairline bg-bg-panel">
+          <h2 className="px-4 pt-3 text-sm font-semibold text-fg">Founder meetings with no audit yet</h2>
+          <p className="px-4 pb-2 text-[12px] text-fg-dim">On the Pipeline at Founder Meeting, Meeting Held or Proposal Sent. Start an audit to prepare the meeting, the audit and the proposal.</p>
+          <table className="w-full text-sm">
+            <tbody>
+              {withoutAudit.map((d) => (
+                <tr key={d.id} className="border-t border-hairline">
+                  <td className="px-4 py-2.5">
+                    <Link href={`/pipeline/${d.id}`} className="font-medium text-fg hover:underline">
+                      {d.company || d.name || "Unnamed lead"}
+                    </Link>
+                    <div className="text-[12px] text-fg-dim">{d.company && d.name ? d.name : d.email || "no email"}</div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" style={{ background: pipelineColumnMeta(d.stage).bg, color: pipelineColumnMeta(d.stage).fg }}>
+                      {pipelineStageLabel(d.stage)}
+                    </span>
+                    <div className="mt-0.5 text-[12px] text-fg-dim">{QUEUE_WORDS[d.queue]}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <StartAiAuditButton leadId={d.id} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : null}
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-hairline bg-bg-panel p-6 text-sm text-fg-muted">
