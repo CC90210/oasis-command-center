@@ -7,6 +7,7 @@ import {
   pickRebookSlot,
   readRebookState,
   REBOOK_LEAD_STAGE,
+  rebookHosts,
   rebookLeadPatch,
 } from "@/lib/booking/rebook";
 import { RebookNotConfiguredError, verifyRebookToken } from "@/lib/booking/rebook-token";
@@ -71,7 +72,7 @@ async function recordLead(input: {
   missedAt: string;
   occurredAt: string;
   expectedOwnerId: string | null;
-}): Promise<{ ok: true } | { ok: false; error: string }> {
+}): Promise<{ ok: true; applied: boolean } | { ok: false; error: string }> {
   const db = getServiceSupabase();
   const transition = await db.rpc("transition_pipeline_lead", {
     p_tenant_id: input.tenantId,
@@ -101,11 +102,55 @@ async function recordLead(input: {
       source: "public_rebook_link",
     },
   });
-  const data = transition.data as { ok?: boolean; error?: string } | null;
+  const data = transition.data as { ok?: boolean; error?: string; idempotent?: boolean } | null;
   if (transition.error || data?.ok === false) {
     return { ok: false, error: transition.error?.message || data?.error || "refused" };
   }
-  return { ok: true };
+  // `applied`: this call wrote the receipt (a replay answers idempotent), so the
+  // sales desk is told exactly once, by whichever attempt recorded the rebook.
+  return { ok: true, applied: data?.idempotent !== true };
+}
+
+/** Tell the sales desk once the lead record shows the new time (after the response). */
+function alertRebooked(input: {
+  tenantId: string;
+  leadId: string;
+  lead: Record<string, unknown> | null;
+  clientName: string | null;
+  missedAt: string;
+  meeting: VerifiedFounderMeeting;
+}): void {
+  after(async () => {
+    const db = getServiceSupabase();
+    const lead = input.lead ?? {};
+    const company = typeof lead.company === "string" ? lead.company : typeof lead.company_name === "string" ? lead.company_name : "";
+    const label = input.meeting.offerLabel || "Founder meeting";
+    const sent = await pushWorkspaceAlert(
+      input.tenantId,
+      buildRebookedLeadAlert({
+        offerName: label,
+        name: input.clientName || "",
+        company,
+        missedAt: input.missedAt,
+        startsAt: input.meeting.meetingAt,
+        meetUrl: input.meeting.receipt.meetLink,
+        leadUrl: pipelineLeadUrl(input.leadId),
+      }),
+      { desk: "sales" },
+    );
+    if (!sent.delivered) {
+      await recordAlertFailure({
+        db,
+        tenantId: input.tenantId,
+        leadId: input.leadId,
+        source: AI_AUDIT_ALERT_SOURCE,
+        label: `${label} (rebooked)`,
+        reason: sent.outcome,
+        extra: "The new time is on the calendar; the Meet link is on the lead.",
+        tag: "public-rebook.alert",
+      });
+    }
+  });
 }
 
 async function answerBooked(tenantId: string, meeting: VerifiedFounderMeeting): Promise<NextResponse> {
@@ -177,13 +222,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (target !== startsAt) {
         return NextResponse.json({ ok: false, error: "booking_request_mismatch" }, { status: 409 });
       }
-      const slot = moved
-        ? null
-        : pickRebookSlot(
-            await loadPublicBookingAvailability({ tenantId: claims.tenantId, durationMinutes: current.duration_minutes }),
-            startsAt,
-            current.assigned_to,
-          );
+      // The lead must still be one this link may rebook BEFORE anything is
+      // resumed: a lead marked lost since the first attempt keeps its meeting
+      // where it is, and the reconciler settles the stale reservation.
+      const lead = await loadRebookLead(db, claims.tenantId, claims.leadId);
+      if (
+        !lead ||
+        lead.stage !== REBOOK_LEAD_STAGE ||
+        lead.calendar_appointment_id !== claims.appointmentId
+      ) {
+        return NextResponse.json({ ok: false, error: "rebook_closed" }, { status: 409 });
+      }
+      // A move reserved but not applied resumes only into a time still open with
+      // the same hosts. Anything else (the time was taken since, or Google moved
+      // the event before its receipt was saved) is the reconciler's to settle,
+      // never a second write into a slot that may be double-booked.
+      let slot: PublicBookingSlot | null = null;
+      if (!moved) {
+        slot = pickRebookSlot(
+          await loadPublicBookingAvailability({ tenantId: claims.tenantId, durationMinutes: current.duration_minutes }),
+          startsAt,
+          rebookHosts(lead, current),
+        );
+        if (!slot) return NextResponse.json({ ok: false, error: "rebook_in_progress" }, { status: 409 });
+      }
       let meeting: VerifiedFounderMeeting;
       try {
         meeting = await rescheduleVerifiedFounderMeeting(
@@ -201,16 +263,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch (error) {
         return rescheduleFailure(error);
       }
-      const lead = await loadRebookLead(db, claims.tenantId, claims.leadId);
+      // The lead still carries the missed time until this write replaces it.
+      const missedAt = typeof lead.founder_meeting_at === "string" ? lead.founder_meeting_at : current.scheduled_for;
       const recorded = await recordLead({
         tenantId: claims.tenantId,
         leadId: claims.leadId,
         requestId,
         meeting,
-        // The lead still carries the missed time until this write replaces it.
-        missedAt: lead && typeof lead.founder_meeting_at === "string" ? lead.founder_meeting_at : current.scheduled_for,
+        missedAt,
         occurredAt: new Date().toISOString(),
-        expectedOwnerId: lead && typeof lead.assigned_to === "string" ? lead.assigned_to : null,
+        expectedOwnerId: typeof lead.assigned_to === "string" ? lead.assigned_to : null,
       });
       if (!recorded.ok) {
         // Never activate a meeting the lead record does not show: the
@@ -219,6 +281,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ ok: false, error: "booking_sync_pending" }, { status: 503 });
       }
       await activateVerifiedFounderMeeting(claims.tenantId, claims.appointmentId);
+      if (recorded.applied) {
+        alertRebooked({ tenantId: claims.tenantId, leadId: claims.leadId, lead, clientName: current.client_name_snapshot, missedAt, meeting });
+      }
       return await answerBooked(claims.tenantId, meeting);
     }
 
@@ -236,7 +301,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId: state.claims.tenantId,
       durationMinutes: state.durationMinutes,
     });
-    const slot = pickRebookSlot(available, startsAt, state.appointment.assigned_to);
+    const slot = pickRebookSlot(available, startsAt, rebookHosts(state.lead, state.appointment));
     if (!slot) {
       return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
     }
@@ -286,34 +351,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       console.error("[public-rebook.activation_pending]", codeOf(error, "meeting_activation_failed"));
     }
 
-    after(async () => {
-      const company = typeof state.lead.company === "string" ? state.lead.company : typeof state.lead.company_name === "string" ? state.lead.company_name : "";
-      const sent = await pushWorkspaceAlert(
-        state.claims.tenantId,
-        buildRebookedLeadAlert({
-          offerName: meeting.offerLabel || "Founder meeting",
-          name: state.appointment.client_name_snapshot || "",
-          company,
-          missedAt: state.missedAt,
-          startsAt: meeting.meetingAt,
-          meetUrl: meeting.receipt.meetLink,
-          leadUrl: pipelineLeadUrl(state.claims.leadId),
-        }),
-        { desk: "sales" },
-      );
-      if (!sent.delivered) {
-        await recordAlertFailure({
-          db,
-          tenantId: state.claims.tenantId,
-          leadId: state.claims.leadId,
-          source: AI_AUDIT_ALERT_SOURCE,
-          label: `${meeting.offerLabel || "Founder meeting"} (rebooked)`,
-          reason: sent.outcome,
-          extra: "The new time is on the calendar; the Meet link is on the lead.",
-          tag: "public-rebook.alert",
-        });
-      }
-    });
+    if (recorded.applied) {
+      alertRebooked({
+        tenantId: state.claims.tenantId,
+        leadId: state.claims.leadId,
+        lead: state.lead,
+        clientName: state.appointment.client_name_snapshot,
+        missedAt: state.missedAt,
+        meeting,
+      });
+    }
 
     return await answerBooked(state.claims.tenantId, meeting);
   } catch (error) {

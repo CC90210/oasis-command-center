@@ -197,18 +197,40 @@ export async function readRebookState(
   };
 }
 
-/** The slot a lead picked, if it is still open and the meeting's own host is its organizer. */
+/**
+ * Who hosts this meeting: the hosts it was booked with (stored on the lead by
+ * the public booking), else its own host alone. A rebook keeps EXACTLY these
+ * people, so the Schedule copies and the lead's access, written at booking,
+ * stay true without being rewritten (Codex review of #773).
+ */
+export function rebookHosts(
+  lead: Record<string, unknown>,
+  appointment: Pick<RebookAppointment, "assigned_to">,
+): { organizerId: string | null; hostIds: string[] } {
+  const stored = Array.isArray(lead.public_booking_host_ids)
+    ? lead.public_booking_host_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  const hostIds = stored.length ? stored : appointment.assigned_to ? [appointment.assigned_to] : [];
+  return { organizerId: appointment.assigned_to, hostIds };
+}
+
+/** A slot this meeting may move to: its organizer is the meeting's host and its hosts are the same people. */
+export function slotKeepsHosts(slot: PublicBookingSlot, hosts: { organizerId: string | null; hostIds: string[] }): boolean {
+  const organizer = slot.hosts.find((host) => host.role === "organizer");
+  if (!organizer || (hosts.organizerId && organizer.userId !== hosts.organizerId)) return false;
+  const want = new Set(hosts.hostIds);
+  const have = new Set(slot.hosts.map((host) => host.userId));
+  return want.size === have.size && [...want].every((id) => have.has(id));
+}
+
+/** The slot a lead picked, if it is still open with the same hosts. */
 export function pickRebookSlot(
   available: PublicBookingSlot[],
   startsAt: string,
-  hostUserId: string | null,
+  hosts: { organizerId: string | null; hostIds: string[] },
 ): PublicBookingSlot | null {
   const slot = available.find((item) => item.start === startsAt);
-  if (!slot) return null;
-  const organizer = slot.hosts.find((host) => host.role === "organizer");
-  if (!organizer) return null;
-  if (hostUserId && organizer.userId !== hostUserId) return null;
-  return slot;
+  return slot && slotKeepsHosts(slot, hosts) ? slot : null;
 }
 
 /** The lead's record after a rebook: the new time and the new invite, same stage. */

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
-import { readRebookState } from "@/lib/booking/rebook";
+import { readRebookState, rebookHosts, slotKeepsHosts } from "@/lib/booking/rebook";
 import { RebookNotConfiguredError } from "@/lib/booking/rebook-token";
 import {
   loadPublicBookingAvailability,
@@ -49,10 +49,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId: state.claims.tenantId,
       durationMinutes: state.durationMinutes,
     });
-    const host = state.appointment.assigned_to;
-    const slots = available
-      .filter((slot) => slot.hosts.some((h) => h.role === "organizer" && (!host || h.userId === host)))
-      .map((slot) => slot.start);
+    const hosts = rebookHosts(state.lead, state.appointment);
+    const slots = available.filter((slot) => slotKeepsHosts(slot, hosts)).map((slot) => slot.start);
     return NextResponse.json(
       { ok: true, slots, duration_minutes: state.durationMinutes, time_zone: PUBLIC_BOOKING_TIME_ZONE },
       { headers: { "cache-control": "no-store" } },

@@ -19,7 +19,7 @@ import {
   signRebookToken,
   verifyRebookToken,
 } from "../lib/booking/rebook-token";
-import { firstNameOf, pickRebookSlot, readRebookState, rebookLeadPatch } from "../lib/booking/rebook";
+import { firstNameOf, pickRebookSlot, readRebookState, rebookHosts, rebookLeadPatch } from "../lib/booking/rebook";
 import { markFounderMeetingNoShow } from "../lib/booking/no-show";
 import {
   activateVerifiedFounderMeeting,
@@ -200,13 +200,27 @@ function testToken() {
 function testPureHelpers() {
   assert.equal(firstNameOf("  Gideon Boniface "), "Gideon");
   assert.equal(firstNameOf(null), "");
+  const cc = { userId: HOST, role: "organizer", email: ORGANIZER, displayName: "CC" };
   const slots = [
-    { start: "2026-10-30T15:00:00.000Z", hosts: [{ userId: HOST, role: "organizer", email: ORGANIZER, displayName: "CC" }] },
+    { start: "2026-10-30T15:00:00.000Z", hosts: [cc] },
     { start: "2026-10-30T16:00:00.000Z", hosts: [{ userId: "someone-else", role: "organizer", email: "x@oasisai.work", displayName: "X" }] },
+    { start: "2026-10-30T17:00:00.000Z", hosts: [cc, { userId: "closer-b", role: "attendee", email: "b@oasisai.work", displayName: "B" }] },
   ] as never;
-  assert.ok(pickRebookSlot(slots, "2026-10-30T15:00:00.000Z", HOST), "the meeting's own host's slot is offered");
-  assert.equal(pickRebookSlot(slots, "2026-10-30T16:00:00.000Z", HOST), null, "a slot another founder organizes is not this meeting's");
-  assert.equal(pickRebookSlot(slots, "2026-10-30T17:00:00.000Z", HOST), null, "a time that is not open is refused");
+  const alone = rebookHosts({ public_booking_host_ids: [HOST] }, { assigned_to: HOST });
+  assert.deepEqual(alone, { organizerId: HOST, hostIds: [HOST] });
+  assert.deepEqual(rebookHosts({}, { assigned_to: HOST }).hostIds, [HOST], "no stored hosts: the meeting's own host");
+  assert.ok(pickRebookSlot(slots, "2026-10-30T15:00:00.000Z", alone), "the meeting's own host's slot is offered");
+  assert.equal(pickRebookSlot(slots, "2026-10-30T16:00:00.000Z", alone), null, "a slot another founder organizes is not this meeting's");
+  assert.equal(
+    pickRebookSlot(slots, "2026-10-30T17:00:00.000Z", alone),
+    null,
+    "a slot that adds a co-host would leave Schedule copies and lead access stale, so it is not offered",
+  );
+  assert.ok(
+    pickRebookSlot(slots, "2026-10-30T17:00:00.000Z", rebookHosts({ public_booking_host_ids: [HOST, "closer-b"] }, { assigned_to: HOST })),
+    "a meeting booked with that co-host keeps them",
+  );
+  assert.equal(pickRebookSlot(slots, "2026-10-30T18:00:00.000Z", alone), null, "a time that is not open is refused");
   const patch = rebookLeadPatch({
     startsAt: NEW_TIME,
     occurredAt: "2026-10-28T20:00:00.000Z",
@@ -358,6 +372,13 @@ function testSourceContracts() {
     "a replay never activates a meeting the lead record does not show",
   );
   assert.match(replay, /pending_request_id === requestId/, "a move reserved under this request resumes instead of closing the link");
+  assert.ok(
+    replay.indexOf("lead.stage !== REBOOK_LEAD_STAGE") > 0 &&
+      replay.indexOf("lead.stage !== REBOOK_LEAD_STAGE") < replay.indexOf("rescheduleVerifiedFounderMeeting("),
+    "a resumed move re-checks the lead before touching the calendar",
+  );
+  assert.match(replay, /if \(!slot\) return NextResponse\.json\(\{ ok: false, error: "rebook_in_progress" \}/, "an unapplied move resumes only into a still-open slot");
+  assert.equal((route.match(/if \(recorded\.applied\)/g) || []).length, 2, "both success paths tell the sales desk, once");
   const page = readFileSync("components/booking/RebookPage.tsx", "utf8");
   assert.doesNotMatch(page, /retry_required"\) setRequestId\(null\)/, "an uncertain move is retried under the same request id");
   assert.doesNotMatch(route, /createVerifiedFounderMeeting/);
