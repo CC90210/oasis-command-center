@@ -36,6 +36,7 @@ const METRIC_NAMES = new Set([
   "OASIS-nav-commit",
   "OASIS-board-soft",
   "OASIS-board-full",
+  "OASIS-board-query",
 ]);
 const RATINGS = new Set(["good", "needs-improvement", "poor"]);
 const PATH_RE = /^[A-Za-z0-9/_\-.[\]]{1,100}$/;

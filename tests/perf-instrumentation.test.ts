@@ -264,6 +264,74 @@ async function testNavTimingNoClick(): Promise<void> {
   }
 }
 
+/**
+ * A same-route click (a stage chip, Next, a queue tab) is timed once the board
+ * is drawn for exactly that search: once, pathname only. The same URL, or a
+ * search the server answered with something else, is never credited.
+ */
+async function testNavTimingQuery(): Promise<void> {
+  const sent: Array<{ name: string; path: string }> = [];
+  const location = { pathname: "/pipeline", search: "", href: "https://app.test/pipeline", origin: "https://app.test" };
+  const g = globalThis as Record<string, unknown>;
+  const savedWindow = g.window;
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const savedEntries = performance.getEntriesByType.bind(performance);
+  g.window = { location };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      sendBeacon: (_url: string, body: string) => {
+        const parsed = JSON.parse(body) as { name: string; path: string };
+        sent.push({ name: parsed.name, path: parsed.path });
+        return true;
+      },
+    },
+  });
+  (performance as unknown as { getEntriesByType: (type: string) => unknown[] }).getEntriesByType = (type: string) =>
+    type === "navigation" ? [{ name: "https://app.test/pipeline" }] : [];
+  try {
+    const nav = await import("../lib/perf/nav-timing");
+    nav.resetNavTiming();
+    const click = (href: string) =>
+      ({
+        button: 0,
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        target: { closest: () => ({ href, target: "", hasAttribute: () => false }) },
+      }) as unknown as MouseEvent;
+    nav.reportRouteCommit("/pipeline");
+    nav.reportBoardVisible();
+    assert.deepEqual(sent.map((s) => s.name), ["OASIS-board-full"]);
+    sent.length = 0;
+
+    // The same URL changes nothing on screen: nothing to time.
+    nav.recordLinkClick(click("https://app.test/pipeline"));
+    nav.reportBoardVisible();
+    assert.deepEqual(sent, [], "a click on the URL already showing is not timed");
+
+    // A stage chip: the board, redrawn for that search, reports it once.
+    nav.recordLinkClick(click("https://app.test/pipeline?stage=qualified"));
+    location.search = "?stage=qualified";
+    nav.reportBoardVisible();
+    nav.reportBoardVisible();
+    assert.deepEqual(sent, [{ name: "OASIS-board-query", path: "/pipeline" }], "once, and pathname only");
+
+    // A search the server answered with something else is never credited.
+    sent.length = 0;
+    nav.recordLinkClick(click("https://app.test/pipeline?stage=won"));
+    location.search = "?stage=won&page=1";
+    nav.reportBoardVisible();
+    assert.deepEqual(sent, [], "a board drawn for another search is not this click's");
+  } finally {
+    if (savedWindow === undefined) delete g.window;
+    else g.window = savedWindow;
+    if (savedNavigator) Object.defineProperty(globalThis, "navigator", savedNavigator);
+    (performance as unknown as { getEntriesByType: typeof savedEntries }).getEntriesByType = savedEntries;
+  }
+}
+
 async function testDbWrapper(): Promise<void> {
   const received: Array<{ sql: string; args: unknown[] }> = [];
   const fake = {
@@ -402,7 +470,7 @@ async function testVitalsRoute(): Promise<void> {
     assert.equal(cap.lines.length, before, "rejected payloads never log");
 
     // The first-party navigation metrics (lib/perf/nav-timing.ts) are accepted.
-    for (const name of ["OASIS-nav-commit", "OASIS-board-soft", "OASIS-board-full"]) {
+    for (const name of ["OASIS-nav-commit", "OASIS-board-soft", "OASIS-board-full", "OASIS-board-query"]) {
       const r = await vitalsPost(vitalsReq({ body: { name, value: 180, rating: null, path: "/pipeline" }, origin: "https://app.test" }));
       assert.equal(r.status, 204, `${name} is accepted`);
     }
@@ -419,6 +487,7 @@ async function main(): Promise<void> {
   testPipelineWiring();
   await testNavTiming();
   await testNavTimingNoClick();
+  await testNavTimingQuery();
   await testDbWrapper();
   await testVitalsRoute();
   console.log("perf-instrumentation: all assertions passed");

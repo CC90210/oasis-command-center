@@ -16,6 +16,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback } from "react";
+import { warmRoute } from "@/lib/perf/warm-route";
 import {
   Activity,
   BadgeDollarSign,
@@ -139,17 +140,15 @@ export function iconFor(key: NavIconKey): LucideIcon {
 }
 
 /**
- * Warm a route when the viewer shows intent (hover / keyboard focus). Also
- * runs `onIntent`, for a caller that has data of its own to warm.
+ * Warm a route when the viewer shows intent (hover / keyboard focus): an AUTO
+ * prefetch, down to the route's loading.tsx and no further, so the data the
+ * click fetches is fresh (lib/perf/warm-route.ts). Also runs `onIntent`, for a
+ * caller that has data of its own to warm.
  */
 export function useWarmOnIntent(href: string, onIntent?: () => void): () => void {
   const router = useRouter();
   return useCallback(() => {
-    try {
-      router.prefetch(href);
-    } catch {
-      // Prefetch is best-effort; it must never break a click.
-    }
+    warmRoute(router, href);
     onIntent?.();
   }, [router, href, onIntent]);
 }

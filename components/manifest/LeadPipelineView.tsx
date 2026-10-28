@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,6 +11,7 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type SyntheticEvent,
 } from "react";
 import {
   CheckSquare,
@@ -53,6 +55,8 @@ import {
 } from "@/lib/format-helpers";
 import { timeAgo } from "@/lib/devices/presence";
 import { reportBoardVisible } from "@/lib/perf/nav-timing";
+import { warmRoute } from "@/lib/perf/warm-route";
+import { LinkPending, LinkPendingBar } from "@/components/os/LinkPending";
 import {
   ACTIVE_STAGES as SUN_ACTIVE_STAGES,
   READY_TO_ADVANCE_STAGES as SUN_READY_TO_ADVANCE_STAGES,
@@ -269,10 +273,27 @@ export function LeadPipelineView({
   resultWindow,
 }: Props) {
   const router = useRouter();
-  // Navigation timing: the board is on screen (lib/perf/nav-timing.ts).
+  // Navigation timing: the board is on screen (lib/perf/nav-timing.ts). On
+  // mount, and again each time it is drawn for another stage, search or page,
+  // so a same-route click (a stage chip, Next) is timed as well.
+  const boardKey = `${stageFilter ?? ""}|${query ?? ""}|${resultWindow?.page ?? ""}`;
   useEffect(() => {
     reportBoardVisible();
-  }, []);
+  }, [boardKey]);
+  // A lead's page is warmed when the pointer or keyboard focus reaches its row:
+  // an AUTO prefetch (its loading.tsx, never its data), once per lead. The row
+  // links keep prefetch off themselves: the board draws up to two links per
+  // lead, and viewport prefetch sent a request per link as rows scrolled in.
+  const warmedLinks = useRef(new Set<string>());
+  const warmRowLink = useCallback(
+    (event: SyntheticEvent) => {
+      const href = (event.target as Element | null)?.closest?.("a[data-warm-route]")?.getAttribute("href");
+      if (!href || warmedLinks.current.has(href)) return;
+      warmedLinks.current.add(href);
+      warmRoute(router, href);
+    },
+    [router],
+  );
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
   const [selectMode, setSelectMode] = useState(false);
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
@@ -595,7 +616,7 @@ export function LeadPipelineView({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" onPointerOver={warmRowLink} onFocus={warmRowLink}>
       <QuickAddLeadModal open={addLeadOpen} onClose={() => setAddLeadOpen(false)} />
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -738,8 +759,9 @@ export function LeadPipelineView({
             </>
           );
           return resultWindow?.activeStage ? (
-            <Link key={stage.key} href={resultWindow.stageHrefs[stage.key] || basePath} className={className}>
+            <Link key={stage.key} href={resultWindow.stageHrefs[stage.key] || basePath} className={`relative ${className}`}>
               {content}
+              <LinkPending className="absolute bottom-2 right-2 text-accent" />
             </Link>
           ) : (
             <button key={stage.key} type="button" onClick={() => toggleStage(stage.key)} className={className}>
@@ -900,6 +922,7 @@ export function LeadPipelineView({
         >
           <Link href={resultWindow.allStagesHref} className="font-semibold text-accent hover:text-accent/80">
             All stages
+            <LinkPending className="ml-1.5 align-middle" />
           </Link>
           <span className="tabular-nums">
             {resultWindow.shownFrom > 0
@@ -915,6 +938,7 @@ export function LeadPipelineView({
                 className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
               >
                 Previous
+                <LinkPending className="ml-1.5 align-middle" />
               </Link>
             ) : (
               <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
@@ -928,6 +952,7 @@ export function LeadPipelineView({
                 className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
               >
                 Next
+                <LinkPending className="ml-1.5 align-middle" />
               </Link>
             ) : (
               <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
@@ -1808,6 +1833,8 @@ function AuditStepLink({ m, className = "" }: { m: ReturnType<typeof oasisRowMod
   return (
     <Link
       href={m.auditHref}
+      prefetch={false}
+      data-warm-route
       title={`Open the AI audit for ${m.name}`}
       className={`relative z-10 block max-w-full truncate font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${className}`}
     >
@@ -1904,6 +1931,8 @@ function OasisDesktopRow({
     >
       <Link
         href={`${basePath}/${row.id}`}
+        prefetch={false}
+        data-warm-route
         aria-label={`Open ${m.name}`}
         // The overlay paints above the static cells, so THEIR `title` tooltips
         // no longer fire -- the topmost element under the cursor owns the
@@ -1913,7 +1942,9 @@ function OasisDesktopRow({
         // MORE on hover than it did as a plain link, not less.
         title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
         className="absolute inset-0 z-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-      />
+      >
+        <LinkPendingBar />
+      </Link>
       <Cell>
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
@@ -1989,16 +2020,20 @@ function OasisMobileRow({
 }) {
   const m = oasisRowModel(row, cfg, stage);
   // Same stretched-link restructure as the desktop row, and for the same
-  // reason: the website and battle-card links are real anchors, so the card can
+  // reason: the website and audit links are real anchors, so the card can
   // no longer BE one. See OasisDesktopRow's comment.
   return (
     <div className="group relative px-4 py-3 transition-colors hover:bg-bg-elev/40">
       <Link
         href={`${basePath}/${row.id}`}
+        prefetch={false}
+        data-warm-route
         aria-label={`Open ${m.name}`}
         title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
         className="absolute inset-0 z-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-      />
+      >
+        <LinkPendingBar />
+      </Link>
       <div className="flex items-start gap-3">
         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
           {initialsOf(m.name)}

@@ -68,6 +68,31 @@ export type ManifestRead = {
 };
 
 /**
+ * The stored tenant_manifests row for one slug, read once per request.
+ *
+ * Keyed on the slug alone (2026-10-28). The viewer's tenant id only steers the
+ * seed fallback, but getManifestRead's cache key includes it, so the root
+ * layout read the same row twice per render: once through
+ * getTenantManifestForUser (getManifest(slug)) and once as getManifest(slug,
+ * tenantId), 13-73 ms each in the [perf] layout lines.
+ */
+const readManifestRow = cache(async (key: string): Promise<{ row: StoredManifestRow | null; failed: boolean }> => {
+  try {
+    const result = await getServiceSupabase()
+      .from("tenant_manifests")
+      .select("slug, tenant_id, manifest")
+      .eq("slug", key)
+      .maybeSingle();
+    if (result.error) throw new Error(result.error.message);
+    return { row: (result.data || null) as StoredManifestRow | null, failed: false };
+  } catch (err) {
+    // Logged under the label this read always had, then the seed answers.
+    console.error("[safe:manifest.loader.supabase]", err);
+    return { row: null, failed: true };
+  }
+});
+
+/**
  * getManifest, saying whether the stored row could be read. Same lookup, same
  * fallback, one read per request (getManifest reads through this).
  */
@@ -76,21 +101,7 @@ export const getManifestRead = cache(async (
   viewerTenantId?: string | null,
 ): Promise<ManifestRead> => {
   const key = (slug || "").trim().toLowerCase() || "default";
-  let row: StoredManifestRow | null = null;
-  let storedReadFailed = false;
-  try {
-    const result = await getServiceSupabase()
-      .from("tenant_manifests")
-      .select("slug, tenant_id, manifest")
-      .eq("slug", key)
-      .maybeSingle();
-    if (result.error) throw new Error(result.error.message);
-    row = (result.data || null) as StoredManifestRow | null;
-  } catch (err) {
-    // Logged under the label this read always had, then the seed answers.
-    console.error("[safe:manifest.loader.supabase]", err);
-    storedReadFailed = true;
-  }
+  const { row, failed: storedReadFailed } = await readManifestRow(key);
   const stored = row ? servedFromRow(row, row.tenant_id ?? null, `slug="${key}"`) : null;
   return { manifest: stored ?? getSeedManifest(key, viewerTenantId), storedReadFailed };
 });
