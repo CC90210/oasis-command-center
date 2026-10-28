@@ -42,6 +42,7 @@ import { formatCents } from "@/lib/founders-finances/money";
 import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { getActiveProfile } from "@/lib/queries";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { dbBool } from "@/lib/db-bool";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Money" };
@@ -67,8 +68,8 @@ const LEVEL_BAR: Record<string, string> = {
 
 /** Saving the goal is owner/admin (app/api/goals POST); the editor shows it either way. */
 async function canEditRevenueGoal(): Promise<boolean> {
-  const profile = (await getActiveProfile().catch(() => null)) as { is_owner?: boolean; team_role?: string } | null;
-  return !!profile && (profile.is_owner === true || profile.team_role === "owner" || profile.team_role === "admin");
+  const profile = (await getActiveProfile().catch(() => null)) as { is_owner?: unknown; team_role?: string } | null;
+  return !!profile && (dbBool(profile.is_owner) || profile.team_role === "owner" || profile.team_role === "admin");
 }
 
 function RevenueGoalSection({ canEdit }: { canEdit: boolean }) {

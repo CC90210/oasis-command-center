@@ -408,11 +408,14 @@ async function main() {
     assert.equal(byLabel.get("Owed to you")?.status, "live", "invoices are native: no invoice is a real zero");
     assert.ok(afterCalls.length > 0, "the deferred overdue sweep is scheduled after the response");
   });
-  await check("/money: the former owner gets a 404 and no finance read", async () => {
+  await check("/money: an admin who is not the books' owner gets the revenue goal alone, and no finance read", async () => {
+    // Settings boundaries (2026-10-28): the goal editor moved here from Settings > Team, where any
+    // OASIS owner or admin had it; app/api/goals reads with the same rule. The ledger stays the owner's.
     await login("adon");
     const run = await recording(() => MoneyPage());
-    assert.ok(run.result instanceof Error && /404/.test(run.result.message), `expected 404, got ${String(run.result)}`);
-    assert.deepEqual(touchesFin(run.sql), [], "a fin_* read ran before the former owner was refused");
+    assert.ok(!(run.result instanceof Error), `expected the goal-only page, got ${String(run.result)}`);
+    assert.equal((run.result as { props: { title?: string } }).props.title, "Revenue goal");
+    assert.deepEqual(touchesFin(run.sql), [], "a fin_* read ran for a viewer who is not the books' owner");
   });
   await check("/money: a recorded payment turns Collected live with its real figure", async () => {
     const { BUSINESS_ENTITY_ID } = await import("../lib/founders-finances/chart");

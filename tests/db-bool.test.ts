@@ -97,7 +97,6 @@ const DEFERRED: Record<string, { max: number; reason: string }> = {
   "app/api/chat/resume/route.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
   "lib/queries.ts": { max: 2, reason: "owned by open PR #535 (AI account)" },
   "lib/setup-readiness.ts": { max: 1, reason: "owned by open PR #535 (AI account)" },
-  "components/settings/SettingsContent.tsx": { max: 1, reason: "edited by open PR #535 (AI account)" },
   "lib/slack/identity.ts": { max: 1, reason: "owned by PR #525 (Slack), on hold for a redesign" },
   "lib/notify/sunbiz-events.ts": { max: 1, reason: "owned by open PR #540 (alerts); SunBiz is retired" },
   "components/web-leads/BookMeetPanel.tsx": { max: 1, reason: "APEX's Book the Meet surface (lease); its members JSON is normalised at the source" },
