@@ -278,7 +278,7 @@ async function main(): Promise<void> {
     assert.ok((await row(first.message!.id)).relay_claimed_at, "the reservation is stamped");
   });
 
-  await check("delivered: only the reserving computer may report it, and the stamp names the computer", async () => {
+  await check("delivered: only the reserving computer may report it, the stamp names it, and asking again is safe", async () => {
     const won = await call("POST", "delivered", mac.token, { ids: [first.message!.id] });
     assert.deepEqual(won.json.delivered, [first.message!.id]);
     const notYours = await call("POST", "delivered", laptop.token, { ids: [first.message!.id, second.message!.id] });
@@ -287,6 +287,11 @@ async function main(): Promise<void> {
     assert.equal(stamped.delivered_pairing_id, mac.id);
     assert.equal(stamped.delivered_label, "CC's Mac");
     assert.ok(stamped.delivered_at);
+    // The Mac publishes a note only after this yes, so an answer lost in transit is recovered by asking again.
+    const again = await call("POST", "delivered", mac.token, { ids: [first.message!.id] });
+    assert.deepEqual(again.json.delivered, [first.message!.id], "asked again, the delivering computer hears yes again");
+    assert.equal((await row(first.message!.id)).delivered_at, stamped.delivered_at, "and the first stamp stands");
+    assert.deepEqual((await call("POST", "delivered", laptop.token, { ids: [first.message!.id] })).json.delivered, [], "the laptop still hears no");
     const noOne = await call("POST", "delivered", mac.token, { ids: [agentNote.message!.id, elsewhere.message!.id] });
     assert.deepEqual(noOne.json.delivered, [], "an ineligible note and another workspace's are never stamped");
   });

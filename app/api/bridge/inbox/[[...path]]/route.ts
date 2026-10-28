@@ -23,8 +23,9 @@
  *
  * ONE COMPUTER PER DIRECTIVE. pending RESERVES what it returns for the asking computer (one UPDATE ...
  * RETURNING, lib/agent-inbox-db.ts reserveRelayBatchDb), so two computers polling at once never both
- * write the same directive; only the reserving computer may report it delivered, and only the
- * delivering one may report it read. A reservation with no delivery lapses after five minutes.
+ * write the same directive; only the reserving computer may report it delivered (asked again, it hears
+ * yes again: the computer publishes a note only after that yes, so a lost answer must be recoverable),
+ * and only the delivering one may report it read. A reservation with no delivery lapses after five minutes.
  *
  * SCRUBBED. The subject and body leave scrubbed of environment secrets, URL key parameters AND the
  * workspace's own vault credentials (Settings > Connections > Custom keys): the note lands in a folder a

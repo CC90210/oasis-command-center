@@ -186,9 +186,12 @@ export async function reserveRelayBatchDb(
 }
 
 /**
- * Record that `pairing` wrote these notes into their agents' local inboxes.
- * Only the computer that reserved a note may report it delivered, once; only
- * the ids THIS call stamped are returned.
+ * Record that `pairing` wrote these notes into their agents' local inboxes. Only the computer that
+ * reserved a note may report it delivered. Returns the ids delivered BY THIS COMPUTER, including ones it
+ * already reported: asked again, it hears yes again, and the first stamp stands. The computer publishes
+ * a note into the agent's readable inbox only after this yes (bravo_cli/inbox_relay.py), so an answer
+ * lost in transit must be recoverable by asking again (Codex review of CEO-Agent #134). A computer that
+ * lost the note to another hears no, every time.
  */
 export async function markDeliveredDb(
   tenantId: string,
@@ -196,21 +199,18 @@ export async function markDeliveredDb(
   pairing: { id: string; label: string },
 ): Promise<string[]> {
   if (ids.length === 0) return [];
-  const { data, error } = await getServiceSupabase()
-    .from("agent_messages")
-    .update({
-      delivered_at: new Date().toISOString(),
-      delivered_pairing_id: pairing.id,
-      delivered_label: pairing.label.slice(0, 80),
-    })
-    .eq("tenant_id", tenantId)
-    .in("id", [...ids])
-    .eq("relay_eligible", 1)
-    .eq("delivered_pairing_id", pairing.id)
-    .is("delivered_at", null)
-    .select("id");
-  if (error) throw new Error(`agent_messages delivery write failed: ${error.message}`);
-  return ((data || []) as Array<{ id: string }>).map((row) => row.id);
+  try {
+    const rs = await getTursoClient().execute({
+      sql:
+        `UPDATE agent_messages SET delivered_at = COALESCE(delivered_at, ?), delivered_label = COALESCE(delivered_label, ?) ` +
+        `WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")}) ` +
+        `AND relay_eligible = 1 AND delivered_pairing_id = ? RETURNING id`,
+      args: [new Date().toISOString(), pairing.label.slice(0, 80), tenantId, ...ids, pairing.id],
+    });
+    return rs.rows.map((row) => String(row.id));
+  } catch (err) {
+    throw new Error(`agent_messages delivery write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**
