@@ -47,7 +47,7 @@ import {
   type PaymentDeps,
 } from "@/lib/ai-audit/payment";
 import { completeOnboardingIfDone, defaultOnboardingDeps, runOnboarding, type OnboardingDeps } from "@/lib/ai-audit/onboarding";
-import { advanceEngagement, syncLeadStage } from "@/lib/ai-audit/lifecycle";
+import { syncLeadStage } from "@/lib/ai-audit/lifecycle";
 import { advanceCloudExtraction, defaultCloudModel, dueExtractions, finishMacExtractionIfComplete, sweepStaleExtractions, type CloudDeps } from "@/lib/ai-audit/extraction";
 import { getShareLink } from "@/lib/ai-audit/link";
 import { BRIEF_ATTEMPT_EVENT, briefTablesInstalled, buildBrief, defaultSiteDeps, dueBriefs } from "@/lib/ai-audit/briefs";
@@ -337,7 +337,8 @@ export async function runAiAuditTick(
     });
     for (const e of followRead ? open : []) {
       if (over()) break;
-      const follow = followLead(e.stage, leadStages.get(e.lead_id)?.stage ?? null, {
+      const leadStage = leadStages.get(e.lead_id)?.stage ?? null;
+      const follow = followLead(e.stage, leadStage, {
         cycleNo: e.cycle_no,
         delivered: delivered.has(e.id),
         health: e.health,
@@ -354,12 +355,11 @@ export async function runAiAuditTick(
           return;
         }
         // Not while the audit email is going out: the send already checked the stage (store.noDeliveryInFlight).
-        // A decline lands only while the lead is still Lost, checked inside the write, and leaves the lead alone:
-        // it is Lost already, and someone who restored it a moment ago is never overwritten (Codex review of #762).
-        const r =
-          follow.to === "declined"
-            ? await moveStage(db, { tenantId, id: e.id, to: "declined", actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true, whileLeadStage: "lost" })
-            : await advanceEngagement(db, { tenantId, engagementId: e.id, to: follow.to, actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true });
+        // The move lands only while the lead is still at the stage read above, checked inside the write, and
+        // leaves the lead alone: the lead is where the move came from, and someone who corrected it a moment
+        // ago is never overwritten (Codex review of #762, rounds 3 and 4).
+        if (!leadStage) return;
+        const r = await moveStage(db, { tenantId, id: e.id, to: follow.to, actor: system, now: now(), expectedRowVersion: e.row_version, event: follow.event, unlessDeliveryInFlight: true, whileLeadStage: leadStage });
         if (!r.ok) return;
         if (follow.to === "call_scheduled") report.callsBooked += 1;
         else if (follow.to === "call_completed") report.meetingsHeld += 1;

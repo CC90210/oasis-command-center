@@ -1256,6 +1256,16 @@ async function main() {
     await setLead(51, "stage", "lost");
     const ok = await store.moveStage(db, { tenantId: OASIS, id: eid, to: "declined", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: (await store.getEngagement(db, OASIS, eid))!.row_version, event: "lead_lost_on_pipeline", whileLeadStage: "lost" });
     assert.ok(ok.ok, "still Lost: declined");
+    // Round 4: the same for a meeting held, and the tick never writes the lead back.
+    const held = await openWith(52, null, null);
+    await setLead(52, "stage", "demo_completed");
+    const h = (await store.getEngagement(db, OASIS, held))!;
+    await setLead(52, "stage", "qualified");
+    const moved = await store.moveStage(db, { tenantId: OASIS, id: held, to: "call_completed", actor: { type: "system", id: null }, now: NOW(), expectedRowVersion: h.row_version, event: "meeting_held_on_pipeline", whileLeadStage: "demo_completed" });
+    assert.equal(moved.ok, false, "refused: the lead was corrected");
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps() });
+    assert.equal((await store.getEngagement(db, OASIS, held))?.stage, "new_lead");
+    assert.equal((await store.readLead(db, OASIS, lead(52)))?.stage, "qualified", "the correction stands");
   });
 
   await check("after delivery a Lost lead only flags the audit for CC: the client's page is never closed behind his back", async () => {
