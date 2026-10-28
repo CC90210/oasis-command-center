@@ -221,6 +221,10 @@ async function main() {
     });
     const fm = many.find((c) => c.key === "founder_meeting_booked")!;
     assert.deepEqual([fm.count, fm.noAudit, fm.steps[0].count], [41, 1, 40]);
+    // Round 2: a client whose audit finished (an active client closes it) and a deal sold without one are never "No audit yet".
+    const after = pv.boardColumns({ counts: { warm: { in_build: 1, won: 1, onboarding: 1, lost: 1 }, cold: {} }, deals: [deal("in_build"), deal("won"), deal("onboarding"), deal("lost")], offPipeline: [] });
+    for (const key of ["in_build", "won", "onboarding", "lost"]) assert.equal(after.find((c) => c.key === key)!.noAudit, 0, key);
+    assert.deepEqual([...pv.AUDIT_STAGES], ["founder_meeting_booked", "demo_completed", "proposal_sent"]);
     const off = many.find((c) => c.key === pv.NOT_ON_PIPELINE)!;
     assert.deepEqual([off.label, off.count, off.noAudit, off.steps[0].label], ["Not on the Pipeline", 1, 0, "Research and writing"]);
     assert.equal(pv.queueKey("inbound_warm"), "warm");

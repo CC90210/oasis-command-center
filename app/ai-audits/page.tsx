@@ -24,7 +24,7 @@ import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
 import { aiAuditPageSession } from "@/lib/ai-audit/access";
 import { boardMetrics, boardRows, type BoardMetrics } from "@/lib/ai-audit/view";
-import { boardColumns, pipelineColumnKey, pipelineColumnMeta, pipelineStageLabel, type BoardColumn } from "@/lib/ai-audit/pipeline-view";
+import { AUDIT_STAGES, boardColumns, pipelineColumnKey, pipelineColumnMeta, pipelineStageLabel, type BoardColumn } from "@/lib/ai-audit/pipeline-view";
 import { ownerPipelineSnapshot, type PipelineDeal } from "@/lib/ai-audit/pipeline-deals";
 import { StartAiAuditButton } from "@/components/ai-audit/StartAiAuditButton";
 import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
@@ -36,8 +36,6 @@ type Props = { searchParams: Promise<Record<string, string | string[] | undefine
 
 const FLAG_WORDS: Record<string, string> = { stalled: "Stalled", failed: "Failed", attention: "Needs you" };
 
-/** Founder meetings and deals after them, before a sale: where an audit belongs and none is open yet. */
-const AUDIT_STAGES = new Set(["founder_meeting_booked", "demo_completed", "proposal_sent"]);
 const QUEUE_WORDS = { warm: "Warm inbound", cold: "Cold outbound" } as const;
 
 function when(iso: string): string {

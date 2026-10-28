@@ -25,6 +25,13 @@ const ORDER: readonly string[] = [...ALWAYS, "client_review", "launched", "lost"
 
 const META = new Map<string, StageMeta>(OASIS_LEAD_STAGES.map((s) => [s.key, s]));
 
+/**
+ * Where an audit belongs and a deal can still be missing one: the founder meeting to the proposal, before a sale.
+ * A won or delivered deal either closed its audit (an active client closes it) or was sold without one, so
+ * "No audit yet" is never counted there (Codex review of #763).
+ */
+export const AUDIT_STAGES: ReadonlySet<string> = new Set(["founder_meeting_booked", "demo_completed", "proposal_sent"]);
+
 export type PipelineStep = { stage: AiAuditStage; label: string; count: number };
 export type PipelineColumn = { key: string; label: string; bg: string; fg: string; count: number; steps: PipelineStep[] };
 
@@ -68,7 +75,7 @@ export type BoardColumn = PipelineColumn & {
   /** The Pipeline's deals in this column, by queue (count is their sum). */
   warm: number;
   cold: number;
-  /** Deals here with no open audit. Not counted before the meeting: a prospect is not expected to have one yet. */
+  /** Deals here with no open audit, in the AUDIT_STAGES columns only: never before the meeting, or after a sale. */
   noAudit: number;
 };
 
@@ -104,7 +111,7 @@ export function boardColumns(input: {
   for (const d of input.deals) {
     const key = pipelineColumnKey(d.stage);
     if (d.audit) add(key, d.audit.stage);
-    else unaudited.set(key, (unaudited.get(key) ?? 0) + 1);
+    else if (AUDIT_STAGES.has(d.stage)) unaudited.set(key, (unaudited.get(key) ?? 0) + 1);
   }
   for (const a of input.offPipeline) add(NOT_ON_PIPELINE, a.stage);
   return ORDER.map((key) => {
@@ -113,6 +120,6 @@ export function boardColumns(input: {
     const c = off ? 0 : (cold.get(key) ?? 0);
     const st = steps.get(key) ?? new Map<AiAuditStage, number>();
     const list = AI_AUDIT_STAGES.filter((s) => st.has(s)).map((s) => ({ stage: s, label: AI_AUDIT_STAGE_LABELS[s], count: st.get(s)! }));
-    return { key, ...pipelineColumnMeta(key), count: off ? input.offPipeline.length : w + c, warm: w, cold: c, noAudit: off || key === BEFORE_MEETING ? 0 : (unaudited.get(key) ?? 0), steps: list };
+    return { key, ...pipelineColumnMeta(key), count: off ? input.offPipeline.length : w + c, warm: w, cold: c, noAudit: unaudited.get(key) ?? 0, steps: list };
   }).filter((col) => ALWAYS.includes(col.key) || col.count > 0);
 }
