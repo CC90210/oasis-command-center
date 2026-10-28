@@ -48,6 +48,9 @@ function rebookMessage(code: string | undefined): string {
       return "Too many tries in a row. Wait a minute, then try again.";
     case "already_rebooked":
       return "This call is already on the calendar. Refresh the page to see its time.";
+    case "rebook_in_progress":
+    case "booking_sync_pending":
+      return "Your new time is still being saved. Try again in a minute.";
     case "rebook_closed":
     case "rebook_unavailable":
       return "This link can no longer book a time. Reply to our email and we will set one up with you.";
@@ -81,6 +84,10 @@ export function RebookPage(props: Props) {
       const data = (await res.json().catch(() => null)) as { ok?: boolean; slots?: unknown; error?: string } | null;
       if (data?.error === "rebook_closed" || data?.error === "already_rebooked") {
         setSlotState({ status: "closed" });
+        return;
+      }
+      if (data?.error === "rebook_in_progress") {
+        setSlotState({ status: "error", message: "Your new time is still being saved. Refresh the page in a minute." });
         return;
       }
       if (!data?.ok || !Array.isArray(data.slots)) throw new Error("slots_unavailable");
@@ -142,7 +149,8 @@ export function RebookPage(props: Props) {
         await loadSlots();
         return;
       }
-      if (data?.error === "retry_required") setRequestId(null);
+      // Any other answer keeps the request id for this time: a retry of an
+      // uncertain move resumes it on the server instead of starting another.
       setError(rebookMessage(data?.error));
     } catch {
       setError("Your connection dropped before we heard back. Please try again.");

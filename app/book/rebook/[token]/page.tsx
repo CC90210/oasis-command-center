@@ -82,6 +82,17 @@ export default async function RebookRoute({ params }: { params: Promise<{ token:
       </Shell>
     );
   }
+  if (state.state === "pending") {
+    return (
+      <Shell>
+        <Note
+          eyebrow="One moment"
+          title="Your new time is being saved."
+          body="Refresh this page in a minute to see it. The updated calendar invite will reach your inbox."
+        />
+      </Shell>
+    );
+  }
   if (state.state === "closed") {
     console.info("[rebook.page] closed link", { reason: state.reason });
     return (

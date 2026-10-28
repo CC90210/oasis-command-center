@@ -13,7 +13,7 @@
  *      convention) and gets founder_meeting_status "no_show", the outcome and
  *      a next action a day out, through transition_pipeline_lead with a request
  *      id derived from the appointment and its revision, so a retry is a no-op.
- *   3. A rebook link signed for this appointment at its current revision.
+ *   3. A rebook link signed for this appointment (lib/booking/rebook-token.ts).
  *
  * `who` says what the room saw. It is recorded, never guessed: "unknown" is
  * the honest answer when there is no join data (a Google Meet link).
@@ -142,7 +142,7 @@ export async function markFounderMeetingNoShow(
   }
 
   const rebookToken = signRebookToken(
-    { tenantId: input.tenantId, appointmentId: appointment.id, leadId: appointment.lead_id, revision: appointment.revision },
+    { tenantId: input.tenantId, appointmentId: appointment.id, leadId: appointment.lead_id },
     { nowMs, env: deps.env },
   );
   return {

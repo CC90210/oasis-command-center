@@ -42,7 +42,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const state = await readRebookState(getServiceSupabase(), parsed.data.token);
     if (state.state !== "open") {
-      return NextResponse.json({ ok: false, error: state.state === "booked" ? "already_rebooked" : "rebook_closed" }, { status: 409 });
+      const error = state.state === "booked" ? "already_rebooked" : state.state === "pending" ? "rebook_in_progress" : "rebook_closed";
+      return NextResponse.json({ ok: false, error }, { status: 409 });
     }
     const available = await loadPublicBookingAvailability({
       tenantId: state.claims.tenantId,

@@ -12,10 +12,11 @@
  * Which meetings a link may move ("open"):
  *   - closed as a no-show (status no_answer, workflow no_show), or
  *   - still "scheduled" but its start has passed: nobody closed it out yet.
- * And only while the lead is still at founder_meeting_booked, still points at
- * this appointment, and the appointment is at the revision the link was minted
- * for. Once the link has moved the meeting (revision bumped) the page shows the
- * booked time ("booked"); anything else is "closed" with a reply-to-us message.
+ * And only while the lead is still at founder_meeting_booked and still points
+ * at this appointment. A meeting already moved to a future time shows that
+ * time ("booked"); a move in flight answers "pending"; anything else is
+ * "closed" with a reply-to-us message. The move itself re-checks "still in the
+ * past" atomically (rescheduleVerifiedFounderMeeting requireStartedBefore).
  *
  * ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -41,6 +42,9 @@ export type RebookAppointment = {
   offer_label: string | null;
   google_meet_link: string | null;
   last_reschedule_request_id: string | null;
+  pending_request_id: string | null;
+  pending_operation: string | null;
+  pending_meeting_at: string | null;
 };
 
 export type RebookState =
@@ -55,10 +59,11 @@ export type RebookState =
       missedAt: string;
     }
   | { state: "booked"; claims: RebookClaims; startsAt: string; durationMinutes: number; meetUrl: string | null; firstName: string }
+  | { state: "pending" }
   | { state: "closed"; reason: string };
 
 const APPOINTMENT_COLUMNS =
-  "id,tenant_id,lead_id,scheduled_for,status,workflow_status,meeting_kind,duration_minutes,revision,assigned_to,client_name_snapshot,offer_label,google_meet_link,last_reschedule_request_id";
+  "id,tenant_id,lead_id,scheduled_for,status,workflow_status,meeting_kind,duration_minutes,revision,assigned_to,client_name_snapshot,offer_label,google_meet_link,last_reschedule_request_id,pending_request_id,pending_operation,pending_meeting_at";
 
 export function record(value: unknown): Record<string, unknown> {
   if (typeof value === "string") {
@@ -97,6 +102,9 @@ function asAppointment(row: Record<string, unknown>): RebookAppointment {
     offer_label: row.offer_label == null ? null : String(row.offer_label),
     google_meet_link: row.google_meet_link == null ? null : String(row.google_meet_link),
     last_reschedule_request_id: row.last_reschedule_request_id == null ? null : String(row.last_reschedule_request_id),
+    pending_request_id: row.pending_request_id == null ? null : String(row.pending_request_id),
+    pending_operation: row.pending_operation == null ? null : String(row.pending_operation),
+    pending_meeting_at: row.pending_meeting_at == null ? null : String(row.pending_meeting_at),
   };
 }
 
@@ -159,20 +167,7 @@ export async function readRebookState(
   if (appointment.meeting_kind !== "founder_audit") return { state: "closed", reason: "not_a_founder_meeting" };
   const firstName = firstNameOf(appointment.client_name_snapshot);
   const startMs = Date.parse(appointment.scheduled_for);
-  if (appointment.revision !== claims.revision) {
-    // The link already moved this meeting (or someone else did): show the time it is at now.
-    if (appointment.status === "scheduled" && Number.isFinite(startMs) && startMs > nowMs) {
-      return {
-        state: "booked",
-        claims,
-        startsAt: appointment.scheduled_for,
-        durationMinutes: appointment.duration_minutes,
-        meetUrl: appointment.google_meet_link,
-        firstName,
-      };
-    }
-    return { state: "closed", reason: "link_used" };
-  }
+  if (appointment.workflow_status === "pending_transition") return { state: "pending" };
   if (!appointmentIsMissed(appointment, nowMs)) {
     if (appointment.status === "scheduled" && Number.isFinite(startMs) && startMs > nowMs) {
       return {

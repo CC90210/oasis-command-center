@@ -21,7 +21,11 @@ import {
 } from "../lib/booking/rebook-token";
 import { firstNameOf, pickRebookSlot, readRebookState, rebookLeadPatch } from "../lib/booking/rebook";
 import { markFounderMeetingNoShow } from "../lib/booking/no-show";
-import { closeVerifiedFounderMeeting, rescheduleVerifiedFounderMeeting } from "../lib/website-sales-founder-meeting";
+import {
+  activateVerifiedFounderMeeting,
+  closeVerifiedFounderMeeting,
+  rescheduleVerifiedFounderMeeting,
+} from "../lib/website-sales-founder-meeting";
 
 const KEY = "k".repeat(48);
 process.env.FORM_LINK_HMAC_KEY = KEY;
@@ -169,7 +173,7 @@ async function leadData(raw: Client): Promise<Record<string, unknown>> {
 }
 
 function testToken() {
-  const claims = { tenantId: TENANT, appointmentId: APPT, leadId: LEAD, revision: 2 };
+  const claims = { tenantId: TENANT, appointmentId: APPT, leadId: LEAD };
   const token = signRebookToken(claims, { nowMs: NOW, env: ENV });
   const verified = verifyRebookToken(token, { nowMs: NOW, env: ENV });
   assert.deepEqual(verified && { ...verified, exp: 0 }, { ...claims, exp: 0 });
@@ -179,7 +183,7 @@ function testToken() {
   const [payload, sig] = token.split(".");
   const flipped = `${payload}.${sig.slice(0, -1)}${sig.endsWith("A") ? "B" : "A"}`;
   assert.equal(verifyRebookToken(flipped, { nowMs: NOW, env: ENV }), null, "a changed signature is refused");
-  const forged = Buffer.from(JSON.stringify({ v: 1, t: TENANT, a: "appt-other", l: LEAD, r: 2, exp: 9e9 })).toString("base64url");
+  const forged = Buffer.from(JSON.stringify({ v: 1, t: TENANT, a: "appt-other", l: LEAD, exp: 9e9 })).toString("base64url");
   assert.equal(verifyRebookToken(`${forged}.${sig}`, { nowMs: NOW, env: ENV }), null, "a payload swapped under an old signature is refused");
   assert.equal(
     verifyRebookToken(token, { nowMs: NOW, env: { FORM_LINK_HMAC_KEY: "z".repeat(48) } }),
@@ -275,10 +279,28 @@ async function testNoShowThenRebook() {
   assert.equal(moved.scheduled_for, NEW_TIME);
   assert.equal(moved.status, "scheduled");
 
+  // In flight until activated (the route activates right after the lead record).
+  assert.deepEqual(await readRebookState(db as never, first.rebookToken, NOW), { state: "pending" });
+  await activateVerifiedFounderMeeting(TENANT, APPT, meetingDeps);
   // Used: the link now shows the booked time and cannot move the meeting again.
   const used = await readRebookState(db as never, first.rebookToken, NOW);
   assert.equal(used.state, "booked");
   if (used.state === "booked") assert.equal(used.startsAt, NEW_TIME);
+  // Even a second request that read "open" before the first one landed cannot
+  // move it again: the move itself refuses a meeting no longer in the past.
+  await assert.rejects(
+    rescheduleVerifiedFounderMeeting(
+      {
+        tenantId: TENANT, leadId: LEAD, appointmentId: APPT,
+        requestId: "22222222-2222-4222-8222-222222222222",
+        meetingAt: "2026-10-31T15:00:00.000Z",
+        requireStartedBefore: new Date(NOW).toISOString(),
+      },
+      meetingDeps,
+    ),
+    /meeting_no_longer_reschedulable/,
+  );
+  assert.equal((await appointmentRow(raw)).scheduled_for, NEW_TIME, "the racing second move changed nothing");
 
   // New reminders exist for the new revision; the old revision's are cancelled.
   const reminders = await raw.execute({
@@ -290,12 +312,19 @@ async function testNoShowThenRebook() {
 
 async function testClosedLinks() {
   const { raw, db } = await fixture();
-  const token = signRebookToken({ tenantId: TENANT, appointmentId: APPT, leadId: LEAD, revision: 1 }, { nowMs: NOW, env: ENV });
+  const token = signRebookToken({ tenantId: TENANT, appointmentId: APPT, leadId: LEAD }, { nowMs: NOW, env: ENV });
   // A meeting still ahead is not "missed": the link shows its time instead of a calendar.
   await raw.execute({ sql: "UPDATE call_appointments SET scheduled_for = ? WHERE id = ?", args: [NEW_TIME, APPT] });
   assert.equal((await readRebookState(db as never, token, NOW)).state, "booked");
   await raw.execute({ sql: "UPDATE call_appointments SET scheduled_for = ? WHERE id = ?", args: [MISSED, APPT] });
   // A missed meeting not yet closed out opens (the dispatcher may not have run yet).
+  assert.equal((await readRebookState(db as never, token, NOW)).state, "open");
+  // A move in flight says so instead of offering a second one.
+  await raw.execute({ sql: "UPDATE call_appointments SET workflow_status = 'pending_transition' WHERE id = ?", args: [APPT] });
+  assert.deepEqual(await readRebookState(db as never, token, NOW), { state: "pending" });
+  await raw.execute({ sql: "UPDATE call_appointments SET workflow_status = 'active' WHERE id = ?", args: [APPT] });
+  // A revision bumped by a rolled-back move does not kill the link: the meeting is still missed.
+  await raw.execute({ sql: "UPDATE call_appointments SET revision = 5 WHERE id = ?", args: [APPT] });
   assert.equal((await readRebookState(db as never, token, NOW)).state, "open");
   // A lead that moved on cannot be pulled back by an old link.
   await raw.execute({
@@ -304,7 +333,7 @@ async function testClosedLinks() {
   });
   assert.deepEqual(await readRebookState(db as never, token, NOW), { state: "closed", reason: "lead_stage_changed" });
   // A link for another lead's appointment is refused.
-  const wrongLead = signRebookToken({ tenantId: TENANT, appointmentId: APPT, leadId: "lead-b", revision: 1 }, { nowMs: NOW, env: ENV });
+  const wrongLead = signRebookToken({ tenantId: TENANT, appointmentId: APPT, leadId: "lead-b" }, { nowMs: NOW, env: ENV });
   assert.deepEqual(await readRebookState(db as never, wrongLead, NOW), { state: "closed", reason: "not_found" });
   // A cancelled meeting cannot be revived.
   await raw.execute({
@@ -321,6 +350,16 @@ function testSourceContracts() {
   assert.match(route, /sameOrigin\(req\)/, "the rebook POST refuses cross-origin calls like /api/forms/booking");
   assert.match(route, /rateLimit\(/, "the rebook POST is rate-limited");
   assert.match(route, /rescheduleVerifiedFounderMeeting/, "a rebook MOVES the meeting, never creates a second one");
+  assert.equal((route.match(/requireStartedBefore:/g) || []).length, 2, "both moves (new and resumed) carry the past-only guard");
+  assert.equal((route.match(/openerAttendee: openerOf\(slot\)/g) || []).length, 2, "both moves keep the slot's second host on the invite");
+  const replay = route.slice(route.indexOf("const moved ="), route.indexOf("const state = await readRebookState"));
+  assert.ok(
+    replay.indexOf("if (!recorded.ok)") > 0 && replay.indexOf("if (!recorded.ok)") < replay.indexOf("activateVerifiedFounderMeeting"),
+    "a replay never activates a meeting the lead record does not show",
+  );
+  assert.match(replay, /pending_request_id === requestId/, "a move reserved under this request resumes instead of closing the link");
+  const page = readFileSync("components/booking/RebookPage.tsx", "utf8");
+  assert.doesNotMatch(page, /retry_required"\) setRequestId\(null\)/, "an uncertain move is retried under the same request id");
   assert.doesNotMatch(route, /createVerifiedFounderMeeting/);
   const internal = readFileSync("app/api/internal/tools/meeting-no-show/route.ts", "utf8");
   assert.match(internal, /authenticateToolsRequest\(req/, "the no-show route is signed like the tool runner");

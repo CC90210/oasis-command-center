@@ -1998,6 +1998,13 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   requestId: string;
   meetingAt: string;
   openerAttendee?: OpenerAttendee | null;
+  /**
+   * Move the meeting only while its start is at or before this instant (a
+   * lead's rebook link moves a MISSED meeting, never one already moved to a
+   * future time). Checked on the row the reservation compare-and-swaps on
+   * (scheduled_for), so two links racing cannot both move it.
+   */
+  requireStartedBefore?: string;
 }, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
   const deps = dependencies(dependencyOverrides);
   const db = deps.db;
@@ -2034,6 +2041,13 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   ) {
     if (appointment.workflow_status === "pending_transition") throw new Error("meeting_transition_pending");
     throw new Error("meeting_no_longer_reschedulable");
+  }
+  if (input.requireStartedBefore !== undefined && appointment.pending_request_id !== input.requestId) {
+    const startedMs = Date.parse(appointment.scheduled_for);
+    const limitMs = Date.parse(input.requireStartedBefore);
+    if (!Number.isFinite(startedMs) || !Number.isFinite(limitMs) || startedMs > limitMs) {
+      throw new Error("meeting_no_longer_reschedulable");
+    }
   }
   const existingReceipt = asReceipt(appointment);
   if (!existingReceipt || !appointment.google_event_id || !appointment.assigned_to || !appointment.organizer_email_snapshot) {

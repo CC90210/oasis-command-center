@@ -18,6 +18,7 @@ import {
   loadPublicBookingAvailability,
   publicBookingCreateSchema,
   readPublicBookingJson,
+  type PublicBookingSlot,
 } from "@/lib/forms/public-booking";
 import { buildRebookedLeadAlert } from "@/lib/forms/public-booking-alert";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
@@ -118,6 +119,23 @@ async function answerBooked(tenantId: string, meeting: VerifiedFounderMeeting): 
   });
 }
 
+function openerOf(slot: PublicBookingSlot | null): { email: string; displayName?: string } | null {
+  const attendee = slot?.hosts.find((host) => host.role === "attendee");
+  return attendee ? { email: attendee.email, displayName: attendee.displayName } : null;
+}
+
+function rescheduleFailure(error: unknown): NextResponse {
+  const code = codeOf(error, "calendar_update_failed");
+  console.error("[public-rebook.reschedule]", code);
+  if (RESCHEDULE_BAD_REQUEST.has(code)) return NextResponse.json({ ok: false, error: code }, { status: 400 });
+  if (code === "founder_slot_overlap") return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
+  if (code === "meeting_transition_pending") return NextResponse.json({ ok: false, error: "rebook_in_progress" }, { status: 409 });
+  if (RESCHEDULE_CONFLICT.has(code)) return NextResponse.json({ ok: false, error: "rebook_unavailable" }, { status: 409 });
+  // Uncertain (a provider error after the move was reserved): the page retries
+  // under the SAME request id, which resumes it above.
+  return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!sameOrigin(req)) {
     return NextResponse.json({ ok: false, error: "cross_origin_refused" }, { status: 403 });
@@ -147,34 +165,67 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!claims) return NextResponse.json({ ok: false, error: "rebook_closed" }, { status: 409 });
 
   try {
-    // A REPLAY of this request (the page retried after a dropped connection):
-    // the meeting already moved under this id, so finish the same steps again,
-    // each idempotent, instead of refusing a link whose revision moved on.
     const current = await loadRebookAppointment(db, claims.tenantId, claims.appointmentId);
-    if (current && current.lead_id === claims.leadId && current.last_reschedule_request_id === requestId) {
-      if (current.scheduled_for !== startsAt) {
+    // THIS REQUEST AGAIN (the page retried after a dropped connection or a 503):
+    // either the meeting already moved under this id, or the move was reserved
+    // under it and did not finish. Both resume the same steps, each idempotent;
+    // a link is never refused for a move its own request started.
+    const moved = current?.last_reschedule_request_id === requestId;
+    const reserved = current?.pending_request_id === requestId && current?.pending_operation === "reschedule";
+    if (current && current.lead_id === claims.leadId && (moved || reserved)) {
+      const target = moved ? current.scheduled_for : current.pending_meeting_at;
+      if (target !== startsAt) {
         return NextResponse.json({ ok: false, error: "booking_request_mismatch" }, { status: 409 });
       }
-      const meeting = await rescheduleVerifiedFounderMeeting(
-        { tenantId: claims.tenantId, leadId: claims.leadId, appointmentId: claims.appointmentId, requestId, meetingAt: startsAt },
-        bookingMeetRoomDeps(),
-      );
+      const slot = moved
+        ? null
+        : pickRebookSlot(
+            await loadPublicBookingAvailability({ tenantId: claims.tenantId, durationMinutes: current.duration_minutes }),
+            startsAt,
+            current.assigned_to,
+          );
+      let meeting: VerifiedFounderMeeting;
+      try {
+        meeting = await rescheduleVerifiedFounderMeeting(
+          {
+            tenantId: claims.tenantId,
+            leadId: claims.leadId,
+            appointmentId: claims.appointmentId,
+            requestId,
+            meetingAt: startsAt,
+            openerAttendee: openerOf(slot),
+            requireStartedBefore: new Date().toISOString(),
+          },
+          bookingMeetRoomDeps(),
+        );
+      } catch (error) {
+        return rescheduleFailure(error);
+      }
       const lead = await loadRebookLead(db, claims.tenantId, claims.leadId);
       const recorded = await recordLead({
         tenantId: claims.tenantId,
         leadId: claims.leadId,
         requestId,
         meeting,
-        missedAt: String(current.scheduled_for),
+        // The lead still carries the missed time until this write replaces it.
+        missedAt: lead && typeof lead.founder_meeting_at === "string" ? lead.founder_meeting_at : current.scheduled_for,
         occurredAt: new Date().toISOString(),
         expectedOwnerId: lead && typeof lead.assigned_to === "string" ? lead.assigned_to : null,
       });
-      if (!recorded.ok) console.error("[public-rebook.replay.transition]", recorded.error);
+      if (!recorded.ok) {
+        // Never activate a meeting the lead record does not show: the
+        // reconciler can still settle it, and the next retry finishes it.
+        console.error("[public-rebook.replay.transition]", recorded.error);
+        return NextResponse.json({ ok: false, error: "booking_sync_pending" }, { status: 503 });
+      }
       await activateVerifiedFounderMeeting(claims.tenantId, claims.appointmentId);
       return await answerBooked(claims.tenantId, meeting);
     }
 
     const state = await readRebookState(db, token);
+    if (state.state === "pending") {
+      return NextResponse.json({ ok: false, error: "rebook_in_progress" }, { status: 409 });
+    }
     if (state.state !== "open") {
       return NextResponse.json(
         { ok: false, error: state.state === "booked" ? "already_rebooked" : "rebook_closed" },
@@ -185,7 +236,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tenantId: state.claims.tenantId,
       durationMinutes: state.durationMinutes,
     });
-    if (!pickRebookSlot(available, startsAt, state.appointment.assigned_to)) {
+    const slot = pickRebookSlot(available, startsAt, state.appointment.assigned_to);
+    if (!slot) {
       return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
     }
 
@@ -198,16 +250,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           appointmentId: state.appointment.id,
           requestId,
           meetingAt: startsAt,
+          // The slot's second host, if it has one: Google replaces the whole
+          // attendee list on a move, so they are passed again or dropped.
+          openerAttendee: openerOf(slot),
+          // Only a meeting still in the past moves: checked on the row the
+          // reservation compare-and-swaps on, so two tabs cannot both move it.
+          requireStartedBefore: new Date().toISOString(),
         },
         bookingMeetRoomDeps(),
       );
     } catch (error) {
-      const code = codeOf(error, "calendar_update_failed");
-      console.error("[public-rebook.reschedule]", code);
-      if (RESCHEDULE_BAD_REQUEST.has(code)) return NextResponse.json({ ok: false, error: code }, { status: 400 });
-      if (code === "founder_slot_overlap") return NextResponse.json({ ok: false, error: "slot_unavailable" }, { status: 409 });
-      if (RESCHEDULE_CONFLICT.has(code)) return NextResponse.json({ ok: false, error: "rebook_unavailable" }, { status: 409 });
-      return NextResponse.json({ ok: false, error: "retry_required" }, { status: 503 });
+      return rescheduleFailure(error);
     }
 
     const occurredAt = new Date().toISOString();

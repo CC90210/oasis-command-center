@@ -15,9 +15,12 @@
  * pass for a form link or the reverse. No key, no link: there is no unsigned
  * development mode, because the link moves a real calendar event.
  *
- * `r` is the appointment's revision when the link was minted. A reschedule
- * bumps it, so a link that already moved its meeting cannot move it again;
- * the page shows the booked time instead.
+ * The link is not bound to a revision. What it may do is decided from the
+ * meeting itself (lib/booking/rebook.ts): it moves a meeting whose start has
+ * passed, and a meeting already moved to a future time shows that time. So a
+ * reconciler rolling a failed move back (which bumps the revision) never kills
+ * a link the lead still needs, and the move itself refuses a meeting that is
+ * no longer in the past (requireStartedBefore), atomically.
  *
  * ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -35,7 +38,6 @@ export type RebookClaims = {
   tenantId: string;
   appointmentId: string;
   leadId: string;
-  revision: number;
   exp: number;
 };
 
@@ -67,7 +69,6 @@ export function signRebookToken(
     t: claims.tenantId,
     a: claims.appointmentId,
     l: claims.leadId,
-    r: claims.revision,
     exp: Math.floor(nowMs / 1000) + REBOOK_TOKEN_TTL_S,
   };
   const payload = Buffer.from(JSON.stringify(body)).toString("base64url");
@@ -94,12 +95,11 @@ export function verifyRebookToken(
   } catch {
     return null;
   }
-  const { v, t, a, l, r, exp } = body ?? {};
+  const { v, t, a, l, exp } = body ?? {};
   if (v !== 1 || typeof t !== "string" || typeof a !== "string" || typeof l !== "string") return null;
   if (!t || !a || !l) return null;
-  if (typeof r !== "number" || !Number.isInteger(r) || r < 1) return null;
   if (typeof exp !== "number" || exp * 1000 <= (options.nowMs ?? Date.now())) return null;
-  return { tenantId: t, appointmentId: a, leadId: l, revision: r, exp };
+  return { tenantId: t, appointmentId: a, leadId: l, exp };
 }
 
 /** The public page for a token: oasisai.work/book/rebook/<token>. */
