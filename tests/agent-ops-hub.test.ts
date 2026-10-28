@@ -118,10 +118,12 @@ async function main(): Promise<void> {
     assert.ok(!JSON.stringify(withVault).includes("acmevault"), JSON.stringify(withVault).slice(0, 200));
     assert.deepEqual(actionSnapshot({ stage: "x" }, null), { note: "not kept: the workspace's saved credentials could not be checked" }, "an unreadable vault keeps nothing");
     const chatRoute = read("app/api/chat/route.ts");
-    assert.match(chatRoute, /requested: actionSnapshot\(spec\.payload, vaultReadFailed \? null : vaultSecretsForRedaction\),/, "the cloud chat records what it asked for, vault-scrubbed");
+    assert.match(chatRoute, /requested: actionSnapshot\(spec\.payload, await vaultForSnapshot\(\)\),/, "the cloud chat records what it asked for, vault-scrubbed");
+    // A stored snapshot needs EVERY credential: a partial read (an entry that cannot be decrypted) keeps nothing.
+    assert.match(chatRoute, /fetchTenantVaultSecretsForRedaction\(tenantId, \{ requireComplete: true \}\)/);
     assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /await logResult\(result, ctx, log, spec\.payload\);/, "so does a confirmed harness change");
     assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /requested: actionSnapshot\(payload, vault\)/);
-    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /fetchTenantVaultSecretsForRedaction\(ctx\.tenantId\)/);
+    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /fetchTenantVaultSecretsForRedaction\(ctx\.tenantId, \{ requireComplete: true \}\)/);
     assert.doesNotMatch(read("app/api/chat/route.ts"), /after: actionSnapshot/, "a request is never stored as a write");
     const tracePage = read("app/agent-ops/trace/page.tsx");
     assert.match(tracePage, /"What changed" : ok \? "What it asked to set" : "What it tried to set"/, "a request is labelled as one");

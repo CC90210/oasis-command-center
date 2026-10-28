@@ -719,16 +719,10 @@ export async function POST(req: NextRequest) {
   //       closes the "live stream is a soft control" gap.
   //   (2) by persistAssistantTurn at the end so we don't re-fetch.
   // Empty array on failure → redaction degrades to env-var-only,
-  // chat still works. The action snapshots (logAction `requested`) keep
-  // nothing instead: they are stored, so they never degrade.
-  let vaultReadFailed = false;
+  // chat still works.
   const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
     tenantId,
-  ).catch((err: unknown) => {
-    vaultReadFailed = true;
-    console.error("[chat.vault_redaction]", { tenantId, error: err instanceof Error ? err.message : String(err) });
-    return [];
-  });
+  ).catch(() => []);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -997,6 +991,15 @@ export async function POST(req: NextRequest) {
           cloudToolsMode === "tools"
             ? rawSpecs.filter((s) => !TOOL_NATIVE_MARKER_TYPES.has(s.type))
             : rawSpecs;
+        // The stored action snapshots need EVERY saved credential (Codex review of #768): the vault is read
+        // completely, once per turn, when the first action is logged, and a failed or partial read keeps
+        // no snapshot. The stream's own read above may degrade; a stored copy may not.
+        let snapshotVault: Promise<Awaited<ReturnType<typeof fetchTenantVaultSecretsForRedaction>> | null> | null = null;
+        const vaultForSnapshot = () =>
+          (snapshotVault ??= fetchTenantVaultSecretsForRedaction(tenantId, { requireComplete: true }).catch((err: unknown) => {
+            console.error("[chat.snapshot_vault]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+            return null;
+          }));
         for (const spec of specs) {
           if (!crmWritesAllowed && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
             send("action", {
@@ -1018,7 +1021,7 @@ export async function POST(req: NextRequest) {
             summary: r.ok ? r.summary : undefined,
             error: !r.ok ? r.error : undefined,
             // What it asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
-            requested: actionSnapshot(spec.payload, vaultReadFailed ? null : vaultSecretsForRedaction),
+            requested: actionSnapshot(spec.payload, await vaultForSnapshot()),
           });
         }
       } catch (err) {

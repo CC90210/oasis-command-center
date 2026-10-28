@@ -154,10 +154,10 @@ async function logResult(
   log: typeof logAction,
   payload?: Record<string, unknown>,
 ): Promise<void> {
-  // The workspace's saved credentials, so the snapshot never stores one (Codex review of #768). Null when
-  // they cannot be read, and then the snapshot keeps nothing.
+  // EVERY saved credential of the workspace, so the snapshot never stores one (Codex review of #768). Null
+  // when the read fails or an entry cannot be decrypted, and then the snapshot keeps nothing.
   const vault = payload
-    ? await fetchTenantVaultSecretsForRedaction(ctx.tenantId).catch((err: unknown) => {
+    ? await fetchTenantVaultSecretsForRedaction(ctx.tenantId, { requireComplete: true }).catch((err: unknown) => {
         console.error("[bridge.dashboard_action.vault]", { tenantId: ctx.tenantId, error: err instanceof Error ? err.message : String(err) });
         return null;
       })
