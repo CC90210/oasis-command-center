@@ -48,7 +48,7 @@ import { canManageWorkspaceSettings } from "@/components/settings/settings-secti
 import { askHrefFor, buildOsNav, osNavRows } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 import type { OsNavSection } from "@/lib/os/types";
-import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
+import { timed, logPerfSummary, navKindOf, type PerfSpan } from "@/lib/perf/server-timing";
 import { workspaceDisplayName } from "@/lib/provisioning/workspace-name";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import { connectionsDot, connectionsHealth } from "@/lib/os/connectors";
@@ -367,7 +367,10 @@ export default async function RootLayout({
   const connectionsMeasured = await connectionsStatusP;
   // One `[perf]` line per shell render: the measured session tax. This is
   // the P1 before/after number; remove only when the instant-load work ends.
-  logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);
+  logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0, {
+    nav: navKindOf(hdrs),
+    ray: hdrs.get("cf-ray"),
+  });
 
   // Founders portal nav. Injected here rather than added to CC_NAV because
   // OASIS_SEED.nav IS navToManifest(CC_NAV) and getSeedManifest() falls back to

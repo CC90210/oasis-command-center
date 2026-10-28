@@ -21,6 +21,7 @@
  */
 
 import type { Client, InStatement } from "@libsql/client";
+import { NAV_KIND_HEADER, isNavKind, navKindFromRequestHeaders, type NavKind } from "./nav-kind";
 
 export interface PerfSpan {
   label: string;
@@ -56,22 +57,103 @@ export async function timed<T>(label: string, p: Promise<T>, sink: PerfSpan[]): 
 }
 
 /**
+ * How a render was asked for: document load, client navigation or prefetch
+ * (lib/perf/nav-kind.ts). Next strips its RSC and prefetch headers from what
+ * headers() returns, so middleware decides the kind from the raw request and
+ * forwards it as NAV_KIND_HEADER; this reads that, then falls back to the raw
+ * headers in case they are present (a direct call, a test).
+ */
+export type { NavKind } from "./nav-kind";
+
+export function navKindOf(h: { get(name: string): string | null }): NavKind {
+  try {
+    const forwarded = h.get(NAV_KIND_HEADER);
+    if (isNavKind(forwarded)) return forwarded;
+    return navKindFromRequestHeaders(h);
+  } catch {
+    return "doc";
+  }
+}
+
+/** What a summary line may carry besides its spans. No identifiers, no values. */
+export interface PerfMeta {
+  nav?: NavKind;
+  /** The request's cf-ray, so a layout line and a page line from one request can be joined. */
+  ray?: string | null;
+  /** How the scope ended: "ok", "redirect" or "error". */
+  outcome?: "ok" | "redirect" | "error";
+}
+
+/**
+ * [perf] lines this isolate has written. 1 and 2 are the first renders of a
+ * freshly started isolate, which is how a cold start is told apart from a
+ * warm one in the logs. A plain number per isolate: no request data, no
+ * pending promise (tests/worker-request-isolation.test.ts).
+ */
+let perfSeq = 0;
+
+const RAY_RE = /^[A-Za-z0-9-]{1,40}$/;
+
+/**
  * One structured line per tracked render scope. Greppable as `[perf]`;
  * fields are label:ms pairs plus the total. Skips trivially-fast scopes
  * (< 5ms with no spans) so full-bleed marketing paths don't spam logs.
  */
-export function logPerfSummary(scope: string, path: string, spans: PerfSpan[], totalMs: number): void {
+export function logPerfSummary(
+  scope: string,
+  path: string,
+  spans: PerfSpan[],
+  totalMs: number,
+  meta: PerfMeta = {},
+): void {
   try {
     if (!perfLogEnabled()) return;
     if (totalMs < 5 && spans.length === 0) return;
+    perfSeq += 1;
     const fields: Record<string, number> = {};
     for (const s of spans) fields[s.label] = Math.round(s.ms);
+    const extra: Record<string, string> = {};
+    if (meta.nav) extra.nav = meta.nav;
+    if (meta.ray && RAY_RE.test(meta.ray)) extra.ray = meta.ray;
+    if (meta.outcome) extra.outcome = meta.outcome;
     console.log(
-      `[perf] ${JSON.stringify({ scope, path: path.slice(0, 120), total_ms: Math.round(totalMs), spans: fields })}`,
+      `[perf] ${JSON.stringify({ ...extra, iso: perfSeq, scope, path: path.slice(0, 120), total_ms: Math.round(totalMs), spans: fields })}`,
     );
   } catch {
     // fail-open
   }
+}
+
+/**
+ * One [perf] line for a page render, the way the root layout writes its own:
+ * spans go into `spans` (pass it to timed()), and done() writes the line once,
+ * with the nav kind and cf-ray read from the request headers, then hands back
+ * whatever it was given, unchanged, so a page can `return perf.done("ok", (...))`.
+ */
+export function startPagePerf(
+  scope: string,
+  path: string,
+  hdrs: { get(name: string): string | null },
+): { spans: PerfSpan[]; done<T>(outcome: "ok" | "redirect" | "error", value?: T): T } {
+  const t0 = Date.now();
+  const spans: PerfSpan[] = [];
+  let logged = false;
+  return {
+    spans,
+    done<T>(outcome: "ok" | "redirect" | "error", value?: T): T {
+      if (!logged) {
+        logged = true;
+        let ray: string | null = null;
+        try {
+          ray = hdrs.get("cf-ray");
+        } catch {
+          // fail-open
+        }
+        logPerfSummary(scope, path, spans, Date.now() - t0, { nav: navKindOf(hdrs), ray, outcome });
+      }
+      return value as T;
+    },
+  };
 }
 
 // ------------------------------------------------------------- db wrapper

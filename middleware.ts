@@ -13,6 +13,7 @@ import { matchesPathPrefix } from "./lib/path-prefix";
 import { destinationForClaim, onboardingGateApplies, shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH, MARKETING_UTILITY_PATHS } from "./lib/marketing/routes";
 import { OS_REDIRECTS } from "./lib/os/redirects";
+import { NAV_KIND_HEADER, navKindFromRequestHeaders } from "./lib/perf/nav-kind";
 
 export const PUBLIC_PATH_PREFIXES = [
   // Public marketing site — /home (served at "/" via the rewrite below),
@@ -272,6 +273,11 @@ export async function middleware(req: NextRequest) {
   // to render the dashboard shell vs full-bleed (marketing/auth) chrome.
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("x-pathname", pathname);
+  // How this request was asked for (document, client navigation, prefetch),
+  // decided here because Next strips its RSC headers from what pages read
+  // (lib/perf/nav-kind.ts). Timing logs only; nothing authorizes on it.
+  const navKind = navKindFromRequestHeaders(req.headers);
+  requestHeaders.set(NAV_KIND_HEADER, navKind);
 
   const isHome = pathname === "/" || pathname === "";
 
@@ -383,6 +389,7 @@ export async function middleware(req: NextRequest) {
         toSet.forEach(({ name, value }) => req.cookies.set(name, value));
         const refreshedHeaders = new Headers(req.headers);
         refreshedHeaders.set("x-pathname", pathname);
+        refreshedHeaders.set(NAV_KIND_HEADER, navKind);
         res = NextResponse.next({ request: { headers: refreshedHeaders } });
         toSet.forEach(({ name, value, options }) =>
           res.cookies.set({ name, value, ...options })

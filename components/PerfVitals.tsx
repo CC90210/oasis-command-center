@@ -11,35 +11,41 @@
  * Payload carries metric name, value, rating, and pathname ONLY — no
  * lead data, no query strings (they can embed filter text), no user
  * identity. Fail-open: a failed beacon never surfaces to the operator.
+ *
+ * Also installs the click → route-commit timing (lib/perf/nav-timing.ts,
+ * 2026-10-28), which the board completes with reportBoardVisible().
  */
 
+import { useEffect } from "react";
+import { usePathname } from "next/navigation";
 import { useReportWebVitals } from "next/web-vitals";
+import { recordLinkClick, reportRouteCommit, sendVital } from "@/lib/perf/nav-timing";
 
-const ENDPOINT = "/api/perf/vitals";
+/**
+ * Module scope, so its identity never changes: useReportWebVitals subscribes
+ * again whenever its callback changes and never unsubscribes the old one, and
+ * this component re-renders on every route change (Codex review, 2026-10-28).
+ */
+function reportVital(metric: { name: string; value: number; rating?: string }): void {
+  try {
+    sendVital(metric.name, metric.value, metric.rating ?? null, window.location.pathname);
+  } catch {
+    // fail-open
+  }
+}
 
 export function PerfVitals() {
-  useReportWebVitals((metric) => {
-    try {
-      const body = JSON.stringify({
-        name: metric.name,
-        value: Math.round(metric.value * 1000) / 1000,
-        rating: (metric as { rating?: string }).rating ?? null,
-        // pathname only — location.search is deliberately excluded.
-        path: window.location.pathname.slice(0, 100),
-      });
-      if (navigator.sendBeacon) {
-        navigator.sendBeacon(ENDPOINT, body);
-      } else {
-        fetch(ENDPOINT, {
-          method: "POST",
-          body,
-          keepalive: true,
-          headers: { "content-type": "application/json" },
-        }).catch(() => {});
-      }
-    } catch {
-      // fail-open
-    }
-  });
+  useReportWebVitals(reportVital);
+
+  useEffect(() => {
+    document.addEventListener("click", recordLinkClick, true);
+    return () => document.removeEventListener("click", recordLinkClick, true);
+  }, []);
+
+  const pathname = usePathname();
+  useEffect(() => {
+    reportRouteCommit(pathname);
+  }, [pathname]);
+
   return null;
 }
