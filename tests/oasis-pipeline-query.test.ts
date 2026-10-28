@@ -304,6 +304,18 @@ assert.equal(
   "overview stays bounded per stage",
 );
 assert.deepEqual(overview.truncatedStages, ["assigned"]);
+
+// everyRow (the AI audits board, lib/ai-audit/pipeline-deals.ts): every counted row, the same counts, the same read.
+const before = calls.length;
+const everything = await listOasisPipelineWindow(
+  { tenantId: "tenant-1", stageKeys: OPENER_PIPELINE_STAGE_KEYS, salesProgram: "website_sales_v1", salesMotion: "cold_outbound", assignedTo: "rep-1", query: "Acme, Inc.", everyRow: true },
+  { list: fakeList },
+);
+assert.equal(everything.rows.length, everything.total, "every row the board counts, not the 40-row overview");
+assert.equal(everything.rows.filter((row) => row.data.stage === "assigned").length, 145);
+assert.deepEqual(everything.stageCounts, overview.stageCounts, "the same counts");
+assert.equal(calls.length - before, 1, "one read, as the board makes");
+calls.splice(before);
 assert.deepEqual(
   calls[0]?.whereIn?.stage,
   OPENER_PIPELINE_STAGE_KEYS,

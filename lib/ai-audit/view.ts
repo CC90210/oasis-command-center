@@ -12,7 +12,7 @@ import { FOLLOW_UP_AI_AUDIT_KIND } from "@/lib/ai-audit/follow-up-payload";
 import { effectiveStatus } from "@/lib/os/approvals/rules";
 import type { Client } from "@libsql/client";
 import { AI_AUDIT_STAGE_LABELS, nextActionFor } from "@/lib/ai-audit/rules";
-import { pipelineStageLabel, queueLabel } from "@/lib/ai-audit/pipeline-view";
+import { pipelineStageLabel, queueKey, queueLabel, type PipelineQueue } from "@/lib/ai-audit/pipeline-view";
 import { leadsOnPipeline, type LeadOnPipeline } from "@/lib/ai-audit/pipeline-link";
 import { auditDocIssues, type DocIssue } from "@/lib/ai-audit/doc";
 import { proposalBlockers, proposalTotals, type ProposalTotals } from "@/lib/ai-audit/proposal";
@@ -73,6 +73,7 @@ export type BoardRow = {
   pipeline_stage: string | null;
   pipeline_stage_label: string;
   queue: string | null;
+  queue_key: PipelineQueue | null;
   health: Engagement["health"];
   health_reason: string | null;
   payment_status: Engagement["payment_status"];
@@ -93,6 +94,7 @@ export function boardRow(e: Engagement, lead: LeadOnPipeline | null): BoardRow {
     pipeline_stage: lead?.stage ?? null,
     pipeline_stage_label: pipelineStageLabel(lead?.stage ?? null),
     queue: queueLabel(lead?.motion ?? null),
+    queue_key: queueKey(lead?.motion ?? null),
     health: e.health,
     health_reason: e.health_reason,
     payment_status: e.payment_status,
