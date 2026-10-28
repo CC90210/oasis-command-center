@@ -19,6 +19,7 @@
 import { PageHeader } from "@/components/Card";
 import { CronJobsManager } from "@/components/automations/CronJobsManager";
 import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorkersPanel";
+import { CronFlowCards } from "@/components/automations/CronFlowCards";
 import { BreezeDealsPanel } from "@/components/automations/BreezeDealsPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
 import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModulesStatusBoard";
@@ -276,7 +277,10 @@ export async function AutomationsContent({
         // only, and /automations is already 404 for the personas whose
         // canSeeSystemSurfaces is false (reps, managers), so no client
         // tenant and no rep gets CC's machine's daemon list.
-        <BackgroundWorkersPanel />
+        <>
+          <CronFlowCards />
+          <BackgroundWorkersPanel />
+        </>
       )}
       {isClientAutomationSurface && (
         // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`

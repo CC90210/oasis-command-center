@@ -213,6 +213,8 @@ const UNSCHEDULED_BY_DESIGN: Record<string, string> = {
   "roi-snapshot": "OASIS client ROI roll-up; no schedule registered yet",
   // OASIS MRR snapshot (user_profiles.mrr_current_usd -> mrr_snapshots). Same.
   "snapshot-mrr": "OASIS MRR snapshot; no schedule registered yet",
+  // The cron Worker's own report of each tick (POST, 2026-10-28): it is called BY the Worker, never on a schedule.
+  runs: "the cron Worker's run report (POST /api/cron/runs), never scheduled itself",
 };
 const registeredRoutes = new Set(crons.map((c) => basePathOf(c.path).replace(/^\/api\/cron\//, "")));
 const onDisk = readdirSync("app/api/cron", { withFileTypes: true })
