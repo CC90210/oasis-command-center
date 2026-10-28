@@ -87,3 +87,32 @@ export function buildDetailsOnlyLeadAlert(input: {
     `<a href="${input.leadUrl}">Open the lead in Command Center</a>`,
   ].join("\n");
 }
+
+const REBOOK_EMOJI = String.fromCodePoint(0x1f501);
+
+/**
+ * The sales-desk alert for a lead who missed a founder meeting and picked a new
+ * time from their rebook link (app/book/rebook/[token], CC 2026-10-28).
+ */
+export function buildRebookedLeadAlert(input: {
+  offerName: string;
+  name: string;
+  company: string;
+  missedAt: string;
+  startsAt: string;
+  meetUrl: string;
+  leadUrl: string;
+}): string {
+  const e = escapeTelegramHtml;
+  const cap = clipAndEscape;
+  return [
+    `${REBOOK_EMOJI} <b>${cap(input.offerName, 120)} rebooked</b>`,
+    `<b>${cap(input.name || "Lead", 120)}</b>${input.company ? ` - ${cap(input.company, 120)}` : ""}`,
+    `Missed: ${e(formatBookedTime(input.missedAt))}`,
+    `New time: ${e(formatBookedTime(input.startsAt))}`,
+    isMeetUrl(input.meetUrl)
+      ? `<a href="${input.meetUrl}">Open video call</a>`
+      : `Video call: ${cap(input.meetUrl, 200)}`,
+    `<a href="${input.leadUrl}">Open the lead in Command Center</a>`,
+  ].join("\n");
+}
