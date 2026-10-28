@@ -73,9 +73,9 @@ type SlotState =
   | { status: "error"; message: string };
 
 /** `recorded`: the call's Oasis Meet room records it, so the confirmation and the .ics say so (MEET_RECORDING_NOTICE). */
-type Booked = { startsAt: string; endsAt: string; meetUrl: string; recorded: boolean };
+export type Booked = { startsAt: string; endsAt: string; meetUrl: string; recorded: boolean };
 
-const FALLBACK_ZONE = "America/Toronto";
+export const FALLBACK_ZONE = "America/Toronto";
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
@@ -97,7 +97,7 @@ export async function raiseDetailsOnlyAlert(token: string, reason: DetailsOnlyRe
   ).catch(() => undefined);
 }
 
-function visitorZone(): string {
+export function visitorZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || FALLBACK_ZONE;
   } catch {
@@ -105,7 +105,7 @@ function visitorZone(): string {
   }
 }
 
-function fmt(iso: string, zone: string, options: Intl.DateTimeFormatOptions): string {
+export function fmt(iso: string, zone: string, options: Intl.DateTimeFormatOptions): string {
   try {
     return new Intl.DateTimeFormat("en-US", { timeZone: zone, ...options }).format(new Date(iso));
   } catch {
@@ -113,11 +113,11 @@ function fmt(iso: string, zone: string, options: Intl.DateTimeFormatOptions): st
   }
 }
 
-function dayKey(iso: string, zone: string): string {
+export function dayKey(iso: string, zone: string): string {
   return fmt(iso, zone, { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
-function zoneName(zone: string): string {
+export function zoneName(zone: string): string {
   try {
     const part = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "long" })
       .formatToParts(new Date())
@@ -128,7 +128,7 @@ function zoneName(zone: string): string {
   }
 }
 
-function newRequestId(): string {
+export function newRequestId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   // RFC 4122 v4 from getRandomValues (the booking route accepts v4 only).
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -142,7 +142,7 @@ function icsStamp(iso: string): string {
   return iso.replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 }
 
-function icsHref(booked: Booked, title: string): string {
+export function icsHref(booked: Booked, title: string): string {
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
