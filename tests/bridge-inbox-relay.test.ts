@@ -10,10 +10,13 @@
  *      not OASIS's own;
  *   3. pending lists only this workspace's undelivered, unread, eligible directives, oldest first;
  *   4. pending RESERVES what it returns for one computer: a second computer polling at once gets none
- *      of it, may take it only after the reservation lapses, may report delivered only what it reserved,
+ *      of it, may take it only after the reservation lapses, may report delivered only what it reserved
+ *      (asking again is answered yes again; a note dismissed before its first delivery is refused),
  *      and only the delivering computer may report it read;
- *   5. the subject and body leave scrubbed of secrets (they land in a folder a model reads);
- *   6. a malformed body is a 400, and an eleventh request in a minute is a 429.
+ *   5. the subject and body leave scrubbed of secrets (they land in a folder a model reads), and a
+ *      reply id travels only as an id the scrub leaves alone;
+ *   6. a malformed body is a 400, an eleventh request in a minute is a 429, and a caller guessing
+ *      bearers is stopped by address before any lookup.
  *
  * Run: node --conditions=react-server --import tsx tests/bridge-inbox-relay.test.ts
  */
@@ -294,6 +297,28 @@ async function main(): Promise<void> {
     assert.deepEqual((await call("POST", "delivered", laptop.token, { ids: [first.message!.id] })).json.delivered, [], "the laptop still hears no");
     const noOne = await call("POST", "delivered", mac.token, { ids: [agentNote.message!.id, elsewhere.message!.id] });
     assert.deepEqual(noOne.json.delivered, [], "an ineligible note and another workspace's are never stamped");
+  });
+
+  await check("a directive dismissed after it was reserved is never confirmed as delivered", async () => {
+    const office = await computer({ label: "Office" });
+    const cancelled = await post("bravo", "Cancelled before delivery", true);
+    const reserved = await call("GET", "pending", office.token);
+    assert.ok(reserved.json.messages!.some((m) => m.id === cancelled.message!.id), "reserved for the office computer");
+    await inbox.markReadDb(OASIS, cancelled.message!.id, "dashboard");
+    assert.deepEqual((await call("POST", "delivered", office.token, { ids: [cancelled.message!.id] })).json.delivered, [], "the operator cancelled it");
+    assert.equal((await row(cancelled.message!.id)).delivered_at, null);
+  });
+
+  await check("a reply id that is not an id, or holds a saved credential, never travels", async () => {
+    const den = await computer({ label: "Den" });
+    const odd = await post("bravo", "Reply with an odd parent", true);
+    await db.execute({ sql: "UPDATE agent_messages SET in_reply_to = ?, thread_id = ? WHERE id = ?", args: ["acmevault-9f8e7d6c5b4a", "not an id!", odd.message!.id] });
+    const res = await call("GET", "pending", den.token);
+    const sent = res.json.messages!.find((m) => m.id === odd.message!.id) as unknown as Record<string, unknown>;
+    assert.ok(sent, JSON.stringify(res.json).slice(0, 200));
+    assert.equal(sent.in_reply_to, null, "the credential-shaped parent is dropped");
+    assert.equal(sent.thread_id, odd.message!.message_id, "a thread id that is not an id falls back to the note's own");
+    assert.ok(!JSON.stringify(res.json).includes("acmevault-9f8e7d6c5b4a"));
   });
 
   await check("a reservation that lapses (the Mac stopped partway) may be taken by another computer", async () => {

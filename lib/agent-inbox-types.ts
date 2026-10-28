@@ -36,3 +36,11 @@ export const COMPOSER_RECIPIENTS = KNOWN_AGENTS.filter((a) => a !== "cc");
  * that will deliver from one whose bridge predates delivery.
  */
 export const AGENT_INBOX_PROTOCOL = "agent_inbox_v1";
+
+/**
+ * A message id as the inbox mints them (random hex, or a UUID): all that in_reply_to and thread_id may
+ * hold on their way into an agent's local inbox (Codex review of #768). Anything else is dropped there.
+ */
+export function isMessageId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,64}$/.test(value);
+}

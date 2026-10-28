@@ -20,6 +20,7 @@ import { safe } from "@/lib/api-helpers";
 import { timeAgo } from "@/lib/devices/presence";
 import { agentName, deliveryStateOf, type DeliveryComputer, type DeliveryTone } from "@/lib/os/agent-ops";
 import { readDeliveryComputer } from "@/lib/os/agent-ops-data";
+import { readAgentsOwner } from "@/lib/agents-owner";
 import { getActiveProfile } from "@/lib/queries";
 import { requireOperator } from "@/lib/role-surfaces-session";
 
@@ -47,12 +48,15 @@ export default async function AgentOpsPage() {
   const now = Date.now();
   // null = the notes could not be read ("Couldn't check", never "no notes");
   // undefined computer = its read failed, which a waiting note says.
-  const [messages, computer] = await Promise.all([
+  const [messages, computer, owner] = await Promise.all([
     tenantId ? safe<DbInboxMessage[] | null>("agent-ops.messages", listAgentOpsMessagesDb(tenantId), null) : Promise.resolve(null),
     tenantId
       ? safe<DeliveryComputer | null | undefined>("agent-ops.computer", readDeliveryComputer(tenantId), undefined)
       : Promise.resolve(undefined),
+    tenantId ? readAgentsOwner(tenantId) : Promise.resolve({ state: "unavailable" as const }),
   ]);
+  // Only the agents owner dispatches (app/api/inbox/post): a directive runs on their computer.
+  const mayDispatch = owner.state === "set" && Boolean(profile?.auth_user_id) && owner.authUserId === profile?.auth_user_id;
   const byMessageId = new Map((messages ?? []).map((m) => [m.message_id, m]));
 
   return (
@@ -75,7 +79,17 @@ export default async function AgentOpsPage() {
                   : `${computer.label}'s bridge predates delivery. Restart it to update, and directives start arriving.`
           }
         >
-          <AgentInboxComposer recipients={RELAY_RECIPIENTS} submitLabel="Dispatch" />
+          {mayDispatch ? (
+            <AgentInboxComposer recipients={RELAY_RECIPIENTS} submitLabel="Dispatch" />
+          ) : (
+            <p className="text-sm text-fg-muted">
+              {owner.state === "unavailable"
+                ? "Couldn't check who may dispatch just now. Reload to try again."
+                : owner.state === "set"
+                  ? "Only the workspace's agents owner can dispatch: a directive runs on that person's computer."
+                  : "No agents owner is set for this workspace yet, so directives can't be dispatched."}
+            </p>
+          )}
         </Card>
 
         <Card

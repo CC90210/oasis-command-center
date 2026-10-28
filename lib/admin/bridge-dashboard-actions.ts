@@ -44,6 +44,7 @@ import "server-only";
 
 import { extractActionMarkers, knownActionTypes, runAction, type ActionResult } from "@/lib/agent-actions";
 import { actionSnapshot, logAction } from "@/lib/action-log";
+import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { READ_ONLY_DENIED_MARKERS, canWriteCrm } from "@/lib/role-gates";
 import { signResumeState, verifyResumeState, type ResumeBinding } from "@/lib/resume-hmac";
 
@@ -153,6 +154,14 @@ async function logResult(
   log: typeof logAction,
   payload?: Record<string, unknown>,
 ): Promise<void> {
+  // The workspace's saved credentials, so the snapshot never stores one (Codex review of #768). Null when
+  // they cannot be read, and then the snapshot keeps nothing.
+  const vault = payload
+    ? await fetchTenantVaultSecretsForRedaction(ctx.tenantId).catch((err: unknown) => {
+        console.error("[bridge.dashboard_action.vault]", { tenantId: ctx.tenantId, error: err instanceof Error ? err.message : String(err) });
+        return null;
+      })
+    : null;
   await log({
     agent_key: ctx.agent,
     tenant_id: ctx.tenantId,
@@ -162,7 +171,7 @@ async function logResult(
     summary: result.ok ? result.summary : undefined,
     error: result.ok ? undefined : result.error,
     // What the confirmed change asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
-    ...(payload ? { requested: actionSnapshot(payload) } : {}),
+    ...(payload ? { requested: actionSnapshot(payload, vault) } : {}),
   });
 }
 

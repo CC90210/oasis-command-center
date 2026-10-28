@@ -104,17 +104,24 @@ async function main(): Promise<void> {
     console.log("  ok    key changes");
 
     const { actionSnapshot } = await import("../lib/action-log");
-    assert.equal(actionSnapshot(null), null);
-    assert.equal(actionSnapshot(["a"]), null);
-    assert.equal(actionSnapshot({}), null);
-    const snap = actionSnapshot({ stage: "qualified", link: "https://x.test/?token=abc123supersecret", deep: { a: { b: { c: 1 } } } })!;
+    assert.equal(actionSnapshot(null, []), null);
+    assert.equal(actionSnapshot(["a"], []), null);
+    assert.equal(actionSnapshot({}, []), null);
+    const snap = actionSnapshot({ stage: "qualified", link: "https://x.test/?token=abc123supersecret", deep: { a: { b: { c: 1 } } } }, [])!;
     assert.equal(snap.stage, "qualified");
     assert.ok(!JSON.stringify(snap).includes("abc123supersecret"), "secrets are scrubbed before they are stored");
     assert.deepEqual(snap.deep, { a: { b: "[nested]" } }, "three levels at most");
-    assert.deepEqual(actionSnapshot({ big: "y".repeat(400), more: "z".repeat(400), lots: Array.from({ length: 40 }, () => "w".repeat(400)) }), { note: "too large to keep" });
-    assert.match(read("app/api/chat/route.ts"), /requested: actionSnapshot\(spec\.payload\),/, "the cloud chat records what it asked for");
+    assert.deepEqual(actionSnapshot({ big: "y".repeat(400), more: "z".repeat(400), lots: Array.from({ length: 40 }, () => "w".repeat(400)) }, []), { note: "too large to keep" });
+    // The workspace's saved credentials too (Codex review of #768): in a value, a key, or across the cut.
+    const vault = [{ key: "ACME_API", value: "acmevault-9f8e7d6c5b4a" }];
+    const withVault = actionSnapshot({ note: "use acmevault-9f8e7d6c5b4a now", "acmevault-9f8e7d6c5b4a": 1, tail: "y".repeat(490) + "acmevault-9f8e7d6c5b4a" }, vault)!;
+    assert.ok(!JSON.stringify(withVault).includes("acmevault"), JSON.stringify(withVault).slice(0, 200));
+    assert.deepEqual(actionSnapshot({ stage: "x" }, null), { note: "not kept: the workspace's saved credentials could not be checked" }, "an unreadable vault keeps nothing");
+    const chatRoute = read("app/api/chat/route.ts");
+    assert.match(chatRoute, /requested: actionSnapshot\(spec\.payload, vaultReadFailed \? null : vaultSecretsForRedaction\),/, "the cloud chat records what it asked for, vault-scrubbed");
     assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /await logResult\(result, ctx, log, spec\.payload\);/, "so does a confirmed harness change");
-    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /requested: actionSnapshot\(payload\)/);
+    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /requested: actionSnapshot\(payload, vault\)/);
+    assert.match(read("lib/admin/bridge-dashboard-actions.ts"), /fetchTenantVaultSecretsForRedaction\(ctx\.tenantId\)/);
     assert.doesNotMatch(read("app/api/chat/route.ts"), /after: actionSnapshot/, "a request is never stored as a write");
     const tracePage = read("app/agent-ops/trace/page.tsx");
     assert.match(tracePage, /"What changed" : ok \? "What it asked to set" : "What it tried to set"/, "a request is labelled as one");
@@ -152,6 +159,10 @@ async function main(): Promise<void> {
   assert.match(postRoute, /from: "cc",/, "the sender is the operator, whatever the body says");
   assert.match(postRoute, /relayEligible: isRelayRecipient\(to\),/);
   assert.match(postRoute, /if \(!\(await isPlatformOperatorForAuthUser\(user\.id, user\.email\)\)\)/);
+  // Only the agents owner dispatches, before anything is written (Codex review of #768).
+  assert.match(postRoute, /if \(owner\.state !== "set" \|\| owner\.authUserId !== user\.id\)/);
+  assert.ok(postRoute.indexOf("readAgentsOwner(tenantId)") < postRoute.indexOf("postMessageDb({"), "the owner check comes first");
+  assert.match(read("app/agent-ops/page.tsx"), /\{mayDispatch \? \(/, "the composer is the agents owner's alone");
   assert.doesNotMatch(read("app/api/inbox/mark-read/route.ts"), /from "@\/lib\/agent-inbox-fs"/);
   assert.match(read("app/api/chat/route.ts"), /markReadDb\(tenantId, id, "cloud_chat"\)/, "a cloud chat's read is labelled");
   assert.match(read("app/api/bridge/ping/route.ts"), /"coding_harness_task_v1", AGENT_INBOX_PROTOCOL\]/, "the ping accepts agent_inbox_v1");
@@ -159,6 +170,7 @@ async function main(): Promise<void> {
   assert.match(relay, /reserveRelayBatchDb\(auth\.pairing\.tenantId, auth\.pairing\.pairingId\)/, "pending reserves for the asking computer");
   assert.match(relay, /const scrub = \(text: string\) => redactTenantVaultSecrets\(redactAll\(text\), vault\);/, "env, URL keys and the workspace's vault");
   assert.match(relay, /subject: scrub\(row\.subject \?\? ""\),\n\s*body: scrub\(row\.body\),/, "the text leaves scrubbed");
+  assert.match(relay, /in_reply_to: idOrNull\(row\.in_reply_to\),\n\s*thread_id: idOrNull\(row\.thread_id\) \?\? row\.message_id,/, "reply ids leave only as ids");
   assert.ok(relay.indexOf("fetchTenantVaultSecretsForRedaction(") < relay.indexOf("reserveRelayBatchDb(auth"), "the vault is read before anything is reserved");
   const { AGENT_INBOX_PROTOCOL } = await import("../lib/agent-inbox-types");
   assert.equal(AGENT_INBOX_PROTOCOL, "agent_inbox_v1");

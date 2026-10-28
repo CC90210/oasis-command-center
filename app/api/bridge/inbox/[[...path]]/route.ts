@@ -47,7 +47,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { markAckedDb, markDeliveredDb, RELAY_BATCH_MAX, reserveRelayBatchDb } from "@/lib/agent-inbox-db";
 import { redactAll, redactTenantVaultSecrets, type VaultSecret } from "@/lib/secret-redaction";
 import { fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
-import { AGENT_INBOX_PROTOCOL } from "@/lib/agent-inbox-types";
+import { AGENT_INBOX_PROTOCOL, isMessageId } from "@/lib/agent-inbox-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -138,6 +138,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
     return json(503, { ok: false, error: "vault_unavailable" });
   }
   const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+  // A reply id travels only when it is an id the scrub leaves alone (Codex review of #768: it lands in a
+  // model-readable inbox, and older rows took free text there).
+  const idOrNull = (value: string | null | undefined) => (value && isMessageId(value) && scrub(value) === value ? value : null);
   try {
     const rows = await reserveRelayBatchDb(auth.pairing.tenantId, auth.pairing.pairingId);
     return json(200, {
@@ -151,8 +154,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
         body: scrub(row.body),
         priority: row.priority,
         requires_response: Boolean(row.requires_response),
-        in_reply_to: row.in_reply_to,
-        thread_id: row.thread_id || row.message_id,
+        in_reply_to: idOrNull(row.in_reply_to),
+        thread_id: idOrNull(row.thread_id) ?? row.message_id,
         created_at: row.created_at,
       })),
     });

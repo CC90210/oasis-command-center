@@ -54,7 +54,7 @@ process.env.EMPIRE_AUTH_BACKEND = "turso";
 process.env.AUTH_SESSION_SECRET = "operator-check-migrated-secret-long-enough-000001";
 // conaugh@oasisai.work is the hardcoded default alias; the rest are configured.
 delete process.env.OPERATOR_EMAIL;
-process.env.ADMIN_EMAILS = ["squatter@alias.test", "unlinked@alias.test"].join(",");
+process.env.ADMIN_EMAILS = ["squatter@alias.test", "unlinked@alias.test", "deputy@alias.test"].join(",");
 delete process.env.OPERATOR_EMAIL_FALLBACK_ENABLED;
 // Bridge targets: SunBiz on the global env, OASIS on its per-tenant override.
 process.env.BRIDGE_VPS_URL = "https://bridge.sunbiz.test";
@@ -307,6 +307,7 @@ const USERS = {
   unlinked: u(3, "unlinked@alias.test"), // ADMIN_EMAILS; an OASIS owner row carries this EMAIL, unlinked
   spoof: u(4, "spoof@client.test"), // NOT an alias — but wrote CC's alias into its own profile's email
   rep: u(5, "rep@sunbiz.test"), // SunBiz member, not an alias
+  deputy: u(6, "deputy@alias.test"), // ADMIN_EMAILS; an OASIS admin, a real operator, NOT the agents owner
 } as const;
 
 async function login(user: U | null): Promise<void> {
@@ -361,6 +362,16 @@ async function behaviouralChecks() {
       provider TEXT, model TEXT, encrypted_api_key TEXT, system_prompt_override TEXT,
       display_name_override TEXT, enabled INTEGER DEFAULT 1);
   `);
+  // The agent inbox as the live database holds it (bravo__246/247 add delivery), for the dispatch checks.
+  await db.executeMultiple(`
+    CREATE TABLE agent_messages (
+      id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))), message_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+      from_agent TEXT NOT NULL, to_agent TEXT NOT NULL, subject TEXT, body TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal', requires_response INTEGER NOT NULL DEFAULT 0, in_reply_to TEXT,
+      thread_id TEXT, read_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      relay_eligible INTEGER NOT NULL DEFAULT 0, delivered_at TEXT, delivered_pairing_id TEXT, delivered_label TEXT,
+      acked_at TEXT, read_via TEXT, relay_claimed_at TEXT, PRIMARY KEY (id));
+  `);
   // O1: authorizeBridgeRequest now also gates on the workspace's agents
   // owner (lib/agents-owner.ts). CC must be named here or every "operator
   // still reaches the bridge" check below would fail on the NEW gate instead
@@ -399,6 +410,7 @@ async function behaviouralChecks() {
       // read it in preference to the session email.
       profile("p-spoof", { id: USERS.spoof.id, email: USERS.cc.email }, SPOOF_TENANT, "owner", 1),
       profile("p-rep", USERS.rep, SUNBIZ, "member", 0),
+      profile("p-deputy", USERS.deputy, OASIS, "admin", 0),
       {
         sql: `INSERT INTO agent_events (id, event_type, publisher_agent, severity, payload, published_at, created_at, status, correlation_id)
               VALUES ('ev-oasis', 'lead_update', 'bravo', 'info', '{"note":"OASIS-ONLY-EVENT"}', ?, ?, 'delivered', ?)`,
@@ -560,6 +572,35 @@ async function behaviouralChecks() {
       }),
     );
     assert.equal(res.status, 403);
+  });
+
+  // Codex review of #768: a directive is relayed to the agents owner's computer as "cc", so only the
+  // agents owner may dispatch one; another real operator is refused before anything is written.
+  const dispatch = (payload: Record<string, unknown>) =>
+    inboxPost.POST(new NextRequest("http://localhost/api/inbox/post", { method: "POST", body: JSON.stringify(payload) }));
+  const inboxRows = async () =>
+    (await db.execute("SELECT message_id, from_agent, relay_eligible, in_reply_to FROM agent_messages ORDER BY created_at")).rows;
+  await check("agent inbox: an operator who is not the agents owner cannot dispatch", async () => {
+    await login(USERS.deputy);
+    assert.equal(await operator.isPlatformOperatorForAuthUser(USERS.deputy.id, USERS.deputy.email), true, "premise: a real operator");
+    const res = await dispatch({ to: "bravo", subject: "x", body: "do the thing" });
+    assert.equal(res.status, 403);
+    assert.equal(((await res.json()) as { error: string }).error, "agents_owner_only");
+    assert.equal((await inboxRows()).length, 0, "nothing written");
+  });
+  await check("agent inbox: the agents owner dispatches, and a reply must name a real note", async () => {
+    await login(USERS.cc);
+    const res = await dispatch({ to: "bravo", subject: "x", body: "do the thing" });
+    assert.equal(res.status, 200, await res.clone().text());
+    const [first] = await inboxRows();
+    assert.equal(first.from_agent, "cc");
+    assert.equal(Number(first.relay_eligible), 1, "a directive to Bravo is carried to the computer");
+    const forged = await dispatch({ to: "bravo", body: "reply", in_reply_to: "acmevault-9f8e7d6c5b4a" });
+    assert.equal(forged.status, 400);
+    assert.equal(((await forged.json()) as { error: string }).error, "unknown_in_reply_to");
+    const reply = await dispatch({ to: "bravo", body: "reply", in_reply_to: String(first.message_id) });
+    assert.equal(reply.status, 200);
+    assert.equal((await inboxRows()).at(-1)!.in_reply_to, first.message_id);
   });
 
   // ── app/api/cron-jobs/[id] (the Empire scheduler lane) ───────────────────

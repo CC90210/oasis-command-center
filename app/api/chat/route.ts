@@ -719,10 +719,16 @@ export async function POST(req: NextRequest) {
   //       closes the "live stream is a soft control" gap.
   //   (2) by persistAssistantTurn at the end so we don't re-fetch.
   // Empty array on failure → redaction degrades to env-var-only,
-  // chat still works.
+  // chat still works. The action snapshots (logAction `requested`) keep
+  // nothing instead: they are stored, so they never degrade.
+  let vaultReadFailed = false;
   const vaultSecretsForRedaction = await fetchTenantVaultSecretsForRedaction(
     tenantId,
-  ).catch(() => []);
+  ).catch((err: unknown) => {
+    vaultReadFailed = true;
+    console.error("[chat.vault_redaction]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return [];
+  });
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -1012,7 +1018,7 @@ export async function POST(req: NextRequest) {
             summary: r.ok ? r.summary : undefined,
             error: !r.ok ? r.error : undefined,
             // What it asked to set, for the Execution trace (scrubbed, bounded): a request, not a write.
-            requested: actionSnapshot(spec.payload),
+            requested: actionSnapshot(spec.payload, vaultReadFailed ? null : vaultSecretsForRedaction),
           });
         }
       } catch (err) {

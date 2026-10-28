@@ -191,7 +191,9 @@ export async function reserveRelayBatchDb(
  * already reported: asked again, it hears yes again, and the first stamp stands. The computer publishes
  * a note into the agent's readable inbox only after this yes (bravo_cli/inbox_relay.py), so an answer
  * lost in transit must be recoverable by asking again (Codex review of CEO-Agent #134). A computer that
- * lost the note to another hears no, every time.
+ * lost the note to another hears no, every time. So does one reporting a FIRST delivery of a note the
+ * operator dismissed after it was reserved (Codex review of #768): a cancelled directive is never
+ * published; a note already delivered is still confirmed.
  */
 export async function markDeliveredDb(
   tenantId: string,
@@ -204,7 +206,7 @@ export async function markDeliveredDb(
       sql:
         `UPDATE agent_messages SET delivered_at = COALESCE(delivered_at, ?), delivered_label = COALESCE(delivered_label, ?) ` +
         `WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")}) ` +
-        `AND relay_eligible = 1 AND delivered_pairing_id = ? RETURNING id`,
+        `AND relay_eligible = 1 AND delivered_pairing_id = ? AND (delivered_at IS NOT NULL OR read_at IS NULL) RETURNING id`,
       args: [new Date().toISOString(), pairing.label.slice(0, 80), tenantId, ...ids, pairing.id],
     });
     return rs.rows.map((row) => String(row.id));
