@@ -44,7 +44,8 @@ export async function recordCronRuns(db: Client, batch: { tickAt: string; runs: 
   await db.batch(
     [
       ...batch.runs.map((run) => ({
-        sql: "INSERT INTO cron_runs (route, tick_at, ok, http_status, attempts, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
+        // One row per route per tick (bravo__250): a repeated report of the same tick is ignored.
+        sql: "INSERT OR IGNORE INTO cron_runs (route, tick_at, ok, http_status, attempts, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
         args: [run.path, batch.tickAt, run.ok ? 1 : 0, run.status, run.attempts, run.ms],
       })),
       { sql: "DELETE FROM cron_runs WHERE tick_at < ?", args: [new Date(now - CRON_RUNS_KEEP_DAYS * DAY_MS).toISOString()] },

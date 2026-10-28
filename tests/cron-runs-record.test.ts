@@ -48,7 +48,9 @@ async function check(name: string, fn: () => Promise<void> | void): Promise<void
 }
 
 async function main(): Promise<void> {
-  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__249_cron_runs.sql"), "utf8"));
+  for (const file of ["bravo__249_cron_runs.sql", "bravo__250_cron_runs_unique_tick.sql"]) {
+    await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso", file), "utf8"));
+  }
   const route = await import("../app/api/cron/runs/route");
   const runs = await import("../lib/automations/cron-runs");
   const cards = await import("../components/automations/CronFlowCards");
@@ -81,12 +83,18 @@ async function main(): Promise<void> {
 
   await check("POST: a tick is stored, and rows older than 14 days are pruned", async () => {
     await db.execute({ sql: "INSERT INTO cron_runs (route, tick_at, ok) VALUES ('/api/cron/health-check', ?, 1)", args: [iso(Date.now() - 15 * 24 * 60 * MIN)] });
-    const res = await post({ ...tick(["/api/cron/health-check", "/api/cron/ai-audit-tick"]), tick: iso(Date.now() - MIN) }, both);
+    const tickAt = iso(Date.now() - MIN);
+    const res = await post({ ...tick(["/api/cron/health-check", "/api/cron/ai-audit-tick"]), tick: tickAt }, both);
     assert.equal(res.status, 200, JSON.stringify(res.json));
     assert.equal(res.json.recorded, 2);
     assert.equal(await count(), 2, "the 15-day-old row is gone");
     const row = (await db.execute("SELECT * FROM cron_runs WHERE route = '/api/cron/ai-audit-tick'")).rows[0];
     assert.deepEqual([Number(row.ok), row.http_status, Number(row.attempts), Number(row.duration_ms)], [1, "200", 1, 340]);
+    // A repeated report of the same tick (a double-fired invocation) adds nothing (bravo__250).
+    const again = await post({ ...tick(["/api/cron/ai-audit-tick"], false), tick: tickAt }, both);
+    assert.equal(again.status, 200);
+    assert.equal(await count(), 2, "still one row per route per tick");
+    assert.equal(Number((await db.execute("SELECT ok FROM cron_runs WHERE route = '/api/cron/ai-audit-tick'")).rows[0].ok), 1, "the first report is kept");
   });
 
   await check("flow cards: the last run and 24 hours per route; 'not measured yet' where nothing ran", async () => {
