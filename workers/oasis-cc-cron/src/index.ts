@@ -85,6 +85,7 @@ interface ForwardResult {
   status: number | string;
   ok: boolean;
   attempts: number;
+  ms: number;
 }
 
 async function callOnce(env: Env, origin: string, path: string): Promise<{ status: number | string; ok: boolean; retryable: boolean }> {
@@ -115,16 +116,42 @@ async function callOnce(env: Env, origin: string, path: string): Promise<{ statu
 }
 
 async function forward(env: Env, origin: string, path: string): Promise<ForwardResult> {
+  const started = Date.now();
   const first = await callOnce(env, origin, path);
   if (first.ok || !first.retryable) {
-    return { path, status: first.status, ok: first.ok, attempts: 1 };
+    return { path, status: first.status, ok: first.ok, attempts: 1, ms: Date.now() - started };
   }
   // One bounded retry with jitter for transient failures. Safe for every
   // route: the cutover gate (runbook Phase B) requires all 29 routes to be
   // double-fire-safe via CAS claims or the tick-lease before CRON_FORWARD=on.
   await new Promise((r) => setTimeout(r, 15_000 + Math.floor(Math.random() * 15_000)));
   const second = await callOnce(env, origin, path);
-  return { path, status: second.status, ok: second.ok, attempts: 2 };
+  return { path, status: second.status, ok: second.ok, attempts: 2, ms: Date.now() - started };
+}
+
+/**
+ * Report one tick's results to the app (POST /api/cron/runs, 2026-10-28) so Automations can show
+ * each schedule's last run. Same two-leg auth as the forwards. Best effort: a failed report is
+ * logged and never retried, and never fails the tick.
+ */
+async function recordRuns(env: Env, origin: string, tick: string, results: ForwardResult[]): Promise<void> {
+  try {
+    const res = await fetch(origin + "/api/cron/runs", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.CRON_SECRET ?? ""}`,
+        "x-oasis-cron-attest": env.CRON_ATTEST_SECRET ?? "",
+        "content-type": "application/json",
+        "user-agent": "oasis-cc-cron/1.0",
+      },
+      body: JSON.stringify({ tick, results: results.map((r) => ({ path: r.path, ok: r.ok, status: String(r.status), attempts: r.attempts, ms: r.ms })) }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    await res.body?.cancel().catch(() => undefined);
+    if (!res.ok) console.error(JSON.stringify({ cron_runs_report_failed: res.status, tick }));
+  } catch (err) {
+    console.error(JSON.stringify({ cron_runs_report_failed: String(err).slice(0, 120), tick }));
+  }
 }
 
 export default {
@@ -161,7 +188,7 @@ export default {
     if (!due.length) return;
     const origin = env.APP_ORIGIN || "https://oasisai.work";
     ctx.waitUntil(
-      Promise.all(due.map((e) => forward(env, origin, e.path))).then((results) => {
+      Promise.all(due.map((e) => forward(env, origin, e.path))).then(async (results) => {
         const failed = results.filter((r) => !r.ok);
         console.log(JSON.stringify({ tick: at.toISOString(), mode: "forward", ok: results.length - failed.length, failed: failed.length, results }));
         if (failed.length) {
@@ -170,6 +197,7 @@ export default {
           // OASIS_TELEGRAM secrets from CC's fill list).
           console.error(JSON.stringify({ cron_failures: failed, tick: at.toISOString() }));
         }
+        await recordRuns(env, origin, at.toISOString(), results);
       }),
     );
   },
