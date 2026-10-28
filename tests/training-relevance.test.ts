@@ -10,6 +10,7 @@
  *      nothing reads exactly what it read before;
  *   3. a relevance read that fails falls back to the newest notes, never to none;
  *   4. trainingSelectionFor reports which notes went in; noteMemoryFor gives each learned note its card;
+ *      a note that does not fit the block whole is left out and never reported as picked;
  *   5. every turn path hands its question over, and a prepared turn carries the injected note ids.
  *
  * Run: node --conditions=react-server --import tsx tests/training-relevance.test.ts
@@ -134,6 +135,33 @@ async function main(): Promise<void> {
     assert.match(pick.block, /Subject lines that get opened/);
     const none = await notes.trainingSelectionFor("", "sales", { db, query: "anything" });
     assert.deepEqual(none, { block: "", noteIds: [] });
+  });
+
+  await check("the block holds whole notes only, and reports exactly the notes it holds", () => {
+    // Five long notes (three fields at the stored cap): the 3,000-character block fits three of them.
+    const long = (i: number) => ({
+      id: `long-${i}`,
+      title: `Long note ${i}`,
+      label: "exemplar",
+      hook: `h${i}`.padEnd(280, "h"),
+      steal: `s${i}`.padEnd(280, "s"),
+      tone: `t${i}`.padEnd(280, "t"),
+      pacing: null,
+      structure: null,
+      avoid: null,
+    });
+    const picked = notes.trainingSelection([1, 2, 3, 4, 5].map(long));
+    assert.deepEqual(picked.noteIds, ["long-1", "long-2", "long-3"], "only the notes that fit are reported");
+    for (const id of [1, 2, 3]) assert.ok(picked.block.includes(`Long note ${id}.`), `note ${id} is in the block`);
+    for (const id of [4, 5]) assert.ok(!picked.block.includes(`Long note ${id}`), `note ${id} is left out, not cut off`);
+    assert.doesNotMatch(picked.block, /truncated by llm-input-boundary/, "no note is cut partway");
+    assert.equal(notes.trainingBlock([1, 2, 3, 4, 5].map(long)), picked.block, "trainingBlock is the same block");
+    // A shorter note further down still gets in when a longer one before it does not fit.
+    const short = { ...long(6), hook: "short", steal: null, tone: null };
+    assert.deepEqual(
+      notes.trainingSelection([...[1, 2, 3, 4].map(long), short]).noteIds,
+      ["long-1", "long-2", "long-3", "long-6"],
+    );
   });
 
   await check("noteMemoryFor gives each learned note what it holds and what picks it", async () => {

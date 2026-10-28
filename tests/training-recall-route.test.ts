@@ -6,10 +6,14 @@
  * Pinned here:
  *   1. the edges refuse before any session or database read: an unknown path is 404, a cross-origin
  *      call is 403, a body that is not exactly {note_id, department, question} is 400;
- *   2. the gates and the turn, from the source: operator only, the note checked in this workspace and
+ *   2. a refused session keeps its own reason (no AI account 412, unreadable settings 503, a computer
+ *      that cannot take the turn = the computer guidance), and only a non-operator hears "operator";
+ *   3. the question is scrubbed of secrets before the notes are ranked by it or the model sees it, and
+ *      "included" is read off the notes the turn actually holds;
+ *   4. the gates and the turn, from the source: operator only, the note checked in this workspace and
  *      finished, the department's bound agent, its own usage surface (never a chat), the question as the
  *      training query, the note NEVER forced in, and a computer-only engine refused in words;
- *   3. the surface is registered and kept out of the chat health check.
+ *   5. the surface is registered and kept out of the chat health check.
  *
  * Run: node --conditions=react-server --import tsx tests/training-recall-route.test.ts
  */
@@ -39,6 +43,47 @@ stubModule("next/headers", {
 const ROOT = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 const ROUTE = "app/api/admin/agent-training/[[...path]]/route.ts";
+
+// Stand-ins for the session, the database, the department binding and the turn, so refusals and the
+// happy path run through the real route with no login, database or model. Each records what it got.
+let session: unknown = { ok: false, status: 401, error: "unauthorized" };
+let picked: string[] = [];
+const turnRequests: Array<Record<string, unknown>> = [];
+const modelMessages: Array<Array<{ role: string; content: string }>> = [];
+stubModule(join(ROOT, "lib/os/runs/session.ts"), { resolveRunSession: async () => session });
+stubModule(join(ROOT, "lib/turso.ts"), {
+  tursoConfigured: () => true,
+  getTursoClient: () => ({ execute: async () => ({ rows: [{ id: "n1" }] }) }),
+});
+stubModule(join(ROOT, "components/os/department/config.ts"), {
+  departmentChannelFor: () => ({ kind: "agent", agentSlug: "sales-agent" }),
+});
+stubModule(join(ROOT, "lib/os/department-agent.ts"), {
+  prepareAgentTurn: async (request: Record<string, unknown>) => {
+    turnRequests.push(request);
+    return { ok: true, turn: { trainingNoteIds: picked, engine: { runsOn: "the workspace AI account" } } };
+  },
+  runAgentTurnToText: async (_turn: unknown, messages: Array<{ role: string; content: string }>) => {
+    modelMessages.push(messages);
+    return { ok: true, text: "Open with the problem, then the proof." };
+  },
+});
+const operatorSession = (over: Record<string, unknown> = {}) => ({
+  ok: true,
+  session: {
+    isOperator: true,
+    viewer: { ok: true, oasis: true, manifest: null },
+    scope: { tenantId: "tenant-1", userId: "user-1" },
+    dept: { key: "sales" },
+    tenantSlug: "oasis",
+    operatorName: "CC",
+    email: "cc@oasis.test",
+    fallback: null,
+    apiEngineChoice: { kind: "api" },
+    apiAccountSnapshot: null,
+    ...over,
+  },
+});
 
 let passed = 0;
 let failed = 0;
@@ -102,6 +147,73 @@ async function main(): Promise<void> {
       const json = (await res.json()) as { message: string };
       assert.match(json.message, /could not be read/);
     }
+  });
+
+  await check("a refused session keeps its own reason; only a missing sign-in is 401", async () => {
+    const cases: Array<[Record<string, unknown>, number, string, RegExp]> = [
+      [{ ok: false, status: 401, error: "unauthorized" }, 401, "unauthorized", /Sign in again/],
+      [{ ok: false, status: 412, error: "agent_not_configured" }, 412, "agent_not_configured", /No AI account is connected/],
+      [{ ok: false, status: 503, error: "config_unavailable" }, 503, "config_unavailable", /could not read this workspace's AI settings/],
+      [{ ok: false, status: 503, error: "profile_unavailable" }, 503, "profile_unavailable", /could not confirm your workspace/],
+      // Every refusal about a paired computer gets the computer guidance: a recall test never runs there.
+      [{ ok: false, status: 409, error: "computer_not_connected" }, 409, "computer_only", /answers on your computer/],
+      [{ ok: false, status: 403, error: "computer_not_yours" }, 409, "computer_only", /answers on your computer/],
+      [{ ok: false, status: 409, error: "subscription_auth_failure" }, 409, "computer_only", /answers on your computer/],
+    ];
+    for (const [refusal, status, error, message] of cases) {
+      session = refusal;
+      const { req, ctx } = post(["recall"], good, same);
+      const res = await route.POST(req, ctx);
+      const json = (await res.json()) as { error: string; message: string; code?: string };
+      assert.equal(res.status, status, `${String(refusal.error)} keeps its status`);
+      assert.equal(json.error, error, `${String(refusal.error)} keeps its reason`);
+      assert.match(json.message, message);
+      assert.doesNotMatch(json.message, /platform operator/, `${String(refusal.error)} is not an operator refusal`);
+      if (error === "computer_only") assert.equal(json.code, refusal.error, "the computer's own reason travels with it");
+    }
+    assert.equal(turnRequests.length, 0, "no refused session reaches the turn");
+  });
+
+  await check("only a non-operator hears \"operator\"; an unconfirmed seat says so", async () => {
+    session = operatorSession({ isOperator: false });
+    let { req, ctx } = post(["recall"], good, same);
+    let res = await route.POST(req, ctx);
+    assert.equal(res.status, 403);
+    assert.match(((await res.json()) as { message: string }).message, /Only a platform operator/);
+    session = operatorSession({ viewer: { ok: false } });
+    ({ req, ctx } = post(["recall"], good, same));
+    res = await route.POST(req, ctx);
+    assert.equal(res.status, 403);
+    assert.match(((await res.json()) as { message: string }).message, /could not confirm your access/);
+    assert.equal(turnRequests.length, 0);
+  });
+
+  await check("the question is scrubbed before the notes are ranked by it or the model sees it", async () => {
+    session = operatorSession();
+    picked = ["n1", "n2"];
+    const question = 'What did you learn from "https://x.test/page?token=abc123secret"?';
+    const { req, ctx } = post(["recall"], { ...good, question }, same);
+    const res = await route.POST(req, ctx);
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    const json = (await res.json()) as { included: boolean; picked: number; answer: string };
+    assert.equal(json.included, true, "n1 is among the notes the turn holds");
+    assert.equal(json.picked, 2);
+    const ranked = String(turnRequests.at(-1)?.trainingQuery);
+    const asked = modelMessages.at(-1)?.[0]?.content ?? "";
+    for (const sent of [ranked, asked]) {
+      assert.ok(!sent.includes("abc123secret"), "a credential in a quoted link never leaves the route");
+      assert.match(sent, /token=\[REDACTED\]/);
+    }
+    assert.equal(turnRequests.at(-1)?.surface, "training.recall");
+  });
+
+  await check("a note the turn does not hold is reported as not picked", async () => {
+    session = operatorSession();
+    picked = ["n2"];
+    const { req, ctx } = post(["recall"], good, same);
+    const res = await route.POST(req, ctx);
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { included: boolean }).included, false);
   });
 
   await check("the gates and the turn, as the source writes them", () => {

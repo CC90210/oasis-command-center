@@ -11,7 +11,10 @@
  * with it. The note is never forced in: a test that always includes the note proves nothing.
  *
  * GATES. A platform operator only (resolveRunSession's isOperator, the same verdict every Admin page
- * reads), same-origin, a JSON body under 4 KB with known keys only. The turn is the department's real
+ * reads), same-origin, a JSON body under 4 KB with known keys only. The question is scrubbed of secrets
+ * before anything reads it: it often quotes a note's title or source link, and a link can carry a
+ * credential (?token=...). A refused session keeps its own reason: no AI account, settings that could
+ * not be read, or a computer that cannot take the turn each say so. The turn is the department's real
  * one (prepareAgentTurn: binding, account, budget, the notes block, the identity lock), filed under its
  * own usage surface, training.recall, so a recall test never counts as, or pages, a chat
  * (lib/health/department-chat-checks.ts NOT_CHAT_SURFACES). It runs on the workspace's AI account; an
@@ -23,8 +26,10 @@
 import { NextResponse } from "next/server";
 import { departmentChannelFor } from "@/components/os/department/config";
 import { sameOrigin } from "@/lib/calendar/http";
+import { failureCopy } from "@/lib/os/channel/outcome";
 import { prepareAgentTurn, runAgentTurnToText } from "@/lib/os/department-agent";
-import { resolveRunSession } from "@/lib/os/runs/session";
+import { resolveRunSession, type SessionRefusal } from "@/lib/os/runs/session";
+import { redactAll } from "@/lib/secret-redaction";
 import { isTrains, TRAINS_ALL } from "@/lib/training/trains";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
@@ -43,6 +48,7 @@ function reply(status: number, body: Record<string, unknown>): NextResponse {
 const MESSAGES: Record<string, string> = {
   unauthorized: "Sign in again, then try once more.",
   forbidden: "Only a platform operator can run a recall test.",
+  viewer_unconfirmed: "We could not confirm your access to this workspace just now. Try again in a moment.",
   bad_request: "That request could not be read. Reload the page and try again.",
   note_not_found: "That note was not found, or it has not finished being read.",
   agent_unbound: "No agent answers for this department in your workspace.",
@@ -54,6 +60,34 @@ const MESSAGES: Record<string, string> = {
 
 function refuse(status: number, error: string, extra: Record<string, unknown> = {}): NextResponse {
   return reply(status, { ok: false, error, message: MESSAGES[error] ?? MESSAGES.turn_failed, ...extra });
+}
+
+/** resolveRunSession's refusals that are about the workspace (its account or its settings), not a computer. */
+const WORKSPACE_REFUSALS: ReadonlySet<string> = new Set([
+  "unknown_department",
+  "profile_unavailable",
+  "no_tenant",
+  "unknown_tenant",
+  "config_unavailable",
+  "engine_snapshot_unavailable",
+  "agent_not_configured",
+]);
+
+/**
+ * A refused session, kept as itself (Codex review, 2026-10-28). A workspace with no AI account (412) or
+ * settings that could not be read (503) keeps its status and the channel's own words for it; every
+ * refusal about a paired computer (offline, not approved, not this person's, no owner set) gets the
+ * computer guidance, because a recall test never runs on a computer. Only a missing sign-in is 401, and
+ * only the operator gate says "operator".
+ */
+function sessionRefusal(refusal: SessionRefusal): NextResponse {
+  if (refusal.status === 401) return refuse(401, "unauthorized");
+  if (!WORKSPACE_REFUSALS.has(refusal.error)) return refuse(409, "computer_only", { code: refusal.error });
+  return reply(refusal.status, {
+    ok: false,
+    error: refusal.error,
+    message: failureCopy(refusal.error, { canManageAi: true }).sentence,
+  });
 }
 
 async function recall(req: Request): Promise<NextResponse> {
@@ -72,16 +106,18 @@ async function recall(req: Request): Promise<NextResponse> {
   for (const key of Object.keys(body)) if (!["note_id", "department", "question"].includes(key)) return refuse(400, "bad_request");
   const noteId = typeof body.note_id === "string" ? body.note_id.trim() : "";
   const department = typeof body.department === "string" ? body.department.trim() : "";
-  const question = typeof body.question === "string" ? body.question.replace(/\s+/g, " ").trim() : "";
-  if (!NOTE_ID_RE.test(noteId) || !isTrains(department) || department === TRAINS_ALL || !question || question.length > MAX_QUESTION_CHARS) {
+  const typed = typeof body.question === "string" ? body.question.replace(/\s+/g, " ").trim() : "";
+  if (!NOTE_ID_RE.test(noteId) || !isTrains(department) || department === TRAINS_ALL || !typed || typed.length > MAX_QUESTION_CHARS) {
     return refuse(400, "bad_request");
   }
+  // Scrubbed before the notes are ranked by it or the model sees it, the way trainingBlock scrubs notes.
+  const question = redactAll(typed);
 
   const resolved = await resolveRunSession({ department });
-  if (!resolved.ok) return refuse(resolved.status === 401 ? 401 : 403, resolved.status === 401 ? "unauthorized" : "forbidden");
+  if (!resolved.ok) return sessionRefusal(resolved);
   const session = resolved.session;
   if (!session.isOperator) return refuse(403, "forbidden");
-  if (!session.viewer.ok) return refuse(403, "forbidden");
+  if (!session.viewer.ok) return refuse(403, "viewer_unconfirmed");
   const tenantId = session.scope.tenantId;
 
   // The note must exist in this workspace and be finished: the recall test is about a learned note.
