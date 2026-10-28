@@ -34,6 +34,7 @@ import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { MEET_PRESENCE_MS } from "@/lib/meet/participants";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
+import { memberStanding } from "@/lib/team";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { closeVerifiedFounderMeeting } from "@/lib/website-sales-founder-meeting";
 import { FOUNDER_MEETING_TIMEZONE, founderMeetingDedupeKey } from "@/lib/website-sales-meeting";
@@ -46,15 +47,19 @@ export const ATTENDANCE_LATE_MINUTES = 30;
 export const NO_SHOW_FOLLOW_UPS_HOURS = [24, 72] as const;
 
 export type Attendance = {
+  /** The lead was in the room at some point in the meeting's window. */
   guestJoined: boolean;
+  /** Someone from OASIS was in the room at some point in the window. */
   hostJoined: boolean;
+  /** The lead and someone from OASIS were in the room AT THE SAME TIME, in the window: the call happened. */
+  met: boolean;
   guestPresentNow: boolean;
   hostPresentNow: boolean;
 };
 
 export type ParticipantRow = {
   role: string;
-  /** Set for a signed-in OASIS teammate (host, opener, second host); null for the lead, who joins from the public link. */
+  /** Set for anyone signed in; null for a visitor on the public link. */
   user_id?: string | null;
   joined_at: string;
   left_at: string | null;
@@ -62,37 +67,58 @@ export type ParticipantRow = {
   last_seen_at: string;
 };
 
-/** Who was in the room for this meeting's slot, and who is in it now. */
+/**
+ * Who was in the room for this meeting, and who is in it now.
+ *
+ * OASIS is a signed-in member of the meeting's own workspace (isTeammate):
+ * the host, an opener, a second host, whatever room role they got. Everyone
+ * else is the lead's side: the public-link visitor, or someone signed in to
+ * another workspace (Codex review of #775). A call was HELD only when the two
+ * sides' time in the room overlapped inside the meeting's window: a host
+ * testing the room at 15:40 and a lead waiting alone at 16:05 never met.
+ */
 export function attendanceFrom(
   rows: ParticipantRow[],
-  input: { startsAt: string; durationMinutes: number; nowMs: number },
+  input: { startsAt: string; durationMinutes: number; nowMs: number; isTeammate?: (userId: string) => boolean },
 ): Attendance {
   const start = Date.parse(input.startsAt);
   const from = start - ATTENDANCE_EARLY_MINUTES * 60_000;
   const until = start + (input.durationMinutes + ATTENDANCE_LATE_MINUTES) * 60_000;
-  const inSlot = (row: ParticipantRow) => {
-    const joined = Date.parse(row.joined_at);
-    return Number.isFinite(joined) && joined >= from && joined <= until;
-  };
   const presentNow = (row: ParticipantRow) =>
     !row.left_at && !row.removed_at && Date.parse(row.last_seen_at) > input.nowMs - MEET_PRESENCE_MS;
-  // The lead joins from the public link, signed out: a participant with no
-  // user_id. Anyone signed in is OASIS (the host, an opener, a second host),
-  // whatever room role they got: a teammate who is not the room's host joins
-  // as "guest" and must never be read as the lead (Codex review).
-  const guests = rows.filter((row) => !row.user_id);
-  const hosts = rows.filter((row) => !!row.user_id);
+  const interval = (row: ParticipantRow): [number, number] | null => {
+    const joined = Date.parse(row.joined_at);
+    if (!Number.isFinite(joined)) return null;
+    const ended = presentNow(row)
+      ? input.nowMs
+      : Date.parse(row.left_at || row.removed_at || row.last_seen_at);
+    return [joined, Number.isFinite(ended) ? Math.max(joined, ended) : joined];
+  };
+  const clip = (span: [number, number] | null): [number, number] | null => {
+    if (!span) return null;
+    const a = Math.max(span[0], from);
+    const b = Math.min(span[1], until);
+    return a <= b ? [a, b] : null;
+  };
+  const isTeammate = input.isTeammate ?? (() => true);
+  const oasis = rows.filter((row) => !!row.user_id && isTeammate(row.user_id));
+  const lead = rows.filter((row) => !row.user_id || !isTeammate(row.user_id));
+  const leadSpans = lead.map((row) => clip(interval(row))).filter((x): x is [number, number] => x !== null);
+  const oasisSpans = oasis.map((row) => clip(interval(row))).filter((x): x is [number, number] => x !== null);
+  const met = leadSpans.some(([a1, b1]) => oasisSpans.some(([a2, b2]) => Math.max(a1, a2) <= Math.min(b1, b2)));
   return {
-    guestJoined: guests.some(inSlot),
-    hostJoined: hosts.some(inSlot),
-    guestPresentNow: guests.some(presentNow),
-    hostPresentNow: hosts.some(presentNow),
+    guestJoined: leadSpans.length > 0,
+    hostJoined: oasisSpans.length > 0,
+    met,
+    guestPresentNow: lead.some(presentNow),
+    hostPresentNow: oasis.some(presentNow),
   };
 }
 
 /** What a meeting that has passed its grace minutes was: held, or missed by whom. */
-export function classifyMeeting(att: Pick<Attendance, "guestJoined" | "hostJoined">): "held" | NoShowWho {
-  if (att.guestJoined && att.hostJoined) return "held";
+export function classifyMeeting(att: Pick<Attendance, "guestJoined" | "hostJoined" | "met">): "held" | NoShowWho {
+  if (att.met) return "held";
+  if (att.guestJoined && att.hostJoined) return "missed_each_other";
   if (att.guestJoined) return "host_absent";
   if (att.hostJoined) return "lead_absent";
   return "both_absent";
@@ -239,6 +265,8 @@ export type WatchDependencies = {
   now: () => number;
   origin: string;
   env?: Readonly<Record<string, string | undefined>>;
+  /** Is this signed-in user a member of the workspace (OASIS's side)? Default: lib/team memberStanding. */
+  isTeammate?: (tenantId: string, userId: string) => Promise<boolean>;
   markNoShow?: typeof markFounderMeetingNoShow;
   alert?: typeof pushWorkspaceAlert;
 };
@@ -253,6 +281,17 @@ async function readParticipants(db: SupabaseClient, tenantId: string, roomId: st
     .eq("room_id", roomId);
   if (result.error) throw new Error(`meet_participants_read_failed:${result.error.message}`);
   return (result.data || []) as ParticipantRow[];
+}
+
+/** The signed-in participants who are members of the workspace. A read that fails throws: this run skips the meeting. */
+async function teammatesAmong(deps: WatchDependencies, tenantId: string, rows: ParticipantRow[]): Promise<Set<string>> {
+  const ids = [...new Set(rows.map((row) => row.user_id).filter((id): id is string => typeof id === "string" && id.length > 0))];
+  const check =
+    deps.isTeammate ??
+    (async (tenant: string, userId: string) => (await memberStanding(tenant, userId)).standing !== "not_member");
+  const out = new Set<string>();
+  for (const id of ids) if (await check(tenantId, id)) out.add(id);
+  return out;
 }
 
 async function insertNotification(db: SupabaseClient, row: Record<string, unknown>): Promise<boolean> {
@@ -316,10 +355,13 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       const startMs = Date.parse(appointment.scheduled_for);
       const duration = Number(appointment.duration_minutes) || 15;
       if (!appointment.meet_room_id) continue; // excluded above; a Google Meet link has no join data
-      const att = attendanceFrom(await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id), {
+      const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id);
+      const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
+      const att = attendanceFrom(participants, {
         startsAt: appointment.scheduled_for,
         durationMinutes: duration,
         nowMs,
+        isTeammate: (userId) => teammates.has(userId),
       });
 
       // 1. The lead is waiting and no host is: tell the founder now, once.
@@ -436,13 +478,75 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
           ? `The lead joined and nobody from OASIS did.${reachable ? " An apology with their rebook link is going out now." : sent}`
           : verdict === "lead_absent"
             ? `You joined and the lead did not.${sent}`
-            : `Nobody joined.${sent}`;
+            : verdict === "missed_each_other"
+              ? `You and the lead were both in the room, at different times, and never met.${sent}`
+              : `Nobody joined.${sent}`;
       await alert(
         appointment.tenant_id,
         [
           `<b>Missed: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
           `Booked for ${escapeTelegramHtml(when(appointment.scheduled_for))}.`,
           who,
+          `<a href="${pipelineLeadUrl(appointment.lead_id)}">Open the lead in Command Center</a>`,
+        ].join("\n"),
+        { desk: "sales" },
+      ).catch(() => undefined);
+    } catch (error) {
+      result.errors.push(`${appointment.id}:${error instanceof Error ? error.message.slice(0, 160) : String(error)}`);
+    }
+  }
+
+  // A meeting closed as a no-show whose lead record never took it (the lead
+  // write failed after the close): the close cannot be repeated, so finish the
+  // lead here and tell the founder, once (Codex review of #775). A lead that
+  // already shows the no-show, moved on, or points elsewhere is left alone.
+  const closedNoShows = await deps.db
+    .from("call_appointments")
+    .select(WATCH_COLUMNS)
+    .eq("tenant_id", AI_AUDIT_TENANT_ID)
+    .eq("meeting_kind", "founder_audit")
+    .eq("status", "no_answer")
+    .eq("workflow_status", "no_show")
+    .not("meet_room_id", "is", null)
+    .lte("scheduled_for", nowIso)
+    .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
+    .order("scheduled_for", { ascending: false })
+    .limit(50);
+  if (closedNoShows.error) {
+    result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error.message}`);
+    return result;
+  }
+  for (const appointment of (closedNoShows.data || []) as WatchedAppointment[]) {
+    try {
+      const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
+      if (
+        !lead ||
+        lead.stage !== REBOOK_LEAD_STAGE ||
+        lead.calendar_appointment_id !== appointment.id ||
+        lead.founder_meeting_status === "no_show"
+      ) continue;
+      const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
+      const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
+      const verdict = classifyMeeting(
+        attendanceFrom(participants, {
+          startsAt: appointment.scheduled_for,
+          durationMinutes: Number(appointment.duration_minutes) || 15,
+          nowMs,
+          isTeammate: (userId) => teammates.has(userId),
+        }),
+      );
+      const who: NoShowWho = verdict === "held" ? "unknown" : verdict;
+      const finished = await markNoShow(
+        { tenantId: appointment.tenant_id, appointmentId: appointment.id, who, actorUserId: "system:meeting-watch" },
+        { db: deps.db, now: deps.now, close: closeVerifiedFounderMeeting, origin: deps.origin, env: deps.env },
+      );
+      if (!finished.leadUpdated) continue;
+      result.noShows += 1;
+      await alert(
+        appointment.tenant_id,
+        [
+          `<b>Missed: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
+          `Booked for ${escapeTelegramHtml(when(appointment.scheduled_for))}. Its lead record is now marked as a no-show.`,
           `<a href="${pipelineLeadUrl(appointment.lead_id)}">Open the lead in Command Center</a>`,
         ].join("\n"),
         { desk: "sales" },

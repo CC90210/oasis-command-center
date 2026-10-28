@@ -429,6 +429,35 @@ async function testNoShowYieldsToARebook() {
   assert.equal(lead.founder_meeting_at, NEW_TIME);
 }
 
+async function testRealCloseKeepsRebookMessages() {
+  // The watcher queues a missed meeting's rebook messages BEFORE it closes the
+  // meeting; the real close (closeVerifiedFounderMeeting) must keep them, while
+  // still cancelling ordinary reminders (Codex review of #775).
+  const { raw, db, meetingDeps } = await fixture();
+  const queue = (id: string, kind: string, channel: string) =>
+    raw.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before,
+              channel, due_at, recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 'gideon@example.com', ?, 's', 'b', 'pending', 0, 1, ?)`,
+      args: [id, TENANT, APPT, LEAD, kind, channel, new Date(NOW).toISOString(), HOST, `k-${id}`],
+    });
+  await queue("rebook-email", "no_show_rebook", "email");
+  await queue("rebook-sms", "no_show_rebook", "sms");
+  await queue("follow-24", "no_show_followup", "email");
+  await queue("stale-reminder", "reminder_5", "sms");
+  const close = (input: Parameters<typeof closeVerifiedFounderMeeting>[0]) => closeVerifiedFounderMeeting(input, meetingDeps);
+  await markFounderMeetingNoShow(
+    { tenantId: TENANT, appointmentId: APPT, who: "both_absent", actorUserId: "system:test" },
+    { db: db as never, now: () => NOW, close, origin: "https://oasisai.work", env: ENV },
+  );
+  const states = await raw.execute({ sql: "SELECT id, status FROM website_sales_meeting_notifications WHERE appointment_id = ? ORDER BY id", args: [APPT] });
+  assert.deepEqual(
+    states.rows.map((r) => `${r.id}:${r.status}`),
+    ["follow-24:pending", "rebook-email:pending", "rebook-sms:pending", "stale-reminder:cancelled"],
+    "the no-show close keeps its own rebook messages and still cancels a reminder",
+  );
+}
+
 async function main() {
   testToken();
   testPureHelpers();
@@ -436,6 +465,7 @@ async function main() {
   await testNoShowThenRebook();
   await testClosedLinks();
   await testOpener();
+  await testRealCloseKeepsRebookMessages();
   await testNoShowYieldsToARebook();
   console.log("meeting-rebook: OK");
 }

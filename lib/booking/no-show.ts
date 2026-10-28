@@ -26,9 +26,9 @@ import { rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
 import { loadRebookAppointment, loadRebookLead, REBOOK_LEAD_STAGE, type RebookAppointment } from "@/lib/booking/rebook";
 import { closeVerifiedFounderMeeting } from "@/lib/website-sales-founder-meeting";
 
-export type NoShowWho = "lead_absent" | "host_absent" | "both_absent" | "unknown";
+export type NoShowWho = "lead_absent" | "host_absent" | "both_absent" | "missed_each_other" | "unknown";
 
-export const NO_SHOW_WHO: readonly NoShowWho[] = ["lead_absent", "host_absent", "both_absent", "unknown"];
+export const NO_SHOW_WHO: readonly NoShowWho[] = ["lead_absent", "host_absent", "both_absent", "missed_each_other", "unknown"];
 
 const NEXT_ACTION_MS = 24 * 60 * 60 * 1000;
 
@@ -67,6 +67,8 @@ function whoSentence(who: NoShowWho): string {
       return "The lead joined the video call and nobody from OASIS did.";
     case "both_absent":
       return "Nobody joined the video call.";
+    case "missed_each_other":
+      return "The lead and OASIS were both in the video call room, at different times, and never met.";
     default:
       return "Marked as missed.";
   }

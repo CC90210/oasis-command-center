@@ -604,13 +604,17 @@ async function loadById(
   return result.data as AppointmentRow;
 }
 
+/** A missed meeting's own messages (lib/booking/meeting-watch.ts): its rebook link and follow-ups. */
+const NO_SHOW_NOTIFICATION_KINDS = ["no_show_rebook", "no_show_followup"] as const;
+
 async function cancelOutstandingNotifications(
   db: Db,
   appointment: AppointmentRow,
   reason: string,
   nowIso: string,
+  options: { keepNoShowMessages?: boolean } = {},
 ): Promise<void> {
-  const result = await db
+  let query = db
     .from("website_sales_meeting_notifications")
     .update({
       status: "cancelled",
@@ -622,6 +626,11 @@ async function cancelOutstandingNotifications(
     .eq("appointment_id", appointment.id)
     .lte("appointment_revision", Number(appointment.revision))
     .in("status", ["pending", "sending"]);
+  // Closing a meeting AS a no-show keeps the messages queued for exactly that:
+  // the watcher queues them before it closes (Codex review of #775). Every
+  // other change (a reschedule, a cancel, a held call) still cancels them.
+  if (options.keepNoShowMessages) query = query.not("kind", "in", `(${NO_SHOW_NOTIFICATION_KINDS.join(",")})`);
+  const result = await query;
   if (result.error) throw new Error(`meeting_notification_cancel_failed:${result.error.message}`);
 }
 
@@ -2453,6 +2462,7 @@ export async function closeVerifiedFounderMeeting(input: {
       appointment,
       `meeting_${input.outcome}`,
       new Date(deps.now()).toISOString(),
+      { keepNoShowMessages: input.outcome === "no_show" },
     );
     return;
   }
@@ -2492,7 +2502,9 @@ export async function closeVerifiedFounderMeeting(input: {
     throw new Error(`meeting_close_failed:${closed.error?.message || "row_changed"}`);
   }
   appointment = closed.data as AppointmentRow;
-  await cancelOutstandingNotifications(db, appointment, `meeting_${input.outcome}`, nowIso);
+  await cancelOutstandingNotifications(db, appointment, `meeting_${input.outcome}`, nowIso, {
+    keepNoShowMessages: input.outcome === "no_show",
+  });
 }
 
 function emptyReconciliation(): FounderMeetingReconciliationResult {

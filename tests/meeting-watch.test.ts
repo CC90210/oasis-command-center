@@ -33,7 +33,8 @@ function participant(role: string, joinedAt: string, opts: Partial<ParticipantRo
     role,
     user_id: role === "host" ? HOST : null,
     joined_at: joinedAt,
-    left_at: opts.left_at ?? "2026-10-28T16:10:00.000Z",
+    // Two minutes in the room unless the case says otherwise (Vivian's real test visit lasted 18 s).
+    left_at: opts.left_at === undefined ? new Date(Date.parse(joinedAt) + 120_000).toISOString() : opts.left_at,
     removed_at: null,
     last_seen_at: opts.last_seen_at ?? joinedAt,
     ...opts,
@@ -64,10 +65,33 @@ function testAttendance() {
   assert.equal(opener.guestJoined, false, "a signed-in opener is not the lead");
   assert.equal(opener.hostJoined, true, "a signed-in opener is OASIS in the room");
 
-  assert.equal(classifyMeeting({ guestJoined: true, hostJoined: true }), "held");
-  assert.equal(classifyMeeting({ guestJoined: true, hostJoined: false }), "host_absent");
-  assert.equal(classifyMeeting({ guestJoined: false, hostJoined: true }), "lead_absent");
-  assert.equal(classifyMeeting({ guestJoined: false, hostJoined: false }), "both_absent");
+  // Held means the two sides were in the room AT THE SAME TIME (Codex review of #775).
+  const together = attendanceFrom(
+    [participant("guest", "2026-10-28T16:00:30.000Z"), participant("host", "2026-10-28T16:02:00.000Z")],
+    slot,
+  );
+  assert.equal(together.met, true);
+  const apart = attendanceFrom(
+    [
+      participant("host", "2026-10-28T15:40:00.000Z", { left_at: "2026-10-28T15:42:00.000Z" }),
+      participant("guest", "2026-10-28T16:00:00.000Z", { left_at: "2026-10-28T16:10:00.000Z" }),
+    ],
+    slot,
+  );
+  assert.deepEqual([apart.guestJoined, apart.hostJoined, apart.met], [true, true, false], "a host testing the room at 15:40 never met a lead waiting at 16:00");
+  assert.equal(classifyMeeting(apart), "missed_each_other");
+  // Someone signed in to ANOTHER workspace is the lead's side, not OASIS.
+  const outsider = attendanceFrom(
+    [participant("guest", "2026-10-28T16:00:00.000Z", { user_id: "client-of-another-workspace" })],
+    { ...slot, isTeammate: (id) => id === HOST },
+  );
+  assert.deepEqual([outsider.guestJoined, outsider.hostJoined], [true, false]);
+
+  assert.equal(classifyMeeting({ guestJoined: true, hostJoined: true, met: true }), "held");
+  assert.equal(classifyMeeting({ guestJoined: true, hostJoined: true, met: false }), "missed_each_other");
+  assert.equal(classifyMeeting({ guestJoined: true, hostJoined: false, met: false }), "host_absent");
+  assert.equal(classifyMeeting({ guestJoined: false, hostJoined: true, met: false }), "lead_absent");
+  assert.equal(classifyMeeting({ guestJoined: false, hostJoined: false, met: false }), "both_absent");
 }
 
 function testMessages() {
@@ -139,7 +163,9 @@ async function testWatch() {
   const joinRoom = (room: string, role: string, at: string, opts: { left?: string | null; seen?: string; userId?: string | null } = {}) =>
     raw.execute({
       sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      args: [TENANT, room, role, opts.userId === undefined ? (role === "host" ? HOST : null) : opts.userId, at, opts.seen ?? at, opts.left === undefined ? at : opts.left],
+      // Ten minutes in the room unless the case says otherwise.
+      args: [TENANT, room, role, opts.userId === undefined ? (role === "host" ? HOST : null) : opts.userId, at, opts.seen ?? at,
+        opts.left === undefined ? new Date(Date.parse(at) + 600_000).toISOString() : opts.left],
     });
   const marked: Array<{ appointmentId: string; who: string }> = [];
   const alerts: string[] = [];
@@ -149,11 +175,17 @@ async function testWatch() {
     now: () => NOW,
     origin: "https://oasisai.work",
     env: { FORM_LINK_HMAC_KEY: KEY },
+    isTeammate: async (_tenant: string, userId: string) => userId === HOST || userId === "opener-1",
     markNoShow: (async (input: { appointmentId: string; who: string }) => {
       if (failCloseOnce.delete(input.appointmentId)) throw new Error("meeting_close_failed:row_changed");
       marked.push({ appointmentId: input.appointmentId, who: input.who });
+      const before = (await raw.execute({ sql: "SELECT status FROM call_appointments WHERE id = ?", args: [input.appointmentId] })).rows[0];
       await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id=?", args: [input.appointmentId] });
-      return { alreadyClosed: false, leadStage: "founder_meeting_booked" };
+      await raw.execute({
+        sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = ?",
+        args: [`lead-${input.appointmentId}`],
+      });
+      return { alreadyClosed: before?.status === "no_answer", leadUpdated: true, leadStage: "founder_meeting_booked" };
     }) as never,
     alert: (async (_tenant: string, text: string) => {
       alerts.push(text);
@@ -178,17 +210,25 @@ async function testWatch() {
   await appointment("flaky", START); // its close fails once: the next run finishes it
   await appointment("elsewhere", START, { tenant: OTHER_TENANT }); // another workspace: never touched
   for (let i = 0; i < 30; i++) await appointment(`gmeet-${i}`, "2026-10-28T08:00:00.000Z", { room: null }); // no join data
+  // Closed as a no-show earlier, but its lead write failed: the watcher finishes the lead.
+  await appointment("half-done", "2026-10-28T14:00:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='half-done'", args: [] });
+  // Closed and recorded by the operator's route: left alone.
+  await appointment("operator-closed", "2026-10-28T14:30:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='operator-closed'", args: [] });
+  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-operator-closed'", args: [] });
 
   const first = await watchFounderMeetings(deps);
   assert.equal(first.errors.length, 1, "the failed close is reported");
   assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
     marked.map((m) => `${m.appointmentId}:${m.who}`).sort(),
-    ["lead-only:host_absent", "nobody:both_absent", "opener-only:lead_absent"],
-    "only the missed meetings past their grace minutes are closed, each with what the room saw",
+    ["half-done:both_absent", "lead-only:host_absent", "nobody:both_absent", "opener-only:lead_absent"],
+    "the missed meetings past their grace minutes are closed with what the room saw, and the half-done one is finished",
   );
+  assert.ok(!marked.some((m) => m.appointmentId === "operator-closed"), "a no-show the operator already recorded is left alone");
   assert.equal(first.held, 1);
-  assert.equal(first.noShows, 3);
+  assert.equal(first.noShows, 4);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
   const flakyQueued = await rows("flaky");
   assert.equal(flakyQueued.filter((r) => r.kind === "no_show_rebook").length, 1, "the rebook email is queued before the close is tried");
@@ -207,7 +247,7 @@ async function testWatch() {
   assert.equal((await rows("held")).length, 0);
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 3, "the founder hears about each missed meeting that closed");
+  assert.equal(alerts.length, 4, "the founder hears about each missed meeting that closed, and the finished one");
 
   // The next minute: the failed close finishes, nothing else happens twice.
   const second = await watchFounderMeetings(deps);
@@ -215,7 +255,7 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 4, "and the founder hears about it once");
+  assert.equal(alerts.length, 5, "and the founder hears about it once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
 }
 
