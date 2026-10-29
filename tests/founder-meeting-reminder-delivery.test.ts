@@ -623,6 +623,28 @@ async function main() {
     assert.ok(!sharedSends.some((s) => s.subject === "Someone else is waiting in the call room now"));
   });
 
+  // Pass 6a (Codex review r12): a waiting note skipped because the lead stepped
+  // out for a moment goes back in the queue when they are waiting again, and
+  // reaches the founder in that same run.
+  await appointment("appt-blip", -3);
+  await seed.execute({ sql: "UPDATE call_appointments SET meet_room_id = 'room-blip' WHERE id = 'appt-blip'", args: [] });
+  await seed.execute({ sql: "INSERT INTO meet_rooms (id, tenant_id) VALUES ('room-blip', ?)", args: [OASIS] });
+  await inRoom("room-blip", "guest", null);
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key, last_error
+    ) VALUES ('blip-waiting', ?, 'appt-blip', 'lead-appt-blip', 'host_guest_waiting', NULL, 'email', ?, ?, ?,
+      'Blip is waiting in the call room now', 'Join now: https://meet.google.com/abc-defg-hij', 'skipped', 0, 1,
+      'appt-blip:1:host_guest_waiting:email', 'lead_no_longer_waiting')`,
+    args: [OASIS, new Date(Date.now() - 120_000).toISOString(), HOST_EMAIL, HOST],
+  });
+  await dispatch();
+  await check("a waiting note skipped while the lead stepped out goes again once they are back, the same run", async () => {
+    const row = await rowOf("blip-waiting");
+    assert.equal(row.status, "sent");
+  });
+
   // Pass 6b (Codex review r11): the call happened after all, and the watcher
   // could not store the founder's card this run. The rebook follow-up is held,
   // never sent; once the card is stored, the watcher stops it.

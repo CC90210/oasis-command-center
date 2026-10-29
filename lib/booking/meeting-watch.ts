@@ -602,7 +602,23 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
           dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "host_guest_waiting", "email"),
           updated_at: nowIso,
         });
-        if (queued) result.guestWaiting += 1;
+        if (queued) {
+          result.guestWaiting += 1;
+        } else {
+          // Skipped earlier because the lead stepped out for a moment, so never
+          // delivered: back in the queue now that they are waiting again. A
+          // delivered note stays once per meeting (Codex review r12).
+          const requeued = await deps.db
+            .from("website_sales_meeting_notifications")
+            .update({ status: "pending", due_at: nowIso, claimed_at: null, last_error: null, updated_at: nowIso })
+            .eq("tenant_id", appointment.tenant_id)
+            .eq("dedupe_key", founderMeetingDedupeKey(appointment.id, appointment.revision, "host_guest_waiting", "email"))
+            .eq("status", "skipped")
+            .eq("last_error", "lead_no_longer_waiting")
+            .select("id");
+          if (requeued.error) throw new Error(`guest_waiting_requeue_failed:${requeued.error.message}`);
+          if ((requeued.data || []).length > 0) result.guestWaiting += 1;
+        }
       }
 
       // 2. Past its grace minutes: held, or missed by whom.
