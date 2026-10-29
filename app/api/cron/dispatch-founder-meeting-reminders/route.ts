@@ -852,48 +852,75 @@ async function processRow(
   }
 }
 
+/** Failed reminders this recent are (re)alerted: a run that died before alerting, or a card that failed to write, is caught by the next run. */
+const FAILURE_ALERT_WINDOW_MS = 15 * 60_000;
+const FAILURE_ALERT_PAGE = 100;
+
 /**
- * Every reminder that ended "failed" in this run, told to the founder at once
- * (CC, 2026-10-28: two months of reminders failed and nobody heard). One card
- * per meeting in the Command Center (Today, Needs you): it stays open whatever
- * happens to its push, so when Telegram and the email fallback are both down
- * or capped, the failure is still there to see (Codex review r5). A meeting's
- * first failure pages; later ones refresh its card.
+ * Every reminder that ended "failed", told to the founder (CC, 2026-10-28: two
+ * months of reminders failed and nobody heard). One urgent card per meeting in
+ * the Command Center (Today, Needs you): it stays open whatever happens to its
+ * push, so when Telegram and the email fallback are both down or capped, the
+ * failure is still there (Codex review r5). A meeting's first failure pages;
+ * later ones refresh its card.
+ *
+ * Every failure of the last 15 minutes is read, page by page, so none is cut
+ * off and a run that died before this point is caught by the next one (Codex
+ * review r6). A host's withheld reminders already have their own card
+ * (alertWithheldReminders) and are left to it. Returns the failures of this
+ * step itself, which count against the run.
  */
-async function alertFailedReminders(db: Db, runStartedAt: string): Promise<void> {
-  const failed = await db.from("website_sales_meeting_notifications")
-    .select("id,tenant_id,appointment_id,lead_id,kind,channel,last_error")
-    .eq("status", "failed")
-    .gte("updated_at", runStartedAt)
-    .order("updated_at", { ascending: true })
-    .limit(20);
-  if (failed.error) {
-    console.error("[founder-meeting-reminders] failed-reminder lookup failed", failed.error.message);
-    return;
-  }
+async function alertFailedReminders(db: Db, now: string): Promise<number> {
   type FailedRow = { id: string; tenant_id: string; appointment_id: string; lead_id: string; kind: string; channel: string; last_error: string | null };
+  const since = new Date(Date.parse(now) - FAILURE_ALERT_WINDOW_MS).toISOString();
+  const failed: FailedRow[] = [];
+  for (let from = 0; ; from += FAILURE_ALERT_PAGE) {
+    const page = await db.from("website_sales_meeting_notifications")
+      .select("id,tenant_id,appointment_id,lead_id,kind,channel,last_error")
+      .eq("status", "failed")
+      .gte("updated_at", since)
+      .order("updated_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, from + FAILURE_ALERT_PAGE - 1);
+    if (page.error) {
+      console.error("[founder-meeting-reminders] failed-reminder lookup failed", page.error.message);
+      return 1;
+    }
+    const rows = (page.data || []) as FailedRow[];
+    failed.push(...rows);
+    if (rows.length < FAILURE_ALERT_PAGE) break;
+  }
   const byMeeting = new Map<string, FailedRow[]>();
-  for (const row of (failed.data || []) as FailedRow[]) {
+  for (const row of failed) {
+    if (row.last_error === "sender_deactivated") continue;
     const key = `${row.tenant_id}:${row.appointment_id}`;
     byMeeting.set(key, [...(byMeeting.get(key) || []), row]);
   }
+  let failures = 0;
   for (const rows of byMeeting.values()) {
     const first = rows[0];
     const lines = rows.slice(0, 5).map((row) =>
       `${row.kind} ${row.channel === "sms" ? "text" : "email"}: ${clipText(row.last_error || "unknown", 140, "...")}`,
     );
-    await writeAgentAlert({
-      tenantId: first.tenant_id,
-      alertType: "founder_meeting_reminder_failed",
-      severity: "urgent",
-      title: "Meeting reminder failed",
-      body: [`${rows.length} reminder(s) for this meeting could not be sent.`, ...lines, `Lead: ${pipelineLeadUrl(first.lead_id)}`].join("\n"),
-      subjectType: "call_appointment",
-      subjectId: first.appointment_id,
-      payload: { notification_ids: rows.map((row) => row.id), appointment_id: first.appointment_id, lead_id: first.lead_id },
-      telegramOncePerOpen: true,
-    }).catch((error) => console.error("[founder-meeting-reminders] failure alert threw", error));
+    try {
+      const card = await writeAgentAlert({
+        tenantId: first.tenant_id,
+        alertType: "founder_meeting_reminder_failed",
+        severity: "urgent",
+        title: "Meeting reminder failed",
+        body: [`${rows.length} reminder(s) for this meeting could not be sent.`, ...lines, `Lead: ${pipelineLeadUrl(first.lead_id)}`].join("\n"),
+        subjectType: "call_appointment",
+        subjectId: first.appointment_id,
+        payload: { notification_ids: rows.map((row) => row.id), appointment_id: first.appointment_id, lead_id: first.lead_id },
+        telegramOncePerOpen: true,
+      });
+      if (card?.stored === false) failures += 1;
+    } catch (error) {
+      failures += 1;
+      console.error("[founder-meeting-reminders] failure alert threw", error);
+    }
   }
+  return failures;
 }
 
 async function handle(req: NextRequest) {
@@ -1056,7 +1083,7 @@ async function handle(req: NextRequest) {
     }
   }
   if (senderPass.withheld.length) await alertWithheldReminders(senderPass.withheld);
-  await alertFailedReminders(db, now);
+  failures += await alertFailedReminders(db, now);
 
   await setHealth({
     status: failures ? "degraded" : "healthy",
