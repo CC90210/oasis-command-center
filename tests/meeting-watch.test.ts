@@ -299,6 +299,17 @@ async function testWatch() {
   await queuedNoShow({ id: "ro-email", appointment: "rb-old", message: "no_show_rebook", due: "2026-10-26T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "sent", sentAt: "2026-10-26T14:35:03.000Z" });
   await queuedNoShow({ id: "ro-24", appointment: "rb-old", message: "no_show_followup_24h", due: "2026-10-27T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "skipped", lastError: "lead_moved_on" });
   await queuedNoShow({ id: "ro-72", appointment: "rb-old", message: "no_show_followup_72h", due: "2026-10-29T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "cancelled" });
+  // 55 newer rolled-back no-shows already put right: the older ones behind them are still reached (Codex review r7).
+  for (let i = 0; i < 55; i++) {
+    await rolledBack(`rb-filler-${i}`, new Date(Date.parse("2026-10-28T08:00:00.000Z") + i * 60_000).toISOString(), 2);
+  }
+  // Closed as a no-show 20 hours ago, its lead write lost, behind all of those.
+  await appointment("half-done-old", "2026-10-27T20:00:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='half-done-old'", args: [] });
+  // A call that happened: the host left at the end, the lead's tab is still open. Not a lead waiting (Codex review r7).
+  await appointment("done-call", START);
+  await joinRoom("room-done-call", "host", "2026-10-28T16:00:00.000Z", { left: "2026-10-28T16:15:00.000Z", seen: "2026-10-28T16:15:00.000Z" });
+  await joinRoom("room-done-call", "guest", "2026-10-28T16:00:30.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
   // Closed and recorded by the operator's route: left alone.
   await appointment("operator-closed", "2026-10-28T14:30:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='operator-closed'", args: [] });
@@ -309,7 +320,7 @@ async function testWatch() {
   assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
     marked.map((m) => `${m.appointmentId}:${m.who}`).sort(),
-    ["half-done:both_absent", "lead-only:host_absent", "lobby-missed:host_absent", "nobody:both_absent", "opener-only:both_absent"],
+    ["half-done-old:both_absent", "half-done:both_absent", "lead-only:host_absent", "lobby-missed:host_absent", "nobody:both_absent", "opener-only:both_absent"],
     "the missed meetings past their grace minutes are closed with what the room saw, and the half-done one is finished",
   );
   assert.ok(!marked.some((m) => m.appointmentId === "operator-closed"), "a no-show the operator already recorded is left alone");
@@ -349,8 +360,9 @@ async function testWatch() {
     ["no_show_followup_72h:email@2026-10-29T14:35:00.000Z"],
     "a meeting missed 50 hours ago still gets its cancelled follow-up back, and one skipped for its own reason stays skipped",
   );
-  assert.equal(first.held, 1);
-  assert.equal(first.noShows, 5);
+  assert.equal(first.held, 2, "the call both joined, and the one that ended with the lead's tab open");
+  assert.deepEqual(await rows("done-call"), [], "a lead left in the room after the call is not 'waiting'");
+  assert.equal(first.noShows, 6);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
   const flakyQueued = await rows("flaky");
   assert.equal(flakyQueued.filter((r) => r.kind === "no_show_rebook").length, 1, "the rebook email is queued before the close is tried");
@@ -376,7 +388,7 @@ async function testWatch() {
   );
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 5, "the founder hears about each missed meeting that closed, and the finished one");
+  assert.equal(alerts.length, 6, "the founder hears about each missed meeting that closed, and the finished ones");
 
   // The next minute: the failed close finishes, nothing else happens twice.
   const second = await watchFounderMeetings(deps);
@@ -384,7 +396,7 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 6, "and the founder hears about it once");
+  assert.equal(alerts.length, 7, "and the founder hears about it once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
   assert.equal(Number(restoredAgain.rows[0].n), 2, "restored once, not again");

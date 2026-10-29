@@ -416,6 +416,28 @@ function firstNameOf(name: string | null): string {
   return (name || "").trim().split(/\s+/)[0]?.slice(0, 60) || "";
 }
 
+const RECOVERY_SCAN_PAGE = 50;
+const RECOVERY_SCAN_MAX = 1000;
+
+/**
+ * Every meeting a recovery scan matches, page by page. Meetings already put
+ * right keep matching, so reading only the newest page would leave an older one
+ * still waiting behind them for good (Codex review r7).
+ */
+async function pageThrough(
+  fetchPage: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+): Promise<{ rows: WatchedAppointment[]; error: string | null }> {
+  const rows: WatchedAppointment[] = [];
+  for (let from = 0; from < RECOVERY_SCAN_MAX; from += RECOVERY_SCAN_PAGE) {
+    const page = await fetchPage(from, from + RECOVERY_SCAN_PAGE - 1);
+    if (page.error) return { rows, error: page.error.message };
+    const data = (Array.isArray(page.data) ? page.data : []) as WatchedAppointment[];
+    rows.push(...data);
+    if (data.length < RECOVERY_SCAN_PAGE) break;
+  }
+  return { rows, error: null };
+}
+
 /**
  * Run both watches once. Never throws: each meeting's failure is collected
  * (and reported by the caller) so one bad row cannot stop the rest.
@@ -463,9 +485,11 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         isTeammate: (userId) => teammates.has(userId),
       });
 
-      // 1. The lead is waiting and no host is: tell the founder now, once.
+      // 1. The lead is waiting and no host is: tell the founder now, once. Not
+      // after a call that happened: a lead whose tab stays open when the host
+      // leaves is not waiting (Codex review r7).
       const inSlot = nowMs >= startMs - 2 * 60_000 && nowMs <= startMs + (duration + 10) * 60_000;
-      if (inSlot && att.guestPresentNow && !att.hostPresentNow && appointment.organizer_email_snapshot && appointment.google_meet_link) {
+      if (inSlot && att.guestPresentNow && !att.hostPresentNow && !att.met && appointment.organizer_email_snapshot && appointment.google_meet_link) {
         const note = buildGuestWaitingAlert({
           name: appointment.client_name_snapshot,
           company: appointment.company_snapshot,
@@ -605,23 +629,26 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   // write failed after the close): the close cannot be repeated, so finish the
   // lead here and tell the founder, once (Codex review of #775). A lead that
   // already shows the no-show, moved on, or points elsewhere is left alone.
-  const closedNoShows = await deps.db
-    .from("call_appointments")
-    .select(WATCH_COLUMNS)
-    .eq("tenant_id", AI_AUDIT_TENANT_ID)
-    .eq("meeting_kind", "founder_audit")
-    .eq("status", "no_answer")
-    .eq("workflow_status", "no_show")
-    .not("meet_room_id", "is", null)
-    .lte("scheduled_for", nowIso)
-    .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
-    .order("scheduled_for", { ascending: false })
-    .limit(50);
+  const closedNoShows = await pageThrough((from, to) =>
+    deps.db
+      .from("call_appointments")
+      .select(WATCH_COLUMNS)
+      .eq("tenant_id", AI_AUDIT_TENANT_ID)
+      .eq("meeting_kind", "founder_audit")
+      .eq("status", "no_answer")
+      .eq("workflow_status", "no_show")
+      .not("meet_room_id", "is", null)
+      .lte("scheduled_for", nowIso)
+      .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
+      .order("scheduled_for", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
   if (closedNoShows.error) {
-    result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error.message}`);
+    result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error}`);
     return result;
   }
-  for (const appointment of (closedNoShows.data || []) as WatchedAppointment[]) {
+  for (const appointment of closedNoShows.rows) {
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
@@ -663,23 +690,26 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   // put back the ones that never went out. Looked for as long as the lead's
   // link could be used, not just 48 hours: a rebook tried on day three can
   // roll back too (Codex review r4).
-  const rolledBack = await deps.db
-    .from("call_appointments")
-    .select(WATCH_COLUMNS)
-    .eq("tenant_id", AI_AUDIT_TENANT_ID)
-    .eq("meeting_kind", "founder_audit")
-    .eq("status", "no_answer")
-    .eq("workflow_status", "no_show")
-    .not("last_compensated_request_id", "is", null)
-    .lte("scheduled_for", nowIso)
-    .gte("scheduled_for", new Date(nowMs - NO_SHOW_RESTORE_LOOKBACK_MS).toISOString())
-    .order("scheduled_for", { ascending: false })
-    .limit(50);
+  const rolledBack = await pageThrough((from, to) =>
+    deps.db
+      .from("call_appointments")
+      .select(WATCH_COLUMNS)
+      .eq("tenant_id", AI_AUDIT_TENANT_ID)
+      .eq("meeting_kind", "founder_audit")
+      .eq("status", "no_answer")
+      .eq("workflow_status", "no_show")
+      .not("last_compensated_request_id", "is", null)
+      .lte("scheduled_for", nowIso)
+      .gte("scheduled_for", new Date(nowMs - NO_SHOW_RESTORE_LOOKBACK_MS).toISOString())
+      .order("scheduled_for", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
   if (rolledBack.error) {
-    result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error.message}`);
+    result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error}`);
     return result;
   }
-  for (const appointment of (rolledBack.data || []) as WatchedAppointment[]) {
+  for (const appointment of rolledBack.rows) {
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
