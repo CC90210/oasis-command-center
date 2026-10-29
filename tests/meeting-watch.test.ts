@@ -16,6 +16,7 @@ import {
   buildGuestWaitingAlert,
   buildNoShowMessages,
   classifyMeeting,
+  noShowDedupeKey,
   watchFounderMeetings,
   type ParticipantRow,
 } from "../lib/booking/meeting-watch";
@@ -225,18 +226,59 @@ async function testWatch() {
   // Closed as a no-show earlier, but its lead write failed: the watcher finishes the lead.
   await appointment("half-done", "2026-10-28T14:00:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='half-done'", args: [] });
-  // A rebook that failed and was rolled back: the no-show again at revision 2, its rebook messages cancelled.
-  await appointment("rolled-back", "2026-10-28T13:00:00.000Z");
-  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show', revision=2 WHERE id='rolled-back'", args: [] });
-  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-rolled-back'", args: [] });
-  for (const [id, kind, due] of [["rb-email", "no_show_rebook", "2026-10-28T13:15:00.000Z"], ["rb-24", "no_show_followup", "2026-10-29T13:15:00.000Z"]] as const) {
+  // Rebooks that failed and were rolled back: each meeting is the no-show again at a higher revision.
+  const rolledBack = async (id: string, start: string, revision: number) => {
+    await appointment(id, start);
     await raw.execute({
-      sql: `INSERT INTO website_sales_meeting_notifications (id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel,
-              due_at, recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key, last_error)
-            VALUES (?, ?, 'rolled-back', 'lead-rolled-back', ?, NULL, 'email', ?, 'rb@example.com', ?, 's', 'link', 'cancelled', 0, 1, ?, 'booking_compensated')`,
-      args: [id, TENANT, kind, due, HOST, `rolled-back:1:${kind}:email`],
+      sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show', revision=?, last_compensated_request_id='req-failed' WHERE id=?",
+      args: [revision, id],
     });
+    await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = ?", args: [`lead-${id}`] });
+  };
+  const queuedNoShow = (row: {
+    id: string; appointment: string; message: string; channel?: "email" | "sms"; due: string; revision: number;
+    missedAt: string; status: string; sentAt?: string; lastError?: string;
+  }) =>
+    raw.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel,
+              due_at, recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key, last_error, sent_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 's', 'link', ?, 0, ?, ?, ?, ?)`,
+      args: [row.id, TENANT, row.appointment, `lead-${row.appointment}`,
+        row.message.startsWith("no_show_followup") ? "no_show_followup" : "no_show_rebook", row.channel ?? "email", row.due,
+        row.channel === "sms" ? "+14165550101" : "rb@example.com", HOST, row.status, row.revision,
+        noShowDedupeKey(row.appointment, row.revision, row.message, row.channel ?? "email", row.missedAt),
+        row.lastError ?? (row.status === "cancelled" ? "reschedule_compensated" : null), row.sentAt ?? null],
+    });
+  // Rolled back once: both messages were cancelled with the move.
+  await rolledBack("rolled-back", "2026-10-28T13:00:00.000Z", 2);
+  await queuedNoShow({ id: "rb-email", appointment: "rolled-back", message: "no_show_rebook", due: "2026-10-28T13:15:00.000Z", revision: 1, missedAt: "2026-10-28T13:00:00.000Z", status: "cancelled" });
+  await queuedNoShow({ id: "rb-24", appointment: "rolled-back", message: "no_show_followup_24h", due: "2026-10-29T13:15:00.000Z", revision: 1, missedAt: "2026-10-28T13:00:00.000Z", status: "cancelled" });
+  // A restore cut short: its first copy landed, the next write failed (Codex review r4). The dispatcher saw the move first for one.
+  await rolledBack("rb-partial", "2026-10-28T12:00:00.000Z", 2);
+  for (const [id, message, status, lastError] of [
+    ["rp-email", "no_show_rebook", "cancelled", undefined],
+    ["rp-24", "no_show_followup_24h", "cancelled", undefined],
+    ["rp-72", "no_show_followup_72h", "skipped", "meeting_moved"],
+  ] as const) {
+    await queuedNoShow({ id, appointment: "rb-partial", message, due: "2026-10-29T12:15:00.000Z", revision: 1, missedAt: "2026-10-28T12:00:00.000Z", status, lastError });
   }
+  await queuedNoShow({ id: "rp-email-2", appointment: "rb-partial", message: "no_show_rebook", due: "2026-10-28T16:00:00.000Z", revision: 2, missedAt: "2026-10-28T12:00:00.000Z", status: "pending" });
+  // Rolled back twice: the restored rebook email went out at revision 2, then the second rollback cancelled the 72 h follow-up.
+  await rolledBack("rb-twice", "2026-10-28T11:00:00.000Z", 3);
+  await queuedNoShow({ id: "rt-email-1", appointment: "rb-twice", message: "no_show_rebook", due: "2026-10-28T11:15:00.000Z", revision: 1, missedAt: "2026-10-28T11:00:00.000Z", status: "cancelled" });
+  await queuedNoShow({ id: "rt-72-1", appointment: "rb-twice", message: "no_show_followup_72h", due: "2026-10-31T11:15:00.000Z", revision: 1, missedAt: "2026-10-28T11:00:00.000Z", status: "cancelled" });
+  await queuedNoShow({ id: "rt-email-2", appointment: "rb-twice", message: "no_show_rebook", due: "2026-10-28T11:30:00.000Z", revision: 2, missedAt: "2026-10-28T11:00:00.000Z", status: "sent", sentAt: "2026-10-28T11:30:05.000Z" });
+  await queuedNoShow({ id: "rt-72-2", appointment: "rb-twice", message: "no_show_followup_72h", due: "2026-10-31T11:15:00.000Z", revision: 2, missedAt: "2026-10-28T11:00:00.000Z", status: "cancelled" });
+  // Missed again after a rebook that held: the first miss's text (cancelled by that rebook) stays gone.
+  await rolledBack("rb-second-miss", "2026-10-28T10:00:00.000Z", 3);
+  await queuedNoShow({ id: "rs-sms-1", appointment: "rb-second-miss", message: "no_show_rebook", channel: "sms", due: "2026-10-21T15:15:00.000Z", revision: 1, missedAt: "2026-10-21T15:00:00.000Z", status: "cancelled", lastError: "meeting_rescheduled" });
+  await queuedNoShow({ id: "rs-email-2", appointment: "rb-second-miss", message: "no_show_rebook", due: "2026-10-28T10:15:00.000Z", revision: 2, missedAt: "2026-10-28T10:00:00.000Z", status: "sent", sentAt: "2026-10-28T10:15:04.000Z" });
+  await queuedNoShow({ id: "rs-24-2", appointment: "rb-second-miss", message: "no_show_followup_24h", due: "2026-10-29T10:15:00.000Z", revision: 2, missedAt: "2026-10-28T10:00:00.000Z", status: "cancelled" });
+  // Missed 50 hours ago, rebook rolled back before its 72 h follow-up: past the 48-hour watch, still put right.
+  await rolledBack("rb-old", "2026-10-26T14:20:00.000Z", 2);
+  await queuedNoShow({ id: "ro-email", appointment: "rb-old", message: "no_show_rebook", due: "2026-10-26T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "sent", sentAt: "2026-10-26T14:35:03.000Z" });
+  await queuedNoShow({ id: "ro-24", appointment: "rb-old", message: "no_show_followup_24h", due: "2026-10-27T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "skipped", lastError: "lead_moved_on" });
+  await queuedNoShow({ id: "ro-72", appointment: "rb-old", message: "no_show_followup_72h", due: "2026-10-29T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "cancelled" });
   // Closed and recorded by the operator's route: left alone.
   await appointment("operator-closed", "2026-10-28T14:30:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='operator-closed'", args: [] });
@@ -261,6 +303,32 @@ async function testWatch() {
     "a rolled-back rebook gets its unsent rebook messages back at the current revision",
   );
   assert.equal(restored.rows.find((r) => r.kind === "no_show_followup")?.due_at, "2026-10-29T13:15:00.000Z", "a future follow-up keeps its time");
+  const atRevision = async (id: string, revision: number) =>
+    (await raw.execute({
+      sql: "SELECT dedupe_key FROM website_sales_meeting_notifications WHERE appointment_id = ? AND appointment_revision = ? ORDER BY dedupe_key",
+      args: [id, revision],
+    })).rows.map((r) => String(r.dedupe_key).split(":").slice(2, 4).join(":"));
+  assert.deepEqual(
+    await atRevision("rb-partial", 2),
+    ["no_show_followup_24h:email", "no_show_followup_72h:email", "no_show_rebook:email"],
+    "a restore cut short is finished message by message, a dispatcher's 'moved' skip included, nothing twice",
+  );
+  assert.deepEqual(
+    await atRevision("rb-twice", 3),
+    ["no_show_followup_72h:email"],
+    "after two rollbacks only the follow-up comes back: the rebook email already went out once",
+  );
+  assert.deepEqual(
+    await atRevision("rb-second-miss", 3),
+    ["no_show_followup_24h:email"],
+    "the second miss's follow-up comes back, the first miss's text never does",
+  );
+  const old = await raw.execute({ sql: "SELECT dedupe_key, due_at FROM website_sales_meeting_notifications WHERE appointment_id = 'rb-old' AND appointment_revision = 2", args: [] });
+  assert.deepEqual(
+    old.rows.map((r) => `${String(r.dedupe_key).split(":").slice(2, 4).join(":")}@${r.due_at}`),
+    ["no_show_followup_72h:email@2026-10-29T14:35:00.000Z"],
+    "a meeting missed 50 hours ago still gets its cancelled follow-up back, and one skipped for its own reason stays skipped",
+  );
   assert.equal(first.held, 1);
   assert.equal(first.noShows, 4);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
@@ -293,6 +361,9 @@ async function testWatch() {
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
   assert.equal(Number(restoredAgain.rows[0].n), 2, "restored once, not again");
+  for (const [id, revision, n] of [["rb-partial", 2, 3], ["rb-twice", 3, 1], ["rb-second-miss", 3, 1], ["rb-old", 2, 1]] as const) {
+    assert.equal((await atRevision(id, revision)).length, n, `${id}: nothing restored twice`);
+  }
 }
 
 async function main() {

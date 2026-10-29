@@ -433,6 +433,11 @@ async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: 
     if (Number.isFinite(startedMs) && startedMs <= Date.now() && Date.now() - startedMs < 48 * 3_600_000) return "hold";
     return "no_show_never_closed";
   }
+  // A rebook in flight: wait for it to settle. One that lands moves the
+  // revision on and cancels this row; one rolled back cancels it and the
+  // watcher queues it again at the restored revision. Dropped here, it would
+  // be lost with the rollback (Codex review r4 of #775).
+  if (appointment.workflow_status === "pending_transition") return "hold_transition";
   if (appointment.status !== "no_answer" || appointment.workflow_status !== "no_show") return "meeting_rebooked_or_closed";
   const lead = await db.from("tenant_records")
     .select("data")
@@ -480,10 +485,13 @@ async function processRow(
   const afterStart = row.kind === "host_guest_waiting" || isNoShowKind(row.kind);
   if (afterStart) {
     const verdict = await afterStartRowStillDue(db, row, appointment);
-    if (verdict === "hold") {
+    if (verdict === "hold" || verdict === "hold_transition") {
       // Queued by the watcher before the meeting is closed out: it goes once
-      // the close lands (the watcher retries a close that failed).
-      await mark(db, row, "pending", { error: "waiting_for_no_show_close" });
+      // the close lands (the watcher retries a close that failed). Or a rebook
+      // is in flight: it goes, or is put back, once that settles.
+      await mark(db, row, "pending", {
+        error: verdict === "hold" ? "waiting_for_no_show_close" : "waiting_for_rebook_to_settle",
+      });
       return "held";
     }
     if (verdict !== "send") {

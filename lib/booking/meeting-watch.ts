@@ -20,7 +20,9 @@
  *      so it is left for the founder: the Today page asks for its outcome.
  *
  * Only meetings that started 15 minutes to 48 hours ago are considered, so the
- * watcher never reaches back into old history on its first run.
+ * watcher never reaches back into old history on its first run. A rebook that
+ * was rolled back gets its messages back for as long as its link could be
+ * used, whatever the meeting's age.
  *
  * ASCII only (tests/worker-source-one-byte.test.ts).
  */
@@ -29,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { markFounderMeetingNoShow, type NoShowWho } from "@/lib/booking/no-show";
 import { loadRebookLead, REBOOK_LEAD_STAGE } from "@/lib/booking/rebook";
-import { rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
+import { REBOOK_TOKEN_TTL_S, rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { MEET_PRESENCE_MS } from "@/lib/meet/participants";
@@ -41,6 +43,8 @@ import { FOUNDER_MEETING_TIMEZONE, founderMeetingDedupeKey } from "@/lib/website
 
 export const NO_SHOW_GRACE_MINUTES = 15;
 export const NO_SHOW_LOOKBACK_HOURS = 48;
+/** A rebook can be tried (and rolled back) while its link works; three days on, nothing it queued can still be waiting. */
+export const NO_SHOW_RESTORE_LOOKBACK_MS = (REBOOK_TOKEN_TTL_S + 3 * 86_400) * 1000;
 /** A join counts toward THIS meeting only inside this window around its slot (a lead who tested the link the night before did not attend). */
 export const ATTENDANCE_EARLY_MINUTES = 30;
 export const ATTENDANCE_LATE_MINUTES = 30;
@@ -290,11 +294,35 @@ async function readParticipants(db: SupabaseClient, tenantId: string, roomId: st
 }
 
 /**
+ * A no-show message's dedupe key: appointment, revision, message, channel, and
+ * the miss it is about (the meeting's start, in epoch ms). The miss keeps an
+ * earlier miss of the same appointment (rebooked, then missed again) from ever
+ * counting as, or coming back as, this one's message.
+ */
+export function noShowDedupeKey(
+  appointmentId: string,
+  revision: number,
+  message: string,
+  channel: "email" | "sms",
+  missedAt: string,
+): string {
+  return `${appointmentId}:${revision}:${message}:${channel}:${Date.parse(missedAt)}`;
+}
+
+/** What a rollback leaves a queued message as: cancelled with the move, or skipped as moved when the dispatcher saw the new revision first. */
+function leftByRollback(row: Record<string, unknown>): boolean {
+  return row.status === "cancelled" || (row.status === "skipped" && row.last_error === "meeting_moved");
+}
+
+/**
  * A missed meeting whose rebook was rolled back (compensation restores the
- * no-show at a higher revision and cancels its notifications): requeue its
- * rebook messages that never went out, at the current revision, so the lead
- * still gets their link and follow-ups. Nothing is done when the current
- * revision already has its own rebook messages, or none were ever queued.
+ * no-show at a higher revision and cancels its notifications): queue again, at
+ * the current revision, each of this miss's messages that never went out, so
+ * the lead still gets their link and follow-ups. Each message (the rebook
+ * email, each follow-up, the text) is judged by its own latest copy (Codex
+ * review r4): one that went out once never goes again, one already queued at
+ * this revision is left alone, and only a copy the rollback left behind is put
+ * back. A batch cut short by a failed write is finished on the next run.
  */
 async function restoreRolledBackNoShowMessages(
   db: SupabaseClient,
@@ -303,20 +331,29 @@ async function restoreRolledBackNoShowMessages(
 ): Promise<number> {
   const existing = await db
     .from("website_sales_meeting_notifications")
-    .select("id,kind,channel,recipient,sender_user_id,subject,body,due_at,status,sent_at,appointment_revision,dedupe_key")
+    .select("id,kind,channel,recipient,sender_user_id,subject,body,due_at,status,sent_at,last_error,appointment_revision,dedupe_key")
     .eq("tenant_id", appointment.tenant_id)
     .eq("appointment_id", appointment.id)
     .in("kind", ["no_show_rebook", "no_show_followup"]);
   if (existing.error) throw new Error(`no_show_restore_read_failed:${existing.error.message}`);
-  const rows = (existing.data || []) as Array<Record<string, unknown>>;
-  if (rows.some((row) => Number(row.appointment_revision) === appointment.revision)) return 0;
-  const unsent = rows.filter(
-    (row) => Number(row.appointment_revision) < appointment.revision && row.status === "cancelled" && !row.sent_at,
-  );
+  const missed = String(Date.parse(appointment.scheduled_for));
+  const latest = new Map<string, Record<string, unknown>>();
+  const delivered = new Set<string>();
+  for (const row of (existing.data || []) as Array<Record<string, unknown>>) {
+    const parts = String(row.dedupe_key).split(":"); // noShowDedupeKey
+    if (parts.length !== 5 || parts[4] !== missed) continue; // another miss's message
+    const message = `${parts[2]}:${parts[3]}`;
+    if (row.sent_at || row.status === "sent") delivered.add(message);
+    const seen = latest.get(message);
+    if (!seen || Number(row.appointment_revision) > Number(seen.appointment_revision)) latest.set(message, row);
+  }
   let restored = 0;
-  for (const row of unsent) {
-    const parts = String(row.dedupe_key).split(":");
-    const dedupeKey = [appointment.id, String(appointment.revision), ...parts.slice(2)].join(":");
+  for (const [message, row] of latest) {
+    if (delivered.has(message)) continue;
+    if (Number(row.appointment_revision) >= appointment.revision) continue;
+    if (!leftByRollback(row)) continue;
+    const [name, channel] = message.split(":");
+    const dedupeKey = noShowDedupeKey(appointment.id, appointment.revision, name, channel as "email" | "sms", appointment.scheduled_for);
     const due = String(row.due_at) > nowIso ? String(row.due_at) : nowIso;
     if (
       await insertNotification(db, {
@@ -494,7 +531,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
             recipient: appointment.client_email_snapshot,
             subject: messages.email.subject,
             body: messages.email.body,
-            dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "email"),
+            dedupe_key: noShowDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "email", appointment.scheduled_for),
           });
           for (const followUp of messages.followUps) {
             await insertNotification(deps.db, {
@@ -506,7 +543,13 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
               recipient: appointment.client_email_snapshot,
               subject: followUp.subject,
               body: followUp.body,
-              dedupe_key: `${appointment.id}:${appointment.revision}:no_show_followup_${followUp.hours}h:email`,
+              dedupe_key: noShowDedupeKey(
+                appointment.id,
+                appointment.revision,
+                `no_show_followup_${followUp.hours}h`,
+                "email",
+                appointment.scheduled_for,
+              ),
             });
           }
         }
@@ -520,7 +563,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
             recipient: appointment.client_phone_snapshot,
             subject: null,
             body: messages.sms,
-            dedupe_key: founderMeetingDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "sms"),
+            dedupe_key: noShowDedupeKey(appointment.id, appointment.revision, "no_show_rebook", "sms", appointment.scheduled_for),
           });
         }
       }
@@ -578,13 +621,8 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
-      if (lead.founder_meeting_status === "no_show") {
-        // Recorded already. If a rebook failed and was rolled back, the meeting
-        // is the no-show again at a HIGHER revision and its rebook messages
-        // were cancelled with the move: put the unsent ones back (Codex review).
-        await restoreRolledBackNoShowMessages(deps.db, appointment, nowIso);
-        continue;
-      }
+      if (lead.founder_meeting_status === "no_show") continue; // recorded already
+
       const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
       const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
       const verdict = classifyMeeting(
@@ -611,6 +649,37 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         ].join("\n"),
         { desk: "sales" },
       ).catch(() => undefined);
+    } catch (error) {
+      result.errors.push(`${appointment.id}:${error instanceof Error ? error.message.slice(0, 160) : String(error)}`);
+    }
+  }
+
+  // A rebook that failed and was rolled back leaves the meeting as this
+  // no-show again, at a HIGHER revision, with its queued messages cancelled:
+  // put back the ones that never went out. Looked for as long as the lead's
+  // link could be used, not just 48 hours: a rebook tried on day three can
+  // roll back too (Codex review r4).
+  const rolledBack = await deps.db
+    .from("call_appointments")
+    .select(WATCH_COLUMNS)
+    .eq("tenant_id", AI_AUDIT_TENANT_ID)
+    .eq("meeting_kind", "founder_audit")
+    .eq("status", "no_answer")
+    .eq("workflow_status", "no_show")
+    .not("last_compensated_request_id", "is", null)
+    .lte("scheduled_for", nowIso)
+    .gte("scheduled_for", new Date(nowMs - NO_SHOW_RESTORE_LOOKBACK_MS).toISOString())
+    .order("scheduled_for", { ascending: false })
+    .limit(50);
+  if (rolledBack.error) {
+    result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error.message}`);
+    return result;
+  }
+  for (const appointment of (rolledBack.data || []) as WatchedAppointment[]) {
+    try {
+      const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
+      if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
+      await restoreRolledBackNoShowMessages(deps.db, appointment, nowIso);
     } catch (error) {
       result.errors.push(`${appointment.id}:${error instanceof Error ? error.message.slice(0, 160) : String(error)}`);
     }

@@ -456,6 +456,33 @@ async function main() {
     assert.equal(row.last_error, "waiting_for_no_show_close");
   });
 
+  // Pass 5b2: a follow-up due while the lead's rebook is in flight waits for it
+  // to settle. Dropped, a rollback would have nothing to put back (Codex review r4).
+  await appointment("appt-rebooking", -40);
+  await seed.execute({
+    sql: "UPDATE call_appointments SET status='no_answer', workflow_status='pending_transition', pending_operation='reschedule', pending_request_id='req-rebook' WHERE id='appt-rebooking'",
+    args: [],
+  });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-rebooking", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-rebooking" })],
+  });
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('rebooking-followup', ?, 'appt-rebooking', 'lead-appt-rebooking', 'no_show_followup', NULL, 'email', ?, 'taylor@example.com', ?,
+      'Still want a time?', 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, 'dedupe-rebooking-followup')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), HOST],
+  });
+  await dispatch();
+  await check("a follow-up due while a rebook is in flight waits for it to settle", async () => {
+    const row = await rowOf("rebooking-followup");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "waiting_for_rebook_to_settle");
+    assert.ok(!sharedSends.some((s) => s.subject === "Still want a time?"), "nothing went out");
+  });
+
   // Pass 5c: a real-length signed rebook link survives the text whole.
   const longLink = `https://oasisai.work/book/rebook/${"e".repeat(210)}.${"s".repeat(43)}`;
   await appointment("appt-longsms", -30, "+14165550177");
