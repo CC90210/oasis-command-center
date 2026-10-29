@@ -593,7 +593,16 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     return result;
   }
 
-  for (const appointment of candidates.rows) {
+  // Calls in progress or just missed come first, newest first. The older ones
+  // (mostly held calls waiting for their outcome) follow in an order that moves
+  // every minute, so a pass cut short by its budget still reaches every older
+  // miss over a few runs (Codex review r14).
+  const recentFrom = nowMs - 2 * 3_600_000;
+  const ordered = [
+    ...candidates.rows.filter((row) => Date.parse(row.scheduled_for) >= recentFrom),
+    ...rotated(candidates.rows.filter((row) => Date.parse(row.scheduled_for) < recentFrom)),
+  ];
+  for (const appointment of ordered) {
     if (overBudget()) {
       result.partial = true;
       break;
@@ -771,8 +780,10 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
  * The history pass, run by the dispatcher AFTER it sends, so no backlog can
  * hold up a reminder (Codex review r13): half-done no-shows finished,
  * rolled-back rebooks given their messages back, and calls met after all
- * caught. Within a time budget, each scan starting where the minute says, so a
- * pass cut short reaches every meeting over a few runs. Never throws.
+ * caught. Each of the three scans has its own third of the time budget and
+ * starts where the minute says, so none can starve the others and a scan cut
+ * short reaches every meeting over a few runs; a scan whose read fails is
+ * reported and the next one still runs (Codex review r14). Never throws.
  */
 export async function recoverFounderMeetings(deps: WatchDependencies): Promise<WatchResult> {
   const nowMs = deps.now();
@@ -780,7 +791,8 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
-  const overBudget = budget(deps);
+  const share: WatchDependencies = { ...deps, budgetMs: (deps.budgetMs ?? WATCH_BUDGET_MS) / 3 };
+  let overBudget = budget(share);
 
   // A meeting closed as a no-show whose lead record never took it (the lead
   // write failed after the close): the close cannot be repeated, so finish the
@@ -801,14 +813,11 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("id", { ascending: true })
       .range(from, to),
   );
-  if (closedNoShows.error) {
-    result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error}`);
-    return result;
-  }
+  if (closedNoShows.error) result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error}`);
   for (const appointment of rotated(closedNoShows.rows)) {
     if (overBudget()) {
       result.partial = true;
-      return result;
+      break;
     }
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
@@ -844,6 +853,7 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   // put back the ones that never went out. Looked for as long as the lead's
   // link could be used, not just 48 hours: a rebook tried on day three can
   // roll back too (Codex review r4).
+  overBudget = budget(share);
   const rolledBack = await pageThrough((from, to) =>
     deps.db
       .from("call_appointments")
@@ -859,14 +869,11 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("id", { ascending: true })
       .range(from, to),
   );
-  if (rolledBack.error) {
-    result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error}`);
-    return result;
-  }
+  if (rolledBack.error) result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error}`);
   for (const appointment of rotated(rolledBack.rows)) {
     if (overBudget()) {
       result.partial = true;
-      return result;
+      break;
     }
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
@@ -885,6 +892,7 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   // window. The founder's card is written BEFORE anything stops, so a failed
   // push can never lose the prompt (Codex reviews r8, r9, r10).
   const card = deps.card ?? writeAgentAlert;
+  overBudget = budget(share);
   const waiting = await pageThrough<{ appointment_id: string }>((from, to) =>
     deps.db
       .from("website_sales_meeting_notifications")
@@ -896,12 +904,9 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("id", { ascending: true })
       .range(from, to),
   );
-  if (waiting.error) {
-    result.errors.push(`meeting_watch_waiting_query_failed:${waiting.error}`);
-    return result;
-  }
+  if (waiting.error) result.errors.push(`meeting_watch_waiting_query_failed:${waiting.error}`);
   const waitingIds = rotated([...new Set(waiting.rows.map((row) => row.appointment_id))]);
-  for (let i = 0; i < waitingIds.length; i += 50) {
+  waitingScan: for (let i = 0; i < waitingIds.length; i += 50) {
     const batch = await deps.db
       .from("call_appointments")
       .select(WATCH_COLUMNS)
@@ -917,7 +922,7 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
     for (const appointment of (batch.data || []) as WatchedAppointment[]) {
       if (overBudget()) {
         result.partial = true;
-        return result;
+        break waitingScan;
       }
       try {
         const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
