@@ -556,13 +556,6 @@ async function processRow(
       await mark(db, row, "skipped", { error: verdict });
       return "skipped";
     }
-    if (row.kind === "no_show_followup") {
-      const notBefore = await followUpNotBefore(db, row);
-      if (notBefore && Date.parse(notBefore) > Date.now()) {
-        await deferRow(db, row, notBefore, "spaced_from_last_message");
-        return "held";
-      }
-    }
   } else {
     const decision = meetingNotificationDecision({
       workflowStatus: appointment.workflow_status,
@@ -598,6 +591,16 @@ async function processRow(
 
   let retainLeaseUntilRecovery = false;
   try {
+    // A follow-up's order and spacing, read while this run holds the
+    // appointment lease: an overlapping run that just sent is always seen
+    // (Codex review r16).
+    if (row.kind === "no_show_followup") {
+      const wait = await followUpNotBefore(db, row);
+      if (wait) {
+        await deferRow(db, row, wait.at, wait.reason);
+        return "held";
+      }
+    }
     let deliveryRow = row;
     if (row.reminder_minutes_before != null) {
       const tier = Number(row.reminder_minutes_before);
@@ -920,25 +923,48 @@ const RESERVED_FOR_REPORTING_MS = 5_000;
 /** A rebook follow-up goes no sooner than this after the last rebook email the lead was actually sent. */
 const FOLLOW_UP_SPACING_MS = 20 * 3_600_000;
 
+/** Where a message sits in its no-show sequence: the rebook email first, then the follow-ups by their hour. */
+function sequenceRank(kind: string, dedupeKey: unknown): number {
+  if (kind === "no_show_rebook") return 0;
+  const hours = /no_show_followup_(\d+)h/.exec(String(dedupeKey ?? ""))?.[1];
+  return hours ? Number(hours) : 1;
+}
+
 /**
- * The earliest a no-show follow-up may go: 20 hours after the last rebook
- * email this meeting's lead was actually sent, so a sequence drained after an
- * outage never lands all at once (Codex review r15). Null when none was sent.
+ * When a no-show follow-up may go, or null for now. It waits while an earlier
+ * message of its sequence (the rebook email, an earlier follow-up) is still to
+ * go, so the sequence never arrives backwards (Codex review r16); and it goes
+ * no sooner than 20 hours after the last rebook email the lead was actually
+ * sent, so a sequence drained after an outage never lands at once (Codex
+ * review r15). Read under the appointment lease, so a run that sent a moment
+ * ago is always seen.
  */
-async function followUpNotBefore(db: Db, row: NotificationRow): Promise<string | null> {
-  const sent = await db.from("website_sales_meeting_notifications")
-    .select("sent_at")
+async function followUpNotBefore(db: Db, row: NotificationRow): Promise<{ at: string; reason: string } | null> {
+  const sequence = await db.from("website_sales_meeting_notifications")
+    .select("id,kind,status,sent_at,dedupe_key")
     .eq("tenant_id", row.tenant_id)
     .eq("appointment_id", row.appointment_id)
     .in("kind", ["no_show_rebook", "no_show_followup"])
     .eq("channel", "email")
-    .eq("status", "sent")
-    .order("sent_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (sent.error) throw new Error(`follow_up_spacing_read_failed:${sent.error.message}`);
-  const last = Date.parse(String((sent.data as { sent_at?: string | null } | null)?.sent_at || ""));
-  return Number.isFinite(last) ? new Date(last + FOLLOW_UP_SPACING_MS).toISOString() : null;
+    .in("status", ["pending", "sending", "sent"]);
+  if (sequence.error) throw new Error(`follow_up_spacing_read_failed:${sequence.error.message}`);
+  const rows = (sequence.data || []) as Array<{ id: string; kind: string; status: string; sent_at: string | null; dedupe_key: string | null }>;
+  const mine = sequenceRank(row.kind, rows.find((other) => other.id === row.id)?.dedupe_key);
+  let lastSent = Number.NaN;
+  for (const other of rows) {
+    if (other.id === row.id) continue;
+    if (other.status === "sent") {
+      const at = Date.parse(String(other.sent_at || ""));
+      if (Number.isFinite(at) && (!Number.isFinite(lastSent) || at > lastSent)) lastSent = at;
+      continue;
+    }
+    if (sequenceRank(other.kind, other.dedupe_key) < mine) {
+      return { at: new Date(Date.now() + 5 * 60_000).toISOString(), reason: "waiting_for_earlier_message" };
+    }
+  }
+  if (!Number.isFinite(lastSent)) return null;
+  const at = lastSent + FOLLOW_UP_SPACING_MS;
+  return at > Date.now() ? { at: new Date(at).toISOString(), reason: "spaced_from_last_message" } : null;
 }
 
 /** The notification ids a reminder-failure card already reported (its payload, as stored). */

@@ -805,6 +805,48 @@ async function main() {
     assert.ok(!sharedSends.some((s) => String(s.subject).includes("(outage)") && s.subject !== "Sorry we missed each other (outage)"));
   });
 
+  // Pass 11 (Codex review r16): after an outage the first rebook email fails
+  // once; its follow-up waits for it instead of going first.
+  await appointment("appt-outage2", -73 * 60);
+  await seed.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='appt-outage2'", args: [] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-outage2", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-outage2", founder_meeting_status: "no_show" })],
+  });
+  for (const [id, kind, hoursAgo, subject] of [
+    ["outage2-rebook", "no_show_rebook", 72.5, "Sorry we missed each other (outage 2)"],
+    ["outage2-24", "no_show_followup", 48.5, "Still want a time? (outage 2)"],
+  ] as const) {
+    await seed.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (
+        id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+        recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+      ) VALUES (?, ?, 'appt-outage2', 'lead-appt-outage2', ?, NULL, 'email', ?, 'outage2@example.com', ?, ?, 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, ?)`,
+      args: [id, OASIS, kind, new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), HOST, subject, `appt-outage2:1:${id === "outage2-24" ? "no_show_followup_24h" : "no_show_rebook"}:email:0`],
+    });
+  }
+  sharedResult = { ok: false, provider: "oasis_shared_gmail", reason: "send_failed", error: "421 try later" };
+  await dispatch();
+  sharedResult = null;
+  await check("a follow-up waits while the rebook email before it is still to go", async () => {
+    assert.equal((await rowOf("outage2-rebook")).status, "pending", "the rebook email failed once and is retried");
+    const followUp = await rowOf("outage2-24");
+    assert.equal(followUp.status, "pending");
+    assert.equal(followUp.last_error, "waiting_for_earlier_message");
+  });
+  await dispatch();
+  await check("the rebook email goes first; the follow-up still waits", async () => {
+    assert.equal((await rowOf("outage2-rebook")).status, "sent");
+    assert.equal((await rowOf("outage2-24")).status, "pending");
+    assert.ok(!sharedSends.some((s) => s.subject === "Still want a time? (outage 2)"));
+  });
+  await check("a follow-up's order and spacing are read under the appointment lease (Codex review r16)", async () => {
+    const source = readFileSync("app/api/cron/dispatch-founder-meeting-reminders/route.ts", "utf8");
+    const lease = source.indexOf("const leaseToken = await acquireAppointmentLease(");
+    const spacing = source.indexOf("const wait = await followUpNotBefore(db, row);");
+    assert.ok(lease > 0 && spacing > lease, "the spacing check comes after the lease is taken");
+  });
+
   if (failures) {
     console.error(`founder-meeting-reminder-delivery: ${failures} failure(s)`);
     process.exit(1);

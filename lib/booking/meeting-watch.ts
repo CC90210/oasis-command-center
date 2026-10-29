@@ -539,16 +539,19 @@ const RECOVERY_SCAN_MAX = 1000;
  */
 async function pageThrough<T = WatchedAppointment>(
   fetchPage: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
-): Promise<{ rows: T[]; error: string | null }> {
+  /** Checked before every page: a slow read never carries a scan past its deadline (Codex review r16). */
+  overBudget: () => boolean = () => false,
+): Promise<{ rows: T[]; error: string | null; partial: boolean }> {
   const rows: T[] = [];
   for (let from = 0; from < RECOVERY_SCAN_MAX; from += RECOVERY_SCAN_PAGE) {
+    if (overBudget()) return { rows, error: null, partial: true };
     const page = await fetchPage(from, from + RECOVERY_SCAN_PAGE - 1);
-    if (page.error) return { rows, error: page.error.message };
+    if (page.error) return { rows, error: page.error.message, partial: false };
     const data = (Array.isArray(page.data) ? page.data : []) as T[];
     rows.push(...data);
     if (data.length < RECOVERY_SCAN_PAGE) break;
   }
-  return { rows, error: null };
+  return { rows, error: null, partial: false };
 }
 
 /**
@@ -587,7 +590,9 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       .order("scheduled_for", { ascending: false })
       .order("id", { ascending: true })
       .range(from, to),
+    overBudget,
   );
+  if (candidates.partial) result.partial = true;
   if (candidates.error) {
     result.errors.push(`meeting_watch_query_failed:${candidates.error}`);
     return result;
@@ -791,8 +796,15 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
-  const share: WatchDependencies = { ...deps, budgetMs: (deps.budgetMs ?? WATCH_BUDGET_MS) / 3 };
-  let overBudget = budget(share);
+  const total = deps.budgetMs ?? WATCH_BUDGET_MS;
+  const passDeadline = Date.now() + total;
+  // Each scan its own third of the budget, never past the pass's own deadline,
+  // checked before every page and every meeting (Codex reviews r14, r16).
+  const scanBudget = (): (() => boolean) => {
+    const deadline = Math.min(Date.now() + total / 3, passDeadline);
+    return () => Date.now() > deadline;
+  };
+  let overBudget = scanBudget();
 
   // A meeting closed as a no-show whose lead record never took it (the lead
   // write failed after the close): the close cannot be repeated, so finish the
@@ -812,7 +824,9 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("scheduled_for", { ascending: false })
       .order("id", { ascending: true })
       .range(from, to),
+    overBudget,
   );
+  if (closedNoShows.partial) result.partial = true;
   if (closedNoShows.error) result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error}`);
   for (const appointment of rotated(closedNoShows.rows)) {
     if (overBudget()) {
@@ -853,7 +867,7 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   // put back the ones that never went out. Looked for as long as the lead's
   // link could be used, not just 48 hours: a rebook tried on day three can
   // roll back too (Codex review r4).
-  overBudget = budget(share);
+  overBudget = scanBudget();
   const rolledBack = await pageThrough((from, to) =>
     deps.db
       .from("call_appointments")
@@ -868,7 +882,9 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("scheduled_for", { ascending: false })
       .order("id", { ascending: true })
       .range(from, to),
+    overBudget,
   );
+  if (rolledBack.partial) result.partial = true;
   if (rolledBack.error) result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error}`);
   for (const appointment of rotated(rolledBack.rows)) {
     if (overBudget()) {
@@ -892,7 +908,7 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
   // window. The founder's card is written BEFORE anything stops, so a failed
   // push can never lose the prompt (Codex reviews r8, r9, r10).
   const card = deps.card ?? writeAgentAlert;
-  overBudget = budget(share);
+  overBudget = scanBudget();
   const waiting = await pageThrough<{ appointment_id: string }>((from, to) =>
     deps.db
       .from("website_sales_meeting_notifications")
@@ -903,10 +919,16 @@ export async function recoverFounderMeetings(deps: WatchDependencies): Promise<W
       .order("appointment_id", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to),
+    overBudget,
   );
+  if (waiting.partial) result.partial = true;
   if (waiting.error) result.errors.push(`meeting_watch_waiting_query_failed:${waiting.error}`);
   const waitingIds = rotated([...new Set(waiting.rows.map((row) => row.appointment_id))]);
   waitingScan: for (let i = 0; i < waitingIds.length; i += 50) {
+    if (overBudget()) {
+      result.partial = true;
+      break;
+    }
     const batch = await deps.db
       .from("call_appointments")
       .select(WATCH_COLUMNS)
