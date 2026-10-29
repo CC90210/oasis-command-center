@@ -313,9 +313,15 @@ export function noShowDedupeKey(
   return `${appointmentId}:${revision}:${message}:${channel}:${Date.parse(missedAt)}`;
 }
 
-/** What a rollback leaves a queued message as: cancelled with the move, or skipped as moved when the dispatcher saw the new revision first. */
+/**
+ * What a rollback leaves a queued message as: cancelled by the move or by its
+ * compensation, or skipped as moved when the dispatcher saw the new revision
+ * first. A message stopped for any other reason (the call happened after all,
+ * a STOP, a completed call) stays stopped (Codex review r9).
+ */
 function leftByRollback(row: Record<string, unknown>): boolean {
-  return row.status === "cancelled" || (row.status === "skipped" && row.last_error === "meeting_moved");
+  if (row.status === "skipped") return row.last_error === "meeting_moved";
+  return row.status === "cancelled" && (row.last_error === "meeting_rescheduled" || row.last_error === "reschedule_compensated");
 }
 
 /**
@@ -692,13 +698,21 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         });
       };
       // Recorded as missed, then someone came late and they met after all
-      // (Oasis Meet still lets the call happen). While a late join can still
-      // count, the room is read again; if the lead and a host met, the rebook
-      // follow-ups stop and the founder is asked to record the outcome, which
-      // corrects the no-show (Codex review r8).
-      const lateJoinCounts =
-        nowMs <= Date.parse(appointment.scheduled_for) + (duration + ATTENDANCE_LATE_MINUTES + 5) * 60_000;
-      const att = lateJoinCounts ? await readAttendance() : null;
+      // (Oasis Meet still lets the call happen). While its rebook messages
+      // still wait, the room is read again, whatever the time now:
+      // attendanceFrom only counts the meeting's own window. If the lead and a
+      // host met, the messages stop and the founder is asked to record the
+      // outcome, which corrects the no-show (Codex reviews r8, r9).
+      const waiting = await deps.db
+        .from("website_sales_meeting_notifications")
+        .select("id")
+        .eq("tenant_id", appointment.tenant_id)
+        .eq("appointment_id", appointment.id)
+        .in("kind", ["no_show_rebook", "no_show_followup"])
+        .eq("status", "pending")
+        .limit(1);
+      if (waiting.error) throw new Error(`no_show_waiting_read_failed:${waiting.error.message}`);
+      const att = (waiting.data || []).length > 0 ? await readAttendance() : null;
       if (att?.met) {
         const stopped = await deps.db
           .from("website_sales_meeting_notifications")

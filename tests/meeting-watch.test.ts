@@ -313,6 +313,15 @@ async function testWatch() {
   await joinRoom("room-late-met", "guest", "2026-10-28T16:17:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
   await joinRoom("room-late-met", "host", "2026-10-28T16:18:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
   await queuedNoShow({ id: "lm-24", appointment: "late-met", message: "no_show_followup_24h", due: "2026-10-29T16:15:00.000Z", revision: 1, missedAt: START, status: "pending" });
+  // The same, found two hours later (the worker was down): still caught, whatever the time now (Codex review r9).
+  await appointment("late-met-old", "2026-10-28T14:00:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='late-met-old'", args: [] });
+  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-late-met-old'", args: [] });
+  await joinRoom("room-late-met-old", "guest", "2026-10-28T14:20:00.000Z", { left: "2026-10-28T14:30:00.000Z", seen: "2026-10-28T14:30:00.000Z" });
+  await joinRoom("room-late-met-old", "host", "2026-10-28T14:21:00.000Z", { left: "2026-10-28T14:30:00.000Z", seen: "2026-10-28T14:30:00.000Z" });
+  await queuedNoShow({ id: "lmo-72", appointment: "late-met-old", message: "no_show_followup_72h", due: "2026-10-31T14:15:00.000Z", revision: 1, missedAt: "2026-10-28T14:00:00.000Z", status: "pending" });
+  // A follow-up stopped because the call happened is never brought back by a later rollback (Codex review r9).
+  await queuedNoShow({ id: "rb-met", appointment: "rolled-back", message: "no_show_followup_72h", due: "2026-10-31T13:15:00.000Z", revision: 1, missedAt: "2026-10-28T13:00:00.000Z", status: "cancelled", lastError: "met_after_no_show" });
   // A call that happened: the host left at the end, the lead's tab is still open. Not a lead waiting (Codex review r7).
   await appointment("done-call", START);
   await joinRoom("room-done-call", "host", "2026-10-28T16:00:00.000Z", { left: "2026-10-28T16:15:00.000Z", seen: "2026-10-28T16:15:00.000Z" });
@@ -395,8 +404,11 @@ async function testWatch() {
   );
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 7, "the founder hears about each missed meeting that closed, the finished ones, and the one met after all");
-  assert.equal(first.metAfterNoShow, 1);
+  assert.equal(alerts.length, 8, "the founder hears about each missed meeting that closed, the finished ones, and the two met after all");
+  assert.equal(first.metAfterNoShow, 2);
+  const lateMetOld = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lmo-72'", args: [] });
+  assert.deepEqual([lateMetOld.rows[0].status, lateMetOld.rows[0].last_error], ["cancelled", "met_after_no_show"], "found hours later, it is still stopped");
+  assert.ok(!(await atRevision("rolled-back", 2)).includes("no_show_followup_72h:email"), "a follow-up stopped because the call happened is not restored");
   const lateMet = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lm-24'", args: [] });
   assert.deepEqual([lateMet.rows[0].status, lateMet.rows[0].last_error], ["cancelled", "met_after_no_show"], "a call met after all sends no rebook follow-ups");
   assert.ok(alerts.some((text) => text.includes("Met after all: Lead late-met")), "and the founder is asked to record the outcome");
@@ -408,7 +420,7 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 8, "and the founder hears about it once");
+  assert.equal(alerts.length, 9, "and the founder hears about it once");
   assert.equal(second.metAfterNoShow, 0, "a call met after all is told once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
