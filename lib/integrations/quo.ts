@@ -390,16 +390,25 @@ export async function quoSender(
  */
 export async function quoStopIntakeConnected(
   tenantId: string,
+  /** The number the text would leave from: the proof must be for THIS line (Codex review of #776). */
+  senderNumber: string,
   deps: { env?: Readonly<Record<string, string | undefined>>; client?: Pick<Client, "execute"> } = {},
 ): Promise<boolean> {
   if (!quoWebhookKeyConfigured(deps.env ?? process.env)) return false;
+  if (!senderNumber) return false;
   try {
     const result = await (deps.client ?? getTursoClient()).execute({
-      sql: "SELECT last_inbound_at FROM quo_inbound_health WHERE tenant_id = ? LIMIT 1",
+      sql: "SELECT last_inbound_at, last_inbound_to FROM quo_inbound_health WHERE tenant_id = ? LIMIT 1",
       args: [tenantId],
     });
     const row = result.rows[0] as Record<string, unknown> | undefined;
-    return typeof row?.last_inbound_at === "string" && row.last_inbound_at.length > 0;
+    const digits = (value: unknown) => (typeof value === "string" ? value.replace(/\D/g, "") : "");
+    return (
+      typeof row?.last_inbound_at === "string" &&
+      row.last_inbound_at.length > 0 &&
+      digits(row.last_inbound_to).length >= 10 &&
+      digits(row.last_inbound_to) === digits(senderNumber)
+    );
   } catch (error) {
     console.error("[quo] STOP intake check failed; automated texts stay off", error instanceof Error ? error.message : error);
     return false;

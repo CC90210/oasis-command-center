@@ -821,17 +821,9 @@ async function processRow(
       // (lib/integrations/quo.ts), and an automated text must honour one. So
       // reminders are texted only once that intake is connected; until then
       // the email carries them (Codex review of #774).
-      if (!(await quoStopIntakeConnected(row.tenant_id))) {
-        await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
-        return "skipped";
-      }
       const quo = await quoCredentialsOrNull(row.tenant_id);
       if (!quo) {
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
-        return "skipped";
-      }
-      if (isDryRun("quo")) {
-        await mark(db, row, "skipped", { error: "quo_live_send_disabled" });
         return "skipped";
       }
       // Which number it leaves from is settled BEFORE anything is sent: a
@@ -840,6 +832,14 @@ async function processRow(
       if (!sender.ok) {
         await retryOrFail(db, row, `quo_sender:${sender.code}:${sender.reason}`);
         return "failed";
+      }
+      if (!(await quoStopIntakeConnected(row.tenant_id, sender.number))) {
+        await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
+        return "skipped";
+      }
+      if (isDryRun("quo")) {
+        await mark(db, row, "skipped", { error: "quo_live_send_disabled" });
+        return "skipped";
       }
       const sent = await sendQuoSms({ ...quo, fromNumber: sender.number }, { to: row.recipient, text: deliveryRow.body });
       if (!sent.ok) {

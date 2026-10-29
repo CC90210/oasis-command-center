@@ -10,6 +10,8 @@
 --   last_event_type     its type ("message.received", ...)
 --   last_event_id       its id, for tracing
 --   last_inbound_at     a verified message.received whose sender and text read
+--   last_inbound_to     the OASIS number that text reached: texts are opened
+--                       only for THAT sending number
 --   last_stop_at        the last STOP put on the STOP list from a Quo reply
 --
 -- Additive only. No comment after a semicolon on the same line (the applier
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS quo_inbound_health (
   last_event_type   TEXT,
   last_event_id     TEXT,
   last_inbound_at   TEXT,
+  last_inbound_to   TEXT,
   last_stop_at      TEXT,
   updated_at        TEXT NOT NULL
 );

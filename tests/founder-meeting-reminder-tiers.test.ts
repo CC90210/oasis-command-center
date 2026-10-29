@@ -124,7 +124,7 @@ assert(!reminderTierStillValid(10, 0, "sms"));
 // Automated texts stay off until an authenticated Quo STOP intake has proven
 // itself (Codex review of #774); without the signing key it never opens. The
 // open path is tests/quo-stop-intake.test.ts.
-void quoStopIntakeConnected("tenant-a", { env: {} }).then((open) => {
+void quoStopIntakeConnected("tenant-a", "+13653603976", { env: {} }).then((open) => {
   assert.equal(open, false, "no signing key, no automated texts");
 });
 assert.equal(reminderWindowText(1440), "about 24 hours");

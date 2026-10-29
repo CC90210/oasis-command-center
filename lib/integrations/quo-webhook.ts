@@ -86,6 +86,8 @@ export type QuoInboundEvent = {
   from: string | null;
   text: string | null;
   messageId: string | null;
+  /** The OASIS number the text was sent TO (the line whose STOP replies this proves). */
+  to: string | null;
   /** When it happened (ISO), from the event itself, never from the delivery attempt. */
   occurredAt: string | null;
 };
@@ -127,6 +129,18 @@ export function parseQuoEvent(payload: unknown): QuoInboundEvent {
     from: phoneOf(context?.senderIdentifier) || phoneOf(legacy?.from),
     text: str(resource?.text) || str(legacy?.body),
     messageId: str(resource?.id, 200) || str(legacy?.id, 200),
+    to: firstPhone(context?.recipientIdentifiers) || firstPhone(legacy?.to),
     occurredAt: isoOf(root.createdAt) || isoOf(resource?.createdAt) || isoOf(legacy?.createdAt),
   };
+}
+
+function firstPhone(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const phone = phoneOf(item);
+      if (phone) return phone;
+    }
+    return null;
+  }
+  return phoneOf(value);
 }

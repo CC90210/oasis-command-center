@@ -25,6 +25,7 @@ process.env.LIVE_SEND_QUO = "1";
 delete process.env.BRAVO_FORCE_DRY_RUN;
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+const QUO_NUMBER = "+13653603976";
 const LEAD_PHONE = "+14165550123";
 
 /** Quo's versioned envelope (https://www.quo.com/docs/2026-03-30/webhooks-event-payloads). */
@@ -36,7 +37,7 @@ function received(eventId: string, text: string, createdAt: string, from = LEAD_
     type: "message.received",
     data: {
       resource: { id: `msg-${eventId}`, text, direction: "incoming", createdAt },
-      context: { senderIdentifier: from, recipientIdentifiers: ["+13653603976"] },
+      context: { senderIdentifier: from, recipientIdentifiers: [QUO_NUMBER] },
       links: { quo: null },
     },
   };
@@ -78,12 +79,12 @@ async function main() {
     parseQuoEvent(received("e1", "STOP", "2026-10-28T23:00:00.000Z")),
     {
       eventId: "e1", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "STOP",
-      messageId: "msg-e1", occurredAt: "2026-10-28T23:00:00.000Z",
+      messageId: "msg-e1", to: QUO_NUMBER, occurredAt: "2026-10-28T23:00:00.000Z",
     },
   );
   assert.deepEqual(
     parseQuoEvent({ id: "e2", type: "message.received", data: { object: { id: "m2", from: LEAD_PHONE, to: ["+13653603976"], body: "stop", direction: "incoming", createdAt: "2026-10-28T23:01:00Z" } } }),
-    { eventId: "e2", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "stop", messageId: "m2", occurredAt: "2026-10-28T23:01:00.000Z" },
+    { eventId: "e2", type: "message.received", direction: "incoming", from: LEAD_PHONE, text: "stop", messageId: "m2", to: QUO_NUMBER, occurredAt: "2026-10-28T23:01:00.000Z" },
   );
   assert.equal(parseQuoEvent({ type: "call.completed" }).from, null);
 
@@ -118,7 +119,7 @@ async function main() {
   const health = async () =>
     (await seed.execute({ sql: "SELECT * FROM quo_inbound_health WHERE tenant_id = ?", args: [OASIS] })).rows[0];
 
-  assert.equal(await quoStopIntakeConnected(OASIS), false, "no verified delivery yet: automated texts stay off");
+  assert.equal(await quoStopIntakeConnected(OASIS, QUO_NUMBER), false, "no verified delivery yet: automated texts stay off");
   const unsigned = await deliver(received("e0", "STOP", "2026-10-28T22:59:00.000Z"), { signed: false });
   assert.equal(unsigned.status, 401, "an unsigned delivery is refused");
   assert.equal(await health(), undefined, "and writes nothing");
@@ -132,8 +133,9 @@ async function main() {
   assert.deepEqual(outbox.rows.map((r) => `${r.id}:${r.status}`), ["mail:pending", "t30:cancelled", "t5:cancelled"], "its queued meeting texts are cancelled; email is untouched");
   const h = await health();
   assert.ok(h?.last_inbound_at && h?.last_stop_at, "the intake proof is recorded");
-  assert.equal(await quoStopIntakeConnected(OASIS), true, "a verified, readable inbound text opens automated texts");
-  assert.equal(await quoStopIntakeConnected(OASIS, { env: {} }), false, "never without the signing key");
+  assert.equal(await quoStopIntakeConnected(OASIS, QUO_NUMBER), true, "a verified, readable inbound text opens automated texts for that line");
+  assert.equal(await quoStopIntakeConnected(OASIS, "+14165559999"), false, "never for a line the proof did not reach (Codex review of #776)");
+  assert.equal(await quoStopIntakeConnected(OASIS, QUO_NUMBER, { env: {} }), false, "never without the signing key");
 
   // The canary: the next text to that number is refused before Quo is called.
   const refused = await sendQuoSms({ tenantId: OASIS, apiKey: "test", fromNumber: "+13653603976" }, { to: LEAD_PHONE, text: "OASIS AI: Reminder" });
@@ -160,6 +162,21 @@ async function main() {
   assert.equal(oldStop.body.stale, true);
   const stillLifted = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
   assert.equal(Number(stillLifted.rows[0].n), 0);
+
+  // Overlapping deliveries (Codex review of #776): the order claim and the
+  // STOP-list change are ONE write transaction, so an older START can never
+  // undo a newer STOP between its claim and its write. The out-of-order cases
+  // above prove the ordering; a parallel run on a local SQLite file only
+  // measures that file's locking, not Turso's.
+  const routeSource = readFileSync("app/api/webhooks/quo/route.ts", "utf8");
+  const txStart = routeSource.indexOf('const tx = await getTursoClient().transaction("write");');
+  const claimAt = routeSource.indexOf("INSERT INTO quo_inbound_consent", txStart);
+  const suppressAt = routeSource.indexOf("INSERT INTO sunbiz_phone_suppressions", txStart);
+  const releaseAt = routeSource.indexOf("FROM sunbiz_phone_suppressions WHERE tenant_id = ? AND phone_last10 = ? AND reason", txStart);
+  const commitAt = routeSource.indexOf("await tx.commit();", txStart);
+  assert.ok(txStart > 0 && txStart < claimAt && claimAt < suppressAt && claimAt < releaseAt, "the claim comes first, inside the transaction");
+  assert.ok(suppressAt < commitAt && releaseAt < commitAt, "the STOP-list change commits with the claim");
+  assert.doesNotMatch(routeSource, /applyInboundSmsStop\(|releasePhoneSuppression\(/, "no STOP-list write outside the transaction");
 
   // An ordinary reply is recorded as intake proof but changes nothing.
   const hello = await deliver(received("e3", "See you at 2!", "2026-10-28T23:30:00.000Z"));
