@@ -41,6 +41,9 @@ import { checkPhoneOptOut } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { providerSwitchedOn } from "@/lib/routing/provider-availability";
 import { isRetiredTenant } from "@/lib/tenant/retired";
+import type { Client } from "@libsql/client";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { quoWebhookKeyConfigured } from "@/lib/integrations/quo-webhook";
 
 export const QUO_API_BASE = "https://api.quo.com/v1";
 
@@ -372,17 +375,58 @@ export async function quoSender(
 }
 
 /**
- * Is a STOP texted back to the Quo number read by OASIS? Not yet: there is no
- * authenticated Quo inbound handler that puts a STOP on the workspace's STOP
- * list (lib/sms-opt-out.ts applyInboundSmsStop). Automated texts (the
- * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
- * until it exists. Closed in code, not by a setting, so no key or switch can
- * open it early (Codex review of #774): the PR that adds the verified handler,
- * with its STOP-then-blocked-resend canary, replaces this body. A person's own
- * reply in Conversations is not automated and is unaffected.
+ * The intake (app/api/webhooks/quo) writes the STOP list to Turso itself, and
+ * a send checks that list through getServiceSupabase(), which reads Turso only
+ * under EMPIRE_DATA_BACKEND=turso_cloud (lib/supabase-server.ts). In any other
+ * mode those are two databases and a STOP could be acknowledged where no send
+ * looks, so the intake is off and automated texts stay closed (Codex review r3
+ * of #776).
  */
-export function quoStopIntakeConnected(): boolean {
-  return false;
+export function quoIntakeOnServiceBackend(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return env.EMPIRE_DATA_BACKEND === "turso_cloud" && tursoConfigured();
+}
+
+/**
+ * Is a STOP texted back to the Quo number read by OASIS? Automated texts (the
+ * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
+ * until it provably is. Both must hold:
+ *   - the webhook's signing key is set (QUO_WEBHOOK_SIGNING_KEY), so
+ *     app/api/webhooks/quo can authenticate a delivery; and
+ *   - that route has recorded a delivery whose signature verified AND whose
+ *     message.received sender and text it could read (quo_inbound_health
+ *     last_inbound_at): the exact event a STOP arrives as. A STOP then goes
+ *     through applyInboundSmsStop, the path the Twilio intake already uses,
+ *     and sendQuoSms refuses that number (tests/quo-stop-intake.test.ts).
+ * A key alone never opens it (Codex review of #774), and nor does a backend
+ * where the intake and the sends read different STOP lists. A read failure
+ * keeps it closed. A person's own reply in Conversations is not automated.
+ */
+export async function quoStopIntakeConnected(
+  tenantId: string,
+  /** The number the text would leave from: the proof must be for THIS line (Codex review of #776). */
+  senderNumber: string,
+  deps: { env?: Readonly<Record<string, string | undefined>>; client?: Pick<Client, "execute"> } = {},
+): Promise<boolean> {
+  if (!quoWebhookKeyConfigured(deps.env ?? process.env)) return false;
+  if (!quoIntakeOnServiceBackend(deps.env ?? process.env)) return false;
+  if (!senderNumber) return false;
+  try {
+    const result = await (deps.client ?? getTursoClient()).execute({
+      sql: "SELECT last_inbound_at, last_inbound_to FROM quo_inbound_health WHERE tenant_id = ? LIMIT 1",
+      args: [tenantId],
+    });
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    const digits = (value: unknown) => (typeof value === "string" ? value.replace(/\D/g, "") : "");
+    return (
+      typeof row?.last_inbound_at === "string" &&
+      row.last_inbound_at.length > 0 &&
+      digits(row.last_inbound_to).length >= 10 &&
+      digits(row.last_inbound_to) === digits(senderNumber)
+    );
+  } catch (error) {
+    console.error("[quo] STOP intake check failed; automated texts stay off", error instanceof Error ? error.message : error);
+    return false;
+  }
 }
 
 // -- Sending --------------------------------------------------------------------------

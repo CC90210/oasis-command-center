@@ -121,8 +121,12 @@ assert(reminderTierStillValid(5, 1, "sms"));
 assert(!reminderTierStillValid(5, 0, "sms"));
 assert(reminderTierStillValid(10, 1, "email"), "an old T-10 row still goes out until the call starts");
 assert(!reminderTierStillValid(10, 0, "sms"));
-// Automated texts stay off until an authenticated Quo STOP intake exists (Codex review of #774).
-assert.equal(quoStopIntakeConnected(), false);
+// Automated texts stay off until an authenticated Quo STOP intake has proven
+// itself (Codex review of #774); without the signing key it never opens. The
+// open path is tests/quo-stop-intake.test.ts.
+void quoStopIntakeConnected("tenant-a", "+13653603976", { env: {} }).then((open) => {
+  assert.equal(open, false, "no signing key, no automated texts");
+});
 assert.equal(reminderWindowText(1440), "about 24 hours");
 assert.equal(reminderWindowText(58), "1 hour");
 assert.equal(reminderWindowText(5), "5 minutes");
