@@ -302,17 +302,40 @@ async function roomExists(db: SupabaseClient, tenantId: string, roomId: string):
 }
 
 /** This meeting's attendance, or null when there is no room to read: none (a Google Meet link), or deleted since. Unknown, never empty. */
-async function attendanceIfRoom(deps: WatchDependencies, appointment: WatchedAppointment, nowMs: number): Promise<Attendance | null> {
+type RoomMeeting = Pick<WatchedAppointment, "tenant_id" | "meet_room_id" | "scheduled_for" | "duration_minutes">;
+
+async function attendanceIfRoom(
+  db: SupabaseClient,
+  isTeammate: WatchDependencies["isTeammate"],
+  appointment: RoomMeeting,
+  nowMs: number,
+): Promise<Attendance | null> {
   if (!appointment.meet_room_id) return null;
-  if (!(await roomExists(deps.db, appointment.tenant_id, appointment.meet_room_id))) return null;
-  const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id);
-  const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
+  if (!(await roomExists(db, appointment.tenant_id, appointment.meet_room_id))) return null;
+  const participants = await readParticipants(db, appointment.tenant_id, appointment.meet_room_id);
+  const teammates = await teammatesAmong(isTeammate, appointment.tenant_id, participants);
   return attendanceFrom(participants, {
     startsAt: appointment.scheduled_for,
     durationMinutes: Number(appointment.duration_minutes) || 15,
     nowMs,
     isTeammate: (userId) => teammates.has(userId),
   });
+}
+
+/**
+ * Did the lead and a host meet in this meeting's room after all? Read live by
+ * the dispatcher before a rebook message goes out: a call that happened gets no
+ * rebook message, whatever the watcher managed this run (Codex review r11). No
+ * room to read (none, or deleted) is not proof of a meeting.
+ */
+export async function meetingHeldAfterAll(
+  db: SupabaseClient,
+  appointment: RoomMeeting,
+  nowMs: number,
+  isTeammate?: WatchDependencies["isTeammate"],
+): Promise<boolean> {
+  const att = await attendanceIfRoom(db, isTeammate, appointment, nowMs);
+  return att?.met === true;
 }
 
 async function readParticipants(db: SupabaseClient, tenantId: string, roomId: string): Promise<ParticipantRow[]> {
@@ -545,7 +568,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       // No room to read (a room deleted after its call, before its outcome was
       // recorded): unknown, never proof that nobody came. The founder records
       // it (Codex review r10).
-      const att = await attendanceIfRoom(deps, appointment, nowMs);
+      const att = await attendanceIfRoom(deps.db, deps.isTeammate, appointment, nowMs);
       if (!att) continue;
 
       // 1. The lead is waiting and no host is: tell the founder now, once. Not
@@ -718,7 +741,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       if (lead.founder_meeting_status === "no_show") continue; // recorded already
 
       // No room left to read is unknown, never "nobody came" (Codex review r10).
-      const att = await attendanceIfRoom(deps, appointment, nowMs);
+      const att = await attendanceIfRoom(deps.db, deps.isTeammate, appointment, nowMs);
       const verdict = att ? classifyMeeting(att) : "held";
       const who: NoShowWho = verdict === "held" ? "unknown" : verdict;
       const finished = await markNoShow(
@@ -816,7 +839,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       try {
         const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
         if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
-        const att = await attendanceIfRoom(deps, appointment, nowMs);
+        const att = await attendanceIfRoom(deps.db, deps.isTeammate, appointment, nowMs);
         if (!att?.met) continue;
         const name = appointment.client_name_snapshot || "a lead";
         const written = await card({

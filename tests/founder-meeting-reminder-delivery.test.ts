@@ -86,9 +86,13 @@ stubModule(require.resolve("../lib/tcpa-window"), {
   nextTcpaWindowStart: () => DAYTIME_OPENS,
 });
 const agentCards: Array<Record<string, unknown>> = [];
+let storeCard: ((card: Record<string, unknown>) => Promise<void>) | null = null;
+let refuseMetCards = false;
 stubModule(require.resolve("../lib/notify/agent-alert"), {
   writeAgentAlert: async (card: Record<string, unknown>) => {
+    if (refuseMetCards && card.alertType === "founder_meeting_met_after_no_show") return { stored: false, telegram: null };
     agentCards.push(card);
+    if (storeCard) await storeCard(card);
     return { stored: true, telegram: "sent" };
   },
 });
@@ -166,6 +170,8 @@ async function main() {
     CREATE TABLE meet_participants (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL,
       room_id TEXT NOT NULL, role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
     CREATE TABLE meet_rooms (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL);
+    CREATE TABLE agent_alerts (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT, alert_type TEXT,
+      subject_id TEXT, payload TEXT, created_at TEXT, resolved_at TEXT);
     INSERT INTO meet_rooms (id, tenant_id) VALUES
       ('room-waiting', '${OASIS}'), ('room-live', '${OASIS}'), ('room-joined', '${OASIS}');
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
@@ -213,6 +219,12 @@ async function main() {
       args: [id],
     })).rows[0];
 
+  storeCard = async (card) => {
+    await seed.execute({
+      sql: "INSERT INTO agent_alerts (tenant_id, alert_type, subject_id, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+      args: [String(card.tenantId), String(card.alertType), (card.subjectId as string) ?? null, JSON.stringify(card.payload ?? {}), new Date().toISOString()],
+    });
+  };
   const { GET } = await import("../app/api/cron/dispatch-founder-meeting-reminders/route");
   const { NextRequest } = await import("next/server");
   const dispatch = async () => {
@@ -395,6 +407,12 @@ async function main() {
     assert.equal(card.telegramOncePerOpen, true, "the meeting's first failure pages; later ones refresh its card");
     assert.match(String(card.body), /reminder_15 text: quo_refused/);
     assert.match(String(card.body), /\/pipeline\/lead-appt-refused/);
+  });
+  await seed.execute({ sql: "UPDATE agent_alerts SET resolved_at = ? WHERE subject_id = 'appt-refused'", args: [new Date().toISOString()] });
+  const refusedCards = agentCards.filter((c) => c.subjectId === "appt-refused").length;
+  await dispatch();
+  await check("a failure card the founder dismissed stays dismissed while nothing new fails (Codex review r11)", async () => {
+    assert.equal(agentCards.filter((c) => c.subjectId === "appt-refused").length, refusedCards);
   });
   quoResult = null;
 
@@ -603,6 +621,50 @@ async function main() {
     assert.equal(row.status, "skipped");
     assert.equal(row.last_error, "lead_no_longer_waiting");
     assert.ok(!sharedSends.some((s) => s.subject === "Someone else is waiting in the call room now"));
+  });
+
+  // Pass 6b (Codex review r11): the call happened after all, and the watcher
+  // could not store the founder's card this run. The rebook follow-up is held,
+  // never sent; once the card is stored, the watcher stops it.
+  await appointment("appt-met-late", -40);
+  await seed.execute({
+    sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show', meet_room_id='room-met-late' WHERE id='appt-met-late'",
+    args: [],
+  });
+  await seed.execute({ sql: "INSERT INTO meet_rooms (id, tenant_id) VALUES ('room-met-late', ?)", args: [OASIS] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-met-late", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-met-late", founder_meeting_status: "no_show" })],
+  });
+  for (const [role, userId] of [["guest", null], ["host", HOST]] as const) {
+    await seed.execute({
+      sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, 'room-met-late', ?, ?, ?, ?, ?)",
+      args: [OASIS, role, userId, new Date(Date.now() - 20 * 60_000).toISOString(), new Date(Date.now() - 10 * 60_000).toISOString(), new Date(Date.now() - 10 * 60_000).toISOString()],
+    });
+  }
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+    ) VALUES ('met-late-followup', ?, 'appt-met-late', 'lead-appt-met-late', 'no_show_followup', NULL, 'email', ?, 'taylor@example.com', ?,
+      'Still want to rebook?', 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, 'dedupe-met-late-followup')`,
+    args: [OASIS, new Date(Date.now() - 60_000).toISOString(), HOST],
+  });
+  refuseMetCards = true;
+  await dispatch();
+  await check("a rebook follow-up for a call that happened is held, never sent, while the founder's card cannot be stored", async () => {
+    const row = await rowOf("met-late-followup");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "held_met_after_no_show");
+    assert.ok(!sharedSends.some((s) => s.subject === "Still want to rebook?"));
+  });
+  refuseMetCards = false;
+  await dispatch();
+  await check("once the founder's card is stored, the watcher stops it", async () => {
+    const row = await rowOf("met-late-followup");
+    assert.equal(row.status, "cancelled");
+    assert.equal(row.last_error, "met_after_no_show");
+    assert.ok(agentCards.some((c) => c.alertType === "founder_meeting_met_after_no_show" && c.subjectId === "appt-met-late"));
   });
 
   // Pass 7: a sent reminder whose lead is gone (2026-10-28: the canary's cloned

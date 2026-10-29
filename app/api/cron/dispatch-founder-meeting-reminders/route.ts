@@ -16,7 +16,7 @@ import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import { countSegments } from "@/lib/sms-segments";
-import { leadStillWaiting, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { leadStillWaiting, meetingHeldAfterAll, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { clipText } from "@/lib/notify/telegram-format";
@@ -485,7 +485,26 @@ async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: 
   }
   if (data.stage !== "founder_meeting_booked") return "lead_moved_on";
   if (data.calendar_appointment_id !== row.appointment_id) return "lead_has_other_meeting";
-  return "send";
+  // The call happened after all (someone came late): never a rebook message.
+  // Held, not dropped, until the watcher has told the founder and stopped it,
+  // whatever it managed this run (Codex review r11).
+  const room = await db.from("call_appointments")
+    .select("meet_room_id")
+    .eq("tenant_id", row.tenant_id)
+    .eq("id", row.appointment_id)
+    .maybeSingle();
+  if (room.error) throw new Error(`no_show_room_read_failed:${room.error.message}`);
+  const held = await meetingHeldAfterAll(
+    db,
+    {
+      tenant_id: row.tenant_id,
+      meet_room_id: (room.data as { meet_room_id?: string | null } | null)?.meet_room_id ?? null,
+      scheduled_for: appointment.scheduled_for,
+      duration_minutes: appointment.duration_minutes,
+    },
+    Date.now(),
+  );
+  return held ? "hold_met" : "send";
 }
 
 async function processRow(
@@ -515,12 +534,16 @@ async function processRow(
   const afterStart = row.kind === "host_guest_waiting" || isNoShowKind(row.kind);
   if (afterStart) {
     const verdict = await afterStartRowStillDue(db, row, appointment);
-    if (verdict === "hold" || verdict === "hold_transition") {
+    if (verdict === "hold" || verdict === "hold_transition" || verdict === "hold_met") {
       // Queued by the watcher before the meeting is closed out: it goes once
       // the close lands (the watcher retries a close that failed). Or a rebook
-      // is in flight: it goes, or is put back, once that settles.
+      // is in flight: it goes, or is put back, once that settles. Or the call
+      // happened after all: the watcher tells the founder, then stops it.
       await mark(db, row, "pending", {
-        error: verdict === "hold" ? "waiting_for_no_show_close" : "waiting_for_rebook_to_settle",
+        error:
+          verdict === "hold" ? "waiting_for_no_show_close"
+            : verdict === "hold_transition" ? "waiting_for_rebook_to_settle"
+              : "held_met_after_no_show",
       });
       return "held";
     }
@@ -871,6 +894,20 @@ async function processRow(
   }
 }
 
+/** The notification ids a reminder-failure card already reported (its payload, as stored). */
+function reportedFailureIds(card: unknown): Set<string> {
+  let payload: unknown = (card as { payload?: unknown } | null)?.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      return new Set();
+    }
+  }
+  const ids = (payload as { notification_ids?: unknown } | null)?.notification_ids;
+  return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+}
+
 /** Failed reminders this recent are (re)alerted: a run that died before alerting, or a card that failed to write, is caught by the next run. */
 const FAILURE_ALERT_WINDOW_MS = 15 * 60_000;
 const FAILURE_ALERT_PAGE = 100;
@@ -918,6 +955,18 @@ async function alertFailedReminders(db: Db, now: string): Promise<number> {
   let failures = 0;
   for (const rows of byMeeting.values()) {
     const first = rows[0];
+    // Already told: the meeting's last card, open or dismissed, covers every one
+    // of these failures, so a card the founder dismissed stays dismissed until
+    // something new fails (Codex review r11). A read that fails errs loud.
+    const last = await db.from("agent_alerts")
+      .select("payload")
+      .eq("tenant_id", first.tenant_id)
+      .eq("alert_type", "founder_meeting_reminder_failed")
+      .eq("subject_id", first.appointment_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!last.error && rows.every((row) => reportedFailureIds(last.data).has(row.id))) continue;
     const lines = rows.slice(0, 5).map((row) =>
       `${row.kind} ${row.channel === "sms" ? "text" : "email"}: ${clipText(row.last_error || "unknown", 140, "...")}`,
     );
