@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cronMatches } from "../src/cron-match";
-import { CRON_TABLE, forwardingEnabled } from "../src/index";
+import { cronMatches, isValidCronExpression, isValidTimeZone } from "../src/cron-match";
+import { CRON_TABLE, cronEntryMatches, forwardingEnabled } from "../src/index";
 
 // The kill switch decides whether 28 production routes get called. It must be
 // permissive about SPELLING (an operator writing "true" must not silently get a
@@ -26,10 +26,121 @@ test("fan-out releases every unread response body", () => {
 
 const at = (iso: string) => new Date(iso);
 
+// The exact UTC matcher replaced by this change. Keeping it in the regression
+// test proves the optional-zone default does not move any existing due minute.
+function legacyCronMatches(expr: string, instant: Date): boolean {
+  const partMatches = (part: string, value: number) => {
+    if (part === "*") return true;
+    const step = part.match(/^\*\/(\d+)$/);
+    if (step) return value % Number(step[1]) === 0;
+    const range = part.match(/^(\d+)-(\d+)(?:\/(\d+))?$/);
+    if (range) {
+      const [lo, hi, stride] = [Number(range[1]), Number(range[2]), Number(range[3] || 1)];
+      return value >= lo && value <= hi && (value - lo) % stride === 0;
+    }
+    return Number(part) === value;
+  };
+  const fieldMatches = (field: string, value: number) => field.split(",").some((part) => partMatches(part, value));
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = expr.trim().split(/\s+/);
+  const dateOk = dayOfMonth !== "*" && dayOfWeek !== "*"
+    ? fieldMatches(dayOfMonth, instant.getUTCDate()) || fieldMatches(dayOfWeek, instant.getUTCDay())
+    : fieldMatches(dayOfMonth, instant.getUTCDate()) && fieldMatches(dayOfWeek, instant.getUTCDay());
+  return fieldMatches(minute, instant.getUTCMinutes()) &&
+    fieldMatches(hour, instant.getUTCHours()) &&
+    fieldMatches(month, instant.getUTCMonth() + 1) &&
+    dateOk;
+}
+
 test("every table expression parses", () => {
+  assert.equal(CRON_TABLE.length, 23, "the existing registry has 23 schedules");
   for (const e of CRON_TABLE) {
     assert.doesNotThrow(() => cronMatches(e.schedule, at("2026-08-31T00:00:00Z")), e.schedule);
+    assert.equal(isValidCronExpression(e.schedule), true, `${e.path}: ${e.schedule}`);
+    if (e.timeZone !== undefined) assert.equal(isValidTimeZone(e.timeZone), true, `${e.path}: ${e.timeZone}`);
   }
+});
+
+test("the optional zone defaults to UTC, preserving all 23 existing schedules", () => {
+  const first = Date.parse("2026-10-31T00:00:00Z");
+  const last = Date.parse("2026-11-03T00:00:00Z");
+  for (const entry of CRON_TABLE) {
+    assert.equal(entry.timeZone, undefined, `${entry.path} must remain on its current implicit UTC behavior`);
+    for (let time = first; time <= last; time += 60_000) {
+      const instant = new Date(time);
+      assert.equal(
+        cronMatches(entry.schedule, instant),
+        legacyCronMatches(entry.schedule, instant),
+        `${entry.path} changed at ${instant.toISOString()}`,
+      );
+    }
+  }
+});
+
+test("day names are case-insensitive and work as singles, comma lists, and ranges", () => {
+  const week = [
+    ["SUN", "2026-11-01T09:00:00Z"],
+    ["mon", "2026-11-02T09:00:00Z"],
+    ["TuE", "2026-11-03T09:00:00Z"],
+    ["WED", "2026-11-04T09:00:00Z"],
+    ["thu", "2026-11-05T09:00:00Z"],
+    ["FRI", "2026-11-06T09:00:00Z"],
+    ["sat", "2026-11-07T09:00:00Z"],
+  ] as const;
+  for (const [name, iso] of week) {
+    assert.equal(cronMatches(`0 9 * * ${name}`, at(iso)), true, name);
+  }
+  assert.equal(cronMatches("0 9 * * MON,wed,FRI", at("2026-11-04T09:00:00Z")), true);
+  assert.equal(cronMatches("0 9 * * MON,wed,FRI", at("2026-11-05T09:00:00Z")), false);
+  for (const iso of ["2026-11-02T09:00:00Z", "2026-11-04T09:00:00Z", "2026-11-06T09:00:00Z"]) {
+    assert.equal(cronMatches("0 9 * * mon-FRI", at(iso)), true, iso);
+  }
+  for (const iso of ["2026-11-01T09:00:00Z", "2026-11-07T09:00:00Z"]) {
+    assert.equal(cronMatches("0 9 * * mon-FRI", at(iso)), false, iso);
+  }
+});
+
+test("invalid day names and time zones fail closed", () => {
+  for (const expr of ["0 9 * * FUNDAY", "0 9 * * MONDAY", "0 9 * * MON-FUNDAY", "0 9 * * MON,,FRI"]) {
+    assert.equal(isValidCronExpression(expr), false, expr);
+    assert.equal(cronMatches(expr, at("2026-11-02T09:00:00Z")), false, expr);
+  }
+  assert.equal(isValidTimeZone("America/Toronto"), true);
+  assert.equal(isValidTimeZone("UTC"), true);
+  for (const zone of ["", "+01:00", "Toronto", "Mars/Olympus_Mons", "America/Not_A_Zone"]) {
+    assert.equal(isValidTimeZone(zone), false, zone);
+    assert.equal(cronMatches("0 9 * * MON", at("2026-11-02T14:00:00Z"), zone), false, zone);
+  }
+});
+
+test("a Toronto wall-clock schedule follows the 2026 fall-back transition", () => {
+  const entry = { path: "/test", schedule: "0 9 * * SUN", timeZone: "America/Toronto" };
+  // Oct 25 is still EDT (UTC-4); Nov 1 is EST after the clocks fall back (UTC-5).
+  assert.equal(cronEntryMatches(entry, at("2026-10-25T13:00:00Z")), true);
+  assert.equal(cronEntryMatches(entry, at("2026-10-25T14:00:00Z")), false);
+  assert.equal(cronEntryMatches(entry, at("2026-11-01T13:00:00Z")), false);
+  assert.equal(cronEntryMatches(entry, at("2026-11-01T14:00:00Z")), true);
+  assert.equal(cronEntryMatches({ ...entry, timeZone: "America/Not_A_Zone" }, at("2026-11-01T14:00:00Z")), false);
+});
+
+test("Toronto fixed times use the first fall-back occurrence", () => {
+  const fallBack = { path: "/fixed-fall", schedule: "30 1 * * *", timeZone: "America/Toronto" };
+  assert.equal(cronEntryMatches(fallBack, at("2026-11-01T05:30:00Z")), true, "first 01:30 EDT fires");
+  assert.equal(cronEntryMatches(fallBack, at("2026-11-01T06:30:00Z")), false, "repeated 01:30 EST does not fire twice");
+});
+
+test("Toronto fixed times shift once through the spring gap", () => {
+  const springForward = { path: "/fixed-spring", schedule: "30 2 * * *", timeZone: "America/Toronto" };
+  assert.equal(cronEntryMatches(springForward, at("2026-03-08T07:30:00Z")), true, "missing 02:30 is pushed to 03:30 EDT");
+  assert.equal(cronEntryMatches(springForward, at("2026-03-08T06:30:00Z")), false, "01:30 EST is not the shifted run");
+  assert.equal(cronEntryMatches(springForward, at("2026-03-08T08:30:00Z")), false, "the shifted run happens only once");
+});
+
+test("Toronto every-hour schedules keep both elapsed hours across DST", () => {
+  const hourly = { path: "/hourly", schedule: "0 * * * *", timeZone: "America/Toronto" };
+  assert.equal(cronEntryMatches(hourly, at("2026-11-01T05:00:00Z")), true, "01:00 EDT");
+  assert.equal(cronEntryMatches(hourly, at("2026-11-01T06:00:00Z")), true, "01:00 EST");
+  assert.equal(cronEntryMatches(hourly, at("2026-03-08T06:00:00Z")), true, "01:00 EST");
+  assert.equal(cronEntryMatches(hourly, at("2026-03-08T07:00:00Z")), true, "03:00 EDT; the missing wall hour creates no phantom run");
 });
 
 test("fixed daily: 0 3 * * *", () => {

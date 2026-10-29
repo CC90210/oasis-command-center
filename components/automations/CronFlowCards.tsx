@@ -39,6 +39,29 @@ export function lastRunLine(flow: CronFlow, now: number): { tone: "ok" | "failed
     : { tone: "failed", text: `Failed (${flow.last.status || "no answer"})${ms} · ${when}` };
 }
 
+/** The next instant in the schedule's own zone, including the active DST abbreviation. PURE. */
+export function nextRunText(flow: Pick<CronFlow, "nextAt" | "timeZone">): string | null {
+  if (!flow.nextAt) return null;
+  const instant = new Date(flow.nextAt);
+  if (Number.isNaN(instant.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: flow.timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "short",
+    }).formatToParts(instant);
+    const value = (kind: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === kind)?.value;
+    const hour = value("hour");
+    const minute = value("minute");
+    const zone = value("timeZoneName");
+    return hour && minute && zone ? `next ${hour}:${minute} ${zone}` : null;
+  } catch {
+    return null;
+  }
+}
+
 const DOT: Record<"ok" | "failed" | "none", string> = {
   ok: "bg-status-engaged",
   failed: "bg-status-hot",
@@ -67,6 +90,7 @@ export function CronFlowList({ flows, now }: { flows: CronFlow[] | null; now: nu
         <ul className="divide-y divide-bg-border">
           {flows.map((flow) => {
             const line = lastRunLine(flow, now);
+            const next = nextRunText(flow);
             return (
               <li key={flow.path} className="grid gap-1 py-2.5 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.3fr)] sm:gap-3">
                 <div className="min-w-0">
@@ -83,7 +107,7 @@ export function CronFlowList({ flows, now }: { flows: CronFlow[] | null; now: nu
                   </p>
                   <p className="text-fg-dim">
                     {flow.day.total > 0 ? `${flow.day.ok}/${flow.day.total} OK in 24 h` : "No runs in 24 h"}
-                    {flow.nextAt ? ` · next ${new Date(flow.nextAt).toISOString().slice(11, 16)} UTC` : ""}
+                    {next ? ` · ${next}` : ""}
                   </p>
                 </div>
               </li>

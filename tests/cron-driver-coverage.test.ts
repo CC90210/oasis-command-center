@@ -24,6 +24,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
+import { isValidCronExpression, isValidTimeZone } from "../workers/oasis-cc-cron/src/cron-match";
 
 // 2026-08-30 (PR #347): the crons moved OUT of vercel.json into an inert
 // registry. Vercel's scheduler died silently on 08-06 while reporting the
@@ -37,7 +38,7 @@ import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 // driven - which is the exact presence-not-contribution blindness that let
 // eighteen crons die invisibly the first time.
 const vercelJson = JSON.parse(readFileSync("config/cron-registry.json", "utf8")) as {
-  crons?: Array<{ path: string; schedule: string }>;
+  crons?: Array<{ path: string; schedule: string; timeZone?: string }>;
 };
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 const workerConfig = readFileSync("workers/oasis-cc-cron/wrangler.jsonc", "utf8");
@@ -88,6 +89,11 @@ const RANGES: Array<[string, number, number]> = [
   ["day-of-week", 0, 7],
 ];
 for (const cron of crons) {
+  assert.ok(isValidCronExpression(cron.schedule), `${cron.path}: invalid cron "${cron.schedule}"`);
+  assert.ok(
+    cron.timeZone === undefined || isValidTimeZone(cron.timeZone),
+    `${cron.path}: invalid IANA time zone "${cron.timeZone}"`,
+  );
   const fields = cron.schedule.trim().split(/\s+/);
   assert.equal(fields.length, 5, `${cron.path}: cron needs 5 fields, got "${cron.schedule}"`);
   fields.forEach((field, i) => {
@@ -96,6 +102,7 @@ for (const cron of crons) {
       const spec = part.split("/")[0]; // strip step
       if (spec === "*") continue;
       for (const n of spec.split("-")) {
+        if (i === 4 && /^(SUN|MON|TUE|WED|THU|FRI|SAT)$/i.test(n)) continue;
         const v = Number(n);
         assert.ok(
           Number.isInteger(v) && v >= lo && v <= hi,
@@ -105,6 +112,12 @@ for (const cron of crons) {
     }
   });
 }
+
+assert.equal(isValidCronExpression("0 9 * * SUN,wed,SAT"), true, "the registry accepts case-insensitive day-name lists");
+assert.equal(isValidCronExpression("0 9 * * MON-FRI"), true, "the registry accepts named weekday ranges");
+assert.equal(isValidCronExpression("0 9 * * FUNDAY"), false, "unknown day names fail validation");
+assert.equal(isValidTimeZone("America/Toronto"), true, "a real IANA zone is accepted");
+assert.equal(isValidTimeZone("America/Not_A_Zone"), false, "an unknown zone fails validation");
 
 // ── 3. Cloudflare is live; GitHub is manual-only ───────────────────────────
 //

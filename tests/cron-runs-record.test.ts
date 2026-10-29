@@ -115,11 +115,65 @@ async function main(): Promise<void> {
     assert.match(cards.lastRunLine(health, NOW).text, /^Failed \(500\) · 120 ms · /);
   });
 
+  await check("next run: a fixed Toronto time shifts through the spring gap", () => {
+    assert.equal(
+      runs.nextRunAt("30 2 * * *", Date.parse("2026-03-08T05:00:00Z"), "America/Toronto"),
+      "2026-03-08T07:30:00.000Z",
+      "missing 02:30 shifts once to 03:30 EDT",
+    );
+  });
+
   await check("flow cards: words, names, and a failed read is null", async () => {
     assert.equal(runs.scheduleInWords("* * * * *"), "every minute");
     assert.equal(runs.scheduleInWords("15 * * * *"), "hourly at :15");
     assert.equal(runs.scheduleInWords("47 21 * * *"), "daily at 21:47 UTC");
+    assert.equal(runs.scheduleInWords("0 9 * * *", "America/Toronto"), "daily at 09:00 Toronto time");
     assert.equal(runs.scheduleInWords("0 3 * * 1"), "cron 0 3 * * 1");
+    assert.equal(
+      runs.nextRunAt("0 9 * * MON-FRI", Date.parse("2026-10-30T14:00:00Z"), "America/Toronto"),
+      "2026-11-02T14:00:00.000Z",
+      "after Friday's run, the next weekday stays at 9 Toronto time across the Nov 1 fall-back",
+    );
+    assert.equal(runs.nextRunAt("0 9 * * FUNDAY", NOW, "America/Toronto"), null);
+    assert.equal(runs.nextRunAt("0 9 * * MON", NOW, "America/Not_A_Zone"), null);
+    assert.equal(
+      runs.nextRunAt("30 1 * * *", Date.parse("2026-11-01T04:00:00Z"), "America/Toronto"),
+      "2026-11-01T05:30:00.000Z",
+      "fixed 01:30 chooses the first fall-back occurrence",
+    );
+    assert.equal(
+      runs.nextRunAt("30 1 * * *", Date.parse("2026-11-01T05:31:00Z"), "America/Toronto"),
+      "2026-11-02T06:30:00.000Z",
+      "the repeated fall-back hour is not a second fixed run",
+    );
+    assert.equal(
+      runs.nextRunAt("30 2 * * *", Date.parse("2026-03-08T05:00:00Z"), "America/Toronto"),
+      "2026-03-08T07:30:00.000Z",
+      "missing 02:30 shifts once to 03:30 EDT",
+    );
+    assert.equal(
+      runs.nextRunAt("0 * * * *", Date.parse("2026-11-01T05:01:00Z"), "America/Toronto"),
+      "2026-11-01T06:00:00.000Z",
+      "every-hour keeps the second elapsed 01:00 during fall-back",
+    );
+    assert.equal(
+      runs.nextRunAt("0 * * * *", Date.parse("2026-03-08T06:01:00Z"), "America/Toronto"),
+      "2026-03-08T07:00:00.000Z",
+      "every-hour advances one real hour from 01:00 EST to 03:00 EDT",
+    );
+    assert.equal(
+      cards.nextRunText({ nextAt: "2026-11-02T14:00:00.000Z", timeZone: "America/Toronto" }),
+      "next 09:00 EST",
+    );
+    assert.equal(
+      cards.nextRunText({ nextAt: "2026-11-01T05:30:00.000Z", timeZone: "America/Toronto" }),
+      "next 01:30 EDT",
+    );
+    assert.equal(
+      cards.nextRunText({ nextAt: "2026-03-08T07:30:00.000Z", timeZone: "America/Toronto" }),
+      "next 03:30 EDT",
+    );
+    assert.equal(cards.nextRunText({ nextAt: "2026-10-28T12:15:00.000Z", timeZone: "UTC" }), "next 12:15 UTC");
     assert.equal(cards.cronJobName("/api/cron/finance-books?job=fx-refresh"), "Finance books: FX refresh");
     assert.equal(cards.cronJobName("/api/cron/collect-cc-metrics?write=1"), "Collect CC metrics");
     assert.equal(cards.cronJobName("/api/cron/sla-check"), "SLA check");
