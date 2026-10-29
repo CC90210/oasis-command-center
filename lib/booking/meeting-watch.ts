@@ -36,6 +36,7 @@ import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { MEET_PRESENCE_MS } from "@/lib/meet/participants";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding } from "@/lib/team";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { closeVerifiedFounderMeeting } from "@/lib/website-sales-founder-meeting";
@@ -283,9 +284,36 @@ export type WatchDependencies = {
   isTeammate?: (tenantId: string, userId: string) => Promise<boolean>;
   markNoShow?: typeof markFounderMeetingNoShow;
   alert?: typeof pushWorkspaceAlert;
+  /** A card in the Command Center that stays open whatever its push does. Default: lib/notify/agent-alert. */
+  card?: typeof writeAgentAlert;
 };
 
 export type WatchResult = { guestWaiting: number; noShows: number; held: number; metAfterNoShow: number; errors: string[] };
+
+/**
+ * Whether the meeting's Oasis Meet room still exists. Deleting a room takes its
+ * participants with it, so an empty room is then no proof that nobody came
+ * (Codex review r10).
+ */
+async function roomExists(db: SupabaseClient, tenantId: string, roomId: string): Promise<boolean> {
+  const room = await db.from("meet_rooms").select("id").eq("tenant_id", tenantId).eq("id", roomId).maybeSingle();
+  if (room.error) throw new Error(`meet_room_read_failed:${room.error.message}`);
+  return Boolean(room.data);
+}
+
+/** This meeting's attendance, or null when there is no room to read: none (a Google Meet link), or deleted since. Unknown, never empty. */
+async function attendanceIfRoom(deps: WatchDependencies, appointment: WatchedAppointment, nowMs: number): Promise<Attendance | null> {
+  if (!appointment.meet_room_id) return null;
+  if (!(await roomExists(deps.db, appointment.tenant_id, appointment.meet_room_id))) return null;
+  const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id);
+  const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
+  return attendanceFrom(participants, {
+    startsAt: appointment.scheduled_for,
+    durationMinutes: Number(appointment.duration_minutes) || 15,
+    nowMs,
+    isTeammate: (userId) => teammates.has(userId),
+  });
+}
 
 async function readParticipants(db: SupabaseClient, tenantId: string, roomId: string): Promise<ParticipantRow[]> {
   const result = await db
@@ -454,18 +482,19 @@ const RECOVERY_SCAN_PAGE = 50;
 const RECOVERY_SCAN_MAX = 1000;
 
 /**
- * Every meeting a recovery scan matches, page by page. Meetings already put
- * right keep matching, so reading only the newest page would leave an older one
- * still waiting behind them for good (Codex review r7).
+ * Every row a scan matches, page by page. Rows already dealt with keep
+ * matching (a held call waiting for its outcome, a no-show already put right),
+ * so reading only the newest page would leave an older one behind them for
+ * good (Codex reviews r7, r10).
  */
-async function pageThrough(
+async function pageThrough<T = WatchedAppointment>(
   fetchPage: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
-): Promise<{ rows: WatchedAppointment[]; error: string | null }> {
-  const rows: WatchedAppointment[] = [];
+): Promise<{ rows: T[]; error: string | null }> {
+  const rows: T[] = [];
   for (let from = 0; from < RECOVERY_SCAN_MAX; from += RECOVERY_SCAN_PAGE) {
     const page = await fetchPage(from, from + RECOVERY_SCAN_PAGE - 1);
     if (page.error) return { rows, error: page.error.message };
-    const data = (Array.isArray(page.data) ? page.data : []) as WatchedAppointment[];
+    const data = (Array.isArray(page.data) ? page.data : []) as T[];
     rows.push(...data);
     if (data.length < RECOVERY_SCAN_PAGE) break;
   }
@@ -485,39 +514,39 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
 
   // Meetings in their slot now, or past it within the lookback: OASIS's own
   // workspace only (founder meetings are its program; a retired workspace is
-  // never written to), Oasis Meet rooms only (no join data otherwise), newest
-  // first so meetings left open for an outcome never crowd out a fresh one.
-  const candidates = await deps.db
-    .from("call_appointments")
-    .select(WATCH_COLUMNS)
-    .eq("tenant_id", AI_AUDIT_TENANT_ID)
-    .eq("meeting_kind", "founder_audit")
-    .eq("status", "scheduled")
-    .eq("workflow_status", "active")
-    .eq("calendar_status", "verified")
-    .not("meet_room_id", "is", null)
-    .lte("scheduled_for", new Date(nowMs + 2 * 60_000).toISOString())
-    .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
-    .order("scheduled_for", { ascending: false })
-    .limit(100);
+  // never written to), Oasis Meet rooms only (no join data otherwise). Every
+  // page is read, so held calls waiting for their outcome never crowd out an
+  // older miss (Codex review r10).
+  const candidates = await pageThrough((from, to) =>
+    deps.db
+      .from("call_appointments")
+      .select(WATCH_COLUMNS)
+      .eq("tenant_id", AI_AUDIT_TENANT_ID)
+      .eq("meeting_kind", "founder_audit")
+      .eq("status", "scheduled")
+      .eq("workflow_status", "active")
+      .eq("calendar_status", "verified")
+      .not("meet_room_id", "is", null)
+      .lte("scheduled_for", new Date(nowMs + 2 * 60_000).toISOString())
+      .gte("scheduled_for", new Date(nowMs - NO_SHOW_LOOKBACK_HOURS * 3_600_000).toISOString())
+      .order("scheduled_for", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
   if (candidates.error) {
-    result.errors.push(`meeting_watch_query_failed:${candidates.error.message}`);
+    result.errors.push(`meeting_watch_query_failed:${candidates.error}`);
     return result;
   }
 
-  for (const appointment of (candidates.data || []) as WatchedAppointment[]) {
+  for (const appointment of candidates.rows) {
     try {
       const startMs = Date.parse(appointment.scheduled_for);
       const duration = Number(appointment.duration_minutes) || 15;
-      if (!appointment.meet_room_id) continue; // excluded above; a Google Meet link has no join data
-      const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id);
-      const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
-      const att = attendanceFrom(participants, {
-        startsAt: appointment.scheduled_for,
-        durationMinutes: duration,
-        nowMs,
-        isTeammate: (userId) => teammates.has(userId),
-      });
+      // No room to read (a room deleted after its call, before its outcome was
+      // recorded): unknown, never proof that nobody came. The founder records
+      // it (Codex review r10).
+      const att = await attendanceIfRoom(deps, appointment, nowMs);
+      if (!att) continue;
 
       // 1. The lead is waiting and no host is: tell the founder now, once. Not
       // after a call that happened: a lead whose tab stays open when the host
@@ -686,60 +715,11 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
-      const duration = Number(appointment.duration_minutes) || 15;
-      const readAttendance = async (): Promise<Attendance> => {
-        const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
-        const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
-        return attendanceFrom(participants, {
-          startsAt: appointment.scheduled_for,
-          durationMinutes: duration,
-          nowMs,
-          isTeammate: (userId) => teammates.has(userId),
-        });
-      };
-      // Recorded as missed, then someone came late and they met after all
-      // (Oasis Meet still lets the call happen). While its rebook messages
-      // still wait, the room is read again, whatever the time now:
-      // attendanceFrom only counts the meeting's own window. If the lead and a
-      // host met, the messages stop and the founder is asked to record the
-      // outcome, which corrects the no-show (Codex reviews r8, r9).
-      const waiting = await deps.db
-        .from("website_sales_meeting_notifications")
-        .select("id")
-        .eq("tenant_id", appointment.tenant_id)
-        .eq("appointment_id", appointment.id)
-        .in("kind", ["no_show_rebook", "no_show_followup"])
-        .eq("status", "pending")
-        .limit(1);
-      if (waiting.error) throw new Error(`no_show_waiting_read_failed:${waiting.error.message}`);
-      const att = (waiting.data || []).length > 0 ? await readAttendance() : null;
-      if (att?.met) {
-        const stopped = await deps.db
-          .from("website_sales_meeting_notifications")
-          .update({ status: "cancelled", claimed_at: null, last_error: "met_after_no_show", updated_at: nowIso })
-          .eq("tenant_id", appointment.tenant_id)
-          .eq("appointment_id", appointment.id)
-          .in("kind", ["no_show_rebook", "no_show_followup"])
-          .eq("status", "pending")
-          .select("id");
-        if (stopped.error) throw new Error(`met_after_no_show_cancel_failed:${stopped.error.message}`);
-        if ((stopped.data || []).length > 0) {
-          result.metAfterNoShow += 1;
-          await alert(
-            appointment.tenant_id,
-            [
-              `<b>Met after all: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
-              "It was recorded as missed, then you and the lead were in the call together. Their rebook follow-ups are stopped.",
-              `<a href="${pipelineLeadUrl(appointment.lead_id)}">Record the outcome on the lead</a>`,
-            ].join("\n"),
-            { desk: "sales" },
-          ).catch(() => undefined);
-        }
-        continue;
-      }
       if (lead.founder_meeting_status === "no_show") continue; // recorded already
 
-      const verdict = classifyMeeting(att ?? (await readAttendance()));
+      // No room left to read is unknown, never "nobody came" (Codex review r10).
+      const att = await attendanceIfRoom(deps, appointment, nowMs);
+      const verdict = att ? classifyMeeting(att) : "held";
       const who: NoShowWho = verdict === "held" ? "unknown" : verdict;
       const finished = await markNoShow(
         { tenantId: appointment.tenant_id, appointmentId: appointment.id, who, actorUserId: "system:meeting-watch" },
@@ -792,6 +772,81 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       await restoreRolledBackNoShowMessages(deps.db, appointment, nowIso);
     } catch (error) {
       result.errors.push(`${appointment.id}:${error instanceof Error ? error.message.slice(0, 160) : String(error)}`);
+    }
+  }
+  // A missed call whose rebook messages still wait: if the lead and a host met
+  // after all (someone came late, and Oasis Meet still let the call happen),
+  // the messages stop and the founder is asked to record the outcome, which
+  // corrects the no-show. Driven by the waiting messages, not the meeting's
+  // age, so a late call is caught however long the worker was down; the room
+  // is read whatever the time now, as attendance only counts the meeting's own
+  // window. The founder's card is written BEFORE anything stops, so a failed
+  // push can never lose the prompt (Codex reviews r8, r9, r10).
+  const card = deps.card ?? writeAgentAlert;
+  const waiting = await pageThrough<{ appointment_id: string }>((from, to) =>
+    deps.db
+      .from("website_sales_meeting_notifications")
+      .select("appointment_id")
+      .eq("tenant_id", AI_AUDIT_TENANT_ID)
+      .in("kind", ["no_show_rebook", "no_show_followup"])
+      .eq("status", "pending")
+      .order("appointment_id", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+  if (waiting.error) {
+    result.errors.push(`meeting_watch_waiting_query_failed:${waiting.error}`);
+    return result;
+  }
+  const waitingIds = [...new Set(waiting.rows.map((row) => row.appointment_id))];
+  for (let i = 0; i < waitingIds.length; i += 50) {
+    const batch = await deps.db
+      .from("call_appointments")
+      .select(WATCH_COLUMNS)
+      .eq("tenant_id", AI_AUDIT_TENANT_ID)
+      .eq("meeting_kind", "founder_audit")
+      .eq("status", "no_answer")
+      .eq("workflow_status", "no_show")
+      .in("id", waitingIds.slice(i, i + 50));
+    if (batch.error) {
+      result.errors.push(`meeting_watch_waiting_meetings_failed:${batch.error.message}`);
+      continue;
+    }
+    for (const appointment of (batch.data || []) as WatchedAppointment[]) {
+      try {
+        const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
+        if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
+        const att = await attendanceIfRoom(deps, appointment, nowMs);
+        if (!att?.met) continue;
+        const name = appointment.client_name_snapshot || "a lead";
+        const written = await card({
+          tenantId: appointment.tenant_id,
+          alertType: "founder_meeting_met_after_no_show",
+          severity: "warn",
+          title: `Met after all: ${name}${appointment.company_snapshot ? ` - ${appointment.company_snapshot}` : ""}`,
+          body: [
+            "It was recorded as missed, then you and the lead were in the call together. Their rebook follow-ups are stopped.",
+            `Record the outcome on the lead: ${pipelineLeadUrl(appointment.lead_id)}`,
+          ].join("\n"),
+          subjectType: "call_appointment",
+          subjectId: appointment.id,
+          payload: { appointment_id: appointment.id, lead_id: appointment.lead_id },
+          telegramOncePerOpen: true,
+        });
+        if (written?.stored === false) throw new Error("met_after_no_show_card_not_stored");
+        const stopped = await deps.db
+          .from("website_sales_meeting_notifications")
+          .update({ status: "cancelled", claimed_at: null, last_error: "met_after_no_show", updated_at: nowIso })
+          .eq("tenant_id", appointment.tenant_id)
+          .eq("appointment_id", appointment.id)
+          .in("kind", ["no_show_rebook", "no_show_followup"])
+          .eq("status", "pending")
+          .select("id");
+        if (stopped.error) throw new Error(`met_after_no_show_cancel_failed:${stopped.error.message}`);
+        if ((stopped.data || []).length > 0) result.metAfterNoShow += 1;
+      } catch (error) {
+        result.errors.push(`${appointment.id}:${error instanceof Error ? error.message.slice(0, 160) : String(error)}`);
+      }
     }
   }
   return result;

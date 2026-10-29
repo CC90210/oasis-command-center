@@ -165,6 +165,9 @@ async function main() {
       actor_user_id TEXT, metadata TEXT, created_at TEXT);
     CREATE TABLE meet_participants (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL,
       room_id TEXT NOT NULL, role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
+    CREATE TABLE meet_rooms (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL);
+    INSERT INTO meet_rooms (id, tenant_id) VALUES
+      ('room-waiting', '${OASIS}'), ('room-live', '${OASIS}'), ('room-joined', '${OASIS}');
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,

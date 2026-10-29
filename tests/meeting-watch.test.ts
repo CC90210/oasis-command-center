@@ -164,6 +164,7 @@ async function testWatch() {
     );
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE meet_rooms (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL);
     ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
     ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
@@ -171,7 +172,11 @@ async function testWatch() {
     ${readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8")}
   `);
   const db = createTursoPostgrest(raw) as never;
-  const appointment = async (id: string, start: string, opts: { room?: string | null; consent?: number; tenant?: string } = {}) => {
+  const appointment = async (id: string, start: string, opts: { room?: string | null; consent?: number; tenant?: string; roomDeleted?: boolean } = {}) => {
+    const room = opts.room === undefined ? `room-${id}` : opts.room;
+    if (room && !opts.roomDeleted) {
+      await raw.execute({ sql: "INSERT OR IGNORE INTO meet_rooms (id, tenant_id) VALUES (?, ?)", args: [room, opts.tenant ?? TENANT] });
+    }
     await raw.execute({
       sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
       args: [`lead-${id}`, opts.tenant ?? TENANT, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: id })],
@@ -196,6 +201,7 @@ async function testWatch() {
     });
   const marked: Array<{ appointmentId: string; who: string }> = [];
   const alerts: string[] = [];
+  const cards: Array<Record<string, unknown>> = [];
   const failCloseOnce = new Set<string>(["flaky"]);
   const deps = {
     db,
@@ -217,6 +223,10 @@ async function testWatch() {
     alert: (async (_tenant: string, text: string) => {
       alerts.push(text);
       return { delivered: true, outcome: "sent" };
+    }) as never,
+    card: (async (input: Record<string, unknown>) => {
+      cards.push(input);
+      return { stored: true, telegram: "sent" };
     }) as never,
   };
   const rows = async (id: string) =>
@@ -322,6 +332,23 @@ async function testWatch() {
   await queuedNoShow({ id: "lmo-72", appointment: "late-met-old", message: "no_show_followup_72h", due: "2026-10-31T14:15:00.000Z", revision: 1, missedAt: "2026-10-28T14:00:00.000Z", status: "pending" });
   // A follow-up stopped because the call happened is never brought back by a later rollback (Codex review r9).
   await queuedNoShow({ id: "rb-met", appointment: "rolled-back", message: "no_show_followup_72h", due: "2026-10-31T13:15:00.000Z", revision: 1, missedAt: "2026-10-28T13:00:00.000Z", status: "cancelled", lastError: "met_after_no_show" });
+  // Its room deleted after the call, before the outcome was recorded: unknown, not "nobody came" (Codex review r10).
+  await appointment("room-deleted", START, { roomDeleted: true });
+  // Met late, found 50 hours on (past the 48-hour scans) with its 72-hour follow-up still waiting (Codex review r10).
+  await appointment("late-met-50h", "2026-10-26T14:20:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='late-met-50h'", args: [] });
+  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-late-met-50h'", args: [] });
+  await joinRoom("room-late-met-50h", "guest", "2026-10-26T14:40:00.000Z", { left: "2026-10-26T14:50:00.000Z", seen: "2026-10-26T14:50:00.000Z" });
+  await joinRoom("room-late-met-50h", "host", "2026-10-26T14:41:00.000Z", { left: "2026-10-26T14:50:00.000Z", seen: "2026-10-26T14:50:00.000Z" });
+  await queuedNoShow({ id: "lm50-72", appointment: "late-met-50h", message: "no_show_followup_72h", due: "2026-10-29T14:35:00.000Z", revision: 1, missedAt: "2026-10-26T14:20:00.000Z", status: "pending" });
+  // 101 newer calls held but their outcomes not yet entered, in front of an older miss (Codex review r10).
+  for (let i = 0; i < 101; i++) {
+    const at = new Date(Date.parse("2026-10-28T11:00:00.000Z") + i * 30_000).toISOString();
+    await appointment(`held-${i}`, at);
+    await joinRoom(`room-held-${i}`, "guest", at);
+    await joinRoom(`room-held-${i}`, "host", at);
+  }
+  await appointment("old-miss", "2026-10-28T09:00:00.000Z");
   // A call that happened: the host left at the end, the lead's tab is still open. Not a lead waiting (Codex review r7).
   await appointment("done-call", START);
   await joinRoom("room-done-call", "host", "2026-10-28T16:00:00.000Z", { left: "2026-10-28T16:15:00.000Z", seen: "2026-10-28T16:15:00.000Z" });
@@ -336,7 +363,7 @@ async function testWatch() {
   assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
     marked.map((m) => `${m.appointmentId}:${m.who}`).sort(),
-    ["half-done-old:both_absent", "half-done:both_absent", "lead-only:host_absent", "lobby-missed:host_absent", "nobody:both_absent", "opener-only:both_absent"],
+    ["half-done-old:both_absent", "half-done:both_absent", "lead-only:host_absent", "lobby-missed:host_absent", "nobody:both_absent", "old-miss:both_absent", "opener-only:both_absent"],
     "the missed meetings past their grace minutes are closed with what the room saw, and the half-done one is finished",
   );
   assert.ok(!marked.some((m) => m.appointmentId === "operator-closed"), "a no-show the operator already recorded is left alone");
@@ -376,9 +403,9 @@ async function testWatch() {
     ["no_show_followup_72h:email@2026-10-29T14:35:00.000Z"],
     "a meeting missed 50 hours ago still gets its cancelled follow-up back, and one skipped for its own reason stays skipped",
   );
-  assert.equal(first.held, 2, "the call both joined, and the one that ended with the lead's tab open");
+  assert.equal(first.held, 103, "the call both joined, the one that ended with the lead's tab open, and the 101 waiting for outcomes");
   assert.deepEqual(await rows("done-call"), [], "a lead left in the room after the call is not 'waiting'");
-  assert.equal(first.noShows, 6);
+  assert.equal(first.noShows, 7);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
   const flakyQueued = await rows("flaky");
   assert.equal(flakyQueued.filter((r) => r.kind === "no_show_rebook").length, 1, "the rebook email is queued before the close is tried");
@@ -404,14 +431,24 @@ async function testWatch() {
   );
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 8, "the founder hears about each missed meeting that closed, the finished ones, and the two met after all");
-  assert.equal(first.metAfterNoShow, 2);
+  assert.equal(alerts.length, 7, "the founder hears about each missed meeting that closed, and the finished ones");
+  assert.equal(first.metAfterNoShow, 3);
+  assert.deepEqual(
+    cards.filter((c) => c.alertType === "founder_meeting_met_after_no_show").map((c) => c.subjectId).sort(),
+    ["late-met", "late-met-50h", "late-met-old"],
+    "each call met after all is a card for the founder, written before its follow-ups stop",
+  );
+  const lm50 = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lm50-72'", args: [] });
+  assert.deepEqual([lm50.rows[0].status, lm50.rows[0].last_error], ["cancelled", "met_after_no_show"], "found 50 hours on, it is still stopped");
+  assert.ok(!marked.some((m) => m.appointmentId === "room-deleted"), "a deleted room is not read as a no-show");
+  assert.deepEqual(await rows("room-deleted"), [], "and sends nothing");
+  assert.ok(marked.some((m) => m.appointmentId === "old-miss"), "an older miss behind 101 held calls is still closed");
   const lateMetOld = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lmo-72'", args: [] });
   assert.deepEqual([lateMetOld.rows[0].status, lateMetOld.rows[0].last_error], ["cancelled", "met_after_no_show"], "found hours later, it is still stopped");
   assert.ok(!(await atRevision("rolled-back", 2)).includes("no_show_followup_72h:email"), "a follow-up stopped because the call happened is not restored");
   const lateMet = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lm-24'", args: [] });
   assert.deepEqual([lateMet.rows[0].status, lateMet.rows[0].last_error], ["cancelled", "met_after_no_show"], "a call met after all sends no rebook follow-ups");
-  assert.ok(alerts.some((text) => text.includes("Met after all: Lead late-met")), "and the founder is asked to record the outcome");
+  assert.ok(cards.some((c) => String(c.title).startsWith("Met after all: Lead late-met")), "and the founder is asked to record the outcome");
   assert.ok(!marked.some((m) => m.appointmentId === "late-met"), "it is not marked missed again");
 
   // The next minute: the failed close finishes, nothing else happens twice.
@@ -420,7 +457,7 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 9, "and the founder hears about it once");
+  assert.equal(alerts.length, 8, "and the founder hears about it once");
   assert.equal(second.metAfterNoShow, 0, "a call met after all is told once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
