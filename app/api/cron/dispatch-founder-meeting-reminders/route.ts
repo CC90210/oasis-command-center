@@ -376,10 +376,22 @@ async function markTrackingComplete(db: Db, row: NotificationRow): Promise<void>
   }
 }
 
+/**
+ * A sent reminder whose lead no longer exists: its touch can never be recorded,
+ * so retrying it every run only fails the run. On 2026-10-28 the reminder
+ * canary's cloned lead was gone and the job answered 503 every minute for two
+ * hours.
+ */
+function trackingLeadGone(error: string): boolean {
+  return error.includes("lead_not_found_or_wrong_tenant");
+}
+
 async function markTrackingError(db: Db, row: NotificationRow, error: string): Promise<void> {
   const result = await db.from("website_sales_meeting_notifications").update({
     tracking_attempts: Number(row.tracking_attempts || 0) + 1,
     tracking_last_error: error.slice(0, 500),
+    // Nothing to record it on: stop retrying, and keep the reason.
+    ...(trackingLeadGone(error) ? { tracking_status: "not_required" } : {}),
     updated_at: new Date().toISOString(),
   }).eq("tenant_id", row.tenant_id)
     .eq("id", row.id)
@@ -948,8 +960,8 @@ async function handle(req: NextRequest) {
         await persistReminderTracking(db, raw);
         tracked += 1;
       } catch (error) {
-        trackingFailures += 1;
         const detail = error instanceof Error ? error.message : "reminder_tracking_failed";
+        if (!trackingLeadGone(detail)) trackingFailures += 1;
         console.error("[founder-meeting-reminders] tracking retry failed", raw.id, detail);
         await markTrackingError(db, raw, detail).catch((writeError) => {
           console.error("[founder-meeting-reminders] tracking retry state failed", raw.id, writeError);

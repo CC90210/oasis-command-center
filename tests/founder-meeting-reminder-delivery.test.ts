@@ -93,7 +93,15 @@ stubModule(require.resolve("../lib/notify/alert-route"), {
     return { delivered: true, outcome: "sent" };
   },
 });
-stubModule(require.resolve("../lib/leads/canonical-touch"), { persistCanonicalLeadTouch: async () => undefined });
+stubModule(require.resolve("../lib/leads/canonical-touch"), {
+  // Production's answer for a lead that no longer exists (record_lead_touch, lib/turso-rpc-shim.ts).
+  persistCanonicalLeadTouch: async (_db: unknown, input: { leadId: string }) => {
+    if (input.leadId === "lead-deleted") {
+      throw new Error("canonical_touch_write_failed:record_lead_touch: lead_not_found_or_wrong_tenant");
+    }
+    return undefined;
+  },
+});
 stubModule(require.resolve("../lib/website-sales-founder-meeting"), {
   reconcileFounderMeetingSagas: async () => ({
     considered: 0, activated: 0, cancelled: 0, compensated: 0, released: 0, failed: 0, errors: [],
@@ -562,6 +570,31 @@ async function main() {
     const sent = sharedSends.find((s) => s.subject === "Taylor Smith is waiting in the call room now");
     assert.ok(sent);
     assert.equal(sent.internalAlert, true);
+  });
+
+  // Pass 7: a sent reminder whose lead is gone (2026-10-28: the canary's cloned
+  // lead) stops retrying its timeline write instead of failing every run.
+  await seed.execute({
+    sql: `INSERT INTO website_sales_meeting_notifications (
+      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key,
+      attempt_token, provider, provider_receipt, sent_at, tracking_status
+    ) VALUES ('sent-lead-gone', ?, 'appt-live', 'lead-deleted', 'reminder_15', 15, 'email', ?, 'gone@example.com', ?,
+      'In 15 minutes', 'See you soon', 'sent', 1, 1, 'dedupe-sent-lead-gone', 'attempt-gone', 'oasis_shared_gmail', 'receipt-gone', ?, 'pending')`,
+    args: [OASIS, new Date(Date.now() - 120_000).toISOString(), HOST, new Date(Date.now() - 60_000).toISOString()],
+  });
+  const firstGone = (await dispatch()) as { tracking_failed?: number };
+  const secondGone = (await dispatch()) as { tracking_failed?: number; failed?: number };
+  await check("a sent reminder whose lead is gone stops retrying and stops failing the run", async () => {
+    const row = (await seed.execute({
+      sql: "SELECT tracking_status, tracking_last_error FROM website_sales_meeting_notifications WHERE id = 'sent-lead-gone'",
+      args: [],
+    })).rows[0];
+    assert.equal(row.tracking_status, "not_required");
+    assert.match(String(row.tracking_last_error), /lead_not_found_or_wrong_tenant/);
+    assert.equal(firstGone.tracking_failed, 0, "not counted as a failure when found");
+    assert.equal(secondGone.tracking_failed, 0, "and not retried after");
+    assert.equal(secondGone.failed, 0, "the next run is healthy");
   });
 
   if (failures) {
