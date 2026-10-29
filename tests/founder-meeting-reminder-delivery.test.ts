@@ -746,6 +746,30 @@ async function main() {
     assert.ok(!subjects.has("appt-withheld"), "a withheld reminder keeps its own card");
   });
 
+  // Pass 9 (Codex review r13): held rows are looked at again a little later,
+  // so 51 of them, due before a fresh reminder, never keep it from going out.
+  for (let i = 0; i < 51; i++) {
+    await appointment(`appt-held-${i}`, -20);
+    await seed.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (
+        id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+        recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+      ) VALUES (?, ?, ?, ?, 'no_show_followup', NULL, 'email', ?, 'taylor@example.com', ?, 'Held', 'b', 'pending', 0, 1, ?)`,
+      args: [`held-${i}`, OASIS, `appt-held-${i}`, `lead-appt-held-${i}`, new Date(Date.now() - 10 * 60_000).toISOString(), HOST, `dedupe-held-${i}`],
+    });
+  }
+  await appointment("appt-fresh", 15);
+  await queue("fresh-15", "appt-fresh", "reminder_15", 15, "email", "fresh@example.com");
+  await dispatch();
+  await dispatch();
+  await check("held rows never crowd a fresh reminder out of the batch", async () => {
+    const row = await rowOf("fresh-15");
+    assert.equal(row.status, "sent");
+    const held = await rowOf("held-0");
+    assert.equal(held.status, "pending");
+    assert.ok(Date.parse(String(held.due_at)) > Date.now(), "a held row is looked at again later");
+  });
+
   if (failures) {
     console.error(`founder-meeting-reminder-delivery: ${failures} failure(s)`);
     process.exit(1);

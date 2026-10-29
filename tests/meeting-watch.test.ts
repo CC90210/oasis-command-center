@@ -17,8 +17,10 @@ import {
   buildNoShowMessages,
   classifyMeeting,
   noShowDedupeKey,
+  recoverFounderMeetings,
   watchFounderMeetings,
   type ParticipantRow,
+  type WatchResult,
 } from "../lib/booking/meeting-watch";
 
 const TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
@@ -122,12 +124,15 @@ function testAttendance() {
 
 function testMessages() {
   const url = "https://oasisai.work/book/rebook/abc.def";
-  const missed = buildNoShowMessages({ firstName: "Gideon", offerLabel: "AI automation audit", missedAt: START, rebookUrl: url, who: "both_absent" });
+  const missed = buildNoShowMessages({ firstName: "Gideon", offerLabel: "AI automation audit", durationMinutes: 15, missedAt: START, rebookUrl: url, who: "both_absent" });
   assert.equal(missed.email.subject, "Sorry we missed each other");
   assert.match(missed.email.body, /^Hi Gideon,/);
   assert.ok(missed.email.body.includes(url));
   assert.match(missed.sms, /^OASIS AI: Sorry we missed each other for your AI automation audit\. Pick a new time here: /);
-  const sorry = buildNoShowMessages({ firstName: "Uwem", offerLabel: "AI automation audit", missedAt: START, rebookUrl: url, who: "host_absent" });
+  const sorry = buildNoShowMessages({ firstName: "Uwem", offerLabel: "AI automation audit", durationMinutes: 15, missedAt: START, rebookUrl: url, who: "host_absent" });
+  assert.match(missed.followUps[0].body, /It takes about 15 minutes/);
+  const fleet = buildNoShowMessages({ firstName: "Ana", offerLabel: "Fleet strategy call", durationMinutes: 45, missedAt: START, rebookUrl: url, who: "lead_absent" });
+  assert.match(fleet.followUps[0].body, /It takes about 45 minutes/, "the follow-up gives the meeting's own length (Codex review r13)");
   assert.equal(sorry.email.subject, "I'm sorry I missed our call");
   assert.match(sorry.email.body, /You joined our AI automation audit .* and I wasn't there/);
   assert.deepEqual(missed.followUps.map((f) => f.hours), [24, 72]);
@@ -358,7 +363,23 @@ async function testWatch() {
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='operator-closed'", args: [] });
   await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-operator-closed'", args: [] });
 
-  const first = await watchFounderMeetings(deps);
+  // One dispatcher run: the live pass, then (after the sends) the history pass.
+  const run = async (): Promise<WatchResult> => {
+    const live = await watchFounderMeetings(deps);
+    const history = await recoverFounderMeetings(deps);
+    return {
+      guestWaiting: live.guestWaiting + history.guestWaiting,
+      noShows: live.noShows + history.noShows,
+      held: live.held + history.held,
+      metAfterNoShow: live.metAfterNoShow + history.metAfterNoShow,
+      errors: [...live.errors, ...history.errors],
+      partial: Boolean(live.partial || history.partial),
+    };
+  };
+  const cutShort = await watchFounderMeetings({ ...deps, budgetMs: -1 });
+  assert.equal(cutShort.partial, true, "a pass out of time says so and leaves the rest to the next run (Codex review r13)");
+  assert.equal(cutShort.noShows + cutShort.held + cutShort.guestWaiting, 0);
+  const first = await run();
   assert.equal(first.errors.length, 1, "the failed close is reported");
   assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
@@ -452,7 +473,7 @@ async function testWatch() {
   assert.ok(!marked.some((m) => m.appointmentId === "late-met"), "it is not marked missed again");
 
   // The next minute: the failed close finishes, nothing else happens twice.
-  const second = await watchFounderMeetings(deps);
+  const second = await run();
   assert.deepEqual(second.errors, []);
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));

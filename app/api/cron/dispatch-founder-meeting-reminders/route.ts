@@ -16,7 +16,7 @@ import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import { countSegments } from "@/lib/sms-segments";
-import { leadStillWaiting, meetingHeldAfterAll, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { leadStillWaiting, meetingHeldAfterAll, recoverFounderMeetings, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { clipText } from "@/lib/notify/telegram-format";
@@ -538,13 +538,18 @@ async function processRow(
       // Queued by the watcher before the meeting is closed out: it goes once
       // the close lands (the watcher retries a close that failed). Or a rebook
       // is in flight: it goes, or is put back, once that settles. Or the call
-      // happened after all: the watcher tells the founder, then stops it.
-      await mark(db, row, "pending", {
-        error:
-          verdict === "hold" ? "waiting_for_no_show_close"
-            : verdict === "hold_transition" ? "waiting_for_rebook_to_settle"
-              : "held_met_after_no_show",
-      });
+      // happened after all: the watcher tells the founder, then stops it. A
+      // held row is looked at again a little later, never at the head of every
+      // batch, so held rows can never crowd out a fresh reminder (Codex review r13).
+      const again = verdict === "hold" ? 60_000 : 5 * 60_000;
+      await deferRow(
+        db,
+        row,
+        new Date(Date.now() + again).toISOString(),
+        verdict === "hold" ? "waiting_for_no_show_close"
+          : verdict === "hold_transition" ? "waiting_for_rebook_to_settle"
+            : "held_met_after_no_show",
+      );
       return "held";
     }
     if (verdict !== "send") {
@@ -1148,6 +1153,27 @@ async function handle(req: NextRequest) {
           console.error("[founder-meeting-reminders] retry write failed", candidate.id, writeError);
         });
       }
+    }
+  }
+  // The meetings' history (half-done no-shows, rolled-back rebooks, calls met
+  // after all) after the sends, so no backlog can hold up a reminder (Codex
+  // review r13). What it queues goes out next run.
+  if (bookingMeetRoomDeps().meetRooms) {
+    try {
+      const recovered = await recoverFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
+      watch = {
+        guestWaiting: watch.guestWaiting + recovered.guestWaiting,
+        noShows: watch.noShows + recovered.noShows,
+        held: watch.held + recovered.held,
+        metAfterNoShow: watch.metAfterNoShow + recovered.metAfterNoShow,
+        errors: [...watch.errors, ...recovered.errors],
+        partial: Boolean(watch.partial || recovered.partial),
+      };
+      failures += recovered.errors.length;
+      if (recovered.errors.length) console.error("[founder-meeting-reminders] meeting recovery degraded", recovered.errors);
+    } catch (error) {
+      failures += 1;
+      watch = { ...watch, errors: [...watch.errors, error instanceof Error ? error.message : "meeting_recovery_failed"] };
     }
   }
   if (senderPass.withheld.length) await alertWithheldReminders(senderPass.withheld);

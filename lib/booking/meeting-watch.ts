@@ -158,6 +158,8 @@ function when(iso: string): string {
 export function buildNoShowMessages(input: {
   firstName: string;
   offerLabel: string;
+  /** The meeting's own length: an audit is 15 minutes, other calls 30 or 45 (lib/forms/public-booking-config.ts). */
+  durationMinutes: number;
   missedAt: string;
   rebookUrl: string;
   who: NoShowWho;
@@ -211,7 +213,7 @@ export function buildNoShowMessages(input: {
         `Just making sure my last note reached you. Your link to pick a new time for your ${offer} is still open:`,
         input.rebookUrl,
         "",
-        "It takes about 15 minutes, and there is no cost.",
+        `It takes about ${input.durationMinutes} minutes, and there is no cost.`,
       ].join("\n"),
     },
     {
@@ -286,9 +288,35 @@ export type WatchDependencies = {
   alert?: typeof pushWorkspaceAlert;
   /** A card in the Command Center that stays open whatever its push does. Default: lib/notify/agent-alert. */
   card?: typeof writeAgentAlert;
+  /** Wall-clock milliseconds one pass may take before it leaves the rest to the next run. Default 30 s. */
+  budgetMs?: number;
 };
 
-export type WatchResult = { guestWaiting: number; noShows: number; held: number; metAfterNoShow: number; errors: string[] };
+const WATCH_BUDGET_MS = 30_000;
+
+/** A pass's clock: real time (the injected now() is the meetings' clock, which tests fix). */
+function budget(deps: WatchDependencies): () => boolean {
+  const started = Date.now();
+  const limit = deps.budgetMs ?? WATCH_BUDGET_MS;
+  return () => Date.now() - started > limit;
+}
+
+/** The same rows, starting at a point that moves every minute, so a pass cut short by its budget reaches every row over a few runs. */
+function rotated<T>(rows: T[]): T[] {
+  if (rows.length < 2) return rows;
+  const start = Math.floor(Date.now() / 60_000) % rows.length;
+  return [...rows.slice(start), ...rows.slice(0, start)];
+}
+
+export type WatchResult = {
+  guestWaiting: number;
+  noShows: number;
+  held: number;
+  metAfterNoShow: number;
+  errors: string[];
+  /** The run's time budget ran out; the rest is picked up by later runs. */
+  partial?: boolean;
+};
 
 /**
  * Whether the meeting's Oasis Meet room still exists. Deleting a room takes its
@@ -525,8 +553,12 @@ async function pageThrough<T = WatchedAppointment>(
 }
 
 /**
- * Run both watches once. Never throws: each meeting's failure is collected
- * (and reported by the caller) so one bad row cannot stop the rest.
+ * The live pass, run before the dispatcher sends so what it queues goes out
+ * the same run: a lead waiting alone, and calls just missed closed out with
+ * their rebook messages. Newest first, within a time budget. Never throws:
+ * each meeting's failure is collected (and reported by the caller) so one bad
+ * row cannot stop the rest. The history work is recoverFounderMeetings, run
+ * after the sends (Codex review r13).
  */
 export async function watchFounderMeetings(deps: WatchDependencies): Promise<WatchResult> {
   const nowMs = deps.now();
@@ -534,6 +566,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
+  const overBudget = budget(deps);
 
   // Meetings in their slot now, or past it within the lookback: OASIS's own
   // workspace only (founder meetings are its program; a retired workspace is
@@ -562,6 +595,10 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   }
 
   for (const appointment of candidates.rows) {
+    if (overBudget()) {
+      result.partial = true;
+      break;
+    }
     try {
       const startMs = Date.parse(appointment.scheduled_for);
       const duration = Number(appointment.duration_minutes) || 15;
@@ -638,6 +675,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         const messages = buildNoShowMessages({
           firstName: firstNameOf(appointment.client_name_snapshot),
           offerLabel: appointment.offer_label || "call",
+          durationMinutes: duration,
           missedAt: appointment.scheduled_for,
           rebookUrl,
           who: verdict,
@@ -727,6 +765,24 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     }
   }
 
+  return result;
+}
+
+/**
+ * The history pass, run by the dispatcher AFTER it sends, so no backlog can
+ * hold up a reminder (Codex review r13): half-done no-shows finished,
+ * rolled-back rebooks given their messages back, and calls met after all
+ * caught. Within a time budget, each scan starting where the minute says, so a
+ * pass cut short reaches every meeting over a few runs. Never throws.
+ */
+export async function recoverFounderMeetings(deps: WatchDependencies): Promise<WatchResult> {
+  const nowMs = deps.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
+  const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
+  const alert = deps.alert ?? pushWorkspaceAlert;
+  const overBudget = budget(deps);
+
   // A meeting closed as a no-show whose lead record never took it (the lead
   // write failed after the close): the close cannot be repeated, so finish the
   // lead here and tell the founder, once (Codex review of #775). A lead that
@@ -750,7 +806,11 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     result.errors.push(`meeting_watch_recovery_query_failed:${closedNoShows.error}`);
     return result;
   }
-  for (const appointment of closedNoShows.rows) {
+  for (const appointment of rotated(closedNoShows.rows)) {
+    if (overBudget()) {
+      result.partial = true;
+      return result;
+    }
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
@@ -804,7 +864,11 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     result.errors.push(`meeting_watch_restore_query_failed:${rolledBack.error}`);
     return result;
   }
-  for (const appointment of rolledBack.rows) {
+  for (const appointment of rotated(rolledBack.rows)) {
+    if (overBudget()) {
+      result.partial = true;
+      return result;
+    }
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
@@ -837,7 +901,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     result.errors.push(`meeting_watch_waiting_query_failed:${waiting.error}`);
     return result;
   }
-  const waitingIds = [...new Set(waiting.rows.map((row) => row.appointment_id))];
+  const waitingIds = rotated([...new Set(waiting.rows.map((row) => row.appointment_id))]);
   for (let i = 0; i < waitingIds.length; i += 50) {
     const batch = await deps.db
       .from("call_appointments")
@@ -852,6 +916,10 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       continue;
     }
     for (const appointment of (batch.data || []) as WatchedAppointment[]) {
+      if (overBudget()) {
+        result.partial = true;
+        return result;
+      }
       try {
         const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
         if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
