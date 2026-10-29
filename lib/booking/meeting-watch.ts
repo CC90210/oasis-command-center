@@ -296,9 +296,8 @@ const WATCH_BUDGET_MS = 30_000;
 
 /** A pass's clock: real time (the injected now() is the meetings' clock, which tests fix). */
 function budget(deps: WatchDependencies): () => boolean {
-  const started = Date.now();
-  const limit = deps.budgetMs ?? WATCH_BUDGET_MS;
-  return () => Date.now() - started > limit;
+  const deadline = Date.now() + (deps.budgetMs ?? WATCH_BUDGET_MS);
+  return () => Date.now() > deadline;
 }
 
 /** The same rows, starting at a point that moves every minute, so a pass cut short by its budget reaches every row over a few runs. */
