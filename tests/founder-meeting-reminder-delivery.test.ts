@@ -770,6 +770,41 @@ async function main() {
     assert.ok(Date.parse(String(held.due_at)) > Date.now(), "a held row is looked at again later");
   });
 
+  // Pass 10 (Codex review r15): after an outage the whole rebook sequence is
+  // overdue at once. The rebook email goes; each follow-up waits 20 hours after
+  // the last email the lead was actually sent.
+  await appointment("appt-outage", -73 * 60);
+  await seed.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='appt-outage'", args: [] });
+  await seed.execute({
+    sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+    args: ["lead-appt-outage", OASIS, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: "appt-outage", founder_meeting_status: "no_show" })],
+  });
+  for (const [id, kind, hoursAgo, subject] of [
+    ["outage-rebook", "no_show_rebook", 72.5, "Sorry we missed each other (outage)"],
+    ["outage-24", "no_show_followup", 48.5, "Still want a time? (outage)"],
+    ["outage-72", "no_show_followup", 0.5, "Last note (outage)"],
+  ] as const) {
+    await seed.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (
+        id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+        recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+      ) VALUES (?, ?, 'appt-outage', 'lead-appt-outage', ?, NULL, 'email', ?, 'outage@example.com', ?, ?, 'Your link: https://oasisai.work/book/rebook/x.y', 'pending', 0, 1, ?)`,
+      args: [id, OASIS, kind, new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), HOST, subject, `dedupe-${id}`],
+    });
+  }
+  await dispatch();
+  await check("after an outage the rebook email goes, and each follow-up waits 20 hours after it", async () => {
+    assert.equal((await rowOf("outage-rebook")).status, "sent");
+    for (const id of ["outage-24", "outage-72"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending", id);
+      assert.equal(row.last_error, "spaced_from_last_message", id);
+      const waits = Date.parse(String(row.due_at)) - Date.now();
+      assert.ok(waits > 19 * 3_600_000 && waits <= 20 * 3_600_000, `${id} waits about 20 hours`);
+    }
+    assert.ok(!sharedSends.some((s) => String(s.subject).includes("(outage)") && s.subject !== "Sorry we missed each other (outage)"));
+  });
+
   if (failures) {
     console.error(`founder-meeting-reminder-delivery: ${failures} failure(s)`);
     process.exit(1);

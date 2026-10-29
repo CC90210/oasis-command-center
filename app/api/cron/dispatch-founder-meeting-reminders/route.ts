@@ -556,6 +556,13 @@ async function processRow(
       await mark(db, row, "skipped", { error: verdict });
       return "skipped";
     }
+    if (row.kind === "no_show_followup") {
+      const notBefore = await followUpNotBefore(db, row);
+      if (notBefore && Date.parse(notBefore) > Date.now()) {
+        await deferRow(db, row, notBefore, "spaced_from_last_message");
+        return "held";
+      }
+    }
   } else {
     const decision = meetingNotificationDecision({
       workflowStatus: appointment.workflow_status,
@@ -899,6 +906,41 @@ async function processRow(
   }
 }
 
+/**
+ * One deadline for the whole run, inside the route's 60-second maxDuration
+ * (Codex review r15). The live watch gets a capped share and must leave room
+ * for the sends; the history pass only uses what is left before reporting, so
+ * the failure alerts and the health row always get written.
+ */
+const RUN_DEADLINE_MS = 45_000;
+const LIVE_WATCH_MAX_MS = 15_000;
+const RESERVED_FOR_SENDS_MS = 20_000;
+const RESERVED_FOR_REPORTING_MS = 5_000;
+
+/** A rebook follow-up goes no sooner than this after the last rebook email the lead was actually sent. */
+const FOLLOW_UP_SPACING_MS = 20 * 3_600_000;
+
+/**
+ * The earliest a no-show follow-up may go: 20 hours after the last rebook
+ * email this meeting's lead was actually sent, so a sequence drained after an
+ * outage never lands all at once (Codex review r15). Null when none was sent.
+ */
+async function followUpNotBefore(db: Db, row: NotificationRow): Promise<string | null> {
+  const sent = await db.from("website_sales_meeting_notifications")
+    .select("sent_at")
+    .eq("tenant_id", row.tenant_id)
+    .eq("appointment_id", row.appointment_id)
+    .in("kind", ["no_show_rebook", "no_show_followup"])
+    .eq("channel", "email")
+    .eq("status", "sent")
+    .order("sent_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (sent.error) throw new Error(`follow_up_spacing_read_failed:${sent.error.message}`);
+  const last = Date.parse(String((sent.data as { sent_at?: string | null } | null)?.sent_at || ""));
+  return Number.isFinite(last) ? new Date(last + FOLLOW_UP_SPACING_MS).toISOString() : null;
+}
+
 /** The notification ids a reminder-failure card already reported (its payload, as stored). */
 function reportedFailureIds(card: unknown): Set<string> {
   let payload: unknown = (card as { payload?: unknown } | null)?.payload;
@@ -999,6 +1041,7 @@ async function alertFailedReminders(db: Db, now: string): Promise<number> {
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const runDeadline = Date.now() + RUN_DEADLINE_MS;
   const db = getServiceSupabase();
   const now = new Date().toISOString();
   const stale = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
@@ -1092,7 +1135,12 @@ async function handle(req: NextRequest) {
   // column and no join data, so there is nothing to watch (Codex review).
   if (bookingMeetRoomDeps().meetRooms) {
     try {
-      watch = await watchFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
+      watch = await watchFounderMeetings({
+        db,
+        now: () => Date.now(),
+        origin: SITE_ORIGIN,
+        budgetMs: Math.min(LIVE_WATCH_MAX_MS, runDeadline - RESERVED_FOR_SENDS_MS - RESERVED_FOR_REPORTING_MS - Date.now()),
+      });
     } catch (error) {
       watch = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
     }
@@ -1158,9 +1206,13 @@ async function handle(req: NextRequest) {
   // The meetings' history (half-done no-shows, rolled-back rebooks, calls met
   // after all) after the sends, so no backlog can hold up a reminder (Codex
   // review r13). What it queues goes out next run.
-  if (bookingMeetRoomDeps().meetRooms) {
+  const recoveryBudget = runDeadline - RESERVED_FOR_REPORTING_MS - Date.now();
+  if (bookingMeetRoomDeps().meetRooms && recoveryBudget <= 0) {
+    // No time left this run: the history waits for the next one.
+    watch = { ...watch, partial: true };
+  } else if (bookingMeetRoomDeps().meetRooms) {
     try {
-      const recovered = await recoverFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
+      const recovered = await recoverFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN, budgetMs: recoveryBudget });
       watch = {
         guestWaiting: watch.guestWaiting + recovered.guestWaiting,
         noShows: watch.noShows + recovered.noShows,
