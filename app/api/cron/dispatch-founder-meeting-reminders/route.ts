@@ -20,7 +20,7 @@ import { watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-wa
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
-import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -853,7 +853,7 @@ async function alertFailedReminders(db: Db, runStartedAt: string): Promise<void>
   }
   for (const [tenantId, rows] of byTenant) {
     const lines = rows.slice(0, 5).map((row) =>
-      `- ${escapeTelegramHtml(row.kind)} ${row.channel === "sms" ? "text" : "email"}: ${escapeTelegramHtml((row.last_error || "unknown").slice(0, 140))} <a href="${pipelineLeadUrl(row.lead_id)}">lead</a>`,
+      `- ${escapeTelegramHtml(row.kind)} ${row.channel === "sms" ? "text" : "email"}: ${clipAndEscape(row.last_error || "unknown", 140)} <a href="${pipelineLeadUrl(row.lead_id)}">lead</a>`,
     );
     await pushWorkspaceAlert(
       tenantId,
@@ -953,20 +953,28 @@ async function handle(req: NextRequest) {
   // Calls in their slot or just past it: the founder's "lead is waiting" note,
   // and missed meetings closed out with the lead's rebook link queued. Before
   // the due query, so what it queues goes out in this same run.
-  let watch: WatchResult;
-  try {
-    watch = await watchFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
-  } catch (error) {
-    watch = { guestWaiting: 0, noShows: 0, held: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
+  let watch: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, errors: [] };
+  // Only where Oasis Meet rooms exist (the Turso data plane, as
+  // bookingMeetRoomDeps decides): on the Supabase fallback there is no room
+  // column and no join data, so there is nothing to watch (Codex review).
+  if (bookingMeetRoomDeps().meetRooms) {
+    try {
+      watch = await watchFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
+    } catch (error) {
+      watch = { guestWaiting: 0, noShows: 0, held: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
+    }
   }
   if (watch.errors.length) console.error("[founder-meeting-reminders] meeting watch degraded", watch.errors);
+  // The due cutoff is taken AFTER the watcher, so what it just queued (a "lead
+  // is waiting" note, a rebook link) goes out in this same run (Codex review).
+  const dueBy = new Date().toISOString();
 
   // Founder meetings are OASIS-only today; the retired-tenant exclusion keeps
   // it that way if a retired tenant ever carries a queued reminder.
   const due = await db.from("website_sales_meeting_notifications")
     .select("id,tenant_id")
     .eq("status", "pending")
-    .lte("due_at", now)
+    .lte("due_at", dueBy)
     .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("due_at", { ascending: true })
     .limit(BATCH_LIMIT);

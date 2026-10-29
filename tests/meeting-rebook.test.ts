@@ -373,6 +373,16 @@ function testSourceContracts() {
     "a replay never activates a meeting the lead record does not show",
   );
   assert.match(replay, /pending_request_id === requestId/, "a move reserved under this request resumes instead of closing the link");
+  const dispatcher = readFileSync("app/api/cron/dispatch-founder-meeting-reminders/route.ts", "utf8");
+  assert.ok(
+    dispatcher.indexOf("if (bookingMeetRoomDeps().meetRooms) {") > 0 &&
+      dispatcher.indexOf("if (bookingMeetRoomDeps().meetRooms) {") < dispatcher.indexOf("watchFounderMeetings({"),
+    "the room watcher runs only where Oasis Meet rooms exist (never on the Supabase fallback)",
+  );
+  assert.ok(
+    dispatcher.indexOf("const dueBy = new Date().toISOString();") > dispatcher.indexOf("watchFounderMeetings({"),
+    "the due cutoff is taken after the watcher",
+  );
   assert.ok(
     replay.indexOf("lead.stage !== REBOOK_LEAD_STAGE") > 0 &&
       replay.indexOf("lead.stage !== REBOOK_LEAD_STAGE") < replay.indexOf("rescheduleVerifiedFounderMeeting("),

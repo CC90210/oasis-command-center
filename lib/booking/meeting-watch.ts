@@ -86,13 +86,19 @@ export function attendanceFrom(
   const until = start + (input.durationMinutes + ATTENDANCE_LATE_MINUTES) * 60_000;
   const presentNow = (row: ParticipantRow) =>
     !row.left_at && !row.removed_at && Date.parse(row.last_seen_at) > input.nowMs - MEET_PRESENCE_MS;
+  // In the room from joining until last heard from (plus the presence
+  // window). A left_at can be the CLEANUP time of a browser that vanished
+  // (leaveStale), long after its last heartbeat, so it only ever shortens
+  // the stay, never stretches it into a meeting it missed (Codex review).
   const interval = (row: ParticipantRow): [number, number] | null => {
     const joined = Date.parse(row.joined_at);
     if (!Number.isFinite(joined)) return null;
-    const ended = presentNow(row)
-      ? input.nowMs
-      : Date.parse(row.left_at || row.removed_at || row.last_seen_at);
-    return [joined, Number.isFinite(ended) ? Math.max(joined, ended) : joined];
+    if (presentNow(row)) return [joined, input.nowMs];
+    const seen = Date.parse(row.last_seen_at);
+    const heardUntil = Number.isFinite(seen) ? seen + MEET_PRESENCE_MS : joined;
+    const stamped = Date.parse(row.left_at || row.removed_at || "");
+    const ended = Number.isFinite(stamped) ? Math.min(stamped, heardUntil) : heardUntil;
+    return [joined, Math.max(joined, ended)];
   };
   const clip = (span: [number, number] | null): [number, number] | null => {
     if (!span) return null;
@@ -281,6 +287,58 @@ async function readParticipants(db: SupabaseClient, tenantId: string, roomId: st
     .eq("room_id", roomId);
   if (result.error) throw new Error(`meet_participants_read_failed:${result.error.message}`);
   return (result.data || []) as ParticipantRow[];
+}
+
+/**
+ * A missed meeting whose rebook was rolled back (compensation restores the
+ * no-show at a higher revision and cancels its notifications): requeue its
+ * rebook messages that never went out, at the current revision, so the lead
+ * still gets their link and follow-ups. Nothing is done when the current
+ * revision already has its own rebook messages, or none were ever queued.
+ */
+async function restoreRolledBackNoShowMessages(
+  db: SupabaseClient,
+  appointment: WatchedAppointment,
+  nowIso: string,
+): Promise<number> {
+  const existing = await db
+    .from("website_sales_meeting_notifications")
+    .select("id,kind,channel,recipient,sender_user_id,subject,body,due_at,status,sent_at,appointment_revision,dedupe_key")
+    .eq("tenant_id", appointment.tenant_id)
+    .eq("appointment_id", appointment.id)
+    .in("kind", ["no_show_rebook", "no_show_followup"]);
+  if (existing.error) throw new Error(`no_show_restore_read_failed:${existing.error.message}`);
+  const rows = (existing.data || []) as Array<Record<string, unknown>>;
+  if (rows.some((row) => Number(row.appointment_revision) === appointment.revision)) return 0;
+  const unsent = rows.filter(
+    (row) => Number(row.appointment_revision) < appointment.revision && row.status === "cancelled" && !row.sent_at,
+  );
+  let restored = 0;
+  for (const row of unsent) {
+    const parts = String(row.dedupe_key).split(":");
+    const dedupeKey = [appointment.id, String(appointment.revision), ...parts.slice(2)].join(":");
+    const due = String(row.due_at) > nowIso ? String(row.due_at) : nowIso;
+    if (
+      await insertNotification(db, {
+        id: randomUUID(),
+        tenant_id: appointment.tenant_id,
+        appointment_id: appointment.id,
+        lead_id: appointment.lead_id,
+        kind: row.kind,
+        reminder_minutes_before: null,
+        channel: row.channel,
+        due_at: due,
+        recipient: row.recipient,
+        sender_user_id: row.sender_user_id,
+        subject: row.subject ?? null,
+        body: row.body,
+        appointment_revision: appointment.revision,
+        dedupe_key: dedupeKey,
+        updated_at: nowIso,
+      })
+    ) restored += 1;
+  }
+  return restored;
 }
 
 /** The signed-in participants who are members of the workspace. A read that fails throws: this run skips the meeting. */
@@ -519,12 +577,14 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   for (const appointment of (closedNoShows.data || []) as WatchedAppointment[]) {
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
-      if (
-        !lead ||
-        lead.stage !== REBOOK_LEAD_STAGE ||
-        lead.calendar_appointment_id !== appointment.id ||
-        lead.founder_meeting_status === "no_show"
-      ) continue;
+      if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
+      if (lead.founder_meeting_status === "no_show") {
+        // Recorded already. If a rebook failed and was rolled back, the meeting
+        // is the no-show again at a HIGHER revision and its rebook messages
+        // were cancelled with the move: put the unsent ones back (Codex review).
+        await restoreRolledBackNoShowMessages(deps.db, appointment, nowIso);
+        continue;
+      }
       const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
       const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
       const verdict = classifyMeeting(

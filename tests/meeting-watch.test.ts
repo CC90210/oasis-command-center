@@ -29,14 +29,16 @@ const NOW = Date.parse("2026-10-28T16:20:00.000Z");
 const START = "2026-10-28T16:00:00.000Z";
 
 function participant(role: string, joinedAt: string, opts: Partial<ParticipantRow> = {}): ParticipantRow {
+  // Two minutes in the room unless the case says otherwise (Vivian's real test visit lasted 18 s);
+  // a participant who leaves on purpose was last heard from as they left.
+  const leftAt = opts.left_at === undefined ? new Date(Date.parse(joinedAt) + 120_000).toISOString() : opts.left_at;
   return {
     role,
     user_id: role === "host" ? HOST : null,
     joined_at: joinedAt,
-    // Two minutes in the room unless the case says otherwise (Vivian's real test visit lasted 18 s).
-    left_at: opts.left_at === undefined ? new Date(Date.parse(joinedAt) + 120_000).toISOString() : opts.left_at,
+    left_at: leftAt,
     removed_at: null,
-    last_seen_at: opts.last_seen_at ?? joinedAt,
+    last_seen_at: opts.last_seen_at ?? leftAt ?? joinedAt,
     ...opts,
   };
 }
@@ -80,6 +82,15 @@ function testAttendance() {
   );
   assert.deepEqual([apart.guestJoined, apart.hostJoined, apart.met], [true, true, false], "a host testing the room at 15:40 never met a lead waiting at 16:00");
   assert.equal(classifyMeeting(apart), "missed_each_other");
+  // A vanished browser's left_at is the CLEANUP time; presence ends when it was last heard from (Codex review).
+  const stale = attendanceFrom(
+    [
+      participant("host", "2026-10-28T15:40:00.000Z", { last_seen_at: "2026-10-28T15:42:00.000Z", left_at: "2026-10-28T16:00:02.000Z" }),
+      participant("guest", "2026-10-28T16:00:00.000Z", { left_at: "2026-10-28T16:10:00.000Z", last_seen_at: "2026-10-28T16:09:58.000Z" }),
+    ],
+    slot,
+  );
+  assert.equal(stale.met, false, "a host last seen at 15:42 did not meet a lead who came at 16:00, whatever the cleanup stamped");
   // Someone signed in to ANOTHER workspace is the lead's side, not OASIS.
   const outsider = attendanceFrom(
     [participant("guest", "2026-10-28T16:00:00.000Z", { user_id: "client-of-another-workspace" })],
@@ -163,8 +174,9 @@ async function testWatch() {
   const joinRoom = (room: string, role: string, at: string, opts: { left?: string | null; seen?: string; userId?: string | null } = {}) =>
     raw.execute({
       sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      // Ten minutes in the room unless the case says otherwise.
-      args: [TENANT, room, role, opts.userId === undefined ? (role === "host" ? HOST : null) : opts.userId, at, opts.seen ?? at,
+      // Ten minutes in the room unless the case says otherwise, last heard from as they left.
+      args: [TENANT, room, role, opts.userId === undefined ? (role === "host" ? HOST : null) : opts.userId, at,
+        opts.seen ?? (opts.left === undefined ? new Date(Date.parse(at) + 600_000).toISOString() : opts.left ?? at),
         opts.left === undefined ? new Date(Date.parse(at) + 600_000).toISOString() : opts.left],
     });
   const marked: Array<{ appointmentId: string; who: string }> = [];
@@ -213,6 +225,18 @@ async function testWatch() {
   // Closed as a no-show earlier, but its lead write failed: the watcher finishes the lead.
   await appointment("half-done", "2026-10-28T14:00:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='half-done'", args: [] });
+  // A rebook that failed and was rolled back: the no-show again at revision 2, its rebook messages cancelled.
+  await appointment("rolled-back", "2026-10-28T13:00:00.000Z");
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show', revision=2 WHERE id='rolled-back'", args: [] });
+  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-rolled-back'", args: [] });
+  for (const [id, kind, due] of [["rb-email", "no_show_rebook", "2026-10-28T13:15:00.000Z"], ["rb-24", "no_show_followup", "2026-10-29T13:15:00.000Z"]] as const) {
+    await raw.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel,
+              due_at, recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key, last_error)
+            VALUES (?, ?, 'rolled-back', 'lead-rolled-back', ?, NULL, 'email', ?, 'rb@example.com', ?, 's', 'link', 'cancelled', 0, 1, ?, 'booking_compensated')`,
+      args: [id, TENANT, kind, due, HOST, `rolled-back:1:${kind}:email`],
+    });
+  }
   // Closed and recorded by the operator's route: left alone.
   await appointment("operator-closed", "2026-10-28T14:30:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='operator-closed'", args: [] });
@@ -227,6 +251,16 @@ async function testWatch() {
     "the missed meetings past their grace minutes are closed with what the room saw, and the half-done one is finished",
   );
   assert.ok(!marked.some((m) => m.appointmentId === "operator-closed"), "a no-show the operator already recorded is left alone");
+  const restored = await raw.execute({
+    sql: "SELECT kind, status, appointment_revision, due_at FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2 ORDER BY kind",
+    args: [],
+  });
+  assert.deepEqual(
+    restored.rows.map((r) => `${r.kind}:${r.status}`),
+    ["no_show_followup:pending", "no_show_rebook:pending"],
+    "a rolled-back rebook gets its unsent rebook messages back at the current revision",
+  );
+  assert.equal(restored.rows.find((r) => r.kind === "no_show_followup")?.due_at, "2026-10-29T13:15:00.000Z", "a future follow-up keeps its time");
   assert.equal(first.held, 1);
   assert.equal(first.noShows, 4);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
@@ -257,6 +291,8 @@ async function testWatch() {
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
   assert.equal(alerts.length, 5, "and the founder hears about it once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
+  const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
+  assert.equal(Number(restoredAgain.rows[0].n), 2, "restored once, not again");
 }
 
 async function main() {

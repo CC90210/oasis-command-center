@@ -150,7 +150,7 @@ async function main() {
       to_phone TEXT, to_email TEXT, subject TEXT, content TEXT, content_preview TEXT,
       actor_user_id TEXT, metadata TEXT, created_at TEXT);
     CREATE TABLE meet_participants (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL,
-      room_id TEXT NOT NULL, role TEXT NOT NULL, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
+      room_id TEXT NOT NULL, role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
@@ -498,6 +498,24 @@ async function main() {
     const row = await rowOf("locked-followup");
     assert.equal(row.status, "pending");
     assert.equal(row.last_error, "appointment_delivery_or_transition_in_progress");
+  });
+
+  // Pass 5e: the watcher finds a lead waiting alone and the note goes out in the SAME run.
+  await appointment("appt-waiting", -2);
+  await seed.execute({ sql: "UPDATE call_appointments SET meet_room_id = 'room-waiting' WHERE id = 'appt-waiting'", args: [] });
+  await seed.execute({
+    sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, 'room-waiting', 'guest', NULL, ?, ?, NULL)",
+    args: [OASIS, new Date(Date.now() - 90_000).toISOString(), new Date(Date.now() - 2_000).toISOString()],
+  });
+  await dispatch();
+  await check("a lead waiting alone is told to the founder in the same run the watcher sees it", async () => {
+    const row = (await seed.execute({
+      sql: "SELECT status, recipient FROM website_sales_meeting_notifications WHERE appointment_id = 'appt-waiting' AND kind = 'host_guest_waiting'",
+      args: [],
+    })).rows[0];
+    assert.ok(row, "the note was queued");
+    assert.equal(row.status, "sent");
+    assert.equal(row.recipient, HOST_EMAIL);
   });
 
   // Pass 6: the founder's "lead is waiting" note during the call.
