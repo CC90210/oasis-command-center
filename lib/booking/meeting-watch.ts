@@ -285,7 +285,7 @@ export type WatchDependencies = {
   alert?: typeof pushWorkspaceAlert;
 };
 
-export type WatchResult = { guestWaiting: number; noShows: number; held: number; errors: string[] };
+export type WatchResult = { guestWaiting: number; noShows: number; held: number; metAfterNoShow: number; errors: string[] };
 
 async function readParticipants(db: SupabaseClient, tenantId: string, roomId: string): Promise<ParticipantRow[]> {
   const result = await db
@@ -383,10 +383,14 @@ async function restoreRolledBackNoShowMessages(
 }
 
 /** The signed-in participants who are members of the workspace. A read that fails throws: this run skips the meeting. */
-async function teammatesAmong(deps: WatchDependencies, tenantId: string, rows: ParticipantRow[]): Promise<Set<string>> {
+async function teammatesAmong(
+  isTeammate: WatchDependencies["isTeammate"],
+  tenantId: string,
+  rows: ParticipantRow[],
+): Promise<Set<string>> {
   const ids = [...new Set(rows.map((row) => row.user_id).filter((id): id is string => typeof id === "string" && id.length > 0))];
   const check =
-    deps.isTeammate ??
+    isTeammate ??
     (async (tenant: string, userId: string) => (await memberStanding(tenant, userId)).standing !== "not_member");
   const out = new Set<string>();
   for (const id of ids) if (await check(tenantId, id)) out.add(id);
@@ -414,6 +418,30 @@ function signedRebookUrl(deps: WatchDependencies, appointment: WatchedAppointmen
 
 function firstNameOf(name: string | null): string {
   return (name || "").trim().split(/\s+/)[0]?.slice(0, 60) || "";
+}
+
+/**
+ * Is the lead still waiting in the room with no host, for a call that has not
+ * happened? Read live for a "lead is waiting" note about to go out: one held up
+ * by a mail failure or the appointment lease may be stale by then (Codex
+ * review r8).
+ */
+export async function leadStillWaiting(
+  db: SupabaseClient,
+  appointment: { tenant_id: string; meet_room_id: string | null; scheduled_for: string; duration_minutes: number | null },
+  nowMs: number,
+  isTeammate?: WatchDependencies["isTeammate"],
+): Promise<boolean> {
+  if (!appointment.meet_room_id) return false;
+  const participants = await readParticipants(db, appointment.tenant_id, appointment.meet_room_id);
+  const teammates = await teammatesAmong(isTeammate, appointment.tenant_id, participants);
+  const att = attendanceFrom(participants, {
+    startsAt: appointment.scheduled_for,
+    durationMinutes: Number(appointment.duration_minutes) || 15,
+    nowMs,
+    isTeammate: (userId) => teammates.has(userId),
+  });
+  return att.guestPresentNow && !att.hostPresentNow && !att.met;
 }
 
 const RECOVERY_SCAN_PAGE = 50;
@@ -445,7 +473,7 @@ async function pageThrough(
 export async function watchFounderMeetings(deps: WatchDependencies): Promise<WatchResult> {
   const nowMs = deps.now();
   const nowIso = new Date(nowMs).toISOString();
-  const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, errors: [] };
+  const result: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
 
@@ -477,7 +505,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       const duration = Number(appointment.duration_minutes) || 15;
       if (!appointment.meet_room_id) continue; // excluded above; a Google Meet link has no join data
       const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id);
-      const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
+      const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
       const att = attendanceFrom(participants, {
         startsAt: appointment.scheduled_for,
         durationMinutes: duration,
@@ -652,18 +680,52 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
     try {
       const lead = await loadRebookLead(deps.db, appointment.tenant_id, appointment.lead_id);
       if (!lead || lead.stage !== REBOOK_LEAD_STAGE || lead.calendar_appointment_id !== appointment.id) continue;
-      if (lead.founder_meeting_status === "no_show") continue; // recorded already
-
-      const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
-      const teammates = await teammatesAmong(deps, appointment.tenant_id, participants);
-      const verdict = classifyMeeting(
-        attendanceFrom(participants, {
+      const duration = Number(appointment.duration_minutes) || 15;
+      const readAttendance = async (): Promise<Attendance> => {
+        const participants = await readParticipants(deps.db, appointment.tenant_id, appointment.meet_room_id || "");
+        const teammates = await teammatesAmong(deps.isTeammate, appointment.tenant_id, participants);
+        return attendanceFrom(participants, {
           startsAt: appointment.scheduled_for,
-          durationMinutes: Number(appointment.duration_minutes) || 15,
+          durationMinutes: duration,
           nowMs,
           isTeammate: (userId) => teammates.has(userId),
-        }),
-      );
+        });
+      };
+      // Recorded as missed, then someone came late and they met after all
+      // (Oasis Meet still lets the call happen). While a late join can still
+      // count, the room is read again; if the lead and a host met, the rebook
+      // follow-ups stop and the founder is asked to record the outcome, which
+      // corrects the no-show (Codex review r8).
+      const lateJoinCounts =
+        nowMs <= Date.parse(appointment.scheduled_for) + (duration + ATTENDANCE_LATE_MINUTES + 5) * 60_000;
+      const att = lateJoinCounts ? await readAttendance() : null;
+      if (att?.met) {
+        const stopped = await deps.db
+          .from("website_sales_meeting_notifications")
+          .update({ status: "cancelled", claimed_at: null, last_error: "met_after_no_show", updated_at: nowIso })
+          .eq("tenant_id", appointment.tenant_id)
+          .eq("appointment_id", appointment.id)
+          .in("kind", ["no_show_rebook", "no_show_followup"])
+          .eq("status", "pending")
+          .select("id");
+        if (stopped.error) throw new Error(`met_after_no_show_cancel_failed:${stopped.error.message}`);
+        if ((stopped.data || []).length > 0) {
+          result.metAfterNoShow += 1;
+          await alert(
+            appointment.tenant_id,
+            [
+              `<b>Met after all: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
+              "It was recorded as missed, then you and the lead were in the call together. Their rebook follow-ups are stopped.",
+              `<a href="${pipelineLeadUrl(appointment.lead_id)}">Record the outcome on the lead</a>`,
+            ].join("\n"),
+            { desk: "sales" },
+          ).catch(() => undefined);
+        }
+        continue;
+      }
+      if (lead.founder_meeting_status === "no_show") continue; // recorded already
+
+      const verdict = classifyMeeting(att ?? (await readAttendance()));
       const who: NoShowWho = verdict === "held" ? "unknown" : verdict;
       const finished = await markNoShow(
         { tenantId: appointment.tenant_id, appointmentId: appointment.id, who, actorUserId: "system:meeting-watch" },

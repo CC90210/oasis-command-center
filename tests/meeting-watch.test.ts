@@ -306,6 +306,13 @@ async function testWatch() {
   // Closed as a no-show 20 hours ago, its lead write lost, behind all of those.
   await appointment("half-done-old", "2026-10-27T20:00:00.000Z");
   await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='half-done-old'", args: [] });
+  // Recorded as missed at +15, then the lead came late and the host joined them: met after all (Codex review r8).
+  await appointment("late-met", START);
+  await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id='late-met'", args: [] });
+  await raw.execute({ sql: "UPDATE tenant_records SET data = json_set(data, '$.founder_meeting_status', 'no_show') WHERE id = 'lead-late-met'", args: [] });
+  await joinRoom("room-late-met", "guest", "2026-10-28T16:17:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
+  await joinRoom("room-late-met", "host", "2026-10-28T16:18:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
+  await queuedNoShow({ id: "lm-24", appointment: "late-met", message: "no_show_followup_24h", due: "2026-10-29T16:15:00.000Z", revision: 1, missedAt: START, status: "pending" });
   // A call that happened: the host left at the end, the lead's tab is still open. Not a lead waiting (Codex review r7).
   await appointment("done-call", START);
   await joinRoom("room-done-call", "host", "2026-10-28T16:00:00.000Z", { left: "2026-10-28T16:15:00.000Z", seen: "2026-10-28T16:15:00.000Z" });
@@ -388,7 +395,12 @@ async function testWatch() {
   );
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 6, "the founder hears about each missed meeting that closed, and the finished ones");
+  assert.equal(alerts.length, 7, "the founder hears about each missed meeting that closed, the finished ones, and the one met after all");
+  assert.equal(first.metAfterNoShow, 1);
+  const lateMet = await raw.execute({ sql: "SELECT status, last_error FROM website_sales_meeting_notifications WHERE id = 'lm-24'", args: [] });
+  assert.deepEqual([lateMet.rows[0].status, lateMet.rows[0].last_error], ["cancelled", "met_after_no_show"], "a call met after all sends no rebook follow-ups");
+  assert.ok(alerts.some((text) => text.includes("Met after all: Lead late-met")), "and the founder is asked to record the outcome");
+  assert.ok(!marked.some((m) => m.appointmentId === "late-met"), "it is not marked missed again");
 
   // The next minute: the failed close finishes, nothing else happens twice.
   const second = await watchFounderMeetings(deps);
@@ -396,7 +408,8 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 7, "and the founder hears about it once");
+  assert.equal(alerts.length, 8, "and the founder hears about it once");
+  assert.equal(second.metAfterNoShow, 0, "a call met after all is told once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
   assert.equal(Number(restoredAgain.rows[0].n), 2, "restored once, not again");

@@ -2466,9 +2466,16 @@ export async function closeVerifiedFounderMeeting(input: {
     );
     return;
   }
+  // A meeting recorded as missed that was held after all (the lead or the host
+  // came after the watcher's cutoff, and Oasis Meet still let the call happen):
+  // its completed outcome corrects the no-show, and the rebook messages queued
+  // for the miss are cancelled below (Codex review r8 of #775).
+  const correctingNoShow =
+    input.outcome === "completed" &&
+    appointment.status === "no_answer" &&
+    appointment.workflow_status === "no_show";
   if (
-    appointment.workflow_status !== "active" ||
-    appointment.status !== "scheduled" ||
+    (!correctingNoShow && (appointment.workflow_status !== "active" || appointment.status !== "scheduled")) ||
     appointment.pending_request_id ||
     notificationLeaseIsFresh(appointment, deps.now())
   ) {
@@ -2484,8 +2491,8 @@ export async function closeVerifiedFounderMeeting(input: {
     .eq("id", appointment.id)
     .eq("lead_id", input.leadId)
     .eq("revision", Number(appointment.revision))
-    .eq("status", "scheduled")
-    .eq("workflow_status", "active")
+    .eq("status", correctingNoShow ? "no_answer" : "scheduled")
+    .eq("workflow_status", correctingNoShow ? "no_show" : "active")
     .is("pending_request_id", null);
   closeQuery = nullableMatch(
     closeQuery,

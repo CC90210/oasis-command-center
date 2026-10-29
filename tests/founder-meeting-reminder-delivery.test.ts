@@ -562,16 +562,31 @@ async function main() {
     assert.equal(row.recipient, HOST_EMAIL);
   });
 
-  // Pass 6: the founder's "lead is waiting" note during the call.
+  // Pass 6: the founder's "lead is waiting" note during the call, queued earlier
+  // and held up: it goes only if the lead is still waiting with no host, read
+  // from the room as it is sent (Codex review r8).
+  const queueWaiting = (id: string, appointmentId: string, subject: string) =>
+    seed.execute({
+      sql: `INSERT INTO website_sales_meeting_notifications (
+        id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
+        recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
+      ) VALUES (?, ?, ?, ?, 'host_guest_waiting', NULL, 'email', ?, ?, ?, ?, 'Join now: https://meet.google.com/abc-defg-hij', 'pending', 0, 1, ?)`,
+      args: [id, OASIS, appointmentId, `lead-${appointmentId}`, new Date(Date.now() - 30_000).toISOString(), HOST_EMAIL, HOST, subject, `dedupe-${id}`],
+    });
+  const inRoom = (room: string, role: string, userId: string | null) =>
+    seed.execute({
+      sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+      args: [OASIS, room, role, userId, new Date(Date.now() - 120_000).toISOString(), new Date(Date.now() - 2_000).toISOString()],
+    });
   await appointment("appt-live", -3);
-  await seed.execute({
-    sql: `INSERT INTO website_sales_meeting_notifications (
-      id, tenant_id, appointment_id, lead_id, kind, reminder_minutes_before, channel, due_at,
-      recipient, sender_user_id, subject, body, status, attempts, appointment_revision, dedupe_key
-    ) VALUES ('waiting', ?, 'appt-live', 'lead-appt-live', 'host_guest_waiting', NULL, 'email', ?, ?, ?,
-      'Taylor Smith is waiting in the call room now', 'Join now: https://meet.google.com/abc-defg-hij', 'pending', 0, 1, 'dedupe-waiting')`,
-    args: [OASIS, new Date(Date.now() - 30_000).toISOString(), HOST_EMAIL, HOST],
-  });
+  await seed.execute({ sql: "UPDATE call_appointments SET meet_room_id = 'room-live' WHERE id = 'appt-live'", args: [] });
+  await inRoom("room-live", "guest", null);
+  await queueWaiting("waiting", "appt-live", "Taylor Smith is waiting in the call room now");
+  await appointment("appt-joined", -3);
+  await seed.execute({ sql: "UPDATE call_appointments SET meet_room_id = 'room-joined' WHERE id = 'appt-joined'", args: [] });
+  await inRoom("room-joined", "guest", null);
+  await inRoom("room-joined", "host", HOST);
+  await queueWaiting("waiting-joined", "appt-joined", "Someone else is waiting in the call room now");
   await dispatch();
   await check("the founder's lead-is-waiting note goes out as internal mail during the call", async () => {
     const row = await rowOf("waiting");
@@ -579,6 +594,12 @@ async function main() {
     const sent = sharedSends.find((s) => s.subject === "Taylor Smith is waiting in the call room now");
     assert.ok(sent);
     assert.equal(sent.internalAlert, true);
+  });
+  await check("a held-up waiting note whose host has joined since is dropped, not sent", async () => {
+    const row = await rowOf("waiting-joined");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.last_error, "lead_no_longer_waiting");
+    assert.ok(!sharedSends.some((s) => s.subject === "Someone else is waiting in the call room now"));
   });
 
   // Pass 7: a sent reminder whose lead is gone (2026-10-28: the canary's cloned

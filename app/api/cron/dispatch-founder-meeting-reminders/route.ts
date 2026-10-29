@@ -16,7 +16,7 @@ import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import { countSegments } from "@/lib/sms-segments";
-import { watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { leadStillWaiting, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { clipText } from "@/lib/notify/telegram-format";
@@ -435,7 +435,26 @@ async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: 
   if (row.kind === "host_guest_waiting") {
     if (appointment.status !== "scheduled" || appointment.workflow_status !== "active") return "meeting_closed";
     if (Date.now() - Date.parse(appointment.scheduled_for) > 60 * 60_000) return "meeting_window_passed";
-    return "send";
+    // Queued earlier and held up (a mail failure, the lease): a host may have
+    // joined since, or the lead left. Read the room again (Codex review r8).
+    const room = await db.from("call_appointments")
+      .select("meet_room_id")
+      .eq("tenant_id", row.tenant_id)
+      .eq("id", row.appointment_id)
+      .maybeSingle();
+    if (room.error) throw new Error(`waiting_room_read_failed:${room.error.message}`);
+    const meetRoomId = (room.data as { meet_room_id?: string | null } | null)?.meet_room_id ?? null;
+    const waiting = await leadStillWaiting(
+      db,
+      {
+        tenant_id: row.tenant_id,
+        meet_room_id: meetRoomId,
+        scheduled_for: appointment.scheduled_for,
+        duration_minutes: appointment.duration_minutes,
+      },
+      Date.now(),
+    );
+    return waiting ? "send" : "lead_no_longer_waiting";
   }
   if (appointment.status === "scheduled" && appointment.workflow_status === "active") {
     // Not closed out yet (the watcher queues before it closes): wait, but not
@@ -1013,7 +1032,7 @@ async function handle(req: NextRequest) {
   // Calls in their slot or just past it: the founder's "lead is waiting" note,
   // and missed meetings closed out with the lead's rebook link queued. Before
   // the due query, so what it queues goes out in this same run.
-  let watch: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, errors: [] };
+  let watch: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
   // Only where Oasis Meet rooms exist (the Turso data plane, as
   // bookingMeetRoomDeps decides): on the Supabase fallback there is no room
   // column and no join data, so there is nothing to watch (Codex review).
@@ -1021,7 +1040,7 @@ async function handle(req: NextRequest) {
     try {
       watch = await watchFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN });
     } catch (error) {
-      watch = { guestWaiting: 0, noShows: 0, held: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
+      watch = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
     }
   }
   if (watch.errors.length) console.error("[founder-meeting-reminders] meeting watch degraded", watch.errors);

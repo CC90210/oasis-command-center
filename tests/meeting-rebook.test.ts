@@ -466,6 +466,27 @@ async function testRealCloseKeepsRebookMessages() {
     ["follow-24:pending", "rebook-email:pending", "rebook-sms:pending", "stale-reminder:cancelled"],
     "the no-show close keeps its own rebook messages and still cancels a reminder",
   );
+
+  // Held after all (the lead came late and Oasis Meet let the call happen): the
+  // founder's completed outcome corrects the no-show and cancels its rebook
+  // messages (Codex review r8).
+  await closeVerifiedFounderMeeting({ tenantId: TENANT, leadId: LEAD, appointmentId: APPT, outcome: "completed" }, meetingDeps);
+  const corrected = await appointmentRow(raw);
+  assert.equal(corrected.status, "completed");
+  assert.equal(corrected.workflow_status, "completed");
+  const after = await raw.execute({ sql: "SELECT id, status FROM website_sales_meeting_notifications WHERE appointment_id = ? ORDER BY id", args: [APPT] });
+  assert.deepEqual(
+    after.rows.map((r) => `${r.id}:${r.status}`),
+    ["follow-24:cancelled", "rebook-email:cancelled", "rebook-sms:cancelled", "stale-reminder:cancelled"],
+    "a completed call sends no rebook messages",
+  );
+  await closeVerifiedFounderMeeting({ tenantId: TENANT, leadId: LEAD, appointmentId: APPT, outcome: "completed" }, meetingDeps);
+  assert.equal((await appointmentRow(raw)).status, "completed", "completing twice is a no-op");
+  await assert.rejects(
+    closeVerifiedFounderMeeting({ tenantId: TENANT, leadId: LEAD, appointmentId: APPT, outcome: "no_show" }, meetingDeps),
+    /meeting_close_conflict/,
+    "a completed call is never turned back into a no-show",
+  );
 }
 
 async function main() {
