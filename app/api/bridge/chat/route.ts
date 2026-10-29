@@ -43,6 +43,7 @@ import { readAgentsOwner } from "@/lib/agents-owner";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import {
   cancelHarnessJob,
+  createDisconnectHold,
   enqueueHarnessJob,
   HARNESS_PROTOCOL,
   harnessJobStream,
@@ -51,7 +52,6 @@ import {
 } from "@/lib/bridge/harness-jobs";
 import { readLatestRuntimeProbeReceipts, runtimeProbeReceiptKey } from "@/lib/bridge/runtime-jobs";
 import { liveSeat } from "@/lib/os/seat";
-import { keepAlive } from "@/lib/os/runs/keepalive";
 import { isWorkspaceApiFallbackReason, type WorkspaceApiFallbackReason } from "@/lib/os/runs/types";
 import { runtimeAvailability } from "@/lib/bridge/runtime-availability";
 import {
@@ -458,23 +458,15 @@ export async function POST(req: NextRequest) {
       ? workspaceFallbackResponse("computer_not_answering")
       : jsonError(409, queued.code);
   }
-  // A closed tab or a page left mid-reply aborts the request, and this cancel
-  // is what tells the connector to stop. On Cloudflare Workers the request is
-  // cancelled at exactly that moment, and a promise nobody gave to ctx.waitUntil
-  // is cancelled with it: a bare `void` could leave the job running with nobody
-  // watching. The same hazard, in lib/bridge-chat-persistence.ts, left every
-  // reply unsaved (bridge chat saved no replies; 2026-10-20 audit). keepAlive
-  // hands the cancel to the platform and never throws. It finds the platform
-  // only while this callback still runs inside the request's context (OpenNext
-  // keeps it in an AsyncLocalStorage); where the runtime calls the listener
-  // without it, keepAlive falls back and the cancel runs as it did before. Making
-  // it reliable (a waitUntil hold registered at request time and released on
-  // normal completion) is a separate follow-up, not part of this change.
+  // One hold for every way the person can leave, made now while the request's
+  // context exists. Workers never fires req.signal on a closed tab and drops the
+  // context before a response stream's cancel() runs, so a cancel started there
+  // dies (2026-10-20 audit; workerd probe). The abort listener below, where a
+  // runtime does fire one, and both streams cancel through this hold: the job is
+  // cancelled once, and the hold is let go as soon as the reply ends by itself.
+  const disconnect = createDisconnectHold(`bridge.chat.disconnect-cancel:${queued.job.id}`);
   const cancelForDisconnect = () => {
-    const cancelled = cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }).catch((error) => {
-      console.error("[bridge.chat.disconnect-cancel]", error instanceof Error ? error.message : String(error));
-    });
-    void keepAlive(cancelled, "bridge.chat.disconnect-cancel");
+    void disconnect.run(() => cancelHarnessJob({ tenantId: auth.tenantId, userId: auth.userId, jobId: queued.job.id }));
   };
   if (req.signal.aborted) cancelForDisconnect();
   else req.signal.addEventListener("abort", cancelForDisconnect, { once: true });
@@ -495,7 +487,7 @@ export async function POST(req: NextRequest) {
   const deviceStream = () => {
     // Only the device branch owns bridge persistence. If a never-claimed job
     // falls back, /api/chat persists the turn and its usage exactly once.
-    const persistedBody = teeBridgeChatPersistence(harnessJobStream(queued.job), {
+    const persistedBody = teeBridgeChatPersistence(harnessJobStream(queued.job, { disconnect }), {
       tenantId: auth.tenantId,
       userId: auth.userId,
       agent,
@@ -522,6 +514,7 @@ export async function POST(req: NextRequest) {
     ? harnessJobStreamWithUnclaimedFallback(queued.job, {
         deviceStream,
         fallbackResponse: () => workspaceFallbackResponse("computer_not_answering"),
+        disconnect,
       })
     : deviceStream();
   return new Response(body, { status: 200, headers: sseHeaders });
