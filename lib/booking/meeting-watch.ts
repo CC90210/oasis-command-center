@@ -53,9 +53,9 @@ export const NO_SHOW_FOLLOW_UPS_HOURS = [24, 72] as const;
 export type Attendance = {
   /** The lead was in the room at some point in the meeting's window. */
   guestJoined: boolean;
-  /** Someone from OASIS was in the room at some point in the window. */
+  /** Someone who could open the call (the room's host role) was in the room at some point in the window. */
   hostJoined: boolean;
-  /** The lead and someone from OASIS were in the room AT THE SAME TIME, in the window: the call happened. */
+  /** The lead and a host were in the room AT THE SAME TIME, in the window: the call happened. */
   met: boolean;
   guestPresentNow: boolean;
   hostPresentNow: boolean;
@@ -74,12 +74,16 @@ export type ParticipantRow = {
 /**
  * Who was in the room for this meeting, and who is in it now.
  *
- * OASIS is a signed-in member of the meeting's own workspace (isTeammate):
- * the host, an opener, a second host, whatever room role they got. Everyone
- * else is the lead's side: the public-link visitor, or someone signed in to
- * another workspace (Codex review of #775). A call was HELD only when the two
- * sides' time in the room overlapped inside the meeting's window: a host
- * testing the room at 15:40 and a lead waiting alone at 16:05 never met.
+ * The lead's side is everyone who is not a member of the meeting's own
+ * workspace (isTeammate): the public-link visitor, or someone signed in to
+ * another workspace (Codex review of #775). OASIS's side is whoever could open
+ * the call: a participant with the room's host role (the meeting's host or a
+ * workspace admin, lib/meet/access.ts meetRoleFor). A teammate without it
+ * waits in the lobby with the lead until a host comes (waiting_for_host,
+ * lib/meet/handlers.ts), so it counts as neither side (Codex review r5). A
+ * call was HELD only when the lead and a host were in the room AT THE SAME
+ * TIME inside the meeting's window: a host testing the room at 15:40 and a
+ * lead waiting alone at 16:05 never met.
  */
 export function attendanceFrom(
   rows: ParticipantRow[],
@@ -111,7 +115,7 @@ export function attendanceFrom(
     return a <= b ? [a, b] : null;
   };
   const isTeammate = input.isTeammate ?? (() => true);
-  const oasis = rows.filter((row) => !!row.user_id && isTeammate(row.user_id));
+  const oasis = rows.filter((row) => row.role === "host" && !!row.user_id && isTeammate(row.user_id));
   const lead = rows.filter((row) => !row.user_id || !isTeammate(row.user_id));
   const leadSpans = lead.map((row) => clip(interval(row))).filter((x): x is [number, number] => x !== null);
   const oasisSpans = oasis.map((row) => clip(interval(row))).filter((x): x is [number, number] => x !== null);
@@ -576,12 +580,12 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       const sent = reachable ? " Their rebook link is going out now." : " The lead has moved on in the Pipeline, so nothing was sent.";
       const who =
         verdict === "host_absent"
-          ? `The lead joined and nobody from OASIS did.${reachable ? " An apology with their rebook link is going out now." : sent}`
+          ? `The lead joined and nobody opened the call for them.${reachable ? " An apology with their rebook link is going out now." : sent}`
           : verdict === "lead_absent"
             ? `You joined and the lead did not.${sent}`
             : verdict === "missed_each_other"
               ? `You and the lead were both in the room, at different times, and never met.${sent}`
-              : `Nobody joined.${sent}`;
+              : `Nobody opened the call, and the lead never joined.${sent}`;
       await alert(
         appointment.tenant_id,
         [

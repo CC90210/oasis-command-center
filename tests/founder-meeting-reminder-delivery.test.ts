@@ -85,7 +85,13 @@ stubModule(require.resolve("../lib/tcpa-window"), {
   ) => (check.usedFallback ? effects.skip("sms_timezone_unresolved") : !check.withinWindow ? effects.skip("outside_sms_hours") : effects.send()),
   nextTcpaWindowStart: () => DAYTIME_OPENS,
 });
-stubModule(require.resolve("../lib/notify/agent-alert"), { writeAgentAlert: async () => undefined });
+const agentCards: Array<Record<string, unknown>> = [];
+stubModule(require.resolve("../lib/notify/agent-alert"), {
+  writeAgentAlert: async (card: Record<string, unknown>) => {
+    agentCards.push(card);
+    return { stored: true, telegram: "sent" };
+  },
+});
 const founderAlerts: string[] = [];
 stubModule(require.resolve("../lib/notify/alert-route"), {
   pushWorkspaceAlert: async (_tenant: string, text: string) => {
@@ -378,11 +384,14 @@ async function main() {
     assert.equal(Number(row.attempts), 1);
     assert.match(String(row.last_error), /^quo_refused:/);
   });
-  await check("a reminder that fails is told to the founder in the same run", async () => {
-    const alert = founderAlerts.find((text) => text.includes("Meeting reminder failed"));
-    assert.ok(alert, "an alert went out");
-    assert.match(alert, /reminder_15 text: quo_refused/);
-    assert.match(alert, /\/pipeline\/lead-appt-refused/);
+  await check("a reminder that fails is a card for the founder in the same run, kept whatever its push does", async () => {
+    const card = agentCards.find((c) => c.alertType === "founder_meeting_reminder_failed" && c.subjectId === "appt-refused");
+    assert.ok(card, "a card was written for the meeting (Codex review r5)");
+    assert.equal(card.severity, "urgent");
+    assert.equal(card.title, "Meeting reminder failed");
+    assert.equal(card.telegramOncePerOpen, true, "the meeting's first failure pages; later ones refresh its card");
+    assert.match(String(card.body), /reminder_15 text: quo_refused/);
+    assert.match(String(card.body), /\/pipeline\/lead-appt-refused/);
   });
   quoResult = null;
 

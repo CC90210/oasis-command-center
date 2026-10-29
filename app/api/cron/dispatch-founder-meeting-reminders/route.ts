@@ -19,8 +19,7 @@ import { countSegments } from "@/lib/sms-segments";
 import { watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
-import { pushWorkspaceAlert } from "@/lib/notify/alert-route";
-import { clipAndEscape, escapeTelegramHtml } from "@/lib/notify/telegram-format";
+import { clipText } from "@/lib/notify/telegram-format";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -855,31 +854,45 @@ async function processRow(
 
 /**
  * Every reminder that ended "failed" in this run, told to the founder at once
- * (CC, 2026-10-28: two months of reminders failed and nobody heard). One alert
- * per run that had failures, through the same route as booking alerts, which
- * emails the founder when Telegram refuses and caps itself per hour.
+ * (CC, 2026-10-28: two months of reminders failed and nobody heard). One card
+ * per meeting in the Command Center (Today, Needs you): it stays open whatever
+ * happens to its push, so when Telegram and the email fallback are both down
+ * or capped, the failure is still there to see (Codex review r5). A meeting's
+ * first failure pages; later ones refresh its card.
  */
 async function alertFailedReminders(db: Db, runStartedAt: string): Promise<void> {
   const failed = await db.from("website_sales_meeting_notifications")
-    .select("tenant_id,lead_id,kind,channel,last_error")
+    .select("id,tenant_id,appointment_id,lead_id,kind,channel,last_error")
     .eq("status", "failed")
     .gte("updated_at", runStartedAt)
     .order("updated_at", { ascending: true })
     .limit(20);
-  if (failed.error || !failed.data?.length) return;
-  const byTenant = new Map<string, Array<{ lead_id: string; kind: string; channel: string; last_error: string | null }>>();
-  for (const row of failed.data as Array<{ tenant_id: string; lead_id: string; kind: string; channel: string; last_error: string | null }>) {
-    byTenant.set(row.tenant_id, [...(byTenant.get(row.tenant_id) || []), row]);
+  if (failed.error) {
+    console.error("[founder-meeting-reminders] failed-reminder lookup failed", failed.error.message);
+    return;
   }
-  for (const [tenantId, rows] of byTenant) {
+  type FailedRow = { id: string; tenant_id: string; appointment_id: string; lead_id: string; kind: string; channel: string; last_error: string | null };
+  const byMeeting = new Map<string, FailedRow[]>();
+  for (const row of (failed.data || []) as FailedRow[]) {
+    const key = `${row.tenant_id}:${row.appointment_id}`;
+    byMeeting.set(key, [...(byMeeting.get(key) || []), row]);
+  }
+  for (const rows of byMeeting.values()) {
+    const first = rows[0];
     const lines = rows.slice(0, 5).map((row) =>
-      `- ${escapeTelegramHtml(row.kind)} ${row.channel === "sms" ? "text" : "email"}: ${clipAndEscape(row.last_error || "unknown", 140)} <a href="${pipelineLeadUrl(row.lead_id)}">lead</a>`,
+      `${row.kind} ${row.channel === "sms" ? "text" : "email"}: ${clipText(row.last_error || "unknown", 140, "...")}`,
     );
-    await pushWorkspaceAlert(
-      tenantId,
-      [`<b>Meeting reminder failed</b>`, `${rows.length} reminder(s) could not be sent:`, ...lines].join("\n"),
-      { desk: "sales" },
-    ).catch((error) => console.error("[founder-meeting-reminders] failure alert threw", error));
+    await writeAgentAlert({
+      tenantId: first.tenant_id,
+      alertType: "founder_meeting_reminder_failed",
+      severity: "urgent",
+      title: "Meeting reminder failed",
+      body: [`${rows.length} reminder(s) for this meeting could not be sent.`, ...lines, `Lead: ${pipelineLeadUrl(first.lead_id)}`].join("\n"),
+      subjectType: "call_appointment",
+      subjectId: first.appointment_id,
+      payload: { notification_ids: rows.map((row) => row.id), appointment_id: first.appointment_id, lead_id: first.lead_id },
+      telegramOncePerOpen: true,
+    }).catch((error) => console.error("[founder-meeting-reminders] failure alert threw", error));
   }
 }
 

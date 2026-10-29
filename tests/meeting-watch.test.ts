@@ -63,10 +63,24 @@ function testAttendance() {
   );
   assert.equal(gone.guestPresentNow, false, "not heard from in two minutes is not in the room now");
 
-  // A signed-in teammate who is not the room's host joins as "guest": still OASIS, never the lead.
+  // A signed-in teammate who is not the room's host joins as "guest" and waits in the lobby
+  // until a host comes (Meet's waiting_for_host): never the lead, and not OASIS opening the call.
   const opener = attendanceFrom([participant("guest", "2026-10-28T16:01:00.000Z", { user_id: "opener-1" })], slot);
   assert.equal(opener.guestJoined, false, "a signed-in opener is not the lead");
-  assert.equal(opener.hostJoined, true, "a signed-in opener is OASIS in the room");
+  assert.equal(opener.hostJoined, false, "a teammate in the lobby cannot open the call (Codex review r5)");
+  const lobby = attendanceFrom(
+    [
+      participant("guest", "2026-10-28T16:01:00.000Z", { left_at: null, last_seen_at: new Date(NOW - 5_000).toISOString() }),
+      participant("guest", "2026-10-28T16:02:00.000Z", { user_id: "opener-1", left_at: null, last_seen_at: new Date(NOW - 5_000).toISOString() }),
+    ],
+    slot,
+  );
+  assert.deepEqual(
+    [lobby.guestJoined, lobby.hostJoined, lobby.met, lobby.guestPresentNow, lobby.hostPresentNow],
+    [true, false, false, true, false],
+    "the lead and a teammate waiting together for a host never met, and the lead is waiting",
+  );
+  assert.equal(classifyMeeting(lobby), "host_absent");
 
   // Held means the two sides were in the room AT THE SAME TIME (Codex review of #775).
   const together = attendanceFrom(
@@ -220,6 +234,12 @@ async function testWatch() {
   await appointment("early", "2026-10-28T16:10:00.000Z"); // 10 min in: not yet past the grace minutes
   await appointment("opener-only", START); // only a signed-in opener came: the lead never did
   await joinRoom("room-opener-only", "guest", "2026-10-28T16:01:00.000Z", { userId: "opener-1" });
+  await appointment("lobby-missed", START); // the lead and a non-host teammate waited together; no host came
+  await joinRoom("room-lobby-missed", "guest", "2026-10-28T16:01:00.000Z");
+  await joinRoom("room-lobby-missed", "guest", "2026-10-28T16:02:00.000Z", { userId: "opener-1" });
+  await appointment("lobby-now", "2026-10-28T16:15:00.000Z"); // in its slot: the lead and a teammate in the lobby, no host
+  await joinRoom("room-lobby-now", "guest", "2026-10-28T16:14:00.000Z", { left: null, seen: new Date(NOW - 3_000).toISOString() });
+  await joinRoom("room-lobby-now", "guest", "2026-10-28T16:16:00.000Z", { userId: "opener-1", left: null, seen: new Date(NOW - 3_000).toISOString() });
   await appointment("flaky", START); // its close fails once: the next run finishes it
   await appointment("elsewhere", START, { tenant: OTHER_TENANT }); // another workspace: never touched
   for (let i = 0; i < 30; i++) await appointment(`gmeet-${i}`, "2026-10-28T08:00:00.000Z", { room: null }); // no join data
@@ -289,7 +309,7 @@ async function testWatch() {
   assert.match(first.errors[0], /^flaky:meeting_close_failed/);
   assert.deepEqual(
     marked.map((m) => `${m.appointmentId}:${m.who}`).sort(),
-    ["half-done:both_absent", "lead-only:host_absent", "nobody:both_absent", "opener-only:lead_absent"],
+    ["half-done:both_absent", "lead-only:host_absent", "lobby-missed:host_absent", "nobody:both_absent", "opener-only:both_absent"],
     "the missed meetings past their grace minutes are closed with what the room saw, and the half-done one is finished",
   );
   assert.ok(!marked.some((m) => m.appointmentId === "operator-closed"), "a no-show the operator already recorded is left alone");
@@ -330,7 +350,7 @@ async function testWatch() {
     "a meeting missed 50 hours ago still gets its cancelled follow-up back, and one skipped for its own reason stays skipped",
   );
   assert.equal(first.held, 1);
-  assert.equal(first.noShows, 4);
+  assert.equal(first.noShows, 5);
   assert.deepEqual(await rows("elsewhere"), [], "another workspace's meeting is never written to");
   const flakyQueued = await rows("flaky");
   assert.equal(flakyQueued.filter((r) => r.kind === "no_show_rebook").length, 1, "the rebook email is queued before the close is tried");
@@ -347,9 +367,16 @@ async function testWatch() {
   assert.deepEqual(await rows("gmeet"), [], "a Google Meet call is left for the founder");
   assert.deepEqual(await rows("early"), [], "a call ten minutes in is not missed yet");
   assert.equal((await rows("held")).length, 0);
+  const lobbyMissed = await rows("lobby-missed");
+  assert.ok(lobbyMissed.some((r) => r.kind === "no_show_rebook" && String(r.body).includes("I wasn't there")), "a lead left in the lobby with a teammate gets the apology");
+  assert.deepEqual(
+    (await rows("lobby-now")).map((r) => `${r.kind}:${r.recipient}`),
+    ["host_guest_waiting:conaugh@oasisai.work"],
+    "a teammate in the lobby does not stop the founder hearing that the lead is waiting",
+  );
   const waiting = await rows("now");
   assert.deepEqual(waiting.map((r) => `${r.kind}:${r.recipient}`), ["host_guest_waiting:conaugh@oasisai.work"]);
-  assert.equal(alerts.length, 4, "the founder hears about each missed meeting that closed, and the finished one");
+  assert.equal(alerts.length, 5, "the founder hears about each missed meeting that closed, and the finished one");
 
   // The next minute: the failed close finishes, nothing else happens twice.
   const second = await watchFounderMeetings(deps);
@@ -357,7 +384,7 @@ async function testWatch() {
   assert.equal(second.noShows, 1, "only the meeting whose close failed is closed now");
   assert.ok(marked.some((m) => m.appointmentId === "flaky"));
   assert.equal((await rows("flaky")).filter((r) => r.kind === "no_show_rebook").length, 1, "its messages are not queued twice");
-  assert.equal(alerts.length, 5, "and the founder hears about it once");
+  assert.equal(alerts.length, 6, "and the founder hears about it once");
   assert.equal((await rows("now")).length, 1, "the lead-waiting note goes out once per meeting");
   const restoredAgain = await raw.execute({ sql: "SELECT count(*) AS n FROM website_sales_meeting_notifications WHERE appointment_id = 'rolled-back' AND appointment_revision = 2", args: [] });
   assert.equal(Number(restoredAgain.rows[0].n), 2, "restored once, not again");
