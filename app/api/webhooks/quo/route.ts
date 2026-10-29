@@ -17,8 +17,13 @@
  *   4. ORDER. Quo retries and does not promise order, so each STOP/START first
  *      claims its number in quo_inbound_consent by the event's own time: an
  *      older event than the newest seen is ignored (an old START never lifts a
- *      newer STOP), and only the same delivery may replay (Codex review of #776).
- *   5. 200 once handled. A failed STOP write answers 503 so Quo retries: a STOP
+ *      newer STOP), and a delivery already applied is never applied again
+ *      (Codex reviews of #776).
+ *   5. ONE DATABASE. The STOP list written here must be the one a send reads
+ *      (getServiceSupabase, Turso only under EMPIRE_DATA_BACKEND=turso_cloud).
+ *      In any other mode the intake answers 503 and automated texts stay
+ *      closed (quoIntakeOnServiceBackend).
+ *   6. 200 once handled. A failed STOP write answers 503 so Quo retries: a STOP
  *      honoured late is the violation. Quo is OASIS's own line (client
  *      workspaces cannot connect it), so the tenant is OASIS's.
  *
@@ -36,8 +41,8 @@ import {
 import { randomUUID } from "node:crypto";
 import { isInvalidSuppressionPhoneError, normalizeInboundSmsPhone } from "@/lib/sms-opt-out";
 import { shouldHonorTwilioOptOut, twilioCarrierKeyword } from "@/lib/sms/twilio-inbound";
-import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
+import { quoIntakeOnServiceBackend } from "@/lib/integrations/quo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,10 +86,12 @@ async function recordHealth(input: {
  * Claim this number's consent order AND apply the STOP or START, in ONE write
  * transaction (Codex review of #776): an older START can never land after a
  * newer STOP has been claimed and applied, however the two deliveries
- * interleave. "stale" when a newer STOP/START for the number has already won;
- * a replay of the same delivery (same webhook id and time) applies again,
- * idempotently, to finish a write that failed. The SQL mirrors
- * applyInboundSmsStop / releasePhoneSuppression (lib/sms-opt-out.ts).
+ * interleave. "stale" when a newer STOP/START for the number has already won.
+ * "duplicate" when this very delivery already committed: Quo retries after
+ * losing an answer, and a STOP or START is applied once (Codex review r3). A
+ * write that failed rolled its claim back with it, so the retry applies it.
+ * The SQL mirrors applyInboundSmsStop / releasePhoneSuppression
+ * (lib/sms-opt-out.ts).
  */
 async function applyConsentChange(input: {
   tenantId: string;
@@ -94,7 +101,7 @@ async function applyConsentChange(input: {
   action: "stop" | "start";
   webhookId: string;
   nowIso: string;
-}): Promise<"applied" | "stale"> {
+}): Promise<"applied" | "stale" | "duplicate"> {
   const tx = await getTursoClient().transaction("write");
   try {
     const claim = await tx.execute({
@@ -105,14 +112,18 @@ async function applyConsentChange(input: {
               last_action = excluded.last_action,
               last_webhook_id = excluded.last_webhook_id,
               updated_at = excluded.updated_at
-            WHERE excluded.last_event_at > quo_inbound_consent.last_event_at
-               OR (excluded.last_event_at = quo_inbound_consent.last_event_at
-                   AND excluded.last_webhook_id = quo_inbound_consent.last_webhook_id)`,
+            WHERE excluded.last_event_at > quo_inbound_consent.last_event_at`,
       args: [input.tenantId, input.phoneLast10, input.occurredAt, input.action, input.webhookId, input.nowIso],
     });
     if (claim.rowsAffected === 0) {
+      // Not newer than what the number holds. The claim commits with its STOP
+      // or START, so a claim holding THIS delivery means it was applied.
+      const held = await tx.execute({
+        sql: "SELECT last_webhook_id FROM quo_inbound_consent WHERE tenant_id = ? AND phone_last10 = ?",
+        args: [input.tenantId, input.phoneLast10],
+      });
       await tx.rollback();
-      return "stale";
+      return held.rows[0]?.last_webhook_id === input.webhookId ? "duplicate" : "stale";
     }
     if (input.action === "stop") {
       await tx.execute({
@@ -167,6 +178,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
+  if (!quoIntakeOnServiceBackend()) {
+    // A STOP written here would land where no send looks (Codex review r3).
+    console.error("[quo-webhook] intake off: EMPIRE_DATA_BACKEND is not turso_cloud, so sends would not read this STOP list");
+    return NextResponse.json({ ok: false, error: "intake_needs_turso" }, { status: 503 });
+  }
 
   let payload: unknown;
   try {
@@ -185,6 +201,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let stop = inbound && shouldHonorTwilioOptOut(text);
   let start = inbound && !stop && twilioCarrierKeyword(text) === "start";
   let stale = false;
+  let duplicate = false;
 
   try {
     if (stop || start) {
@@ -204,6 +221,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         stop = false;
         start = false;
       }
+      // Applied when it first arrived: in force, and nothing is done twice.
+      if (outcome === "duplicate") duplicate = true;
     }
   } catch (error) {
     if (isInvalidSuppressionPhoneError(error)) {
@@ -227,10 +246,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       eventId: event.eventId,
       inbound,
       inboundTo: event.to,
-      stop,
+      stop: stop && !duplicate,
     });
   } catch (error) {
     console.error("[quo-webhook] health row write failed", error instanceof Error ? error.message.slice(0, 200) : error);
   }
-  return NextResponse.json({ ok: true, stop, start, stale });
+  return NextResponse.json({ ok: true, stop, start, stale, duplicate });
 }

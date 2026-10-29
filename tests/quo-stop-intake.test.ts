@@ -27,6 +27,7 @@ delete process.env.BRAVO_FORCE_DRY_RUN;
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const QUO_NUMBER = "+13653603976";
 const LEAD_PHONE = "+14165550123";
+const OTHER_PHONE = "+14165550188";
 
 /** Quo's versioned envelope (https://www.quo.com/docs/2026-03-30/webhooks-event-payloads). */
 function received(eventId: string, text: string, createdAt: string, from = LEAD_PHONE) {
@@ -148,19 +149,36 @@ async function main() {
   assert.equal(staleStart.body.stale, true);
   const stillOptedOut = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
   assert.equal(Number(stillOptedOut.rows[0].n), 1, "the newer STOP stands");
-  // A replay of the SAME STOP delivery still goes through (idempotent finish of a failed write).
+  // Quo retrying the SAME STOP delivery: in force, and applied once (Codex review r3).
   const replay = await deliver(received("e1", "Stop please", "2026-10-28T23:10:00.000Z"), { id: "delivery-stop" });
   assert.equal(replay.body.stop, true);
+  assert.equal(replay.body.duplicate, true);
+  // A STOP whose write failed rolled its claim back with it: Quo's retry applies it.
+  await seed.execute({ sql: "ALTER TABLE sunbiz_phone_suppressions RENAME TO sunbiz_phone_suppressions_away", args: [] });
+  const failed = await deliver(received("e-fail", "STOP", "2026-10-28T23:11:00.000Z", OTHER_PHONE), { id: "delivery-fail" });
+  assert.equal(failed.status, 503, "a STOP that could not be written asks Quo to retry");
+  await seed.execute({ sql: "ALTER TABLE sunbiz_phone_suppressions_away RENAME TO sunbiz_phone_suppressions", args: [] });
+  const retried = await deliver(received("e-fail", "STOP", "2026-10-28T23:11:00.000Z", OTHER_PHONE), { id: "delivery-fail" });
+  assert.equal(retried.status, 200);
+  assert.equal(retried.body.duplicate, false, "the retry is not mistaken for a delivery already applied");
+  const otherSuppressed = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ? AND phone_last10 = ?", args: [OASIS, "4165550188"] });
+  assert.equal(Number(otherSuppressed.rows[0].n), 1, "and the number is on the STOP list");
   // A NEWER START lifts it.
-  const start = await deliver({ id: "e2", type: "message.received", createdAt: "2026-10-28T23:20:00Z", data: { object: { id: "m2", from: LEAD_PHONE, body: "START", direction: "incoming", createdAt: "2026-10-28T23:20:00Z" } } });
+  const startPayload = { id: "e2", type: "message.received", createdAt: "2026-10-28T23:20:00Z", data: { object: { id: "m2", from: LEAD_PHONE, body: "START", direction: "incoming", createdAt: "2026-10-28T23:20:00Z" } } };
+  const start = await deliver(startPayload, { id: "delivery-start" });
   assert.equal(start.status, 200);
   assert.equal(start.body.start, true);
-  const after = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
+  const after = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ? AND phone_last10 = ?", args: [OASIS, "4165550123"] });
   assert.equal(Number(after.rows[0].n), 0);
+  // Quo retrying that START: nothing is recorded or lifted twice (Codex review r3).
+  const startAgain = await deliver(startPayload, { id: "delivery-start" });
+  assert.equal(startAgain.body.duplicate, true);
+  const restoredNotes = await seed.execute({ sql: "SELECT count(*) AS n FROM lead_interactions WHERE type = 'sms_opt_in_restored'", args: [] });
+  assert.equal(Number(restoredNotes.rows[0].n), 1, "one opt-in record for one START");
   // And an older STOP replayed after that START does not re-suppress.
   const oldStop = await deliver(received("e-older-stop", "STOP", "2026-10-28T23:15:00.000Z"));
   assert.equal(oldStop.body.stale, true);
-  const stillLifted = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ?", args: [OASIS] });
+  const stillLifted = await seed.execute({ sql: "SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE tenant_id = ? AND phone_last10 = ?", args: [OASIS, "4165550123"] });
   assert.equal(Number(stillLifted.rows[0].n), 0);
 
   // Overlapping deliveries (Codex review of #776): the order claim and the
@@ -182,6 +200,15 @@ async function main() {
   const hello = await deliver(received("e3", "See you at 2!", "2026-10-28T23:30:00.000Z"));
   assert.equal(hello.status, 200);
   assert.equal(hello.body.stop, false);
+
+  // Not on Turso: a STOP would land where no send reads, so the intake and the
+  // texts are both off (Codex review r3).
+  process.env.EMPIRE_DATA_BACKEND = "supabase_legacy";
+  assert.equal(await quoStopIntakeConnected(OASIS, QUO_NUMBER), false, "automated texts stay off");
+  const offTurso = await deliver(received("e5", "STOP", "2026-10-28T23:35:00.000Z"));
+  assert.equal(offTurso.status, 503);
+  assert.equal(offTurso.body.error, "intake_needs_turso");
+  process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 
   // No key on the Worker: the route says it is not installed.
   delete process.env.QUO_WEBHOOK_SIGNING_KEY;
