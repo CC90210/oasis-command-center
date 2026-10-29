@@ -15,6 +15,11 @@ import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
+import { countSegments } from "@/lib/sms-segments";
+import { leadStillWaiting, meetingHeldAfterAll, recoverFounderMeetings, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { pipelineLeadUrl } from "@/lib/forms/lead-link";
+import { SITE_ORIGIN } from "@/lib/marketing/routes";
+import { clipText } from "@/lib/notify/telegram-format";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -258,6 +263,8 @@ async function acquireAppointmentLease(
   row: NotificationRow,
   appointment: AppointmentState,
   now: string,
+  /** The meeting state the row is for: a live meeting (reminders) or a closed no-show (its rebook messages). */
+  expected: { status: string; workflowStatus: string } = { status: "scheduled", workflowStatus: "active" },
 ): Promise<string | null> {
   const currentToken = appointment.notification_lease_token;
   const currentExpiry = appointment.notification_lease_expires_at;
@@ -274,8 +281,8 @@ async function acquireAppointmentLease(
     .eq("tenant_id", row.tenant_id)
     .eq("lead_id", row.lead_id)
     .eq("id", row.appointment_id)
-    .eq("status", "scheduled")
-    .eq("workflow_status", "active")
+    .eq("status", expected.status)
+    .eq("workflow_status", expected.workflowStatus)
     .eq("calendar_status", "verified")
     .eq("revision", row.appointment_revision);
   query = currentToken
@@ -368,10 +375,22 @@ async function markTrackingComplete(db: Db, row: NotificationRow): Promise<void>
   }
 }
 
+/**
+ * A sent reminder whose lead no longer exists: its touch can never be recorded,
+ * so retrying it every run only fails the run. On 2026-10-28 the reminder
+ * canary's cloned lead was gone and the job answered 503 every minute for two
+ * hours.
+ */
+function trackingLeadGone(error: string): boolean {
+  return error.includes("lead_not_found_or_wrong_tenant");
+}
+
 async function markTrackingError(db: Db, row: NotificationRow, error: string): Promise<void> {
   const result = await db.from("website_sales_meeting_notifications").update({
     tracking_attempts: Number(row.tracking_attempts || 0) + 1,
     tracking_last_error: error.slice(0, 500),
+    // Nothing to record it on: stop retrying, and keep the reason.
+    ...(trackingLeadGone(error) ? { tracking_status: "not_required" } : {}),
     updated_at: new Date().toISOString(),
   }).eq("tenant_id", row.tenant_id)
     .eq("id", row.id)
@@ -394,9 +413,98 @@ async function persistReminderTracking(db: Db, row: NotificationRow): Promise<vo
   await markTrackingComplete(db, row);
 }
 
-/** Mail to OASIS's own founder about a meeting (heads-up), never to the lead. */
+/** Mail to OASIS's own founder about a meeting (heads-up, lead waiting), never to the lead. */
 function isHostKind(kind: string): boolean {
-  return kind === "host_15";
+  return kind === "host_15" || kind === "host_guest_waiting";
+}
+
+function isNoShowKind(kind: string): boolean {
+  return kind === "no_show_rebook" || kind === "no_show_followup";
+}
+
+/**
+ * Whether a row queued after the start still goes out.
+ *  - host_guest_waiting: while the meeting is still on the books (not closed
+ *    or moved), within an hour of its start; later, it would only be noise.
+ *  - no_show_rebook / no_show_followup: while the meeting is still the closed
+ *    no-show they were queued for (a rebook moves it back to "scheduled"), and
+ *    the lead is still at Founder Meeting (not lost, not further on).
+ */
+async function afterStartRowStillDue(db: Db, row: NotificationRow, appointment: AppointmentState): Promise<string> {
+  if (Number(appointment.revision) !== Number(row.appointment_revision)) return "meeting_moved";
+  if (row.kind === "host_guest_waiting") {
+    if (appointment.status !== "scheduled" || appointment.workflow_status !== "active") return "meeting_closed";
+    if (Date.now() - Date.parse(appointment.scheduled_for) > 60 * 60_000) return "meeting_window_passed";
+    // Queued earlier and held up (a mail failure, the lease): a host may have
+    // joined since, or the lead left. Read the room again (Codex review r8).
+    const room = await db.from("call_appointments")
+      .select("meet_room_id")
+      .eq("tenant_id", row.tenant_id)
+      .eq("id", row.appointment_id)
+      .maybeSingle();
+    if (room.error) throw new Error(`waiting_room_read_failed:${room.error.message}`);
+    const meetRoomId = (room.data as { meet_room_id?: string | null } | null)?.meet_room_id ?? null;
+    const waiting = await leadStillWaiting(
+      db,
+      {
+        tenant_id: row.tenant_id,
+        meet_room_id: meetRoomId,
+        scheduled_for: appointment.scheduled_for,
+        duration_minutes: appointment.duration_minutes,
+      },
+      Date.now(),
+    );
+    return waiting ? "send" : "lead_no_longer_waiting";
+  }
+  if (appointment.status === "scheduled" && appointment.workflow_status === "active") {
+    // Not closed out yet (the watcher queues before it closes): wait, but not
+    // past the watcher's own window, after which nothing will close it.
+    const startedMs = Date.parse(appointment.scheduled_for);
+    if (Number.isFinite(startedMs) && startedMs <= Date.now() && Date.now() - startedMs < 48 * 3_600_000) return "hold";
+    return "no_show_never_closed";
+  }
+  // A rebook in flight: wait for it to settle. One that lands moves the
+  // revision on and cancels this row; one rolled back cancels it and the
+  // watcher queues it again at the restored revision. Dropped here, it would
+  // be lost with the rollback (Codex review r4 of #775).
+  if (appointment.workflow_status === "pending_transition") return "hold_transition";
+  if (appointment.status !== "no_answer" || appointment.workflow_status !== "no_show") return "meeting_rebooked_or_closed";
+  const lead = await db.from("tenant_records")
+    .select("data")
+    .eq("tenant_id", row.tenant_id)
+    .eq("entity_type", "lead")
+    .eq("id", row.lead_id)
+    .maybeSingle();
+  if (lead.error) throw new Error(`no_show_lead_read_failed:${lead.error.message}`);
+  const raw = (lead.data as { data?: unknown } | null)?.data;
+  let data: Record<string, unknown> = {};
+  try {
+    data = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : ((raw as Record<string, unknown>) ?? {});
+  } catch {
+    data = {};
+  }
+  if (data.stage !== "founder_meeting_booked") return "lead_moved_on";
+  if (data.calendar_appointment_id !== row.appointment_id) return "lead_has_other_meeting";
+  // The call happened after all (someone came late): never a rebook message.
+  // Held, not dropped, until the watcher has told the founder and stopped it,
+  // whatever it managed this run (Codex review r11).
+  const room = await db.from("call_appointments")
+    .select("meet_room_id")
+    .eq("tenant_id", row.tenant_id)
+    .eq("id", row.appointment_id)
+    .maybeSingle();
+  if (room.error) throw new Error(`no_show_room_read_failed:${room.error.message}`);
+  const held = await meetingHeldAfterAll(
+    db,
+    {
+      tenant_id: row.tenant_id,
+      meet_room_id: (room.data as { meet_room_id?: string | null } | null)?.meet_room_id ?? null,
+      scheduled_for: appointment.scheduled_for,
+      duration_minutes: appointment.duration_minutes,
+    },
+    Date.now(),
+  );
+  return held ? "hold_met" : "send";
 }
 
 async function processRow(
@@ -419,26 +527,63 @@ async function processRow(
     return "skipped";
   }
   const decisionAt = new Date().toISOString();
-  const decision = meetingNotificationDecision({
-    workflowStatus: appointment.workflow_status,
-    appointmentStatus: appointment.status,
-    calendarStatus: appointment.calendar_status,
-    appointmentRevision: Number(appointment.revision),
-    notificationRevision: Number(row.appointment_revision),
-    meetingAt: appointment.scheduled_for,
-    now: decisionAt,
-    transitionStartedAt: appointment.pending_started_at,
-  });
-  if (decision === "hold") {
-    await mark(db, row, "pending", { error: "waiting_for_lifecycle_transition" });
-    return "held";
-  }
-  if (decision === "skip") {
-    await mark(db, row, "skipped", { error: "appointment_no_longer_sendable" });
-    return "skipped";
+  // After the start (lib/booking/meeting-watch.ts): the founder's "lead is
+  // waiting" note, and a missed meeting's rebook link and follow-ups. Each has
+  // its own rule, and each still takes the appointment lease (for the state it
+  // expects), so a rebook landing mid-send waits for it (Codex review).
+  const afterStart = row.kind === "host_guest_waiting" || isNoShowKind(row.kind);
+  if (afterStart) {
+    const verdict = await afterStartRowStillDue(db, row, appointment);
+    if (verdict === "hold" || verdict === "hold_transition" || verdict === "hold_met") {
+      // Queued by the watcher before the meeting is closed out: it goes once
+      // the close lands (the watcher retries a close that failed). Or a rebook
+      // is in flight: it goes, or is put back, once that settles. Or the call
+      // happened after all: the watcher tells the founder, then stops it. A
+      // held row is looked at again a little later, never at the head of every
+      // batch, so held rows can never crowd out a fresh reminder (Codex review r13).
+      const again = verdict === "hold" ? 60_000 : 5 * 60_000;
+      await deferRow(
+        db,
+        row,
+        new Date(Date.now() + again).toISOString(),
+        verdict === "hold" ? "waiting_for_no_show_close"
+          : verdict === "hold_transition" ? "waiting_for_rebook_to_settle"
+            : "held_met_after_no_show",
+      );
+      return "held";
+    }
+    if (verdict !== "send") {
+      await mark(db, row, "skipped", { error: verdict });
+      return "skipped";
+    }
+  } else {
+    const decision = meetingNotificationDecision({
+      workflowStatus: appointment.workflow_status,
+      appointmentStatus: appointment.status,
+      calendarStatus: appointment.calendar_status,
+      appointmentRevision: Number(appointment.revision),
+      notificationRevision: Number(row.appointment_revision),
+      meetingAt: appointment.scheduled_for,
+      now: decisionAt,
+      transitionStartedAt: appointment.pending_started_at,
+    });
+    if (decision === "hold") {
+      await mark(db, row, "pending", { error: "waiting_for_lifecycle_transition" });
+      return "held";
+    }
+    if (decision === "skip") {
+      await mark(db, row, "skipped", { error: "appointment_no_longer_sendable" });
+      return "skipped";
+    }
   }
 
-  const leaseToken = await acquireAppointmentLease(db, row, appointment, decisionAt);
+  const leaseToken = await acquireAppointmentLease(
+    db,
+    row,
+    appointment,
+    decisionAt,
+    isNoShowKind(row.kind) ? { status: "no_answer", workflowStatus: "no_show" } : undefined,
+  );
   if (!leaseToken) {
     await mark(db, row, "pending", { error: "appointment_delivery_or_transition_in_progress" });
     return "held";
@@ -446,6 +591,16 @@ async function processRow(
 
   let retainLeaseUntilRecovery = false;
   try {
+    // A follow-up's order and spacing, read while this run holds the
+    // appointment lease: an overlapping run that just sent is always seen
+    // (Codex review r16).
+    if (row.kind === "no_show_followup") {
+      const wait = await followUpNotBefore(db, row);
+      if (wait) {
+        await deferRow(db, row, wait.at, wait.reason);
+        return "held";
+      }
+    }
     let deliveryRow = row;
     if (row.reminder_minutes_before != null) {
       const tier = Number(row.reminder_minutes_before);
@@ -616,11 +771,12 @@ async function processRow(
       // daytime: moved to the next 8 am-9 pm opening while that is still more
       // than an hour ahead, else left to the email (Codex review of #774).
       const minutesToCall = (Date.parse(appointment.scheduled_for) - Date.now()) / 60_000;
-      if (minutesToCall > 60) {
+      if (isNoShowKind(row.kind) || minutesToCall > 60) {
         const quietHours = checkTcpaWindow(row.recipient, new Date());
         if (!quietHours.usedFallback && !quietHours.withinWindow) {
           const opens = nextTcpaWindowStart(row.recipient, new Date());
-          if (Date.parse(appointment.scheduled_for) - opens.getTime() > 60 * 60_000) {
+          // A missed meeting's rebook text has no call to beat: it always waits for daytime.
+          if (isNoShowKind(row.kind) || Date.parse(appointment.scheduled_for) - opens.getTime() > 60 * 60_000) {
             await deferRow(db, row, opens.toISOString(), "held_for_recipient_daytime");
             return "held";
           }
@@ -645,12 +801,20 @@ async function processRow(
         await retryOrFail(db, row, `sms_conversation_lookup_failed:${priorSms.error.message}`);
         return "failed";
       }
-      deliveryRow = {
-        ...deliveryRow,
-        body: clampSmsBody(withSmsFooter(deliveryRow.body, {
-          firstInConversation: (priorSms.data || []).length === 0,
-        })),
-      };
+      const footed = withSmsFooter(deliveryRow.body, { firstInConversation: (priorSms.data || []).length === 0 });
+      if (isNoShowKind(row.kind)) {
+        // The signed rebook link is the whole point of this text and runs to
+        // ~280 characters: it is sent whole in up to four segments, never
+        // shortened to the meeting-link fallback that would drop it (Codex
+        // review). Longer than that, the email carries it.
+        if (countSegments(footed) > 4) {
+          await mark(db, row, "skipped", { error: "sms_rebook_text_too_long" });
+          return "skipped";
+        }
+        deliveryRow = { ...deliveryRow, body: footed };
+      } else {
+        deliveryRow = { ...deliveryRow, body: clampSmsBody(footed) };
+      }
       // OASIS texts through Quo since 2026-10-26 (Twilio broke). Its own
       // switches and the workspace's STOP list are re-checked in sendQuoSms.
       // A STOP texted back to the Quo number is not read by OASIS yet
@@ -735,7 +899,7 @@ async function processRow(
     }
     return "sent";
   } finally {
-    if (!retainLeaseUntilRecovery) {
+    if (leaseToken && !retainLeaseUntilRecovery) {
       try {
         await releaseAppointmentLease(db, row, leaseToken);
       } catch (error) {
@@ -745,9 +909,165 @@ async function processRow(
   }
 }
 
+/**
+ * One deadline for the whole run, inside the route's 60-second maxDuration
+ * (Codex review r15). The live watch gets a capped share and must leave room
+ * for the sends; the history pass only uses what is left before reporting, so
+ * the failure alerts and the health row always get written.
+ */
+const RUN_DEADLINE_MS = 45_000;
+const LIVE_WATCH_MAX_MS = 15_000;
+const RESERVED_FOR_SENDS_MS = 20_000;
+const RESERVED_FOR_REPORTING_MS = 5_000;
+
+/** A rebook follow-up goes no sooner than this after the last rebook email the lead was actually sent. */
+const FOLLOW_UP_SPACING_MS = 20 * 3_600_000;
+
+/** Where a message sits in its no-show sequence: the rebook email first, then the follow-ups by their hour. */
+function sequenceRank(kind: string, dedupeKey: unknown): number {
+  if (kind === "no_show_rebook") return 0;
+  const hours = /no_show_followup_(\d+)h/.exec(String(dedupeKey ?? ""))?.[1];
+  return hours ? Number(hours) : 1;
+}
+
+/**
+ * When a no-show follow-up may go, or null for now. It waits while an earlier
+ * message of its sequence (the rebook email, an earlier follow-up) is still to
+ * go, so the sequence never arrives backwards (Codex review r16); and it goes
+ * no sooner than 20 hours after the last rebook email the lead was actually
+ * sent, so a sequence drained after an outage never lands at once (Codex
+ * review r15). Read under the appointment lease, so a run that sent a moment
+ * ago is always seen.
+ */
+async function followUpNotBefore(db: Db, row: NotificationRow): Promise<{ at: string; reason: string } | null> {
+  const sequence = await db.from("website_sales_meeting_notifications")
+    .select("id,kind,status,sent_at,dedupe_key")
+    .eq("tenant_id", row.tenant_id)
+    .eq("appointment_id", row.appointment_id)
+    .in("kind", ["no_show_rebook", "no_show_followup"])
+    .eq("channel", "email")
+    .in("status", ["pending", "sending", "sent"]);
+  if (sequence.error) throw new Error(`follow_up_spacing_read_failed:${sequence.error.message}`);
+  const rows = (sequence.data || []) as Array<{ id: string; kind: string; status: string; sent_at: string | null; dedupe_key: string | null }>;
+  const mine = sequenceRank(row.kind, rows.find((other) => other.id === row.id)?.dedupe_key);
+  let lastSent = Number.NaN;
+  for (const other of rows) {
+    if (other.id === row.id) continue;
+    if (other.status === "sent") {
+      const at = Date.parse(String(other.sent_at || ""));
+      if (Number.isFinite(at) && (!Number.isFinite(lastSent) || at > lastSent)) lastSent = at;
+      continue;
+    }
+    if (sequenceRank(other.kind, other.dedupe_key) < mine) {
+      return { at: new Date(Date.now() + 5 * 60_000).toISOString(), reason: "waiting_for_earlier_message" };
+    }
+  }
+  if (!Number.isFinite(lastSent)) return null;
+  const at = lastSent + FOLLOW_UP_SPACING_MS;
+  return at > Date.now() ? { at: new Date(at).toISOString(), reason: "spaced_from_last_message" } : null;
+}
+
+/** The notification ids a reminder-failure card already reported (its payload, as stored). */
+function reportedFailureIds(card: unknown): Set<string> {
+  let payload: unknown = (card as { payload?: unknown } | null)?.payload;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      return new Set();
+    }
+  }
+  const ids = (payload as { notification_ids?: unknown } | null)?.notification_ids;
+  return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+}
+
+/** Failed reminders this recent are (re)alerted: a run that died before alerting, or a card that failed to write, is caught by the next run. */
+const FAILURE_ALERT_WINDOW_MS = 15 * 60_000;
+const FAILURE_ALERT_PAGE = 100;
+
+/**
+ * Every reminder that ended "failed", told to the founder (CC, 2026-10-28: two
+ * months of reminders failed and nobody heard). One urgent card per meeting in
+ * the Command Center (Today, Needs you): it stays open whatever happens to its
+ * push, so when Telegram and the email fallback are both down or capped, the
+ * failure is still there (Codex review r5). A meeting's first failure pages;
+ * later ones refresh its card.
+ *
+ * Every failure of the last 15 minutes is read, page by page, so none is cut
+ * off and a run that died before this point is caught by the next one (Codex
+ * review r6). A host's withheld reminders already have their own card
+ * (alertWithheldReminders) and are left to it. Returns the failures of this
+ * step itself, which count against the run.
+ */
+async function alertFailedReminders(db: Db, now: string): Promise<number> {
+  type FailedRow = { id: string; tenant_id: string; appointment_id: string; lead_id: string; kind: string; channel: string; last_error: string | null };
+  const since = new Date(Date.parse(now) - FAILURE_ALERT_WINDOW_MS).toISOString();
+  const failed: FailedRow[] = [];
+  for (let from = 0; ; from += FAILURE_ALERT_PAGE) {
+    const page = await db.from("website_sales_meeting_notifications")
+      .select("id,tenant_id,appointment_id,lead_id,kind,channel,last_error")
+      .eq("status", "failed")
+      .gte("updated_at", since)
+      .order("updated_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, from + FAILURE_ALERT_PAGE - 1);
+    if (page.error) {
+      console.error("[founder-meeting-reminders] failed-reminder lookup failed", page.error.message);
+      return 1;
+    }
+    const rows = (page.data || []) as FailedRow[];
+    failed.push(...rows);
+    if (rows.length < FAILURE_ALERT_PAGE) break;
+  }
+  const byMeeting = new Map<string, FailedRow[]>();
+  for (const row of failed) {
+    if (row.last_error === "sender_deactivated") continue;
+    const key = `${row.tenant_id}:${row.appointment_id}`;
+    byMeeting.set(key, [...(byMeeting.get(key) || []), row]);
+  }
+  let failures = 0;
+  for (const rows of byMeeting.values()) {
+    const first = rows[0];
+    // Already told: the meeting's last card, open or dismissed, covers every one
+    // of these failures, so a card the founder dismissed stays dismissed until
+    // something new fails (Codex review r11). A read that fails errs loud.
+    const last = await db.from("agent_alerts")
+      .select("payload")
+      .eq("tenant_id", first.tenant_id)
+      .eq("alert_type", "founder_meeting_reminder_failed")
+      .eq("subject_id", first.appointment_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!last.error && rows.every((row) => reportedFailureIds(last.data).has(row.id))) continue;
+    const lines = rows.slice(0, 5).map((row) =>
+      `${row.kind} ${row.channel === "sms" ? "text" : "email"}: ${clipText(row.last_error || "unknown", 140, "...")}`,
+    );
+    try {
+      const card = await writeAgentAlert({
+        tenantId: first.tenant_id,
+        alertType: "founder_meeting_reminder_failed",
+        severity: "urgent",
+        title: "Meeting reminder failed",
+        body: [`${rows.length} reminder(s) for this meeting could not be sent.`, ...lines, `Lead: ${pipelineLeadUrl(first.lead_id)}`].join("\n"),
+        subjectType: "call_appointment",
+        subjectId: first.appointment_id,
+        payload: { notification_ids: rows.map((row) => row.id), appointment_id: first.appointment_id, lead_id: first.lead_id },
+        telegramOncePerOpen: true,
+      });
+      if (card?.stored === false) failures += 1;
+    } catch (error) {
+      failures += 1;
+      console.error("[founder-meeting-reminders] failure alert threw", error);
+    }
+  }
+  return failures;
+}
+
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const runDeadline = Date.now() + RUN_DEADLINE_MS;
   const db = getServiceSupabase();
   const now = new Date().toISOString();
   const stale = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
@@ -822,8 +1142,8 @@ async function handle(req: NextRequest) {
         await persistReminderTracking(db, raw);
         tracked += 1;
       } catch (error) {
-        trackingFailures += 1;
         const detail = error instanceof Error ? error.message : "reminder_tracking_failed";
+        if (!trackingLeadGone(detail)) trackingFailures += 1;
         console.error("[founder-meeting-reminders] tracking retry failed", raw.id, detail);
         await markTrackingError(db, raw, detail).catch((writeError) => {
           console.error("[founder-meeting-reminders] tracking retry state failed", raw.id, writeError);
@@ -832,12 +1152,36 @@ async function handle(req: NextRequest) {
     }
   }
 
+  // Calls in their slot or just past it: the founder's "lead is waiting" note,
+  // and missed meetings closed out with the lead's rebook link queued. Before
+  // the due query, so what it queues goes out in this same run.
+  let watch: WatchResult = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [] };
+  // Only where Oasis Meet rooms exist (the Turso data plane, as
+  // bookingMeetRoomDeps decides): on the Supabase fallback there is no room
+  // column and no join data, so there is nothing to watch (Codex review).
+  if (bookingMeetRoomDeps().meetRooms) {
+    try {
+      watch = await watchFounderMeetings({
+        db,
+        now: () => Date.now(),
+        origin: SITE_ORIGIN,
+        budgetMs: Math.min(LIVE_WATCH_MAX_MS, runDeadline - RESERVED_FOR_SENDS_MS - RESERVED_FOR_REPORTING_MS - Date.now()),
+      });
+    } catch (error) {
+      watch = { guestWaiting: 0, noShows: 0, held: 0, metAfterNoShow: 0, errors: [error instanceof Error ? error.message : "meeting_watch_failed"] };
+    }
+  }
+  if (watch.errors.length) console.error("[founder-meeting-reminders] meeting watch degraded", watch.errors);
+  // The due cutoff is taken AFTER the watcher, so what it just queued (a "lead
+  // is waiting" note, a rebook link) goes out in this same run (Codex review).
+  const dueBy = new Date().toISOString();
+
   // Founder meetings are OASIS-only today; the retired-tenant exclusion keeps
   // it that way if a retired tenant ever carries a queued reminder.
   const due = await db.from("website_sales_meeting_notifications")
     .select("id,tenant_id")
     .eq("status", "pending")
-    .lte("due_at", now)
+    .lte("due_at", dueBy)
     .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("due_at", { ascending: true })
     .limit(BATCH_LIMIT);
@@ -849,7 +1193,7 @@ async function handle(req: NextRequest) {
   let processed = 0;
   let sent = 0;
   let skipped = 0;
-  let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0);
+  let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0) + watch.errors.length;
   const senderPass: SenderPass = { standings: new Map(), withheld: [] };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
@@ -885,7 +1229,33 @@ async function handle(req: NextRequest) {
       }
     }
   }
+  // The meetings' history (half-done no-shows, rolled-back rebooks, calls met
+  // after all) after the sends, so no backlog can hold up a reminder (Codex
+  // review r13). What it queues goes out next run.
+  const recoveryBudget = runDeadline - RESERVED_FOR_REPORTING_MS - Date.now();
+  if (bookingMeetRoomDeps().meetRooms && recoveryBudget <= 0) {
+    // No time left this run: the history waits for the next one.
+    watch = { ...watch, partial: true };
+  } else if (bookingMeetRoomDeps().meetRooms) {
+    try {
+      const recovered = await recoverFounderMeetings({ db, now: () => Date.now(), origin: SITE_ORIGIN, budgetMs: recoveryBudget });
+      watch = {
+        guestWaiting: watch.guestWaiting + recovered.guestWaiting,
+        noShows: watch.noShows + recovered.noShows,
+        held: watch.held + recovered.held,
+        metAfterNoShow: watch.metAfterNoShow + recovered.metAfterNoShow,
+        errors: [...watch.errors, ...recovered.errors],
+        partial: Boolean(watch.partial || recovered.partial),
+      };
+      failures += recovered.errors.length;
+      if (recovered.errors.length) console.error("[founder-meeting-reminders] meeting recovery degraded", recovered.errors);
+    } catch (error) {
+      failures += 1;
+      watch = { ...watch, errors: [...watch.errors, error instanceof Error ? error.message : "meeting_recovery_failed"] };
+    }
+  }
   if (senderPass.withheld.length) await alertWithheldReminders(senderPass.withheld);
+  failures += await alertFailedReminders(db, now);
 
   await setHealth({
     status: failures ? "degraded" : "healthy",
@@ -899,6 +1269,7 @@ async function handle(req: NextRequest) {
     expired_leases: expiredLeases.data?.length || 0,
     reconciliation,
     backfill,
+    meeting_watch: watch,
     tracking_reconciled: tracked,
     tracking_failed: trackingFailures,
     claimed: processed,

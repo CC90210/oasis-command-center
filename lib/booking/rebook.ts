@@ -22,6 +22,7 @@
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { memberStanding } from "@/lib/team";
 import { verifyRebookToken, type RebookClaims } from "@/lib/booking/rebook-token";
 import type { PublicBookingSlot } from "@/lib/forms/public-booking";
 
@@ -255,4 +256,41 @@ export function rebookLeadPatch(input: {
     google_ical_uid: input.receipt.iCalUID || null,
     calendar_appointment_revision: input.revision,
   };
+}
+
+/**
+ * Who stays copied on the invite besides the host. Google replaces the whole
+ * attendee list on a move, so whoever was on it must be passed again:
+ *   - a public booking's second host: the slot's attendee (same hosts, see
+ *     slotKeepsHosts);
+ *   - a meeting a rep booked from the lead page (no public_booking_host_ids):
+ *     the opener rep, if they are still a live teammate, as the sales route's
+ *     own reschedule resolves them (attributed_rep_user_id, else assigned_to,
+ *     never the host themself). A failed read drops the copy, never the move.
+ */
+export async function rebookOpener(
+  tenantId: string,
+  lead: Record<string, unknown>,
+  slot: PublicBookingSlot | null,
+  standing: typeof memberStanding = memberStanding,
+): Promise<{ email: string; displayName?: string } | null> {
+  const attendee = slot?.hosts.find((host) => host.role === "attendee");
+  if (attendee) return { email: attendee.email, displayName: attendee.displayName };
+  if (Array.isArray(lead.public_booking_host_ids) && lead.public_booking_host_ids.length) return null;
+  const repId = text(lead.attributed_rep_user_id) || text(lead.assigned_to);
+  if (!repId) return null;
+  try {
+    const { standing: state, member } = await standing(tenantId, repId);
+    if (state !== "active" || !member) return null;
+    const email = typeof member.email === "string" ? member.email.trim().toLowerCase() : "";
+    const hostEmail = text(lead.audit_host_email).toLowerCase();
+    if (!email.includes("@") || email === hostEmail) return null;
+    const name = typeof member.full_name === "string" ? member.full_name.trim() : "";
+    return name ? { email, displayName: name } : { email };
+  } catch (error) {
+    console.warn("[rebook] opener standing unavailable; invite copy skipped", {
+      error: error instanceof Error ? error.message.slice(0, 120) : String(error),
+    });
+    return null;
+  }
 }

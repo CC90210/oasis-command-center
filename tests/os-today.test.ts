@@ -318,6 +318,20 @@ async function main() {
   assert.deepEqual(buckets.noNextStep.map((r) => r.id), ["m2"], "open with no next step; a booked meeting ahead is one");
   assert.deepEqual(buckets.outcomeMissing, [], "no booked meeting is in the past");
   assert.deepEqual(meetingsBetween(rows, day.startMs, day.endMs).map((r) => r.id), ["m1"], "today only, cancelled excluded");
+  // A missed meeting recorded as a no-show (lib/booking/no-show.ts) is not an
+  // outcome nobody wrote down: it waits on its next step, the follow-up a day
+  // after the rebook link went out.
+  const noShows = salesBuckets(
+    [
+      { id: "ns-fresh", data: { company: "Missed Today", stage: "founder_meeting_booked", founder_meeting_at: "2026-09-28T12:00:00Z", founder_meeting_status: "no_show", next_action_at: "2026-09-29T12:20:00Z" } },
+      { id: "ns-due", data: { company: "Missed Friday", stage: "founder_meeting_booked", founder_meeting_at: "2026-09-25T12:00:00Z", founder_meeting_status: "no_show", next_action_at: "2026-09-26T12:20:00Z" } },
+      { id: "unrecorded", data: { company: "Nobody Said", stage: "founder_meeting_booked", founder_meeting_at: "2026-09-28T12:00:00Z" } },
+    ],
+    now,
+    Date.parse("2026-09-24T00:00:00Z"),
+  );
+  assert.deepEqual(noShows.outcomeMissing.map((r) => r.id), ["unrecorded"], "only an unrecorded past meeting is a missing outcome");
+  assert.deepEqual(noShows.overdue.map((r) => r.id), ["ns-due"], "a no-show whose rebook follow-up is past due is a follow-up");
   const board = summarizeBoard({
     rows,
     summary: { onBoard: 9, qualified: 2, meetings: 3, won: 1, lost: 1, cycleStartedAt: "2026-09-24" },

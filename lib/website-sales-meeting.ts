@@ -219,7 +219,7 @@ export function reminderTierStillValid(
 export function founderMeetingDedupeKey(
   appointmentId: string,
   revision: number,
-  kind: "confirmation" | FounderReminderKind | "host_15",
+  kind: "confirmation" | FounderReminderKind | "host_15" | "host_guest_waiting",
   channel: "email" | "sms",
 ): string {
   return `${appointmentId}:${revision}:${kind}:${channel}`;

@@ -9,6 +9,7 @@ import {
   REBOOK_LEAD_STAGE,
   rebookHosts,
   rebookLeadPatch,
+  rebookOpener,
 } from "@/lib/booking/rebook";
 import { RebookNotConfiguredError, verifyRebookToken } from "@/lib/booking/rebook-token";
 import { sameOrigin } from "@/lib/calendar/http";
@@ -164,11 +165,6 @@ async function answerBooked(tenantId: string, meeting: VerifiedFounderMeeting): 
   });
 }
 
-function openerOf(slot: PublicBookingSlot | null): { email: string; displayName?: string } | null {
-  const attendee = slot?.hosts.find((host) => host.role === "attendee");
-  return attendee ? { email: attendee.email, displayName: attendee.displayName } : null;
-}
-
 function rescheduleFailure(error: unknown): NextResponse {
   const code = codeOf(error, "calendar_update_failed");
   console.error("[public-rebook.reschedule]", code);
@@ -255,7 +251,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             appointmentId: claims.appointmentId,
             requestId,
             meetingAt: startsAt,
-            openerAttendee: openerOf(slot),
+            openerAttendee: await rebookOpener(claims.tenantId, lead, slot),
             requireStartedBefore: new Date().toISOString(),
           },
           bookingMeetRoomDeps(),
@@ -280,7 +276,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         console.error("[public-rebook.replay.transition]", recorded.error);
         return NextResponse.json({ ok: false, error: "booking_sync_pending" }, { status: 503 });
       }
-      await activateVerifiedFounderMeeting(claims.tenantId, claims.appointmentId);
+      try {
+        await activateVerifiedFounderMeeting(claims.tenantId, claims.appointmentId);
+      } catch (error) {
+        // The lead record already shows the time: the reconciler activates the
+        // meeting from it. The alert still goes, once, from the attempt that
+        // recorded it (Codex review of #773, round 3).
+        console.error("[public-rebook.replay.activation_pending]", codeOf(error, "meeting_activation_failed"));
+      }
       if (recorded.applied) {
         alertRebooked({ tenantId: claims.tenantId, leadId: claims.leadId, lead, clientName: current.client_name_snapshot, missedAt, meeting });
       }
@@ -317,7 +320,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           meetingAt: startsAt,
           // The slot's second host, if it has one: Google replaces the whole
           // attendee list on a move, so they are passed again or dropped.
-          openerAttendee: openerOf(slot),
+          openerAttendee: await rebookOpener(state.claims.tenantId, state.lead, slot),
           // Only a meeting still in the past moves: checked on the row the
           // reservation compare-and-swaps on, so two tabs cannot both move it.
           requireStartedBefore: new Date().toISOString(),

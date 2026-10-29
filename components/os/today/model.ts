@@ -168,6 +168,16 @@ function cancelledMeeting(data: Record<string, unknown>): boolean {
   return str(data, "founder_meeting_status").toLowerCase().startsWith("cancel");
 }
 
+/**
+ * A missed meeting already recorded as a no-show (lib/booking/no-show.ts): its
+ * outcome is NOT missing. The lead got their rebook link, and its next step is
+ * next_action_at (a day out), so it surfaces as a follow-up if they have not
+ * picked a new time by then.
+ */
+function recordedNoShow(data: Record<string, unknown>): boolean {
+  return str(data, "founder_meeting_status").toLowerCase() === "no_show";
+}
+
 /** Time to write the outcome down once a meeting has ended, before it counts as missing. */
 const OUTCOME_GRACE_MS = 60 * 60 * 1000;
 
@@ -227,7 +237,7 @@ export function salesBuckets(rows: readonly LeadRow[], nowMs: number, cycleStart
     const name = leadName(data);
     const meetingAt = Date.parse(str(data, "founder_meeting_at"));
     const next = Date.parse(str(data, "next_action_at"));
-    if (stage === BOOKED_MEETING_STAGE && Number.isFinite(meetingAt) && !cancelledMeeting(data)) {
+    if (stage === BOOKED_MEETING_STAGE && Number.isFinite(meetingAt) && !cancelledMeeting(data) && !recordedNoShow(data)) {
       if (outcomeDueAt(meetingAt, data) < nowMs) {
         out.outcomeMissing.push({ id: row.id, name, at: meetingAt });
         continue;

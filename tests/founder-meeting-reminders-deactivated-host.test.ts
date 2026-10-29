@@ -136,6 +136,10 @@ async function main() {
       tenant_id TEXT, lead_id TEXT, type TEXT, channel TEXT, direction TEXT, agent_source TEXT,
       to_phone TEXT, to_email TEXT, subject TEXT, content TEXT, content_preview TEXT,
       actor_user_id TEXT, metadata TEXT, created_at TEXT);
+    CREATE TABLE meet_participants (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL,
+      room_id TEXT NOT NULL, role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT);
+    CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, full_name TEXT,
       display_name TEXT, invited_by TEXT, joined_at TEXT, manager_user_id TEXT,
@@ -145,6 +149,7 @@ async function main() {
     ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
     ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
     ${readFileSync("database/turso/bravo__214_consent_events.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8")}
   `);
   const profile = (id: string, authId: string, name: string, deactivatedAt: string | null = null) => ({
     sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, full_name, joined_at, deactivated_at)
