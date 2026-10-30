@@ -241,21 +241,21 @@ async function main() {
       else delete process.env.DEPLOY_SURFACE;
       await login(CC);
       calls = [];
-      answer = () => json(200, { ok: true, output: "restarted bravo-ig-dm" });
-      const res = await post({ service: "pm2.bravo-ig-dm", action: "restart" });
+      answer = () => json(200, { ok: true, output: "restarted bravo-telegram" });
+      const res = await post({ service: "pm2.bravo-telegram", action: "restart" });
       assert.equal(res.status, 200);
-      assert.deepEqual(await res.json(), { ok: true, output: "restarted bravo-ig-dm" });
+      assert.deepEqual(await res.json(), { ok: true, output: "restarted bravo-telegram" });
       assert.equal(calls.length, 1);
       assert.equal(calls[0].url, "https://bridge.test/exec-tool");
       assert.equal(calls[0].headers.authorization, "Bearer test-bearer-not-real");
-      assert.deepEqual(calls[0].body, { tool_name: "fleet_control", input: { action: "restart", name: "bravo-ig-dm" } });
+      assert.deepEqual(calls[0].body, { tool_name: "fleet_control", input: { action: "restart", name: "bravo-telegram" } });
     });
   }
   process.env.DEPLOY_SURFACE = "oasis";
   await check("control: a 401 from the bridge is bridge_refused_token, never offline", async () => {
     await login(CC);
     answer = () => json(401, { ok: false, error: "unauthorized" });
-    const res = await post({ service: "pm2.bravo-ig-dm", action: "stop" });
+    const res = await post({ service: "pm2.bravo-telegram", action: "stop" });
     assert.equal(res.status, 502);
     const body = (await res.json()) as { error: string; message: string };
     assert.equal(body.error, "bridge_refused_token");
@@ -269,7 +269,7 @@ async function main() {
   await check("control: a retired or unknown worker is refused before the bridge", async () => {
     await login(CC);
     calls = [];
-    for (const service of ["skool_engine", "pm2.sunbiz-sequence-runner", "pm2.not-a-worker"]) {
+    for (const service of ["pm2.bravo-ig-dm", "skool_engine", "pm2.sunbiz-sequence-runner", "pm2.not-a-worker"]) {
       const res = await post({ service, action: "start" });
       assert.equal(res.status, 400, service);
       assert.equal(((await res.json()) as { error: string }).error, "unknown_worker");
@@ -280,10 +280,10 @@ async function main() {
     calls = [];
     for (const who of [CLIENT_OWNER, CLOSER]) {
       await login(who);
-      assert.equal((await post({ service: "pm2.bravo-ig-dm", action: "restart" })).status, 404);
+      assert.equal((await post({ service: "pm2.bravo-telegram", action: "restart" })).status, 404);
     }
     await login(null);
-    assert.equal((await post({ service: "pm2.bravo-ig-dm", action: "restart" })).status, 401);
+    assert.equal((await post({ service: "pm2.bravo-telegram", action: "restart" })).status, 401);
     assert.equal(calls.length, 0);
   });
   await check("control: with no bridge target the operator hears bridge_not_configured (503); a SunBiz member still gets the 404; no bridge call", async () => {
@@ -293,7 +293,7 @@ async function main() {
     calls = [];
     try {
       await login(CC);
-      const res = await post({ service: "pm2.bravo-ig-dm", action: "restart" });
+      const res = await post({ service: "pm2.bravo-telegram", action: "restart" });
       assert.equal(res.status, 503);
       const body = (await res.json()) as { ok: boolean; error: string };
       assert.deepEqual(body, { ok: false, error: "bridge_not_configured" });
@@ -305,7 +305,7 @@ async function main() {
       await login(SUNBIZ_REP);
       const bridge = await import("../lib/bridge-proxy");
       assert.deepEqual(await bridge.authorizeBridgeRequest(), { ok: false, status: 503, error: "bridge_not_configured", isOperator: false, tenantSlug: "submissions" });
-      const rep = await post({ service: "pm2.bravo-ig-dm", action: "restart" });
+      const rep = await post({ service: "pm2.bravo-telegram", action: "restart" });
       assert.equal(rep.status, 404, "a non-operator is told nothing, not that a bridge is missing");
       assert.deepEqual(await rep.json(), { ok: false, error: "not_found" });
       assert.equal(calls.length, 0);
@@ -321,14 +321,14 @@ async function main() {
     const wc = await import("../lib/automations/worker-control");
     calls = [];
     answer = () => json(502, { ok: false, error: "bridge_refused_token" });
-    const r = await wc.runWorkerAction("pm2.bravo-ig-dm", "restart");
+    const r = await wc.runWorkerAction("pm2.bravo-telegram", "restart");
     assert.deepEqual(r, { ok: false, output: "the bridge refused the request (token)" });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "/api/automations/background-workers/control");
     assert.equal(calls[0].method, "POST");
-    assert.deepEqual(calls[0].body, { service: "pm2.bravo-ig-dm", action: "restart" });
+    assert.deepEqual(calls[0].body, { service: "pm2.bravo-telegram", action: "restart" });
     answer = () => json(200, { ok: true, output: "started" });
-    assert.deepEqual(await wc.runWorkerAction("pm2.bravo-ig-dm", "start"), { ok: true, output: "started" });
+    assert.deepEqual(await wc.runWorkerAction("pm2.bravo-telegram", "start"), { ok: true, output: "started" });
     assert.ok(calls.every((c) => !/127\.0\.0\.1|localhost:9100/.test(c.url)), "never the loopback bridge");
   });
 
@@ -924,9 +924,8 @@ async function main() {
       ["bravo", "atlas", "maven"],
       [{ agent_name: "atlas", last_tick_at: iso(60_000), tick_count: 9 }],
       [
-        { service: "pm2.bravo-scheduler", last_ping_at: iso(30_000) },
-        { service: "pm2.bravo-scheduler", last_ping_at: iso(40 * 24 * 3_600_000) },
-        { service: "pm2.bravo-telegram", last_ping_at: iso(2 * 3_600_000) },
+        { service: "pm2.bravo-telegram", last_ping_at: iso(30_000) },
+        { service: "pm2.bravo-telegram", last_ping_at: iso(40 * 24 * 3_600_000) },
         { service: "pm2.atlas-telegram", last_ping_at: iso(20 * 60_000) },
         { service: "bravo", last_ping_at: iso(1_000) },
       ],
@@ -934,7 +933,7 @@ async function main() {
     );
     assert.deepEqual(
       [signals.get("bravo")?.live, signals.get("bravo")?.runningCount, signals.get("bravo")?.processCount],
-      [true, 1, 2],
+      [true, 1, 1],
     );
     assert.equal(signals.get("atlas")?.live, false, "a fresh tick is not a running process");
     assert.equal(signals.get("atlas")?.lastTaskAt, iso(60_000));

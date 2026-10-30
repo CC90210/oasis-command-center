@@ -10,8 +10,9 @@
  */
 import { readFileSync } from "node:fs";
 import {
-  daemonBackedCronForName,
+  activeDaemonBackedCronForName,
   deriveDaemonState,
+  retiredDaemonCronStateForName,
 } from "../lib/automations/daemon-backed-crons";
 import { daemonToggleRefusal } from "../lib/automations/daemon-cron-guard";
 
@@ -31,8 +32,17 @@ for (const h of live.health) {
 
 console.log("\n=== Cron rows — what the toggle will say ===");
 for (const row of live.cron) {
-  const def = daemonBackedCronForName(row.name);
+  const retired = retiredDaemonCronStateForName(row.name);
+  const def = activeDaemonBackedCronForName(row.name);
   console.log(`  row: "${row.name}"  cron_jobs.is_active=${row.is_active}`);
+  if (retired) {
+    console.log(`    → RETIRED BY PLAN: ${retired.reason}`);
+    console.log(`    → TOGGLE READS: Retired (disabled; health rows are ignored)`);
+    console.log(`    → schedule chip: "Parked — retired by plan" (entry: ${row.schedule})`);
+    const refusal = daemonToggleRefusal({ ok: true, name: row.name });
+    console.log(`    → PATCH {enabled:true} → HTTP ${refusal?.status} ${refusal?.body.error}`);
+    continue;
+  }
   if (!def) {
     console.log(`    → ordinary row, toggle reads: ${row.is_active ? "On" : "Off"}`);
     continue;
@@ -50,7 +60,12 @@ for (const row of live.cron) {
 
 console.log("\n=== Same row if the bridge went quiet (ping aged past the freshness window) ===");
 for (const row of live.cron) {
-  const def = daemonBackedCronForName(row.name);
+  const retired = retiredDaemonCronStateForName(row.name);
+  if (retired) {
+    console.log(`  ${row.name}: Retired by plan (historical health ignored)`);
+    continue;
+  }
+  const def = activeDaemonBackedCronForName(row.name);
   if (!def) continue;
   const stale = deriveDaemonState(def, {
     status: "healthy",

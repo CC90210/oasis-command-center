@@ -58,6 +58,7 @@ type CronJob = CronInventoryJob;
  * the Instagram setter while it was answering people.
  */
 function isRunning(job: CronJob): boolean {
+  if (job.retired) return false;
   return job.daemon ? job.daemon.state === "running" : job.enabled;
 }
 
@@ -494,6 +495,9 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
   }
 
   async function toggleEnabled(job: CronJob) {
+    // Retired computer workers are reference-only. Their parked cron stays
+    // guarded server-side too, but the UI must not present a loaded switch.
+    if (job.retired) return;
     // A row a background process owns never reaches the PATCH below.
     if (job.daemon) {
       await toggleDaemonBacked(job);
@@ -928,6 +932,7 @@ function JobRow({
   // parked interlock flag that keeps a second runner off the same script — it
   // is not this automation's state, and nothing below may read it as one.
   const daemon = job.daemon ?? null;
+  const retired = job.retired ?? null;
   const running = isRunning(job);
   const daemonUnknown = daemon !== null && daemon.state === "unknown";
   // Every sentence this row says about its last run comes from one pure
@@ -949,7 +954,7 @@ function JobRow({
   // What the promised next fire actually means now that the clock has passed it.
   // Daemon-backed rows are excluded by construction: their cron twin is parked,
   // so its next_run_at is not a promise anyone made.
-  const nextRun = daemon
+  const nextRun = daemon || retired
     ? null
     : describeNextRun({
         nextRunAt: job.next_run_at,
@@ -961,7 +966,9 @@ function JobRow({
   // silently stopped firing, muted if disabled, neutral otherwise. Daemon-backed
   // rows answer from the process instead — a stale scheduler-era error must
   // not paint a running setter red, and a parked flag must not grey it out.
-  const borderClass = daemon
+  const borderClass = retired
+    ? "border-bg-border bg-bg-deep/40 opacity-60"
+    : daemon
     ? daemon.state === "running"
       ? "border-bg-border bg-bg-elev/30"
       : daemon.state === "stopped"
@@ -983,10 +990,12 @@ function JobRow({
           <button
             type="button"
             onClick={onToggle}
-            disabled={isPending}
+            disabled={isPending || Boolean(retired)}
             className="flex flex-col items-center gap-0.5 group disabled:opacity-70"
             title={
-              daemon
+              retired
+                ? `${retired.label} is retired by plan. Its historical scheduler row stays fenced.`
+                : daemon
                 ? daemon.state === "running"
                   ? `Running as the ${daemon.process_name} process — click to stop it.`
                   : daemon.state === "stopped"
@@ -1001,7 +1010,9 @@ function JobRow({
                     : "Click to enable"
             }
           >
-            {isPending ? (
+            {retired ? (
+              <ToggleLeft className="w-7 h-7 text-fg-dim" />
+            ) : isPending ? (
               <Loader2 className="w-7 h-7 text-accent animate-spin" />
             ) : daemonUnknown ? (
               <HelpCircle className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
@@ -1011,7 +1022,7 @@ function JobRow({
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
             <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : daemonUnknown ? "text-fg-dim" : running ? "text-status-engaged" : "text-fg-faint"}`}>
-              {isPending ? (daemon ? "Confirming" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
+              {retired ? "Retired" : isPending ? (daemon ? "Confirming" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
             </span>
           </button>
         </div>
@@ -1034,6 +1045,11 @@ function JobRow({
                 {daemon.process_name}
               </span>
             )}
+            {retired && (
+              <span className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold">
+                Retired by plan
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-1">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
@@ -1050,6 +1066,11 @@ function JobRow({
             )}
           </div>
           {daemon && <DaemonBanner daemon={daemon} />}
+          {retired && (
+            <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 text-[11px] text-fg-muted leading-relaxed">
+              <span className="text-fg font-bold">Retired by plan.</span> {retired.reason}
+            </div>
+          )}
           {/* Prefer operator-friendly copy from lib/cron-descriptions
               over the raw DB row (which is written for engineers and
               references internal paths). Falls back to the DB string
@@ -1083,13 +1104,17 @@ function JobRow({
                 expression stays available in the tooltip. */}
             <span
               className="inline-flex items-center gap-1.5 text-fg-muted"
-              title={daemon ? `Parked scheduler entry: ${job.schedule}` : undefined}
+              title={daemon || retired ? `Parked scheduler entry: ${job.schedule}` : undefined}
             >
               <Clock className="w-3.5 h-3.5" />
               <span className="font-medium text-fg">
-                {daemon ? "Continuously — its own process" : friendlySchedule}
+                {daemon
+                  ? "Continuously — its own process"
+                  : retired
+                    ? "Parked — retired by plan"
+                    : friendlySchedule}
               </span>
-              {!daemon && showRawSchedule && (
+              {!daemon && !retired && showRawSchedule && (
                 <span className="text-fg-faint font-mono text-[10px]">({job.schedule})</span>
               )}
             </span>
@@ -1104,11 +1129,11 @@ function JobRow({
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
-                <span className={run.lastRan.tone === "bad" && !daemon ? "text-status-warm font-medium" : "text-fg-muted"}>
+                <span className={run.lastRan.tone === "bad" && !daemon && !retired ? "text-status-warm font-medium" : "text-fg-muted"}>
                   {/* For a daemon-backed row this is history from when the
                       shared scheduler still ran it — say so, rather than
                       letting it read as the process's last tick. */}
-                  {daemon ? `Last scheduler run ${timeAgo(job.last_run_at)}` : run.lastRan.text}
+                  {daemon || retired ? `Last scheduler run ${timeAgo(job.last_run_at)}` : run.lastRan.text}
                 </span>
                 <span className="text-fg-faint">·</span>
                 <span className="text-fg-faint">{job.run_count} total</span>
@@ -1171,7 +1196,7 @@ function JobRow({
         )}
       </div>
 
-      <RunResultLine run={run} daemon={Boolean(daemon)} />
+      <RunResultLine run={run} daemon={Boolean(daemon || retired)} />
     </div>
   );
 }

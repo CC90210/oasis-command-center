@@ -28,23 +28,22 @@
  *
  * This module is the missing link. It names, in one place:
  *   - which cron row is a parked twin,
- *   - which PM2 process actually does the work,
- *   - and therefore which rows the toggle must drive through pm2 instead of
- *     through `cron_jobs.is_active`.
+ *   - which PM2 process historically or currently owns the work,
+ *   - and whether that process is active or retired by plan.
  *
  * Both halves of the fix read from here: `/api/cron-jobs` attaches live daemon
- * health to the row so it renders as ON when the process is up, and
+ * health only for active workers (retired rows are reference-only), and
  * `/api/cron-jobs/[id]` REFUSES an `enabled` write against any row listed here
  * so the arming path does not exist rather than merely being discouraged.
  *
- * ADDING A ROW: park the cron (`is_active = 0`), add the daemon to
- * ecosystem.config.js, add the pm2 service to EXPECTED_WORKERS in
- * app/api/automations/background-workers/route.ts, and add an entry here.
- * tests/daemon-backed-crons.test.ts fails if the last two drift apart.
+ * ADDING A ROW: park the cron (`is_active = 0`), register the worker lifecycle
+ * in lib/automations/oasis-workers.ts, and add an entry here. An active worker
+ * also needs its real process supervisor entry. tests/daemon-backed-crons.test.ts
+ * fails if the registries drift apart.
  */
 
-/** A cron row that a dedicated PM2 process has taken over. */
-export type DaemonBackedCron = {
+/** A parked cron row whose work moved to a dedicated process. */
+type DaemonBackedCronBase = {
   /** Exact `cron_jobs.name`. Matched case-insensitively, trimmed. */
   cronName: string;
   /** `integrations_health.service` key the bridge reports under. */
@@ -59,6 +58,13 @@ export type DaemonBackedCron = {
   stopWarning: string;
 };
 
+export type ActiveDaemonBackedCron = DaemonBackedCronBase & { lifecycle: "worker" };
+export type RetiredDaemonBackedCron = DaemonBackedCronBase & {
+  lifecycle: "retired";
+  retiredReason: string;
+};
+export type DaemonBackedCron = ActiveDaemonBackedCron | RetiredDaemonBackedCron;
+
 export const DAEMON_BACKED_CRONS: readonly DaemonBackedCron[] = [
   {
     cronName: "Instagram DM Closer",
@@ -72,6 +78,9 @@ export const DAEMON_BACKED_CRONS: readonly DaemonBackedCron[] = [
     stopWarning:
       "This stops the Instagram DM setter. Prospects mid-conversation stop getting " +
       "replies until you start it again.",
+    lifecycle: "retired",
+    retiredReason:
+      "Its computer copy stays off while the always-on Instagram setter moves to the daemon VPS.",
   },
 ];
 
@@ -86,7 +95,36 @@ export function daemonBackedCronForName(
   return BY_NAME.get((name || "").trim().toLowerCase()) ?? null;
 }
 
-/** True when a cron row's on/off is owned by a PM2 process, not `is_active`. */
+/** A parked cron whose dedicated worker is still an active control target. */
+export function activeDaemonBackedCronForName(
+  name: string | null | undefined,
+): ActiveDaemonBackedCron | null {
+  const def = daemonBackedCronForName(name);
+  return def?.lifecycle === "worker" ? def : null;
+}
+
+export type RetiredCronState = {
+  label: string;
+  reason: string;
+};
+
+/**
+ * Operator-facing lifecycle for a parked row whose former computer worker is
+ * retired. The row remains in the registry so the write guard can never arm
+ * its legacy scheduler copy.
+ */
+export function retiredDaemonCronStateForName(
+  name: string | null | undefined,
+): RetiredCronState | null {
+  const def = daemonBackedCronForName(name);
+  if (def?.lifecycle !== "retired") return null;
+  return {
+    label: def.label,
+    reason: def.retiredReason,
+  };
+}
+
+/** True when a cron row must stay parked instead of writing `is_active`. */
 export function isDaemonBackedCronName(name: string | null | undefined): boolean {
   return daemonBackedCronForName(name) !== null;
 }
@@ -135,7 +173,7 @@ export type DaemonHealthRow = {
  * reading too old to trust. `running` requires a fresh `healthy`, full stop.
  */
 export function deriveDaemonState(
-  def: DaemonBackedCron,
+  def: ActiveDaemonBackedCron,
   health: DaemonHealthRow,
   now: number = Date.now(),
 ): DaemonState {

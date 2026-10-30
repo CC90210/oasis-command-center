@@ -1,4 +1,4 @@
-import type { DaemonState } from "./daemon-backed-crons";
+import type { DaemonState, RetiredCronState } from "./daemon-backed-crons";
 
 export type CronInventorySource = "tenant" | "empire";
 
@@ -39,6 +39,8 @@ export type CronInventoryJob = {
   updated_at: string;
   source: CronInventorySource;
   daemon?: DaemonState | null;
+  /** A historical daemon-owned row that remains fenced but has no live control. */
+  retired?: RetiredCronState | null;
   /**
    * O2: who this row belongs to. `null`/absent is a LEGACY row with no
    * recorded owner (a workspace that predates owner_user_id, or a non-OASIS
@@ -240,6 +242,14 @@ function isNullableString(value: unknown): value is string | null {
 
 function isCronInventoryJob(value: unknown): value is CronInventoryJob {
   if (!isRecord(value)) return false;
+  const hasDaemon = value.daemon !== undefined && value.daemon !== null;
+  const hasRetired = value.retired !== undefined && value.retired !== null;
+  if (hasDaemon && !isDaemonState(value.daemon)) return false;
+  if (hasRetired && !isRetiredCronState(value.retired)) return false;
+  // Process-owned lifecycle is an Empire-only parked-row contract. Never let
+  // a contradictory payload hide an armed schedule behind a retired badge.
+  if ((hasDaemon || hasRetired) && (value.source !== "empire" || value.enabled !== false)) return false;
+  if (hasDaemon && hasRetired) return false;
   return (
     typeof value.id === "string" && value.id.length > 0 &&
     (value.source === "tenant" || value.source === "empire") &&
@@ -269,10 +279,15 @@ function isCronInventoryJob(value: unknown): value is CronInventoryJob {
         value.unresolved_failures >= 0)) &&
     typeof value.created_at === "string" &&
     typeof value.updated_at === "string" &&
-    (value.daemon === undefined || value.daemon === null || isDaemonState(value.daemon)) &&
+    (value.daemon === undefined || value.daemon === null || hasDaemon) &&
+    (value.retired === undefined || value.retired === null || hasRetired) &&
     (value.owner_user_id === undefined || isNullableString(value.owner_user_id)) &&
     (value.owner_name === undefined || isNullableString(value.owner_name))
   );
+}
+
+function isRetiredCronState(value: unknown): value is RetiredCronState {
+  return isRecord(value) && typeof value.label === "string" && typeof value.reason === "string";
 }
 
 function isDaemonState(value: unknown): value is DaemonState {

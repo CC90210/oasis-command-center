@@ -172,6 +172,76 @@ assert.equal(
 
 const valid = parseAutomationInventorySuccess({ ok: true, jobs, inventory });
 assert.equal(valid.ok, true);
+const retiredMarker = { label: "Instagram DM setter", reason: "Computer copy stays off." };
+const retiredJob = { ...jobs[1], enabled: false, retired: retiredMarker };
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? retiredJob
+      : entry),
+    inventory,
+  }).ok,
+  true,
+  "a complete retired-by-plan marker survives runtime validation",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? { ...retiredJob, enabled: true }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "a retired row that is still armed must fail closed",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 0
+      ? { ...entry, enabled: false, retired: retiredMarker }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "tenant rows cannot claim the Empire process lifecycle",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? {
+          ...retiredJob,
+          daemon: {
+            service: "pm2.bravo-ig-dm",
+            process_name: "bravo-ig-dm",
+            label: "Instagram DM setter",
+            why: "Dedicated worker",
+            stop_warning: "Stops replies",
+            state: "stopped" as const,
+            reported_status: "down",
+            last_ping_at: "2026-09-16T12:01:00.000Z",
+            stale: false,
+          },
+        }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "a row cannot be both retired and actively daemon-controlled",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? { ...entry, retired: { label: "Instagram DM setter" } }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "a malformed lifecycle marker must fail closed instead of rendering a live-looking switch",
+);
 assert.deepEqual(
   parseAutomationInventorySuccess({ ok: true, jobs }).ok,
   false,

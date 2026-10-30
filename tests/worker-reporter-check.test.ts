@@ -40,19 +40,24 @@ async function run() {
     await check.observe(fakeDb({ pairing: online, reporter: [{ status: "healthy", last_ping_at: minutesAgo(1) }] }), "t", NOW),
     0,
   );
-  // Fresh "down" row → failing (1), and the description names the remedy.
+  // Fresh "down" row → failing (1), without reviving the fenced heartbeat poller.
   const failing = await check.observe(
     fakeDb({ pairing: online, reporter: [{ status: "down", metadata: { error: "x" }, last_ping_at: minutesAgo(1) }] }),
     "t",
     NOW,
   );
   assert.equal(failing, 1);
-  assert.match(check.describe({ id: check.id, verdict: "failing", observed: 1, baseline: null, reason: "" }), /claude-bridge-ping/);
+  const failingDescription = check.describe({ id: check.id, verdict: "failing", observed: 1, baseline: null, reason: "" });
+  assert.doesNotMatch(failingDescription, /claude-bridge-ping|Restart "Bridge heartbeat"/);
+  assert.match(failingDescription, /retired on this computer stay off by plan/);
   // Bridge online but the fleet report is 30 minutes old → silent (2).
   assert.equal(
     await check.observe(fakeDb({ pairing: online, reporter: [{ status: "healthy", last_ping_at: minutesAgo(30) }] }), "t", NOW),
     2,
   );
+  const silentDescription = check.describe({ id: check.id, verdict: "failing", observed: 2, baseline: null, reason: "" });
+  assert.doesNotMatch(silentDescription, /claude-bridge-ping|Restart "Bridge heartbeat"/);
+  assert.match(silentDescription, /retired on this computer stay off by plan/);
   // One missed tick (6 min) is NOT an alert — the threshold is 10 minutes.
   assert.equal(
     await check.observe(fakeDb({ pairing: online, reporter: [{ status: "healthy", last_ping_at: minutesAgo(6) }] }), "t", NOW),

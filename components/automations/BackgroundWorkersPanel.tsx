@@ -89,7 +89,7 @@ const RUNTIME_GROUP_META: Record<WorkerRuntime, { label: string; detail: string 
     detail: "Runs on this tenant's dedicated host.",
   },
   retired: {
-    label: "Inactive / retired",
+    label: "Retired by plan",
     detail: "Preserved for reference and excluded from active health.",
   },
 };
@@ -236,7 +236,7 @@ export function BackgroundWorkersPanel() {
               : `This computer is online but its last worker report was ${
                   reporter.last_ping_at ? formatLastSeen(reporter.last_ping_at) : "never"
                 }.`}{" "}
-            Restarting &ldquo;Bridge heartbeat&rdquo; usually clears it.
+            Check the active host&apos;s reporter; services retired on this computer stay off by plan.
           </span>
         </div>
       )}
@@ -400,7 +400,7 @@ function WorkerRow({
       : "";
   let statusLabel: string;
   if (byDesign) {
-    statusLabel = worker.not_expected_here || "Retired — preserved for reference";
+    statusLabel = worker.not_expected_here || "Retired by plan — preserved for reference";
   } else if (workerRuntime === "cloud") {
     statusLabel =
       effectiveStatus === "healthy"
@@ -463,7 +463,7 @@ function WorkerRow({
             )}
             {workerRuntime === "retired" && (
               <span className="text-[9px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
-                Retired
+                Retired by plan
               </span>
             )}
           </div>
