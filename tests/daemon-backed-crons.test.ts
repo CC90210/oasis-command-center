@@ -29,9 +29,11 @@ import { readFileSync } from "node:fs";
 import {
   DAEMON_BACKED_CRONS,
   DAEMON_HEALTH_STALE_MS,
+  activeDaemonBackedCronForName,
   daemonBackedCronForName,
   deriveDaemonState,
   isDaemonBackedCronName,
+  retiredDaemonCronStateForName,
 } from "../lib/automations/daemon-backed-crons";
 import { daemonToggleRefusal } from "../lib/automations/daemon-cron-guard";
 
@@ -41,11 +43,13 @@ import { daemonToggleRefusal } from "../lib/automations/daemon-cron-guard";
   assert.ok(refusal, "arming the Instagram DM Closer row must be refused");
   assert.equal(refusal.status, 409);
   assert.equal(refusal.body.error, "daemon_backed_cron_not_toggleable");
+  assert.equal(refusal.body.lifecycle, "retired");
   assert.match(
     String(refusal.body.message),
-    /bravo-ig-dm/,
-    "the refusal must name the process the operator should use instead",
+    /retired by plan/i,
+    "the refusal must explain that the former process is intentionally retired",
   );
+  assert.doesNotMatch(String(refusal.body.message), /own switch/i);
 }
 
 // Name matching cannot be defeated by casing or stray whitespace — the row's
@@ -119,17 +123,60 @@ assert.equal(daemonToggleRefusal({ ok: true, name: null }), null);
 {
   const ui = readFileSync("components/automations/CronJobsManager.tsx", "utf8");
   const toggle = ui.slice(ui.indexOf("async function toggleEnabled"));
-  const guardAt = toggle.indexOf("if (job.daemon)");
+  const retiredGuardAt = toggle.indexOf("if (job.retired) return");
+  const daemonGuardAt = toggle.indexOf("if (job.daemon)");
   const patchAt = toggle.indexOf("method: \"PATCH\"");
-  assert.ok(guardAt > -1, "toggleEnabled must short-circuit daemon-backed rows");
+  assert.ok(retiredGuardAt > -1, "toggleEnabled must short-circuit retired rows");
+  assert.ok(daemonGuardAt > -1, "toggleEnabled must still short-circuit active daemon rows");
   assert.ok(patchAt > -1, "toggleEnabled must still PATCH ordinary rows");
   assert.ok(
-    guardAt < patchAt,
-    "toggleEnabled must return for daemon-backed rows before it reaches the PATCH",
+    retiredGuardAt < daemonGuardAt && daemonGuardAt < patchAt,
+    "retired and active-daemon rows must both return before the ordinary PATCH",
   );
   assert.ok(
     ui.includes("runWorkerAction("),
-    "the daemon-backed toggle must drive pm2 through the shared worker-control path",
+    "an active daemon toggle must drive pm2 through the shared worker-control path",
+  );
+
+  const retired = daemonBackedCronForName("Instagram DM Closer");
+  assert.equal(retired?.lifecycle, "retired");
+  assert.equal(
+    activeDaemonBackedCronForName("Instagram DM Closer"),
+    null,
+    "the retired setter must never be attached as a controllable daemon",
+  );
+  assert.match(retiredDaemonCronStateForName("Instagram DM Closer")?.reason ?? "", /computer copy stays off/);
+
+  const route = readFileSync("app/api/cron-jobs/route.ts", "utf8");
+  assert.match(route, /activeDaemonBackedCronForName\(j\.name\)/);
+  assert.match(route, /retiredDaemonCronStateForName\(job\.name\)/);
+  assert.match(
+    route,
+    /if \(\(retired \|\| active\) && job\.enabled\)/,
+    "the server must withhold an armed parked row instead of masking it as safely retired",
+  );
+  const healthRead = route.slice(
+    route.indexOf('const healthQuery = await db'),
+    route.indexOf('if (!healthQuery.error'),
+  );
+  assert.match(
+    healthRead,
+    /\.eq\("tenant_id", tenantId\)[\s\S]*\.eq\("profile_id", profileId\)/,
+    "service-role daemon health reads must be tenant-scoped before profile/service filters",
+  );
+  assert.doesNotMatch(
+    route,
+    /daemonRows = empireJobs\.filter\(\(j\) => daemonBackedCronForName/,
+    "a retired definition must not regain a PM2 control merely by remaining in the safety registry",
+  );
+
+  const probe = readFileSync("scripts/probe-daemon-render.ts", "utf8");
+  assert.match(probe, /activeDaemonBackedCronForName\(row\.name\)/);
+  assert.match(probe, /retiredDaemonCronStateForName\(row\.name\)/);
+  assert.doesNotMatch(
+    probe,
+    /daemonBackedCronForName\(row\.name\)/,
+    "the production-shaped render probe must never derive live status from a retired definition",
   );
 }
 
@@ -166,8 +213,15 @@ assert.equal(daemonToggleRefusal({ ok: true, name: null }), null);
 // A twenty-minute-old "healthy" is not a measurement, and showing it as green
 // is the same defect as the OFF toggle wearing the opposite colour.
 {
-  const def = daemonBackedCronForName("Instagram DM Closer");
-  assert.ok(def, "the Instagram row must resolve to a daemon definition");
+  const def = {
+    cronName: "Synthetic Active Worker",
+    service: "pm2.synthetic-active",
+    processName: "synthetic-active",
+    label: "Synthetic active worker",
+    why: "Exercises the active-worker health mapping independently of retired rows.",
+    stopWarning: "Stops the synthetic worker.",
+    lifecycle: "worker" as const,
+  };
   const now = Date.parse("2026-08-21T20:00:00.000Z");
   const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
 
@@ -220,6 +274,8 @@ assert.equal(daemonToggleRefusal({ ok: true, name: null }), null);
     // allowlists the characters; a registry entry that could not survive that
     // check would be a control button that always fails.
     assert.match(def.processName, /^[a-z0-9._-]+$/i);
+    assert.ok(def.lifecycle === "worker" || def.lifecycle === "retired");
+    if (def.lifecycle === "retired") assert.ok(def.retiredReason.length > 0);
   }
 }
 

@@ -57,6 +57,24 @@ export function daemonToggleRefusal(lookup: CronNameLookup): ToggleRefusal | nul
   }
   const backing = daemonBackedCronForName(lookup.name);
   if (!backing) return null;
+  if (backing.lifecycle === "retired") {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: "daemon_backed_cron_not_toggleable",
+        lifecycle: "retired",
+        daemon: {
+          service: backing.service,
+          process_name: backing.processName,
+          label: backing.label,
+        },
+        message:
+          `"${backing.cronName}" is retired by plan. ${backing.retiredReason} ` +
+          "Its historical scheduler row must stay off so the retired computer copy cannot be restarted or duplicated.",
+      },
+    };
+  }
   return {
     status: 409,
     body: {

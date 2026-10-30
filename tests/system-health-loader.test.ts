@@ -414,6 +414,27 @@ async function main() {
     assert.match(at.whatToDoForCronFailure(null), /Open the job in Automations/);
   });
 
+  await check("workers: active stopped-by-you and no-report states remain distinct", () => {
+    const activeTelegram = { service: "pm2.bravo-telegram", label: "Telegram bridge" };
+    const activeChat = { service: "pm2.claude-bridge", label: "Local chat bridge" };
+    const stopped = at.describeWorker(
+      activeTelegram,
+      {
+        service: activeTelegram.service,
+        status: "degraded",
+        last_ping_at: ago(30 * S),
+        metadata: { pm2_status: "disabled by operator" },
+      },
+      NOW,
+    );
+    assert.equal(stopped.state, "stopped_by_you");
+    assert.equal(stopped.sentence, "Stopped by you.");
+
+    const unreported = at.describeWorker(activeChat, undefined, NOW);
+    assert.equal(unreported.state, "no_report");
+    assert.equal(unreported.sentence, "No report from your computer yet.");
+  });
+
   // ── The loader against the database ────────────────────────────────────
   const probeCloud = async () => sh.describeCloudReach("ok");
   const health = await sh.loadSystemHealth(OASIS, { now: NOW, probeCloud });

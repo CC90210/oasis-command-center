@@ -31,10 +31,12 @@ import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
 import { getTenantEnabledAgents, oasisOperatorAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
-  daemonBackedCronForName,
+  activeDaemonBackedCronForName,
   deriveDaemonState,
+  retiredDaemonCronStateForName,
   type DaemonHealthRow,
   type DaemonState,
+  type RetiredCronState,
 } from "@/lib/automations/daemon-backed-crons";
 import {
   normalizeEmpireRow,
@@ -222,7 +224,12 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // empty list into a false 503. OASIS itself keeps the fail-loud 503: that is
   // the one tenant where "empty Empire lane" really did mean the schedules
   // vanished.
-  let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
+  let empireJobs: Array<
+    ReturnType<typeof normalizeEmpireRow> & {
+      daemon: DaemonState | null;
+      retired: RetiredCronState | null;
+    }
+  > = [];
   if (isAgentsOwner) {
     const empireQuery = await db
       .from("cron_jobs")
@@ -247,29 +254,55 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     empireJobs = ((empireQuery.data || []) as EmpireCronRow[]).map((row) => ({
       ...normalizeEmpireRow(row),
       daemon: null as DaemonState | null,
+      retired: null as RetiredCronState | null,
     }));
   }
 
-  // Daemon-backed rows: attach what the process is ACTUALLY doing.
+  // Parked process rows: mark retired copies as reference-only, and attach
+  // live health only when a dedicated process is still an active owner.
   //
   // These rows sit at is_active=0 on purpose — a dedicated PM2 daemon took the
   // work over and the parked flag is what stops a second runner from
   // double-messaging real prospects. Reporting `enabled: false` and stopping
   // there is how the tab came to show the setter as OFF while it was answering
-  // people, so the row now carries the daemon's live status alongside the DB
-  // flag and the UI renders from that. `enabled` stays the honest DB value —
-  // nothing here rewrites it.
+  // people. Active process rows carry live status; retired computer copies
+  // carry a lifecycle marker with no control. `enabled` remains the honest DB
+  // value; nothing here rewrites the flag.
   //
   // A failed or empty read yields `unknown`, never a green. See
   // lib/automations/daemon-backed-crons.ts for the freshness rule.
-  const daemonRows = empireJobs.filter((j) => daemonBackedCronForName(j.name));
+  for (const job of empireJobs) {
+    const retired = retiredDaemonCronStateForName(job.name);
+    const active = activeDaemonBackedCronForName(job.name);
+    if ((retired || active) && job.enabled) {
+      console.error("[api/cron-jobs GET] parked process cron is armed", {
+        tenantId,
+        id: job.id,
+        name: job.name,
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "parked_cron_armed",
+          message:
+            `"${job.name}" is a parked process-owned row but is_active is on. ` +
+            "The Automations inventory is withheld until the duplicate-runner interlock is restored.",
+        },
+        { status: 503 },
+      );
+    }
+    job.retired = retired;
+  }
+
+  const daemonRows = empireJobs.filter((j) => activeDaemonBackedCronForName(j.name));
   if (daemonRows.length > 0) {
     const healthByService = new Map<string, DaemonHealthRow>();
     if (profileId) {
-      const services = daemonRows.map((j) => daemonBackedCronForName(j.name)!.service);
+      const services = daemonRows.map((j) => activeDaemonBackedCronForName(j.name)!.service);
       const healthQuery = await db
         .from("integrations_health")
         .select("service, status, last_ping_at")
+        .eq("tenant_id", tenantId)
         .eq("profile_id", profileId)
         .in("service", services);
       if (!healthQuery.error && Array.isArray(healthQuery.data)) {
@@ -283,7 +316,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       }
     }
     for (const job of daemonRows) {
-      const def = daemonBackedCronForName(job.name)!;
+      const def = activeDaemonBackedCronForName(job.name)!;
       job.daemon = deriveDaemonState(def, healthByService.get(def.service) ?? null);
     }
   }
