@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createClient, type Client, type InStatement } from "@libsql/client";
+import { NextRequest } from "next/server";
 import { cloudJobDryRun, cloudJobEnabled, OASIS_OPERATOR_TENANT_ID } from "../lib/cloud-jobs/control";
 import {
   configuredServiceChecks,
   runServiceChecks,
+  SERVICE_CHECK_NAMES,
   serviceHealthVerdict,
 } from "../lib/cloud-jobs/service-checks";
 import {
@@ -182,6 +184,97 @@ test("service checks authenticate read-only calls and write only the scoped OASI
     assert.ok(!Object.values(env).some((secret) => call.url.includes(secret)), "a key leaked into a URL");
     const headers = new Headers(call.init?.headers);
     assert.match(headers.get("authorization") || "", /^Bearer /);
+  }
+});
+
+test("service checks map cross-runtime fetch transport failures to status zero", async () => {
+  const env = {
+    CLOUDFLARE_API_TOKEN: "cf-test",
+    HOSTINGER_API_TOKEN: "host-test",
+    GITHUB_PERSONAL_ACCESS_TOKEN: "github-test",
+    FIRECRAWL_API_KEY: "firecrawl-test",
+    WISE_API_TOKEN: "wise-test",
+  };
+  const writes: InStatement[] = [];
+  const db = {
+    async execute(statement: string | InStatement) {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (sql.includes("FROM user_profiles")) {
+        return { rows: [{ id: "profile-cc", tenant_id: OASIS_OPERATOR_TENANT_ID }], rowsAffected: 0 };
+      }
+      writes.push(statement as InStatement);
+      return { rows: [], rowsAffected: 1 };
+    },
+  } as unknown as Pick<Client, "execute">;
+  const result = await runServiceChecks({
+    db,
+    env,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.includes("cloudflare.com")) throw new TypeError("fetch failed");
+      if (url.includes("hostinger.com")) {
+        throw Object.assign(new Error("the deadline elapsed"), { name: "TimeoutError" });
+      }
+      if (url.includes("github.com")) {
+        throw Object.assign(new Error("socket closed"), { code: "ECONNRESET" });
+      }
+      if (url.includes("firecrawl.dev")) throw new TypeError("NetworkError when attempting to fetch resource.");
+      throw Object.assign(new Error("wrapped transport failure"), {
+        cause: Object.assign(new Error("connect deadline"), { code: "UND_ERR_CONNECT_TIMEOUT" }),
+      });
+    },
+  });
+  assert.deepEqual(result.results.map(({ http, status }) => ({ http, status })),
+    SERVICE_CHECK_NAMES.map(() => ({ http: 0, status: "degraded" })));
+  assert.equal(writes.length, SERVICE_CHECK_NAMES.length);
+  assert.ok(writes.every((write) => JSON.parse(String(write.args?.[6])).http === 0));
+});
+
+test("service checks let unexpected adapter defects reach the route's logged 500", async () => {
+  const prior = {
+    CRON_SECRET: process.env.CRON_SECRET,
+    SERVICE_CHECKS_ENABLED: process.env.SERVICE_CHECKS_ENABLED,
+    TURSO_DB_PATH: process.env.TURSO_DB_PATH,
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+    HOSTINGER_API_TOKEN: process.env.HOSTINGER_API_TOKEN,
+    GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_PERSONAL_ACCESS_TOKEN,
+    FIRECRAWL_API_KEY: process.env.FIRECRAWL_API_KEY,
+    WISE_API_TOKEN: process.env.WISE_API_TOKEN,
+  };
+  const realFetch = globalThis.fetch;
+  const realError = console.error;
+  const logged: unknown[][] = [];
+  try {
+    Object.assign(process.env, {
+      CRON_SECRET: "cron-test",
+      SERVICE_CHECKS_ENABLED: "on",
+      TURSO_DB_PATH: ":memory:",
+      CLOUDFLARE_API_TOKEN: "cf-test",
+      HOSTINGER_API_TOKEN: "host-test",
+      GITHUB_PERSONAL_ACCESS_TOKEN: "github-test",
+      FIRECRAWL_API_KEY: "firecrawl-test",
+      WISE_API_TOKEN: "wise-test",
+    });
+    globalThis.fetch = async () => {
+      throw new TypeError("adapter accessed an undefined response field");
+    };
+    console.error = (...args: unknown[]) => { logged.push(args); };
+    const { GET } = await import("../app/api/cron/service-checks/route");
+    const response = await GET(new NextRequest("https://example.test/api/cron/service-checks", {
+      headers: { authorization: "Bearer cron-test", "x-vercel-cron": "1" },
+    }));
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { ok: false, error: "service_checks_failed" });
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0][0], "[cron.service-checks]");
+    assert.match(String(logged[0][1]), /adapter accessed an undefined response field/);
+  } finally {
+    globalThis.fetch = realFetch;
+    console.error = realError;
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
