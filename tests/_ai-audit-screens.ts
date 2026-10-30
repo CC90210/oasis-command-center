@@ -115,6 +115,19 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     scenarios.push({ id: "workspace:model-search-deferred", screen: "workspace", props: { view: deferred, isOwner: true, initialTab: "research" } });
     expect.set("workspace:model-search-deferred", { has: ["Model and web search are deferred", "Deterministic website checks", "audit and proposal drafting", "PDF printing continue"] });
   }
+  {
+    const cloud = json(first as NonNullable<typeof first>);
+    cloud.modelSearchEnabled = true;
+    cloud.settings = { ...cloud.settings, engine: "cloud_workspace" };
+    cloud.authorization = null;
+    cloud.engagement = { ...cloud.engagement, stage: "generating" };
+    cloud.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    scenarios.push({ id: "workspace:cloud-search-skipped", screen: "workspace", props: { view: cloud, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:cloud-search-skipped", {
+      has: ["workspace cloud model is authorized", "AI web search is not run for this engine", "website checks, PageSpeed and evidence rules still run"],
+      hasNot: [/web search waits for CC's Mac/i],
+    });
+  }
   // The proposal editor's two ways out of a stuck draft: a waiting line takes its now-confirmed price in place,
   // and a tax rule set after the draft can be saved in without editing anything else.
   {

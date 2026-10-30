@@ -170,6 +170,15 @@ async function main() {
       process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
     }
   });
+  await check("the core rejects missing, none and unknown extraction engines without creating a step or job", async () => {
+    const stepsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n);
+    const jobsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, id] })).rows[0].n);
+    for (const engine of [undefined, null, "none", "mac-claude", "cloud"] as const) {
+      assert.deepEqual(await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: engine as never, actor: cc, now: NOW() }), { ok: false, error: "engine_invalid" });
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n), stepsBefore);
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, id] })).rows[0].n), jobsBefore);
+    }
+  });
   await check("drafting the profile queues one Mac job per part of the call; the jobs hold ids, never the call's words", async () => {
     // CC typed 35 leads a month on the call; the transcript says about 40: a disagreement for CC, never an overwrite.
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
@@ -445,6 +454,24 @@ async function main() {
     Object.defineProperty(r, "nextUrl", { value: new URL(url) });
     return r as never;
   };
+
+  await check("the extraction route rejects missing, none and unknown engines before the core and writes nothing", async () => {
+    const { eid } = await freshEngagement("Route Engine Fence Co");
+    const stepsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n);
+    const jobsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n);
+    await login(USERS.cc);
+    try {
+      for (const extra of [{}, { engine: null }, { engine: "none" }, { engine: "mac-claude" }, { engine: "cloud" }]) {
+        const response = await route.POST(postJson(`http://t.test/api/ai-audit/${eid}`, { action: "extract_profile", ...extra }), params(eid));
+        assert.equal(response.status, 400);
+        assert.deepEqual(await response.json(), { ok: false, error: "engine_invalid" });
+        assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n), stepsBefore);
+        assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n), jobsBefore);
+      }
+    } finally {
+      await login(null);
+    }
+  });
 
   await check("the card binds CC's call notes: a note changed behind it is refused, and a real change withdraws it on the record (review F3)", async () => {
     const { eid } = await freshEngagement("Notes Co");

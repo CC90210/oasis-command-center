@@ -48,7 +48,11 @@ export const MAC_RUN_UNCLAIMED_MS = 24 * 3_600_000;
 /** The CLI model the Mac uses for extraction. */
 export const MAC_MODEL = "sonnet";
 
-export type ExtractionEngine = "mac_claude" | "cloud_workspace";
+export const EXTRACTION_ENGINES = ["mac_claude", "cloud_workspace"] as const;
+export type ExtractionEngine = (typeof EXTRACTION_ENGINES)[number];
+export function isExtractionEngine(value: unknown): value is ExtractionEngine {
+  return typeof value === "string" && (EXTRACTION_ENGINES as readonly string[]).includes(value);
+}
 export type WindowRef = { transcript_id: string; from: number; to: number };
 export type WindowResult = WindowRef & { kept: KeptFact[]; dropped: DroppedFact[]; summary: ExtractionSummary; unreadable?: boolean };
 
@@ -75,6 +79,10 @@ export async function startExtraction(
   input: { tenantId: string; engagementId: string; engine: ExtractionEngine; actor: Actor; now: Date },
 ): Promise<StartResult> {
   const t = requireTenant(input.tenantId);
+  const engine = input.engine;
+  // Defense in depth: callers other than the HTTP route use this function too.
+  // Missing, "none", future values and typos must never fall through to cloud.
+  if (!isExtractionEngine(engine)) return { ok: false, error: "engine_invalid" };
   const engagement = await getEngagement(db, t, input.engagementId);
   if (!engagement) return { ok: false, error: "not_found" };
   if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, error: "stage_closed" };
@@ -89,7 +97,7 @@ export async function startExtraction(
   if (!usable.length) return { ok: false, error: "no_transcript" };
 
   const windows: WindowRef[] = usable.flatMap((x) => transcriptWindows(x.lines ?? []).map((w) => ({ transcript_id: x.id, from: w.from, to: w.to })));
-  const inputHash = contentHash({ transcripts: usable.map((x) => [x.id, x.text_sha256]).sort(), engine: input.engine });
+  const inputHash = contentHash({ transcripts: usable.map((x) => [x.id, x.text_sha256]).sort(), engine });
   const idem = `extract:${engagement.id}:${inputHash.slice(0, 24)}`;
   const existing = (await db.execute({ sql: "SELECT id, status FROM ai_audit_steps WHERE tenant_id = ? AND idempotency_key = ? LIMIT 1", args: [t, idem] })).rows[0];
   if (existing && ["queued", "running", "waiting_runner"].includes(String(existing.status))) return { ok: true, stepId: String(existing.id), windows: windows.length, created: false };
@@ -98,7 +106,7 @@ export async function startExtraction(
 
   const stepId = newId();
   const at = input.now.toISOString();
-  const mac = input.engine === "mac_claude";
+  const mac = engine === "mac_claude";
   // A re-run of the same inputs (after a finished or failed run) gets a fresh key.
   const runNo = int((await db.execute({ sql: "SELECT COUNT(1) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ?", args: [t, engagement.id, EXTRACT_STEP] })).rows[0]?.n) + 1;
   const stmts: InStatement[] = [
@@ -107,7 +115,7 @@ export async function startExtraction(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, ?, ?)`,
       args: [stepId, t, engagement.id, EXTRACT_STEP, runNo, mac ? "mac" : "cloud", mac ? "waiting_runner" : "queued", inputHash, existing ? `${idem}:run-${runNo}` : idem, JSON.stringify({ windows, results: [] }), at, at],
     },
-    eventStatement({ tenantId: t, engagementId: engagement.id, event: "extraction_started", actor: input.actor, at, refType: "step", refId: stepId, meta: { engine: input.engine, windows: windows.length, transcripts: usable.length } }),
+    eventStatement({ tenantId: t, engagementId: engagement.id, event: "extraction_started", actor: input.actor, at, refType: "step", refId: stepId, meta: { engine, windows: windows.length, transcripts: usable.length } }),
   ];
   if (mac) {
     for (const w of windows) {

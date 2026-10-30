@@ -24,7 +24,7 @@
  *   delete_transcript  { transcript_id }                  wipe a transcript's lines (and the quotes taken from it); owner only
  *   request_authorization { engine? }                     file Gate 1 for the current profile (only the owner approves it)
  *   build_brief                                           build a new version of the pre-call brief (reads the client's public website)
- *   extract_profile    { engine? }                         draft profile facts from the consented transcripts (before Gate 1)
+ *   extract_profile    { engine }                          draft profile facts from the consented transcripts (before Gate 1)
  *   create_meet_room                                      the lead's Oasis Meet call room: the open one, or a new one
  *   attach_meet_transcript { room_id, ai? }               attach a room's ready Meet transcript; `ai` (the client's answer
  *                                                         about AI analysis, said by hand) is the owner's only
@@ -60,7 +60,7 @@ import { getAuditVersion } from "@/lib/ai-audit/versions";
 import { markCall, saveCallNote } from "@/lib/ai-audit/call-notes";
 import { deleteTranscript } from "@/lib/ai-audit/transcripts";
 import { requestAuthorization, withdrawAuthorization, withdrawAuthorizationIfStale } from "@/lib/ai-audit/authorize";
-import { cancelExtraction, startExtraction } from "@/lib/ai-audit/extraction";
+import { cancelExtraction, isExtractionEngine, startExtraction } from "@/lib/ai-audit/extraction";
 import { buildBrief, defaultSiteDeps } from "@/lib/ai-audit/briefs";
 import { attachMeetTranscript, createAuditRoom } from "@/lib/ai-audit/meet-link";
 import { meetMediaReady } from "@/lib/meet/handlers";
@@ -316,7 +316,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     case "extract_profile": {
       // Reading a client's call with a model is processing their data: the owner's press, as Gate 1 is (review of phase 2b, M1).
       if (!s.isOwner) return json(403, { ok: false, error: "owner_only" });
-      const engine = body.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude";
+      if (!isExtractionEngine(body.engine)) return json(400, { ok: false, error: "engine_invalid" });
+      const engine = body.engine;
       const r = await startExtraction(s.db, { tenantId: s.tenantId, engagementId, engine, actor, now });
       if (!r.ok) return json(409, { ok: false, error: r.error });
       return json(200, { ok: true, step_id: r.stepId, windows: r.windows, created: r.created });

@@ -360,6 +360,7 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const running = !!step && IN_FLIGHT.includes(step.status);
   const authorizedEngine = view.authorization?.engine ?? view.settings.engine;
   const modelSearchDeferred = !view.modelSearchEnabled || authorizedEngine === "none";
+  const cloudSearchSkipped = view.modelSearchEnabled && authorizedEngine === "cloud_workspace";
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -383,6 +384,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       res.created
         ? modelSearchDeferred
           ? "Research started. Website checks, PageSpeed and the evidence rules continue; model search is deferred."
+          : cloudSearchSkipped
+            ? "Research started. Website checks, PageSpeed and the evidence rules continue; AI web search is not used for workspace cloud audits."
           : "Research started. It moves one step every five minutes; the web search waits for CC's Mac."
         : "A research run is already going.",
     );
@@ -431,6 +434,10 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       {modelSearchDeferred ? (
         <div className="rounded-lg border border-hairline px-3 py-2 text-[12px] text-status-warm">
           Model and web search are deferred. Deterministic website checks, PageSpeed, evidence rules, audit and proposal drafting, and PDF printing continue.
+        </div>
+      ) : cloudSearchSkipped ? (
+        <div className="rounded-lg border border-hairline px-3 py-2 text-[12px] text-fg-muted">
+          The workspace cloud model is authorized for the audit&apos;s writing pass. AI web search is not run for this engine; website checks, PageSpeed and evidence rules still run.
         </div>
       ) : null}
 
