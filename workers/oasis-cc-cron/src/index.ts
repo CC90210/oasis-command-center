@@ -28,7 +28,9 @@ import { cronMatches } from "./cron-match";
 // 2026-09-29, the books' daily upkeep (lib/founders-finances/books-cron.ts):
 // exchange rates, the Stripe reconcile (payouts included), Wise invoice
 // matches, then the Wise bank feed, in that order, once a day each.
-export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
+export type CronEntry = { path: string; schedule: string; timeZone?: string };
+
+export const CRON_TABLE: ReadonlyArray<CronEntry> = [
   { path: "/api/cron/dispatch-engine-fallbacks", schedule: "* * * * *" },
   { path: "/api/cron/dispatch-automations", schedule: "* * * * *" },
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
@@ -57,6 +59,12 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   // approvals, Stripe checks, onboarding, stalls. OASIS's own workspaces only.
   { path: "/api/cron/ai-audit-tick", schedule: "*/5 * * * *" },
 ];
+
+/** One registry row's due verdict. Kept as a named seam so simulation and the
+ * scheduled dispatch cannot accidentally ignore an entry's optional zone. */
+export function cronEntryMatches(entry: CronEntry, at: Date): boolean {
+  return cronMatches(entry.schedule, at, entry.timeZone ?? "UTC");
+}
 
 // Self-contained runtime types: this dir sits inside the Next app's tsconfig
 // sweep, which has no Cloudflare Workers globals — and must not need them.
@@ -171,7 +179,7 @@ export default {
     if (url.pathname !== "/simulate") return new Response("oasis-cc-cron", { status: 200 });
     const at = new Date(url.searchParams.get("at") || Date.now());
     if (Number.isNaN(at.getTime())) return new Response("bad ?at=", { status: 400 });
-    const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, at)).map((e) => e.path);
+    const due = CRON_TABLE.filter((entry) => cronEntryMatches(entry, at)).map((e) => e.path);
     return Response.json({
       at: at.toISOString(),
       forwarding: forwardingEnabled(env),
@@ -181,7 +189,7 @@ export default {
 
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const at = new Date(controller.scheduledTime);
-    const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, at));
+    const due = CRON_TABLE.filter((entry) => cronEntryMatches(entry, at));
     const forwarding = forwardingEnabled(env);
     if (!forwarding) {
       // Dry mode logs EVERY tick (due or not): the Phase A gate compares the

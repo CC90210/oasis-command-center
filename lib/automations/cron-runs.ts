@@ -10,7 +10,7 @@
  */
 import type { Client } from "@libsql/client";
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
-import { cronMatches } from "@/workers/oasis-cc-cron/src/cron-match";
+import { cronMatches, isValidCronExpression, isValidTimeZone } from "@/workers/oasis-cc-cron/src/cron-match";
 
 export const CRON_RUNS_MAX_BATCH = 60;
 export const CRON_RUNS_KEEP_DAYS = 14;
@@ -55,24 +55,37 @@ export async function recordCronRuns(db: Client, batch: { tickAt: string; runs: 
   return batch.runs.length;
 }
 
-/** "every 5 minutes", "hourly at :15", "daily at 21:47 UTC"; anything else is shown as written. PURE. */
-export function scheduleInWords(expr: string): string {
-  const [min, hour, dom, mon, dow] = expr.trim().split(/\s+/);
-  const rest = dom === "*" && mon === "*" && dow === "*";
-  if (!rest) return `cron ${expr}`;
-  if (min === "*" && hour === "*") return "every minute";
-  const step = /^\*\/(\d+)$/.exec(min ?? "");
-  if (step && hour === "*") return `every ${step[1]} minutes`;
-  if (/^\d+$/.test(min ?? "") && hour === "*") return `hourly at :${String(min).padStart(2, "0")}`;
-  if (/^\d+$/.test(min ?? "") && /^\d+$/.test(hour ?? "")) return `daily at ${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")} UTC`;
-  return `cron ${expr}`;
+function timeZoneLabel(timeZone: string): string | null {
+  if (!isValidTimeZone(timeZone)) return null;
+  if (/^(?:Etc\/)?(?:UTC|GMT)$/i.test(timeZone)) return "UTC";
+  const city = timeZone.split("/").pop();
+  return city ? `${city.replace(/_/g, " ")} time` : timeZone;
 }
 
-/** The next minute (after `now`) the schedule fires, within a day; null when it does not. PURE. */
-export function nextRunAt(expr: string, now: number): string | null {
+/** "every 5 minutes", "hourly at :15", "daily at 21:47 UTC"; anything else is shown as written. PURE. */
+export function scheduleInWords(expr: string, timeZone = "UTC"): string {
+  const [min, hour, dom, mon, dow] = expr.trim().split(/\s+/);
+  const rest = dom === "*" && mon === "*" && dow === "*";
+  const zone = timeZoneLabel(timeZone);
+  if (!zone) return `cron ${expr}`;
+  const suffix = zone === "UTC" ? "" : `, ${zone}`;
+  if (!rest) return zone === "UTC" ? `cron ${expr}` : `cron ${expr} (${zone})`;
+  if (min === "*" && hour === "*") return `every minute${suffix}`;
+  const step = /^\*\/(\d+)$/.exec(min ?? "");
+  if (step && hour === "*") return `every ${step[1]} minutes${suffix}`;
+  if (/^\d+$/.test(min ?? "") && hour === "*") return `hourly at :${String(min).padStart(2, "0")}${suffix}`;
+  if (/^\d+$/.test(min ?? "") && /^\d+$/.test(hour ?? "")) {
+    return `daily at ${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")} ${zone}`;
+  }
+  return zone === "UTC" ? `cron ${expr}` : `cron ${expr} (${zone})`;
+}
+
+/** The next minute (after `now`) the schedule fires, within the next week; null when it does not. PURE. */
+export function nextRunAt(expr: string, now: number, timeZone = "UTC"): string | null {
+  if (!Number.isFinite(now) || !isValidCronExpression(expr) || !isValidTimeZone(timeZone)) return null;
   const start = Math.floor(now / 60_000) * 60_000 + 60_000;
-  for (let t = start; t <= start + DAY_MS; t += 60_000) {
-    if (cronMatches(expr, new Date(t))) return new Date(t).toISOString();
+  for (let t = start; t <= start + 8 * DAY_MS; t += 60_000) {
+    if (cronMatches(expr, new Date(t), timeZone)) return new Date(t).toISOString();
   }
   return null;
 }
@@ -80,6 +93,7 @@ export function nextRunAt(expr: string, now: number): string | null {
 export type CronFlow = {
   path: string;
   schedule: string;
+  timeZone: string;
   words: string;
   nextAt: string | null;
   last: { ok: boolean; status: string | null; ms: number | null; at: string } | null;
@@ -114,14 +128,18 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
     }
     const day = new Map<string, CronFlow["day"]>();
     for (const r of dayRs.rows) day.set(String(r.route), { ok: Number(r.ok ?? 0), total: Number(r.total ?? 0) });
-    return CRON_TABLE.map((e) => ({
-      path: e.path,
-      schedule: e.schedule,
-      words: scheduleInWords(e.schedule),
-      nextAt: nextRunAt(e.schedule, now),
-      last: last.get(e.path) ?? null,
-      day: day.get(e.path) ?? { ok: 0, total: 0 },
-    }));
+    return CRON_TABLE.map((e) => {
+      const timeZone = e.timeZone ?? "UTC";
+      return {
+        path: e.path,
+        schedule: e.schedule,
+        timeZone,
+        words: scheduleInWords(e.schedule, timeZone),
+        nextAt: nextRunAt(e.schedule, now, timeZone),
+        last: last.get(e.path) ?? null,
+        day: day.get(e.path) ?? { ok: 0, total: 0 },
+      };
+    });
   } catch (err) {
     console.error("[automations.cron_runs]", err instanceof Error ? err.message : String(err));
     return null;
