@@ -58,6 +58,12 @@ function walk(dir: string, out: string[] = []): string[] {
 const files = SOURCE_DIRS.flatMap((d) => walk(join(ROOT, d)));
 const rel = (f: string) => f.slice(ROOT.length + 1).split(sep).join("/");
 
+assert.equal(
+  isSharedPath("lib/publish-targets.ts"),
+  true,
+  "the channel capability contract used by both founders and OASIS publishers must be shared infrastructure",
+);
+
 /** `@/lib/founders/gate` -> `lib/founders/gate`. Only alias imports resolve to
  *  repo paths; relative and package imports are out of scope for this rule. */
 function resolveAliasImport(spec: string): string | null {
@@ -179,6 +185,19 @@ assert.equal(
 // ── the rule itself, exercised directly ──────────────────────────────
 // The scan above proves the tree is clean RIGHT NOW. These prove the rule would
 // actually catch a violation, so a clean scan means something.
+// The Maven Queue contract is OASIS-owned and runs outside the founders portal.
+// Keep its pure parsing/capability dependencies in the shared contract too.
+{
+  const contractTs = files.find((f) => rel(f) === "lib/marketing/maven-publish-contract.ts");
+  assert.ok(contractTs, "lib/marketing/maven-publish-contract.ts should exist");
+  const src = readFileSync(contractTs!, "utf8");
+  assert.doesNotMatch(
+    src,
+    /(?:from|import)\s*\(?\s*["']@\/lib\/founders(?:\/|-)/,
+    "the OASIS Maven Queue contract must not import founders-owned code; move pure publishing primitives to shared infrastructure",
+  );
+}
+
 assert.equal(
   isImportAllowed("app/founders/marketing/page.tsx", "lib/lenders/classify-reply").allowed,
   false,

@@ -9,6 +9,7 @@
  * can exercise it with no DB, no session and no network.
  */
 import { timeAgo } from "@/lib/devices/presence";
+import { parseStringArray } from "@/lib/publish-targets";
 
 // ─────────────────────────────────────────────────────────── taxonomy
 
@@ -304,18 +305,7 @@ export function reviewDecisionFor(status: AssetStatus): string | null {
  * the caller the whole asset, which is the same lesson as the publish-intent
  * reader.
  */
-export function parseStringArray(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === "string");
-  if (typeof raw === "string" && raw.trim()) {
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
+export { parseStringArray };
 
 /** Where the asset went. */
 export const parsePlatforms = parseStringArray;

@@ -1,7 +1,6 @@
 /** Pure contract shared by the Maven publish Queue producer and consumer. */
-import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
-import { parseSlideUrls, parseStringArray } from "@/lib/founders-marketing-core";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
+import { PUBLISH_CHANNELS, parseSlideUrls, parseStringArray } from "@/lib/publish-targets";
 
 export const OASIS_TENANT_ID = WEBDEV_TENANT_ID;
 export const OASIS_MAVEN_PUBLISH_SWITCH = "OASIS_MAVEN_PUBLISH_QUEUE_FORWARD";
