@@ -563,6 +563,10 @@ async function main() {
       // The Free AI Audit's upkeep (2026-10-25): it iterates OASIS_INTERNAL_TENANT_IDS only and
       // drops any retired one (lib/ai-audit/tick.ts), so SunBiz is never in reach.
       "ai-audit-tick",
+      // API-only handover jobs (2026-10-29): service checks and both content jobs bind every
+      // database read/write to WEBDEV_TENANT_ID (OASIS), never enumerate tenants; event retention
+      // is deliberately tenant-free and only expires unclaimed global agent_events by exact id.
+      "service-checks", "event-bus-retention", "library-post-linker", "post-analytics-sync",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });
