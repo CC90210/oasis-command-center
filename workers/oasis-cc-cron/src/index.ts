@@ -138,7 +138,7 @@ async function forward(env: Env, origin: string, path: string): Promise<ForwardR
     return { path, status: first.status, ok: first.ok, attempts: 1, ms: Date.now() - started };
   }
   // One bounded retry with jitter for transient failures. Safe for every
-  // route: the cutover gate (runbook Phase B) requires all 29 routes to be
+  // route: the cutover gate (runbook Phase B) requires every registered route to be
   // double-fire-safe via CAS claims or the tick-lease before CRON_FORWARD=on.
   await new Promise((r) => setTimeout(r, 15_000 + Math.floor(Math.random() * 15_000)));
   const second = await callOnce(env, origin, path);

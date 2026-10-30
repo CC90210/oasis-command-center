@@ -55,7 +55,7 @@ export { DEPARTMENT_CHAT_CHECKS };
 export const OASIS_GLOBAL_CHECKS: DripCheck[] = [
   ...CALENDAR_CHECKS,
   ...WORKER_REPORTER_CHECKS,
-  ...DASHBOARD_EMAIL_CHECKS,
+  ...DASHBOARD_EMAIL_CHECKS.map((check) => ({ ...check, lane: "operator" as const })),
 ];
 
 /** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */

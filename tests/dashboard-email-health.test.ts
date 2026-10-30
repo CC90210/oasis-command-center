@@ -40,7 +40,9 @@ const result = summarizeDashboardEmailHealth(
     row("webdev-old-queued", "queued", { tenant_id: OASIS_WEBDEV }),
     row("foreign-old-queued", "queued", { tenant_id: FOREIGN }),
     row("new-queued", "queued", { created_at: "2026-10-29T22:55:00.000Z" }),
-    row("due-retry", "retry", { metadata: { status: "retry", next_attempt_at: "2026-10-29T22:59:00.000Z" } }),
+    row("recently-due-retry", "retry", { metadata: { status: "retry", next_attempt_at: "2026-10-29T22:59:00.000Z" } }),
+    row("overdue-retry", "retry", { metadata: { status: "retry", next_attempt_at: "2026-10-29T22:57:00.000Z" } }),
+    row("invalid-retry", "retry", { metadata: { status: "retry", next_attempt_at: "not-a-date" } }),
     row("future-retry", "retry", { metadata: { status: "retry", next_attempt_at: "2026-10-30T00:00:00.000Z" } }),
     row("expired", "sending", { metadata: { status: "sending", lease_expires_at: "2026-10-29T22:59:00.000Z" } }),
     row("live-lease", "sending", { metadata: { status: "sending", lease_expires_at: "2026-10-29T23:02:00.000Z" } }),
@@ -66,11 +68,12 @@ const result = summarizeDashboardEmailHealth(
 assert.deepEqual(
   result.problems.map((p) => `${p.id}:${p.kind}`).sort(),
   [
-    "due-retry:retry_due",
     "expired:lease_expired",
     "failed:terminal_failed",
+    "invalid-retry:retry_due",
     "malformed-claim:lease_expired",
     "old-queued:queued_stale",
+    "overdue-retry:retry_due",
     "receipt-drift:receipt_unreconciled",
     "unknown:delivery_unknown",
     "webdev-old-queued:queued_stale",
@@ -80,7 +83,7 @@ assert.match(result.reason, /queued stale=2/);
 assert.match(result.reason, /receipt unreconciled=1/);
 assert.equal(DASHBOARD_EMAIL_CHECKS.length, 1);
 assert.equal(DASHBOARD_EMAIL_CHECKS[0].id, "dashboard_email.queue_health");
-assert.equal(DASHBOARD_EMAIL_CHECKS[0].lane, "operator", "OASIS queue pages CC's operator Telegram lane");
+assert.equal(DASHBOARD_EMAIL_CHECKS[0].lane, undefined, "the shared runner owns the alert audience");
 assert.deepEqual(DASHBOARD_EMAIL_CHECKS[0].rule, { kind: "must_be_zero" });
 
 console.log("dashboard-email-health: all assertions passed");

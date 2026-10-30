@@ -13,6 +13,7 @@ import {
 } from "@/lib/leads/dashboard-email-sender";
 
 const READ_CAP = 500;
+const RETRY_HEALTH_GRACE_MS = 2 * 60_000;
 const OASIS_TENANT_IDS = Object.entries(TENANT_ID_BRAND)
   .filter(([, brand]) => brand === "oasis")
   .map(([tenantId]) => tenantId);
@@ -56,7 +57,9 @@ export function summarizeDashboardEmailHealth(
     }
     if (status === "retry") {
       const next = Date.parse(String(metadata.next_attempt_at ?? ""));
-      if (!Number.isFinite(next) || next <= nowMs) problems.push({ id: row.id, kind: "retry_due" });
+      if (!Number.isFinite(next) || next + RETRY_HEALTH_GRACE_MS <= nowMs) {
+        problems.push({ id: row.id, kind: "retry_due" });
+      }
       continue;
     }
     if (status === "sending") {
@@ -101,7 +104,7 @@ async function readLane(
   let query = db
     .from("lead_interactions")
     .select(
-      "id,tenant_id,lead_id,type,channel,direction,agent_source,provider,provider_message_id,subject,content,content_preview,to_email,metadata,created_at,sent_at",
+      "id,tenant_id,lead_id,type,channel,direction,agent_source,provider,provider_message_id,subject,to_email,metadata,created_at,sent_at",
     )
     .in("tenant_id", OASIS_TENANT_IDS)
     .eq("type", "email_queued")
@@ -193,7 +196,6 @@ export async function observeDashboardEmailHealth(
 export const DASHBOARD_EMAIL_CHECKS: DripCheck[] = [{
   id: "dashboard_email.queue_health",
   severity: "critical",
-  lane: "operator",
   rule: { kind: "must_be_zero" },
   observe: async (db, tenantId, endMs) =>
     (await observeDashboardEmailHealth(db, tenantId, endMs)).observed,

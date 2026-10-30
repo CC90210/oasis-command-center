@@ -7,6 +7,7 @@ import { TENANT_ID_BRAND } from "@/lib/email/brand-for-tenant";
 import {
   DASHBOARD_EMAIL_CLAIM_LEASE_MS,
   dashboardEmailLane,
+  dashboardEmailStaleSending,
   type DashboardEmailCasExpected,
   type DashboardEmailCasWrite,
   type DashboardEmailQueueRow,
@@ -110,15 +111,19 @@ export class SupabaseDashboardEmailSenderStore implements DashboardEmailSenderSt
     const reads = await Promise.all([
       this.readLaneStatus("dashboard_drawer", "sending", limit, [leaseExpired]),
       this.readLaneStatus("dashboard_drawer", "sending", limit, [missingLease, claimExpired]),
-      // This bounded safety scan catches malformed non-null timestamps. The
-      // due-specific queries above prevent live leases at the head from hiding
-      // a valid expired lease farther back in the queue.
+      // This bounded safety scan catches malformed non-null timestamps. Every
+      // batch is filtered below before the global limit, so its live leases
+      // cannot crowd an expired result out of the merged set.
       this.readLaneStatus("dashboard_drawer", "sending", Math.max(limit, 100)),
       this.readLaneStatus("ai_audit_transactional", "sending", limit, [leaseExpired]),
       this.readLaneStatus("ai_audit_transactional", "sending", limit, [missingLease, claimExpired]),
       this.readLaneStatus("ai_audit_transactional", "sending", Math.max(limit, 100)),
     ]);
-    return oldestUnique(reads, limit);
+    const nowMs = now.getTime();
+    return oldestUnique(
+      reads.map((batch) => batch.filter((row) => dashboardEmailStaleSending(row, nowMs))),
+      limit,
+    );
   }
 
   async listAmbiguousReceipts(_now: Date, limit: number): Promise<DashboardEmailQueueRow[]> {

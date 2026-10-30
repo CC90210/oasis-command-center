@@ -12,6 +12,7 @@ import {
   dashboardEmailCredentialReadiness,
   dashboardEmailIdempotencyKey,
   dashboardEmailSenderEnabled,
+  dashboardEmailStaleSending,
   isDashboardEmailLane,
   runDashboardEmailSender,
   type DashboardEmailCasExpected,
@@ -142,7 +143,7 @@ class RecordingQuery implements PromiseLike<{ data: unknown[]; error: null }> {
   readonly operations: RecordedOperation[] = [];
   private updatePayload: Record<string, unknown> | null = null;
 
-  constructor(readonly table: string) {}
+  constructor(readonly table: string, private readonly resultData: unknown[] = []) {}
 
   private record(method: string, ...args: unknown[]): this {
     this.operations.push({ method, args });
@@ -167,7 +168,7 @@ class RecordingQuery implements PromiseLike<{ data: unknown[]; error: null }> {
     onfulfilled?: ((value: { data: unknown[]; error: null }) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): PromiseLike<TResult1 | TResult2> {
-    return Promise.resolve({ data: [], error: null }).then(onfulfilled, onrejected);
+    return Promise.resolve({ data: this.resultData, error: null }).then(onfulfilled, onrejected);
   }
 }
 
@@ -177,6 +178,16 @@ class RecordingDb {
     const query = new RecordingQuery(table);
     this.queries.push(query);
     return query;
+  }
+}
+
+class FixtureDb {
+  private index = 0;
+
+  constructor(private readonly batches: unknown[][]) {}
+
+  from(table: string): RecordingQuery {
+    return new RecordingQuery(table, this.batches[this.index++] ?? []);
   }
 }
 
@@ -240,6 +251,38 @@ assert.deepEqual(
   assert.equal(db.queries.length, 6, "expired-lease, expired-claim, and malformed scans for both lanes");
   assert.equal(db.queries.filter((query) => query.operations.some((op) => op.method === "lte" && op.args[0] === "metadata->>lease_expires_at")).length, 2);
   assert.equal(db.queries.filter((query) => hasOperation(query, "is", "metadata->>lease_expires_at", null)).length, 2);
+
+  const expired = row({
+    id: "expired-after-live-row",
+    created_at: "2026-10-29T22:05:00.000Z",
+    metadata: {
+      status: "sending",
+      claimed_at: "2026-10-29T22:50:00.000Z",
+      lease_expires_at: "2026-10-29T22:55:00.000Z",
+    },
+  });
+  const live = row({
+    id: "older-live-row",
+    created_at: "2026-10-29T22:00:00.000Z",
+    metadata: {
+      status: "sending",
+      claimed_at: "2026-10-29T22:59:00.000Z",
+      lease_expires_at: "2026-10-29T23:02:00.000Z",
+    },
+  });
+  const fixtureStore = new SupabaseDashboardEmailSenderStore(new FixtureDb([
+    [expired],
+    [],
+    [live],
+    [],
+    [],
+    [],
+  ]) as never);
+  assert.deepEqual(
+    (await fixtureStore.listStaleSending(NOW, 1)).map((value) => value.id),
+    [expired.id],
+    "an older live lease in the safety scan must not crowd out an expired claim",
+  );
 
   db.queries.length = 0;
   await store.listAmbiguousReceipts(NOW, 5);
@@ -337,6 +380,68 @@ assert.deepEqual(
   assert.equal(metadata(store.rows.get(queued.id)!).status, "sent");
   assert.equal(metadata(store.rows.get(queued.id)!).preserve_me, "yes", "metadata must survive every transition");
 }
+
+{
+  class RetryAdvancedBeforeClaimStore extends MemoryStore {
+    private advanced = false;
+
+    override async compareAndSet(
+      value: DashboardEmailQueueRow,
+      expected: DashboardEmailCasExpected,
+      write: DashboardEmailCasWrite,
+    ): Promise<boolean> {
+      if (!this.advanced && write.metadata.status === "sending") {
+        const current = this.rows.get(value.id)!;
+        this.rows.set(value.id, {
+          ...current,
+          metadata: {
+            ...metadata(current),
+            status: "retry",
+            attempts: 2,
+            claimed_at: "2026-10-29T22:59:30.000Z",
+            next_attempt_at: "2026-10-29T23:05:00.000Z",
+          },
+        });
+        this.advanced = true;
+      }
+      return super.compareAndSet(value, expected, write);
+    }
+  }
+
+  const retry = row({
+    id: "retry-claim-fence",
+    metadata: {
+      status: "retry",
+      attempts: 1,
+      claimed_at: "2026-10-29T22:58:00.000Z",
+      next_attempt_at: "2026-10-29T22:59:00.000Z",
+    },
+  });
+  const store = new RetryAdvancedBeforeClaimStore([retry]);
+  let sends = 0;
+  const result = await runDashboardEmailSender({
+    store,
+    now: NOW,
+    claimToken: () => "stale-tick-claim",
+    send: async () => {
+      sends += 1;
+      return { ok: true, provider: "oasis_shared_gmail", gmail_message_id: "never", from_address: "sender@oasisai.work" };
+    },
+  });
+  assert.equal(sends, 0, "a stale retry snapshot must not send after a newer retry transition");
+  assert.equal(result.raced, 1);
+  assert.equal(metadata(store.rows.get(retry.id)!).attempts, 2);
+  assert.equal(metadata(store.rows.get(retry.id)!).next_attempt_at, "2026-10-29T23:05:00.000Z");
+}
+
+assert.equal(
+  dashboardEmailStaleSending(row({ metadata: { status: "sending", lease_expires_at: "2026-10-29T22:59:00.000Z" } }), NOW.getTime()),
+  true,
+);
+assert.equal(
+  dashboardEmailStaleSending(row({ metadata: { status: "sending", lease_expires_at: "2026-10-29T23:02:00.000Z" } }), NOW.getTime()),
+  false,
+);
 
 {
   const queued = row({

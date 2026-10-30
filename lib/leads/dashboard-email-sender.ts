@@ -218,7 +218,8 @@ function due(row: DashboardEmailQueueRow, nowMs: number): boolean {
   return !Number.isFinite(next) || next <= nowMs;
 }
 
-function staleSending(row: DashboardEmailQueueRow, nowMs: number): boolean {
+/** True only when a sending claim is expired or cannot prove a live lease. */
+export function dashboardEmailStaleSending(row: DashboardEmailQueueRow, nowMs: number): boolean {
   const metadata = dashboardEmailMetadata(row.metadata);
   if (metadata.status !== "sending") return false;
   const lease = Date.parse(String(metadata.lease_expires_at ?? ""));
@@ -357,7 +358,7 @@ export async function runDashboardEmailSender(args: {
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
     .slice(0, limit);
   const stale = rawStale
-    .filter((row) => isDashboardEmailLane(row) && staleSending(row, nowMs))
+    .filter((row) => isDashboardEmailLane(row) && dashboardEmailStaleSending(row, nowMs))
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
     .slice(0, limit);
   const ambiguous = rawAmbiguous
@@ -420,7 +421,6 @@ export async function runDashboardEmailSender(args: {
     }
 
     const metadata = dashboardEmailMetadata(row.metadata);
-    const expectedStatus = String(metadata.status ?? "");
     const claimToken = (args.claimToken ?? randomUUID)();
     const claimedMetadata: DashboardEmailMetadata = {
       ...metadata,
@@ -431,7 +431,7 @@ export async function runDashboardEmailSender(args: {
     };
     const claimed = await args.store.compareAndSet(
       row,
-      { status: expectedStatus },
+      expectedFor(row),
       { metadata: claimedMetadata },
     );
     if (!claimed) {
