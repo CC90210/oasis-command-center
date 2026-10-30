@@ -116,6 +116,7 @@ jobs:
             "* * * * *")
               ROUTES="/api/cron/dispatch-engine-fallbacks
                       /api/cron/dispatch-automations
+                      /api/cron/maven-publish-queue
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/dashboard-email-sender" ;;
             "*/5 * * * *")
@@ -152,6 +153,7 @@ jobs:
               echo "manual run: driving the fast paths + health-check"
               ROUTES="/api/cron/dispatch-engine-fallbacks
                       /api/cron/dispatch-automations
+                      /api/cron/maven-publish-queue
                       /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dashboard-email-sender
