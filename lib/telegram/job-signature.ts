@@ -37,8 +37,15 @@ export async function verifyTelegramJob(input: {
   body: string;
   nowMs: number;
 }): Promise<boolean> {
-  if (!input.secret || !input.timestamp || !input.signature || !/^\d{1,12}$/.test(input.timestamp)) return false;
-  if (Math.abs(Math.floor(input.nowMs / 1000) - Number(input.timestamp)) > TELEGRAM_JOB_SIGNATURE_MAX_AGE_SEC) return false;
+  if (
+    !input.secret ||
+    !input.timestamp ||
+    !input.signature ||
+    !/^\d{1,12}$/.test(input.timestamp) ||
+    !/^tj1=[0-9a-f]{64}$/.test(input.signature)
+  ) return false;
+  const ageSec = Math.floor(input.nowMs / 1000) - Number(input.timestamp);
+  if (ageSec < 0 || ageSec > TELEGRAM_JOB_SIGNATURE_MAX_AGE_SEC) return false;
   const expected = await signTelegramJob(input.secret, input.timestamp, input.body);
   return sameFixedString(expected, input.signature);
 }

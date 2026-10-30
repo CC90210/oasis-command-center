@@ -133,8 +133,14 @@ function testEntryWiring() {
   assert.equal(uploadedEntryName('{ "main": ".open-next/worker.js" }'), "worker.js");
   const entry = readFileSync("worker-entry.ts", "utf8");
   assert.match(entry, /fetch\(request: Request, env: Env, ctx: Ctx\): Promise<Response> \{\s*return handler\.fetch\(request, withSecretBundles\(env\), ctx\);/);
-  assert.match(entry, /const full = withSecretBundles\(env\);\s*await consumeSlackJobs\(batch, full, \(request\) => handler\.fetch\(request, full, ctx\)\);/);
-  assert.doesNotMatch(wrangler, /"queues"/, "the Slack queue bindings are still held for CC");
+  assert.match(entry, /const full = withSecretBundles\(env\);\s*await routeQueueBatch\(batch, full, \(request\) => handler\.fetch\(request, full, ctx\)\);/,
+    "the exact-name router receives the expanded env and passes the same env to OpenNext");
+  assert.match(wrangler, /"producers"\s*:\s*\[\s*\{\s*"binding"\s*:\s*"TELEGRAM_AGENT_JOBS"\s*,\s*"queue"\s*:\s*"oasis-telegram-agent-jobs"\s*\}/,
+    "the dedicated Telegram producer is present");
+  assert.match(wrangler, /"consumers"\s*:\s*\[\s*\{\s*"queue"\s*:\s*"oasis-telegram-agent-jobs"/,
+    "the dedicated Telegram consumer is present");
+  assert.doesNotMatch(wrangler, /SLACK_AGENT_JOBS|oasis-slack-agent-jobs/,
+    "Slack bindings stay absent while its separate cutover is held");
   assert.match(entry, /scrubBundlesFromProcessEnv\(process\.env\);\s*expanded\.set\(env, merged\);/,
     "the entry removes the raw bundles nodejs_compat copied into process.env");
 }

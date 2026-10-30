@@ -5,7 +5,11 @@ import { createClient } from "@libsql/client";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import type { RunSession } from "../lib/os/runs/session";
 import { runOasisTelegramDeviceTurn, telegramDeviceRunIdentity } from "../lib/telegram/device-turn";
-import { verifyTelegramJob } from "../lib/telegram/job-signature";
+import {
+  signTelegramJob,
+  TELEGRAM_JOB_SIGNATURE_MAX_AGE_SEC,
+  verifyTelegramJob,
+} from "../lib/telegram/job-signature";
 import { runOasisTelegramJob } from "../lib/telegram/jobs";
 import {
   NO_PAIRED_COMPUTER_REPLY,
@@ -77,6 +81,24 @@ const parsedJob = (id: number, text?: string): OasisTelegramJob => {
   assert.ok(parsed.ok);
   return parsed.job;
 };
+
+const deviceSession = (engineKind: "cli" | "local", engineName: string | undefined): RunSession => ({
+  scope: { tenantId: OASIS_TELEGRAM_TENANT_ID, userId: "auth-cc" },
+  email: "conaugh@oasisai.work",
+  tenantSlug: "oasis-ai-cc",
+  dept: OS_DEPARTMENTS.find((item) => item.key === "chief_of_staff")!,
+  operatorName: "CC",
+  isOperator: true,
+  canManageAi: true,
+  fallback: null,
+  viewer: { ok: true },
+  bridge: null,
+  computerDispatch: { pairingId: "pair-mac", label: "CC Mac", engineKind, engineName, fallback: "workspace_api" },
+  apiEngineChoice: null,
+  apiAccountSnapshot: { provider: "openrouter", model: "forbidden" },
+  fallbackFrom: null,
+  fallbackReason: null,
+}) as unknown as RunSession;
 
 console.log("oasis telegram webhook:");
 
@@ -235,6 +257,46 @@ await check("the queue signs in-process jobs; 2xx acks and failures retry", asyn
   assert.equal(new URL(seen[0].url).pathname, "/api/webhooks/oasis-telegram/jobs");
 });
 
+await check("queue-job HMAC refuses wrong, tampered, expired, future, missing, malformed and truncated proofs", async () => {
+  const body = JSON.stringify(parsedJob(25));
+  const nowSec = Math.floor(NOW.getTime() / 1000);
+  const timestamp = String(nowSec);
+  const signature = await signTelegramJob(ENV.OASIS_TELEGRAM_JOB_SIGNING_SECRET!, timestamp, body);
+  const verify = (overrides: Partial<Parameters<typeof verifyTelegramJob>[0]> = {}) => verifyTelegramJob({
+    secret: ENV.OASIS_TELEGRAM_JOB_SIGNING_SECRET!,
+    timestamp,
+    signature,
+    body,
+    nowMs: NOW.getTime(),
+    ...overrides,
+  });
+
+  assert.equal(await verify(), true, "the exact proof is accepted");
+  assert.equal(await verify({ secret: "wrong-job-secret" }), false, "wrong secret");
+  assert.equal(await verify({ body: `${body} ` }), false, "tampered body");
+
+  const expiredTimestamp = String(nowSec - TELEGRAM_JOB_SIGNATURE_MAX_AGE_SEC - 1);
+  assert.equal(await verify({
+    timestamp: expiredTimestamp,
+    signature: await signTelegramJob(ENV.OASIS_TELEGRAM_JOB_SIGNING_SECRET!, expiredTimestamp, body),
+  }), false, "expired timestamp");
+
+  const futureTimestamp = String(nowSec + 1);
+  assert.equal(await verify({
+    timestamp: futureTimestamp,
+    signature: await signTelegramJob(ENV.OASIS_TELEGRAM_JOB_SIGNING_SECRET!, futureTimestamp, body),
+  }), false, "even a correctly signed future timestamp is refused");
+
+  for (const missing of [{ secret: null }, { timestamp: null }, { signature: null }]) {
+    assert.equal(await verify(missing), false, `missing ${Object.keys(missing)[0]}`);
+  }
+  for (const malformed of ["not-a-time", "-1", "1234567890123"]) {
+    assert.equal(await verify({ timestamp: malformed }), false, `malformed timestamp ${malformed}`);
+  }
+  assert.equal(await verify({ signature: "not-a-telegram-job-proof" }), false, "malformed signature");
+  assert.equal(await verify({ signature: signature.slice(0, -2) }), false, "truncated signature");
+});
+
 await check("one update infers and replies once; retries read the terminal receipt", async () => {
   const job = parsedJob(30);
   await ensureTelegramReceipt(db, job, NOW);
@@ -304,31 +366,14 @@ await check("an ambiguous outbound result is terminal and can never duplicate th
 
 await check("the exact-device lane forces fallback=none and stable department_task_v2 run IDs", async () => {
   const job = parsedJob(40, "Run the handover");
-  const dept = OS_DEPARTMENTS.find((item) => item.key === "chief_of_staff")!;
-  const session = {
-    scope: { tenantId: OASIS_TELEGRAM_TENANT_ID, userId: "auth-cc" },
-    email: "conaugh@oasisai.work",
-    tenantSlug: "oasis-ai-cc",
-    dept,
-    operatorName: "CC",
-    isOperator: true,
-    canManageAi: true,
-    fallback: null,
-    viewer: { ok: true },
-    bridge: null,
-    computerDispatch: { pairingId: "pair-mac", label: "CC Mac", engineKind: "cli", engineName: "claude", fallback: "workspace_api" },
-    apiEngineChoice: null,
-    apiAccountSnapshot: { provider: "openrouter", model: "forbidden" },
-    fallbackFrom: null,
-    fallbackReason: null,
-  } as unknown as RunSession;
+  const session = deviceSession("cli", "codex");
   let sentArgs: Record<string, unknown> | null = null;
   const result = await runOasisTelegramDeviceTurn(db, job, {
     resolveContext: async () => ({
       ok: true,
       context: {
         session,
-        engine: { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "workspace_api" },
+        engine: { kind: "cli", cli: "codex", pairingId: "pair-mac", fallback: "workspace_api" },
         agentSlug: "bravo",
         userId: "auth-cc",
       },
@@ -354,7 +399,7 @@ await check("the exact-device lane forces fallback=none and stable department_ta
       ok: true,
       context: {
         session,
-        engine: { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "workspace_api" },
+        engine: { kind: "cli", cli: "codex", pairingId: "pair-mac", fallback: "workspace_api" },
         agentSlug: "bravo",
         userId: "auth-cc",
       },
@@ -366,6 +411,55 @@ await check("the exact-device lane forces fallback=none and stable department_ta
     )) as never,
   });
   assert.deepEqual(noAnswer, { outcome: "no_computer", reason: "computer_not_answering" });
+
+  const openCodeSession = deviceSession("cli", "opencode");
+  const openCode = await runOasisTelegramDeviceTurn(db, job, {
+    resolveContext: async () => ({
+      ok: true,
+      context: {
+        session: openCodeSession,
+        engine: { kind: "cli", cli: "opencode", pairingId: "pair-mac", fallback: "none" },
+        agentSlug: "bravo",
+        userId: "auth-cc",
+      },
+    }),
+    executor: (() => ({ scope: openCodeSession.scope })) as never,
+    send: (async () => new Response('event: end\ndata: {"final_text":"Done through OpenCode/Kimi"}\n\n', { status: 200 })) as never,
+  });
+  assert.deepEqual(openCode, { outcome: "completed", text: "Done through OpenCode/Kimi" });
+});
+
+await check("stale Claude, API, local and unknown choices are refused before session resolution or dispatch", async () => {
+  const job = parsedJob(41, "Do not dispatch this");
+  const candidates = [
+    { label: "claude", engine: { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "none" }, session: deviceSession("cli", "claude") },
+    { label: "api", engine: { kind: "api", provider: "openai", pairingId: "pair-mac" }, session: deviceSession("local", undefined) },
+    { label: "local", engine: { kind: "local", model: "ollama/kimi", pairingId: "pair-mac", fallback: "none" }, session: deviceSession("local", "ollama/kimi") },
+    { label: "unknown", engine: { kind: "future", model: "future-engine", pairingId: "pair-mac" }, session: deviceSession("local", "future-engine") },
+  ] as const;
+  let dispatched = 0;
+  for (const candidate of candidates) {
+    const result = await runOasisTelegramDeviceTurn(db, job, {
+      resolveContext: async () => ({
+        ok: true,
+        context: {
+          session: candidate.session,
+          engine: candidate.engine as never,
+          agentSlug: "bravo",
+          userId: "auth-cc",
+        },
+      }),
+      executor: (() => { dispatched += 1; return {}; }) as never,
+      send: (async () => { dispatched += 1; return new Response("unexpected"); }) as never,
+    });
+    assert.deepEqual(result, { outcome: "no_computer", reason: "saved_engine_not_supported" }, candidate.label);
+  }
+  assert.equal(dispatched, 0, "unsupported saved choices never reach executor or send");
+
+  const source = readFileSync("lib/telegram/device-turn.ts", "utf8");
+  const savedEngineGate = source.indexOf("isOasisTelegramDeviceEngine(canonical.engine)");
+  const sessionResolution = source.indexOf("const resolved = await resolveRunSession(");
+  assert.ok(savedEngineGate >= 0 && savedEngineGate < sessionResolution, "the saved-engine gate runs before session resolution");
 });
 
 await check("cutover documentation keeps polling and webhook mutually exclusive", () => {

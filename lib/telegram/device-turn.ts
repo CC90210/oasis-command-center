@@ -2,7 +2,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { Client } from "@libsql/client";
-import type { AgentEngineChoice } from "@/lib/ai/agent-engine";
+import type { AgentEngineChoice, CliEngine } from "@/lib/ai/agent-engine";
 import type { RunSession } from "@/lib/os/runs/session";
 import type { executorDepsFor } from "@/lib/os/runs/turn-starter";
 import type { sendMessage } from "@/lib/os/runs/send";
@@ -14,6 +14,21 @@ export type TelegramDeviceTurnResult =
   | { outcome: "retry"; reason: string };
 
 type DeviceEngine = Exclude<AgentEngineChoice, { kind: "api" }>;
+const OASIS_TELEGRAM_CLI_ENGINES = ["codex", "opencode"] as const satisfies readonly CliEngine[];
+type OasisTelegramCliEngine = DeviceEngine & {
+  kind: "cli";
+  cli: (typeof OASIS_TELEGRAM_CLI_ENGINES)[number];
+};
+
+/** Telegram may use only the two signed-in engines CC still operates. */
+export function isOasisTelegramDeviceEngine(engine: unknown): engine is OasisTelegramCliEngine {
+  if (!engine || typeof engine !== "object" || Array.isArray(engine)) return false;
+  const candidate = engine as { kind?: unknown; cli?: unknown };
+  return candidate.kind === "cli" && (
+    candidate.cli === OASIS_TELEGRAM_CLI_ENGINES[0] ||
+    candidate.cli === OASIS_TELEGRAM_CLI_ENGINES[1]
+  );
+}
 
 export type TelegramDeviceContext = {
   session: RunSession;
@@ -61,10 +76,8 @@ export function telegramPrompt(text: string): string {
   ].join("\n");
 }
 
-function engineIdentity(engine: DeviceEngine): { kind: "cli" | "local"; name: string; pairingId: string | null } {
-  return engine.kind === "cli"
-    ? { kind: "cli", name: engine.cli, pairingId: engine.pairingId || null }
-    : { kind: "local", name: engine.model, pairingId: engine.pairingId || null };
+function engineIdentity(engine: OasisTelegramCliEngine): { kind: "cli"; name: string; pairingId: string | null } {
+  return { kind: "cli", name: engine.cli, pairingId: engine.pairingId || null };
 }
 
 async function resolveDefaultContext(_db: Client): Promise<ContextResult> {
@@ -122,8 +135,8 @@ async function resolveDefaultContext(_db: Client): Promise<ContextResult> {
     if (binding.kind !== "agent") return { ok: false, outcome: "retry", reason: "chief_of_staff_not_configured" };
 
     const canonical = await readEffectiveAgentEngine(OASIS_TELEGRAM_TENANT_ID, null);
-    if (canonical.engine.kind === "api") {
-      return { ok: false, outcome: "no_computer", reason: "saved_engine_is_api" };
+    if (!isOasisTelegramDeviceEngine(canonical.engine)) {
+      return { ok: false, outcome: "no_computer", reason: "saved_engine_not_supported" };
     }
     const expected = engineIdentity(canonical.engine);
     if (!expected.pairingId) return { ok: false, outcome: "no_computer", reason: "computer_choice_needs_pairing" };
@@ -237,6 +250,9 @@ export async function runOasisTelegramDeviceTurn(
   const resolved = await (deps.resolveContext ?? resolveDefaultContext)(db);
   if (!resolved.ok) return { outcome: resolved.outcome, reason: resolved.reason };
   const { session, engine, agentSlug, userId } = resolved.context;
+  if (!isOasisTelegramDeviceEngine(engine)) {
+    return { outcome: "no_computer", reason: "saved_engine_not_supported" };
+  }
   const expected = engineIdentity(engine);
   const dispatch = session.computerDispatch;
   if (
