@@ -31,6 +31,7 @@ import {
 import { FX_RATE_MAX_PPM, FX_RATE_MIN_PPM, validateTaxRule, type FxRate, type TaxRule } from "@/lib/ai-audit/proposal";
 import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { researchPurgeStatements, researchTablesInstalled } from "@/lib/ai-audit/research-purge";
+import type { AiEngine } from "@/lib/ai-audit/authorize-payload";
 
 export type Engagement = {
   id: string;
@@ -609,8 +610,8 @@ export type AiAuditSettings = {
   /** Default deposit in basis points, or null for full payment. */
   deposit_bps: number | null;
   default_currency: "CAD" | "USD";
-  /** "mac_claude" (default) or "cloud_workspace" (phase 2). */
-  engine: "mac_claude" | "cloud_workspace";
+  /** Default processor for a new Gate 1 card. New workspaces fail closed to none. */
+  engine: AiEngine;
   /** The promise the handbook and email make, in CC's words. Empty until set. */
   turnaround: string;
   /**
@@ -624,7 +625,7 @@ export const DEFAULT_SETTINGS: AiAuditSettings = {
   tax: null,
   deposit_bps: null,
   default_currency: "CAD",
-  engine: "mac_claude",
+  engine: "none",
   turnaround: "",
   fx_usd_cad: null,
 };
@@ -646,7 +647,9 @@ export function parseSettings(raw: Record<string, unknown>): AiAuditSettings {
     tax: tax && tax.ok ? tax.value : null,
     deposit_bps: Number.isInteger(bps) && bps >= 1_000 && bps <= 9_000 ? bps : null,
     default_currency: raw.default_currency === "USD" ? "USD" : "CAD",
-    engine: raw.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude",
+    // Preserve every known historical value exactly. Missing, malformed or
+    // future values fail closed instead of silently becoming Mac Claude.
+    engine: raw.engine === "mac_claude" || raw.engine === "cloud_workspace" || raw.engine === "none" ? raw.engine : "none",
     turnaround: typeof raw.turnaround === "string" ? raw.turnaround.trim().slice(0, 200) : "",
     fx_usd_cad: parseFxRate(raw.fx_usd_cad),
   };

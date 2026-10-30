@@ -104,6 +104,53 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
       expect.set(`document:${id}`, { has: [...doc.SECTION_TITLES] });
     }
   }
+  // The retirement state must read as an intentional deferral, while keeping
+  // the deterministic research and document pipeline visible as live work.
+  {
+    const deferred = json(first as NonNullable<typeof first>);
+    deferred.modelSearchEnabled = false;
+    deferred.settings = { ...deferred.settings, engine: "none" };
+    deferred.engagement = { ...deferred.engagement, stage: "generating" };
+    deferred.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    deferred.research.step = { id: "deferred-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:model-search-deferred", screen: "workspace", props: { view: deferred, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:model-search-deferred", {
+      has: ["Running: Checking authorized public sources.", "Model and web search are deferred", "Deterministic website checks", "audit and proposal drafting", "PDF printing continue"],
+      hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i],
+    });
+  }
+  {
+    const pending = json(first as NonNullable<typeof first>);
+    pending.modelSearchEnabled = true;
+    pending.settings = { ...pending.settings, engine: "cloud_workspace" };
+    pending.authorization = { id: "pending-cloud", status: "pending", outcome: null, message: null, engine: "cloud_workspace", engine_label: "Workspace cloud model", plan: [] };
+    pending.engagement = { ...pending.engagement, stage: "generating" };
+    pending.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    pending.research.step = { id: "pending-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:cloud-pending", screen: "workspace", props: { view: pending, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:cloud-pending", {
+      has: ["Model and web search are deferred"],
+      hasNot: [/workspace cloud model is authorized/i, /AI web search is not run for this engine/i],
+    });
+
+    const cloud = json(pending);
+    cloud.authorization = { ...cloud.authorization!, id: "executed-cloud", status: "executed", outcome: "authorized" };
+    cloud.research!.step = { id: "cloud-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:cloud-search-skipped", screen: "workspace", props: { view: cloud, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:cloud-search-skipped", {
+      has: ["Running: Checking authorized public sources.", "workspace cloud model is authorized", "AI web search is not run for this engine", "website checks, PageSpeed and evidence rules still run"],
+      hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i, /web search waits for CC's Mac/i],
+    });
+
+    const waiting = json(cloud);
+    waiting.authorization = { ...waiting.authorization!, id: "executed-runner", engine: "mac_claude", engine_label: "Runner model" };
+    waiting.research!.step = { id: "waiting-search-step", status: "waiting_runner", phase: "waiting_search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:search-waiting-runner", screen: "workspace", props: { view: waiting, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:search-waiting-runner", {
+      has: ["Waiting for a runner to check authorized public sources. Queued"],
+      hasNot: [/Running: Waiting/i, /Waiting for .*CC's Mac/i, /web search waits for CC's Mac/i],
+    });
+  }
   // The proposal editor's two ways out of a stuck draft: a waiting line takes its now-confirmed price in place,
   // and a tax rule set after the draft can be saved in without editing anything else.
   {
@@ -187,6 +234,8 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => false,
     mailboxConnected: async () => false,
     runnerFor: async () => null,
+    workspaceAiAccountReady: async () => false,
+    modelSearchEnabled: () => false,
   });
   const live = await setup.setupChecks(db, tenantId, now, {
     isDryRun: () => false,
@@ -195,6 +244,8 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => true,
     mailboxConnected: async () => true,
     runnerFor: async () => ({ label: "oasis-mac-ai-audit", lastSeenAt: now.toISOString() }),
+    workspaceAiAccountReady: async () => true,
+    modelSearchEnabled: () => true,
   });
   assert.ok(bare.some((c) => c.state === "missing"), "with nothing set up, setup says what is missing");
   const pdfOnly = await setup.setupChecks(db, tenantId, now, {
@@ -204,23 +255,92 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => true,
     mailboxConnected: async () => true,
     runnerFor: async (_db, _t, tool) => (tool === "ai_audit_pdf" ? { label: "old-runner", lastSeenAt: now.toISOString() } : null),
+    workspaceAiAccountReady: async () => true,
+    modelSearchEnabled: () => true,
   });
   const mac = pdfOnly.find((c) => c.key === "mac");
+  const modelSearch = pdfOnly.find((c) => c.key === "model_search");
   const engine = settings.engine;
+  assert.equal(mac?.state, "ready", "a PDF runner is ready independently of model/search retirement");
   if (engine === "mac_claude") {
-    assert.equal(mac?.state, "missing", "a runner that only prints PDFs is not ready for Claude on the Mac");
-    assert.match(mac?.detail ?? "", /ai_audit_model/);
+    assert.equal(modelSearch?.state, "missing", "an enabled Mac engine still reports its missing model/search tools");
+    assert.match(modelSearch?.detail ?? "", /ai_audit_model/);
+  } else if (engine === "none") {
+    assert.equal(modelSearch?.state, "deferred", "the No AI default is shown honestly");
   } else {
-    assert.equal(mac?.state, "ready", "with the cloud engine, the Mac only prints PDFs");
+    assert.equal(modelSearch?.state, "ready", "the cloud engine does not depend on Mac model tools");
   }
+
+  const pdfDespiteModelReadFailure = await setup.setupChecks(db, tenantId, now, {
+    isDryRun: () => false,
+    linkSecretSet: () => true,
+    pdfStorageSet: () => true,
+    stripeConnected: async () => true,
+    mailboxConnected: async () => true,
+    runnerFor: async (_db, _t, tool) => {
+      if (tool === "ai_audit_pdf") return { label: "pdf-only-runner", lastSeenAt: now.toISOString() };
+      throw new Error("injected model/search runner lookup failure");
+    },
+    workspaceAiAccountReady: async () => true,
+    modelSearchEnabled: () => true,
+  });
+  assert.equal(pdfDespiteModelReadFailure.find((c) => c.key === "mac")?.state, "ready", "model/search lookup failures never hide a healthy PDF printer");
+
+  const beforeCloud = await store.getSettings(db, tenantId);
+  assert.deepEqual(
+    await store.saveSettings(db, { tenantId, settings: { ...beforeCloud.settings, engine: "cloud_workspace" }, expectedRowVersion: beforeCloud.rowVersion, actorId: ownerUserId, now }),
+    { ok: true },
+  );
+  const cloudDeps = {
+    isDryRun: () => false,
+    linkSecretSet: () => true,
+    pdfStorageSet: () => true,
+    stripeConnected: async () => true,
+    mailboxConnected: async () => true,
+    runnerFor: async () => null,
+    modelSearchEnabled: () => true,
+  };
+  const cloudMissing = await setup.setupChecks(db, tenantId, now, { ...cloudDeps, workspaceAiAccountReady: async () => false });
+  const cloudUnknown = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    workspaceAiAccountReady: async () => {
+      throw new Error("injected workspace AI account read failure");
+    },
+  });
+  let deferredCloudAccountCalls = 0;
+  const cloudDeferred = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    modelSearchEnabled: () => false,
+    workspaceAiAccountReady: async () => {
+      deferredCloudAccountCalls += 1;
+      return true;
+    },
+  });
+  let enabledCloudAccountCalls = 0;
+  const cloudReady = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    workspaceAiAccountReady: async () => {
+      enabledCloudAccountCalls += 1;
+      return true;
+    },
+  });
+  assert.equal(deferredCloudAccountCalls, 0, "the global OFF switch skips the workspace AI account lookup");
+  assert.equal(cloudDeferred.find((c) => c.key === "model_search")?.state, "deferred", "the global OFF switch still reports the cloud engine as deferred");
+  assert.equal(enabledCloudAccountCalls, 1, "the enabled cloud engine checks its workspace AI account exactly once");
+  assert.equal(cloudMissing.find((c) => c.key === "model_search")?.state, "missing", "cloud model readiness requires a usable workspace AI account");
+  assert.equal(cloudUnknown.find((c) => c.key === "model_search")?.state, "unknown", "an unreadable workspace AI account is never reported ready");
+  assert.equal(cloudReady.find((c) => c.key === "model_search")?.state, "ready", "a usable workspace AI account makes the selected cloud engine ready");
+  const afterCloud = await store.getSettings(db, tenantId);
+  assert.deepEqual(await store.saveSettings(db, { tenantId, settings: beforeCloud.settings, expectedRowVersion: afterCloud.rowVersion, actorId: ownerUserId, now }), { ok: true });
+
   assert.equal(bare.filter((c) => c.state === "test_mode").length, 2, "both client-facing switches read as test mode");
   for (const k of ["mac", "pdf_storage", "link_secret", "mailbox", "stripe", "audit_email", "payments"] as const) {
     assert.equal(live.find((c) => c.key === k)?.state, "ready", `${k} reads ready when it is set up`);
   }
   scenarios.push({ id: "setup:bare", screen: "setup", props: { checks: json(bare) } });
-  expect.set("setup:bare", { has: ["Needs you", "Test mode", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "AI_AUDIT_LINK_SECRET"] });
+  expect.set("setup:bare", { has: ["Needs you", "Test mode", "Deferred", "AI_AUDIT_MODEL_SEARCH_ENABLED", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "AI_AUDIT_LINK_SECRET"] });
   scenarios.push({ id: "setup:live", screen: "setup", props: { checks: json(live) } });
-  expect.set("setup:live", { has: ["Online (oasis-mac-ai-audit"] });
+  expect.set("setup:live", { has: ["Online (oasis-mac-ai-audit", "Model and web search", "Deferred"] });
 
   // The render needs whole React: drop the suite's react-server condition, which CI passes in NODE_OPTIONS and a
   // child inherits (the same as tests/os-channels-honest.test.ts).

@@ -25,6 +25,7 @@ import { RESEARCH_STAGES } from "@/lib/ai-audit/research";
 import { MODEL_TOOL_KEY } from "@/lib/ai-audit/extraction";
 import { inputHashOf } from "@/lib/tools/store";
 import { runToolModelCall, type ToolModelCall, type ToolModelResult } from "@/lib/tools/worker/ai";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 export const WRITE_STEP = "write";
 const shortNameOf = (e: Engagement) => shortName(e.business_name, "an AI audit");
@@ -51,7 +52,7 @@ type StepRef = { audit_version_id: string; content_sha256: string; withheld?: Ch
 
 export type StartWriteResult =
   | { ok: true; stepId: string; created: boolean; runsOn: "mac" | "cloud" }
-  | { ok: false; error: "not_found" | "stage_closed" | "not_authorized" | "no_audit_draft" | "no_ai_engine" };
+  | { ok: false; error: "not_found" | "stage_closed" | "not_authorized" | "no_audit_draft" | "no_ai_engine" | "model_search_deferred" };
 
 /** Start a pass over the current draft's opening prose, or hand back the one running. */
 export async function startWriting(db: Client, input: { tenantId: string; engagementId: string; actor: Actor; now: Date }): Promise<StartWriteResult> {
@@ -63,6 +64,7 @@ export async function startWriting(db: Client, input: { tenantId: string; engage
   if (!auth) return { ok: false, error: "not_authorized" };
   // The engine CC authorized at Gate 1 is the only one that may read this client's information.
   if (auth.engine !== "mac_claude" && auth.engine !== "cloud_workspace") return { ok: false, error: "no_ai_engine" };
+  if (!aiAuditModelSearchEnabled()) return { ok: false, error: "model_search_deferred" };
   const audit = e.current_audit_version_id ? await getAuditVersion(db, t, e.current_audit_version_id) : null;
   if (!audit || audit.status !== "draft" || !audit.doc) return { ok: false, error: "no_audit_draft" };
   const running = async () =>
@@ -126,6 +128,9 @@ type WriteContext = { ok: true; stepId: string; engagement: Engagement; doc: Aud
 
 /** The pass's step, engagement and draft, if it may still run: in flight, after Gate 1, and the draft unchanged since it started. */
 async function writeContext(db: Client, tenantId: string, input: Record<string, unknown>): Promise<WriteContext> {
+  // Recheck at the result boundary too: a pass may have started while the
+  // independent switch was on and answered only after CC turned it off.
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const t = requireTenant(tenantId);
   const stepId = typeof input.step_id === "string" ? input.step_id : "";
   const engagementId = typeof input.engagement_id === "string" ? input.engagement_id : "";
@@ -150,6 +155,7 @@ async function writeContext(db: Client, tenantId: string, input: Record<string, 
 
 /** The Mac's job input for a pass, built now from the draft as it stands (the job row holds ids only). */
 export async function writeJobInput(db: Client, job: { tenantId: string; input: Record<string, unknown> }): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; code: "gone" | "not_permitted" | "bad_input" }> {
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const ctx = await writeContext(db, job.tenantId, job.input);
   if (!ctx.ok) return ctx;
   const p = prosePrompt(ctx.doc);

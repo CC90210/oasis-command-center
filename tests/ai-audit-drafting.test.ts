@@ -32,7 +32,8 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
+process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
 
 const MAC_SECRET = "mac-runner-drafting-test-secret-0123456789abcdef";
 const NOW = () => new Date();
@@ -701,6 +702,51 @@ async function main() {
     // Out of the way of the next check's ticks.
     assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "cancelled", actor: cc, now: NOW() })).ok);
   });
+  await check("the default-off retirement gate skips model/search jobs while the deterministic audit, proposal and main tick finish", async () => {
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const eid = await authorized("Deferred Model Co", "mac_claude");
+      const tickDeps = {
+        payment: { alert: async () => undefined } as never,
+        onboarding: {} as never,
+        site: deps.site,
+        research: deps,
+        extraction: { model: (async () => assert.fail("no extraction model call")) as never, alert: async () => undefined },
+        writing: { model: (async () => assert.fail("no writing model call")) as never, alert: async () => undefined },
+      };
+      let drafted = 0;
+      for (let i = 0; i < 12 && !drafted; i++) {
+        const report = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps });
+        assert.deepEqual(report.errors, [], JSON.stringify(report.errors));
+        assert.equal(report.writingStarted, 0);
+        drafted += report.auditsDrafted;
+      }
+      assert.equal(drafted, 1, "the deterministic audit drafted once");
+      const e = (await store.getEngagement(db, OASIS, eid))!;
+      assert.ok(e.current_audit_version_id, "the rule-based audit exists");
+      assert.ok(e.current_proposal_version_id, "the rule-based proposal exists");
+      const latest = await research.latestResearch(db, OASIS, eid);
+      assert.equal(latest?.content.plan.find((m) => m.module === "site")?.status, "done");
+      assert.equal(latest?.content.plan.find((m) => m.module === "pagespeed")?.status, "done");
+      assert.deepEqual(latest?.content.plan.find((m) => m.module === "search"), {
+        module: "search",
+        status: "skipped",
+        detail: "Web search deferred: model and search processing is switched off.",
+      });
+      const jobs = await db.execute({
+        sql: "SELECT tool_key FROM tool_jobs WHERE tenant_id = ? AND json_extract(input_json, '$.engagement_id') = ? AND tool_key IN ('ai_audit_model', 'ai_audit_search')",
+        args: [OASIS, eid],
+      });
+      assert.deepEqual(jobs.rows, [], "zero model/search jobs were enqueued");
+      const writing = await import("../lib/ai-audit/writing");
+      assert.deepEqual(await writing.startWriting(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() }), { ok: false, error: "model_search_deferred" });
+      assert.equal(await writing.latestWriteStep(db, OASIS, eid), null, "the tick did not create a deferred writing step");
+      const approval = (await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND json_extract(payload_json, '$.engagement_id') = ? AND action_kind = 'authorize_ai_audit' ORDER BY created_at DESC LIMIT 1", args: [OASIS, eid] })).rows[0];
+      assert.match(String(approval?.payload_json ?? ""), /model and web search are deferred/i, "Gate 1 says what the off switch changes");
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+  });
   await check("the tick drafts the audit and the proposal once, when the first research run finishes", async () => {
     const eid = await authorized("Tick Draft Co");
     const tickDeps = { payment: { alert: async () => undefined } as never, onboarding: {} as never, site: deps.site, research: deps };
@@ -755,6 +801,39 @@ async function main() {
     assert.deepEqual(step!.withheld.map((w) => w.reason), ["it promises a result"]);
     const stored = String((await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].result_json);
     assert.ok(!stored.includes("double your revenue"), "the job never keeps the model's text");
+  });
+  await check("turning model/search off while a writing answer is in flight cancels the pass and persists none of its prose", async () => {
+    const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;
+    const writing = await import("../lib/ai-audit/writing");
+    const beforeEngagement = (await store.getEngagement(db, OASIS, eid))!;
+    const before = (await versions.getAuditVersion(db, OASIS, beforeEngagement.current_audit_version_id!))!;
+    const started = await writing.startWriting(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(started.ok && started.created && started.runsOn === "mac", JSON.stringify(started));
+    const claimed = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const job = ((await claimed.json()) as { job: { job_id: string; lease_id: string } | null }).job;
+    assert.ok(job);
+    const lateMarker = "LATE MODEL PROSE MUST NOT PERSIST";
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const completed = await runner.handleToolsComplete(
+        macRequest("complete", { job_id: job!.job_id, lease_id: job!.lease_id, tool_key: "ai_audit_model", text: JSON.stringify({ executive_overview: [{ text: lateMarker, cites: [] }] }) }, NOW()),
+        runnerDeps(NOW()) as never,
+      );
+      assert.equal(completed.status, 200);
+      assert.equal(((await completed.json()) as { written?: boolean }).written, false);
+      const afterEngagement = (await store.getEngagement(db, OASIS, eid))!;
+      const after = (await versions.getAuditVersion(db, OASIS, afterEngagement.current_audit_version_id!))!;
+      assert.equal(after.id, before.id, "no replacement draft was persisted");
+      assert.equal(after.content_sha256, before.content_sha256, "the deterministic/current draft stayed byte-identical");
+      assert.ok(!JSON.stringify(after.doc).includes(lateMarker));
+      const step = await writing.latestWriteStep(db, OASIS, eid);
+      assert.deepEqual([step?.status, step?.error], ["cancelled", "not_authorized"]);
+      const stored = String((await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].result_json);
+      assert.equal(stored, '{"write":"received"}');
+      assert.ok(!stored.includes(lateMarker), "the late model prose was never stored on the job");
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
   });
   await check("CC's own edit wins: a pass that answers after it changes nothing", async () => {
     const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;

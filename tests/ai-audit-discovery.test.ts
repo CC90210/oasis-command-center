@@ -27,7 +27,10 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
+// This legacy-behaviour suite exercises the model paths deliberately. The
+// retirement regression below drops the switch and proves the default-off path.
+process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
 
 const LEAD = "7b000000-0000-4000-8000-000000000001";
 const MAC_SECRET = "mac-runner-discovery-test-secret-0123456789abcdef";
@@ -155,6 +158,27 @@ async function main() {
   console.log("extraction");
   const alerts: Array<Record<string, unknown>> = [];
   const runnerDeps = (now: Date) => ({ db, env: { TOOLS_RUNNER_SECRET_MAC: MAC_SECRET }, now, storage: null, aiAuditAlert: async (a: Record<string, unknown>) => void alerts.push(a) });
+  await check("the model/search gate defaults off and creates no extraction step or model job", async () => {
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const beforeSteps = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n);
+      const beforeJobs = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] })).rows[0].n);
+      assert.deepEqual(await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() }), { ok: false, error: "model_search_deferred" });
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n), beforeSteps);
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] })).rows[0].n), beforeJobs);
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+  });
+  await check("the core rejects missing, none and unknown extraction engines without creating a step or job", async () => {
+    const stepsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n);
+    const jobsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, id] })).rows[0].n);
+    for (const engine of [undefined, null, "none", "mac-claude", "cloud"] as const) {
+      assert.deepEqual(await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: engine as never, actor: cc, now: NOW() }), { ok: false, error: "engine_invalid" });
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n), stepsBefore);
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, id] })).rows[0].n), jobsBefore);
+    }
+  });
   await check("drafting the profile queues one Mac job per part of the call; the jobs hold ids, never the call's words", async () => {
     // CC typed 35 leads a month on the call; the transcript says about 40: a disagreement for CC, never an overwrite.
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });
@@ -430,6 +454,30 @@ async function main() {
     Object.defineProperty(r, "nextUrl", { value: new URL(url) });
     return r as never;
   };
+
+  await check("the extraction route rejects missing, none and unknown engines before the core and writes nothing", async () => {
+    const { eid } = await freshEngagement("Route Engine Fence Co");
+    const stepsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n);
+    const jobsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n);
+    let engagementReads = 0;
+    const getEngagementSpy: typeof store.getEngagement = async (...args) => {
+      engagementReads += 1;
+      return store.getEngagement(...args);
+    };
+    await login(USERS.cc);
+    try {
+      for (const extra of [{}, { engine: null }, { engine: "none" }, { engine: "mac-claude" }, { engine: "cloud" }]) {
+        const response = await route.POST(postJson(`http://t.test/api/ai-audit/${eid}`, { action: "extract_profile", ...extra }), params(eid), { getEngagement: getEngagementSpy });
+        assert.equal(response.status, 400);
+        assert.deepEqual(await response.json(), { ok: false, error: "engine_invalid" });
+        assert.equal(engagementReads, 0, "an invalid extraction engine is refused before getEngagement");
+        assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n), stepsBefore);
+        assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n), jobsBefore);
+      }
+    } finally {
+      await login(null);
+    }
+  });
 
   await check("the card binds CC's call notes: a note changed behind it is refused, and a real change withdraws it on the record (review F3)", async () => {
     const { eid } = await freshEngagement("Notes Co");
@@ -787,6 +835,70 @@ async function main() {
     return { ...base, second: second.ok ? second.transcript.id : "" };
   };
   const stepOf = async (stepId: string) => (await db.execute({ sql: "SELECT status, error_code, result_ref FROM ai_audit_steps WHERE id = ?", args: [stepId] })).rows[0];
+
+  await check("a Mac answer that returns after the model/search switch turns off is discarded without profile or report writes", async () => {
+    const { eid } = await freshEngagement("Deferred Mac Answer Co");
+    const started = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(started.ok);
+    const stepId = started.ok ? started.stepId : "";
+    const job = await macJob(eid);
+    let response: Response;
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      response = await macAnswer(job, [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "misses about 40 calls a week" }]);
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(((await response.json()) as { discarded?: boolean }).discarded, true, "the late answer is explicitly discarded");
+    const step = await stepOf(stepId);
+    assert.deepEqual([String(step.status), String(step.error_code), step.result_ref], ["cancelled", "model_search_deferred", null]);
+    assert.ok((await jobsOf(stepId)).every(([, , result]) => result === null || result === '{"stored":false}'), "no checked model result remains on a Mac job");
+    const engagement = await engagementOf(eid);
+    const fields = await versions.listProfileFields(db, OASIS, engagement.current_profile_version_id!);
+    assert.ok(!fields.some((field) => field.source_type === "transcript"), "the late answer writes no profile fact");
+    const version = (await versions.getProfileVersion(db, OASIS, engagement.current_profile_version_id!))!;
+    assert.equal((version.summary as { extraction?: unknown }).extraction, undefined, "the late answer writes no extraction report");
+    assert.equal(await eventCount(eid, "extraction_done"), 0);
+  });
+
+  await check("a cloud answer that returns after the model/search switch turns off is discarded without profile or report writes", async () => {
+    const { eid } = await freshEngagement("Deferred Cloud Answer Co");
+    const started = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "cloud_workspace", actor: cc, now: NOW() });
+    assert.ok(started.ok);
+    const stepId = started.ok ? started.stepId : "";
+    let outcome: Awaited<ReturnType<typeof extraction.advanceCloudExtraction>>;
+    try {
+      outcome = await extraction.advanceCloudExtraction(db, {
+        tenantId: OASIS,
+        stepId,
+        now: NOW(),
+        deps: {
+          model: async () => {
+            delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+            return {
+              ok: true as const,
+              provider: "test",
+              model: "test",
+              text: JSON.stringify({ facts: [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "misses about 40 calls a week" }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }),
+            };
+          },
+          alert: async () => undefined,
+        },
+      });
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+    assert.equal(outcome, "failed");
+    const step = await stepOf(stepId);
+    assert.deepEqual([String(step.status), String(step.error_code), step.result_ref], ["cancelled", "model_search_deferred", null]);
+    const engagement = await engagementOf(eid);
+    const fields = await versions.listProfileFields(db, OASIS, engagement.current_profile_version_id!);
+    assert.ok(!fields.some((field) => field.source_type === "transcript"), "the late answer writes no profile fact");
+    const version = (await versions.getProfileVersion(db, OASIS, engagement.current_profile_version_id!))!;
+    assert.equal((version.summary as { extraction?: unknown }).extraction, undefined, "the late answer writes no extraction report");
+    assert.equal(await eventCount(eid, "extraction_done"), 0);
+  });
 
   await check("a transcript deleted mid-draft stops the draft: nothing it read is written, and every stored window is cleared (review of phase 2b, H1)", async () => {
     const { eid, transcriptId: tid } = await twoTranscripts("Deleted Midway Co");

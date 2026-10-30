@@ -4,8 +4,8 @@
  * The research behind the audit, on the engagement's "Research" tab (phase 3).
  *
  * After Gate 1 the Command Center reads the client's website again, runs
- * Google PageSpeed, has CC's Mac search the web with public facts only, and
- * reads each page the search found itself. The evidence rules then decide
+ * Google PageSpeed, may run an authorized public web search, and reads each
+ * page that research found itself. The evidence rules then decide
  * every label (lib/ai-audit/evidence.ts) and the impact calculator gives
  * ranges (lib/ai-audit/impact.ts). This shows the stored run: what was
  * measured, what the client said, the likely problems to test, the estimates
@@ -25,8 +25,10 @@ const IN_FLIGHT = ["queued", "running", "waiting_runner"];
 const PHASE_WORDS: Readonly<Record<string, string>> = {
   site: "Reading the website",
   pagespeed: "Running Google PageSpeed",
-  search: "Handing the web search to CC's Mac",
-  waiting_search: "Waiting for the web search on CC's Mac",
+  // Neutral for every engine: cloud, No AI and switch-off runs skip search
+  // here, while an authorized runner-backed search may wait for a runner.
+  search: "Checking authorized public sources",
+  waiting_search: "Waiting for a runner to check authorized public sources",
   fetch: "Reading the pages the search found",
   assemble: "Checking the evidence and putting it together",
 };
@@ -36,6 +38,11 @@ const STOP_WORDS: Readonly<Record<string, string>> = {
   research_failed: "A step failed three times, so it stopped. Press Research again to start a new run.",
   not_authorized: "It stopped because the authorization no longer holds. Authorize the profile again first.",
 };
+
+/** Only an executed, still-valid Gate 1 chooses an engine for this engagement. */
+function executedEngine(view: EngagementView) {
+  return view.authorization?.status === "executed" ? view.authorization.engine : null;
+}
 
 /** Why a writing pass over the opening changed nothing (lib/ai-audit/writing.ts step error codes). */
 const WRITE_STOP_WORDS: Readonly<Record<string, string>> = {
@@ -269,6 +276,8 @@ function DraftBox({ view }: { view: EngagementView }) {
   const [message, setMessage] = useState<string | null>(null);
   const auditDraft = view.audit?.status === "draft";
   const proposalDraft = view.proposal?.status === "draft";
+  const authorizedEngine = executedEngine(view);
+  const modelWritingDeferred = !view.modelSearchEnabled || authorizedEngine === null || authorizedEngine === "none";
 
   async function draft(what: "audit" | "proposal") {
     const exists = what === "audit" ? auditDraft : proposalDraft;
@@ -322,10 +331,11 @@ function DraftBox({ view }: { view: EngagementView }) {
         <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft} onClick={() => void draft("proposal")}>
           {busy === "proposal" ? "Drafting" : view.proposal ? "Draft the proposal again" : "Draft the proposal"}
         </button>
-        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft || writingNow} onClick={() => void prose()}>
-          {busy === "prose" ? "Starting" : writingNow ? "Writing the opening" : "Write the opening with AI"}
+        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft || writingNow || modelWritingDeferred} onClick={() => void prose()}>
+          {modelWritingDeferred ? "Model writing deferred" : busy === "prose" ? "Starting" : writingNow ? "Writing the opening" : "Write the opening with AI"}
         </button>
       </div>
+      {modelWritingDeferred ? <div className="text-[12px] text-status-warm">The opening stays in the deterministic draft for you to edit. Audit and proposal drafting are still available.</div> : null}
       {writing && !writingNow ? (
         <div className="text-[12px] text-fg-muted">
           {writing.written
@@ -355,6 +365,9 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const step = r?.step ?? null;
   const pack = r?.latest?.content ?? null;
   const running = !!step && IN_FLIGHT.includes(step.status);
+  const authorizedEngine = executedEngine(view);
+  const modelSearchDeferred = !view.modelSearchEnabled || authorizedEngine === null || authorizedEngine === "none";
+  const cloudSearchSkipped = view.modelSearchEnabled && authorizedEngine === "cloud_workspace";
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -374,7 +387,15 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       setMessage(describeError(res));
       return;
     }
-    setMessage(res.created ? "Research started. It moves one step every five minutes; the web search waits for CC's Mac." : "A research run is already going.");
+    setMessage(
+      res.created
+        ? modelSearchDeferred
+          ? "Research started. Website checks, PageSpeed and the evidence rules continue; model search is deferred."
+          : cloudSearchSkipped
+            ? "Research started. Website checks, PageSpeed and the evidence rules continue; AI web search is not used for workspace cloud audits."
+          : "Research started. It moves one step every five minutes; the web search waits for CC's Mac."
+        : "A research run is already going.",
+    );
     router.refresh();
   }
 
@@ -395,7 +416,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const canRun = isOwner && e.stage === "generating" && !running;
 
   let status: string;
-  if (running) status = `Running: ${PHASE_WORDS[step?.phase ?? ""] ?? "starting"}. Started ${when(step?.created_at)}.`;
+  if (running && step?.status === "waiting_runner") status = `${PHASE_WORDS[step.phase ?? ""] ?? "Waiting for a runner"}. Queued ${when(step.created_at)}.`;
+  else if (running) status = `Running: ${PHASE_WORDS[step?.phase ?? ""] ?? "starting"}. Started ${when(step?.created_at)}.`;
   else if (r.latest) status = `Version ${r.latest.version_no}, built ${when(r.latest.created_at)}${r.latest.status === "partial" ? ", with some parts missing (see Gaps)" : ""}.`;
   else if (step && step.status !== "done") status = `The last run did not finish. ${STOP_WORDS[step.error ?? ""] ?? (step.error ? `It stopped (${step.error}).` : "")}`.trim();
   else if (e.stage === "generating") status = "Not run yet. It starts by itself within a few minutes of Gate 1, or press the button.";
@@ -417,6 +439,15 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       <div role="status" aria-live="polite">
         {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
       </div>
+      {modelSearchDeferred ? (
+        <div className="rounded-lg border border-hairline px-3 py-2 text-[12px] text-status-warm">
+          Model and web search are deferred. Deterministic website checks, PageSpeed, evidence rules, audit and proposal drafting, and PDF printing continue.
+        </div>
+      ) : cloudSearchSkipped ? (
+        <div className="rounded-lg border border-hairline px-3 py-2 text-[12px] text-fg-muted">
+          The workspace cloud model is authorized for the audit&apos;s writing pass. AI web search is not run for this engine; website checks, PageSpeed and evidence rules still run.
+        </div>
+      ) : null}
 
       {pack ? (
         <>

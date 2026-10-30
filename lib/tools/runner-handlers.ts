@@ -88,6 +88,7 @@ import {
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
 import { checkSearchAnswer, searchJobInput } from "@/lib/ai-audit/research";
 import { cancelWriting, finishWriting, writeJobInput } from "@/lib/ai-audit/writing";
@@ -731,9 +732,14 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
   if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
   if (job.toolKey !== "ai_audit_model") return invalid("tool_key");
   if (job.input.purpose === "write") return completeAuditWrite(job, ref, b.text, deps);
-  const checked = await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
+  // A claim made while the switch was on does not grandfather its answer.
+  // Recheck here, inside checkWindowAnswer, and again after the durable write:
+  // a late answer is acknowledged but retained nowhere.
+  const deferredBeforeCheck = !aiAuditModelSearchEnabled();
+  const checked = deferredBeforeCheck ? ({ ok: false, code: "not_permitted" } as const) : await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
+  const deferredBeforeSave = deferredBeforeCheck || !aiAuditModelSearchEnabled();
   const at = deps.now.toISOString();
-  const resultJson = checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
+  const resultJson = deferredBeforeSave ? JSON.stringify({ discarded: "model_search_deferred" }) : checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
@@ -749,7 +755,8 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
       console.error("[tools.complete] finishing the extraction failed; the tick will retry", { jobId: job.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return toolsJson(200, { ok: true, duplicate: false, kept: checked.ok ? checked.result.kept.length : 0 });
+  const discarded = deferredBeforeSave || !aiAuditModelSearchEnabled();
+  return toolsJson(200, { ok: true, duplicate: false, kept: discarded || !checked.ok ? 0 : checked.result.kept.length, ...(discarded ? { discarded: true } : {}) });
 }
 
 /**
@@ -763,8 +770,17 @@ async function completeAuditSearch(ref: LeaseRef, b: Record<string, unknown>, de
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
   if (job.toolKey !== "ai_audit_search") return invalid("tool_key");
-  const checked = checkSearchAnswer(b.text);
   const at = deps.now.toISOString();
+  if (!aiAuditModelSearchEnabled()) {
+    const rs = await deps.db.execute({
+      sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = '{"discarded":"model_search_deferred"}', error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+            WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+      args: [at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+    });
+    if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
+    return toolsJson(200, { ok: true, duplicate: false, discarded: true, results: 0, unreadable: false });
+  }
+  const checked = checkSearchAnswer(b.text);
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,

@@ -38,16 +38,31 @@ import { inputHashOf } from "@/lib/tools/store";
 import { runToolModelCall, type ToolModelCall, type ToolModelResult } from "@/lib/tools/worker/ai";
 
 import { closeRunStatements, EXTRACT_STEP, MODEL_TOOL_KEY } from "@/lib/ai-audit/extraction-stop";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 export { EXTRACT_STEP, MODEL_TOOL_KEY };
 const IN_FLIGHT = ["queued", "running", "waiting_runner"] as const;
 const inFlight = (status: unknown) => (IN_FLIGHT as readonly string[]).includes(String(status));
+const MODEL_SEARCH_DEFERRED = "model_search_deferred";
+class ModelSearchDeferredError extends Error {
+  constructor() {
+    super(MODEL_SEARCH_DEFERRED);
+    this.name = "ModelSearchDeferredError";
+  }
+}
+const requireModelSearchEnabled = () => {
+  if (!aiAuditModelSearchEnabled()) throw new ModelSearchDeferredError();
+};
 /** A Mac run nobody has worked on for this long is called off: the Mac is off, and nothing else may start meanwhile (review of phase 2b, M2 and F5). */
 export const MAC_RUN_UNCLAIMED_MS = 24 * 3_600_000;
 /** The CLI model the Mac uses for extraction. */
 export const MAC_MODEL = "sonnet";
 
-export type ExtractionEngine = "mac_claude" | "cloud_workspace";
+export const EXTRACTION_ENGINES = ["mac_claude", "cloud_workspace"] as const;
+export type ExtractionEngine = (typeof EXTRACTION_ENGINES)[number];
+export function isExtractionEngine(value: unknown): value is ExtractionEngine {
+  return typeof value === "string" && (EXTRACTION_ENGINES as readonly string[]).includes(value);
+}
 export type WindowRef = { transcript_id: string; from: number; to: number };
 export type WindowResult = WindowRef & { kept: KeptFact[]; dropped: DroppedFact[]; summary: ExtractionSummary; unreadable?: boolean };
 
@@ -74,9 +89,14 @@ export async function startExtraction(
   input: { tenantId: string; engagementId: string; engine: ExtractionEngine; actor: Actor; now: Date },
 ): Promise<StartResult> {
   const t = requireTenant(input.tenantId);
+  const engine = input.engine;
+  // Defense in depth: callers other than the HTTP route use this function too.
+  // Missing, "none", future values and typos must never fall through to cloud.
+  if (!isExtractionEngine(engine)) return { ok: false, error: "engine_invalid" };
   const engagement = await getEngagement(db, t, input.engagementId);
   if (!engagement) return { ok: false, error: "not_found" };
   if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, error: "stage_closed" };
+  if (!aiAuditModelSearchEnabled()) return { ok: false, error: "model_search_deferred" };
   const all = await listTranscripts(db, t, engagement.id, { withLines: true });
   if (!all.length) return { ok: false, error: "no_transcript" };
   const fields = engagement.current_profile_version_id ? await listProfileFields(db, t, engagement.current_profile_version_id) : [];
@@ -87,7 +107,7 @@ export async function startExtraction(
   if (!usable.length) return { ok: false, error: "no_transcript" };
 
   const windows: WindowRef[] = usable.flatMap((x) => transcriptWindows(x.lines ?? []).map((w) => ({ transcript_id: x.id, from: w.from, to: w.to })));
-  const inputHash = contentHash({ transcripts: usable.map((x) => [x.id, x.text_sha256]).sort(), engine: input.engine });
+  const inputHash = contentHash({ transcripts: usable.map((x) => [x.id, x.text_sha256]).sort(), engine });
   const idem = `extract:${engagement.id}:${inputHash.slice(0, 24)}`;
   const existing = (await db.execute({ sql: "SELECT id, status FROM ai_audit_steps WHERE tenant_id = ? AND idempotency_key = ? LIMIT 1", args: [t, idem] })).rows[0];
   if (existing && ["queued", "running", "waiting_runner"].includes(String(existing.status))) return { ok: true, stepId: String(existing.id), windows: windows.length, created: false };
@@ -96,7 +116,7 @@ export async function startExtraction(
 
   const stepId = newId();
   const at = input.now.toISOString();
-  const mac = input.engine === "mac_claude";
+  const mac = engine === "mac_claude";
   // A re-run of the same inputs (after a finished or failed run) gets a fresh key.
   const runNo = int((await db.execute({ sql: "SELECT COUNT(1) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = ?", args: [t, engagement.id, EXTRACT_STEP] })).rows[0]?.n) + 1;
   const stmts: InStatement[] = [
@@ -105,7 +125,7 @@ export async function startExtraction(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, ?, ?)`,
       args: [stepId, t, engagement.id, EXTRACT_STEP, runNo, mac ? "mac" : "cloud", mac ? "waiting_runner" : "queued", inputHash, existing ? `${idem}:run-${runNo}` : idem, JSON.stringify({ windows, results: [] }), at, at],
     },
-    eventStatement({ tenantId: t, engagementId: engagement.id, event: "extraction_started", actor: input.actor, at, refType: "step", refId: stepId, meta: { engine: input.engine, windows: windows.length, transcripts: usable.length } }),
+    eventStatement({ tenantId: t, engagementId: engagement.id, event: "extraction_started", actor: input.actor, at, refType: "step", refId: stepId, meta: { engine, windows: windows.length, transcripts: usable.length } }),
   ];
   if (mac) {
     for (const w of windows) {
@@ -186,6 +206,7 @@ function windowRefOf(input: Record<string, unknown>): (WindowRef & { step_id: st
 
 /** What the Mac is handed at claim time: the prompt, built now, never stored on the job. */
 export async function modelJobInput(db: Client, job: { tenantId: string; input: Record<string, unknown> }): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; code: "not_permitted" | "gone" | "bad_input" }> {
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const ref = windowRefOf(job.input);
   if (!ref) return { ok: false, code: "bad_input" };
   const p = await permittedWindow(db, job.tenantId, ref);
@@ -196,19 +217,26 @@ export async function modelJobInput(db: Client, job: { tenantId: string; input: 
 
 /** The model's text for one window, checked. Throws nothing: an unreadable answer is a window with nothing kept. */
 export async function checkWindowAnswer(db: Client, tenantId: string, input: Record<string, unknown>, answer: string): Promise<{ ok: true; result: WindowResult; stepId: string; engagementId: string } | { ok: false; code: "not_permitted" | "gone" | "bad_input" }> {
+  // Claim-time permission is not enough: a runner or cloud call may answer
+  // after the independent model/search switch has been turned off.
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const ref = windowRefOf(input);
   if (!ref) return { ok: false, code: "bad_input" };
   const p = await permittedWindow(db, tenantId, ref);
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   if (!p.ok) return p;
   const base = { transcript_id: ref.transcript_id, from: ref.from, to: ref.to };
   const unreadable = (): WindowResult => ({ ...base, kept: [], dropped: [{ key: "(answer)", reason: "the model's answer could not be read" }], summary: { goals: [], problems: [], commitments: [], open_questions: [] }, unreadable: true });
   try {
     const parsed = parseExtraction(answer);
     if (!parsed.ok) return { ok: true, stepId: ref.step_id, engagementId: ref.engagement_id, result: unreadable() };
-    const checked = checkFacts(parsed.value, p.lines, { from: ref.from, to: ref.to }, await interviewerNames(db, tenantId));
+    const names = await interviewerNames(db, tenantId);
+    if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
+    const checked = checkFacts(parsed.value, p.lines, { from: ref.from, to: ref.to }, names);
     const kept = checked.kept.map((k) => ({ ...k, transcript_id: ref.transcript_id }));
     return { ok: true, stepId: ref.step_id, engagementId: ref.engagement_id, result: { ...base, kept, dropped: checked.dropped, summary: parsed.value.summary } };
   } catch (err) {
+    if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
     // Whatever the answer held, the run goes on (review of phase 2b, M3: a RangeError escaped the runner's complete).
     console.error("[ai-audit.extraction] checking an answer failed; the window counts as unreadable", err instanceof Error ? err.message : String(err));
     return { ok: true, stepId: ref.step_id, engagementId: ref.engagement_id, result: unreadable() };
@@ -250,6 +278,7 @@ export async function finishExtraction(
   const engagementId = String(step.engagement_id);
   const engagement = await getEngagement(db, t, engagementId);
   const at = input.now.toISOString();
+  if (!aiAuditModelSearchEnabled()) return closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, at);
   if (!engagement || !PROFILE_EDIT_STAGES.includes(engagement.stage)) return closeRun(db, t, input.stepId, "stage_closed", at);
   const actor: Actor = { type: "system", id: null };
   let version: Awaited<ReturnType<typeof ensureDraftProfile>>["version"];
@@ -259,14 +288,20 @@ export async function finishExtraction(
     if (err instanceof Error && /frozen/.test(err.message)) return closeRun(db, t, input.stepId, "stage_closed", at);
     throw err;
   }
+  if (!aiAuditModelSearchEnabled()) return closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, at);
 
   type Outcome = { kind: "closed"; code: string } | { kind: "already" } | { kind: "written"; written: string[]; contradictions: Contradiction[]; dropped: DroppedFact[]; read: number; notRead: number };
-  let outcome: Outcome;
+  let outcome: Outcome | null = null;
+  let deferred = false;
   const tx = await db.transaction("write");
   try {
+    requireModelSearchEnabled();
     const s2 = (await tx.execute({ sql: "SELECT status FROM ai_audit_steps WHERE tenant_id = ? AND id = ?", args: [t, input.stepId] })).rows[0];
+    requireModelSearchEnabled();
     const e2 = (await tx.execute({ sql: "SELECT stage FROM ai_audit_engagements WHERE tenant_id = ? AND id = ?", args: [t, engagementId] })).rows[0];
+    requireModelSearchEnabled();
     const v2 = (await tx.execute({ sql: "SELECT status FROM ai_audit_profile_versions WHERE tenant_id = ? AND id = ?", args: [t, version.id] })).rows[0];
+    requireModelSearchEnabled();
     if (!s2 || !inFlight(s2.status)) {
       outcome = { kind: "already" };
     } else if (!e2 || !(PROFILE_EDIT_STAGES as readonly string[]).includes(String(e2.stage)) || !v2 || String(v2.status) !== "draft") {
@@ -276,6 +311,7 @@ export async function finishExtraction(
       const fieldRows = (
         await tx.execute({ sql: "SELECT field_key, value_json, label, source_type, verified_note, owner_corrected FROM ai_audit_profile_fields WHERE tenant_id = ? AND profile_version_id = ?", args: [t, version.id] })
       ).rows;
+      requireModelSearchEnabled();
       const parse = (x: unknown) => {
         try {
           return JSON.parse(String(x ?? "null"));
@@ -285,6 +321,7 @@ export async function finishExtraction(
       };
       const declined = fieldRows.some((r) => String(r.field_key) === "consent.ai_processing" && parse(r.value_json) === false);
       const tRows = (await tx.execute({ sql: "SELECT id, status, consent_ai FROM ai_audit_transcripts WHERE tenant_id = ? AND engagement_id = ?", args: [t, engagementId] })).rows;
+      requireModelSearchEnabled();
       const active = tRows.filter((r) => String(r.status) === "active");
       const readable = new Set(active.filter((r) => Number(r.consent_ai) === 1).map((r) => String(r.id)));
       // Every active transcript must agree, as at the start and at Gate 1: one added without AI consent stops the
@@ -303,6 +340,7 @@ export async function finishExtraction(
       const dropped = results.flatMap((r) => r.dropped);
       const written: string[] = [];
       for (const f of merged.write) {
+        requireModelSearchEnabled();
         // Insert, or replace a value an earlier extraction wrote and nobody touched since; never one CC verified,
         // corrected or typed. RETURNING says which rows really changed, so the report counts only those.
         const rs = await tx.execute({
@@ -332,6 +370,7 @@ export async function finishExtraction(
             at,
           ],
         });
+        requireModelSearchEnabled();
         if (rs.rows.length) written.push(f.key);
       }
       const summary = mergeSummaries(results.map((r) => r.summary));
@@ -358,10 +397,13 @@ export async function finishExtraction(
         { sql: "UPDATE tool_jobs SET result_json = '{\"stored\":true}' WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ?", args: [t, MODEL_TOOL_KEY, input.stepId] },
         eventStatement({ tenantId: t, engagementId, event: nothingRead ? "extraction_failed" : "extraction_done", actor, at, refType: "step", refId: input.stepId, meta: { written: written.length, contradictions: merged.contradictions.length, dropped: dropped.length, failed_windows: notRead } }),
       ]) {
+        requireModelSearchEnabled();
         await tx.execute(st);
+        requireModelSearchEnabled();
       }
       outcome = { kind: "written", written, contradictions: merged.contradictions, dropped, read: usable.length, notRead };
     }
+    requireModelSearchEnabled();
     await tx.commit();
   } catch (err) {
     try {
@@ -369,11 +411,17 @@ export async function finishExtraction(
     } catch {
       // The transaction is already gone; the original error is the one to report.
     }
-    if (err instanceof Error && /frozen/.test(err.message)) return closeRun(db, t, input.stepId, "stage_closed", at);
-    throw err;
+    if (err instanceof ModelSearchDeferredError) {
+      deferred = true;
+    } else {
+      if (err instanceof Error && /frozen/.test(err.message)) return closeRun(db, t, input.stepId, "stage_closed", at);
+      throw err;
+    }
   } finally {
     tx.close();
   }
+  if (deferred) return closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, at);
+  if (!outcome) throw new Error("finishExtraction ended without an outcome");
   if (outcome.kind === "already") return { ok: false, error: "already_finished" };
   if (outcome.kind === "closed") return { ok: false, error: outcome.code };
 
@@ -455,10 +503,18 @@ export async function sweepStaleExtractions(db: Client, tenantId: string, now: D
 /** For the Mac's path: when every window's job has finished, finish the run from the jobs' checked results. */
 export async function finishMacExtractionIfComplete(db: Client, tenantId: string, stepId: string, now: Date, deps: FinishDeps): Promise<boolean> {
   const t = requireTenant(tenantId);
+  if (!aiAuditModelSearchEnabled()) {
+    await closeRun(db, t, stepId, MODEL_SEARCH_DEFERRED, now.toISOString());
+    return false;
+  }
   const rs = await db.execute({
     sql: "SELECT status, result_json FROM tool_jobs WHERE tenant_id = ? AND tool_key = ? AND json_extract(input_json, '$.step_id') = ?",
     args: [t, MODEL_TOOL_KEY, stepId],
   });
+  if (!aiAuditModelSearchEnabled()) {
+    await closeRun(db, t, stepId, MODEL_SEARCH_DEFERRED, now.toISOString());
+    return false;
+  }
   if (!rs.rows.length) return false;
   if (rs.rows.some((r) => !["done", "failed", "cancelled"].includes(String(r.status)))) return false;
   const results: WindowResult[] = [];
@@ -530,6 +586,10 @@ export async function advanceCloudExtraction(db: Client, input: { tenantId: stri
       // The tick has a budget: one window may not take all of it (review of phase 2b, M3).
       deadlineMs: CLOUD_CALL_DEADLINE_MS,
     });
+    if (!aiAuditModelSearchEnabled()) {
+      await closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, input.now.toISOString());
+      return "failed";
+    }
     if (!answer.ok) {
       const attempts = int(row.attempts) + 1;
       const giveUp = attempts >= int(row.max_attempts, 3) || answer.code === "ai_account_missing";
@@ -567,7 +627,11 @@ export async function advanceCloudExtraction(db: Client, input: { tenantId: stri
     }
     const checked = await checkWindowAnswer(db, t, jobInput, answer.text);
     if (!checked.ok) {
-      await closeRun(db, t, input.stepId, checked.code, input.now.toISOString());
+      await closeRun(db, t, input.stepId, aiAuditModelSearchEnabled() ? checked.code : MODEL_SEARCH_DEFERRED, input.now.toISOString());
+      return "failed";
+    }
+    if (!aiAuditModelSearchEnabled()) {
+      await closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, input.now.toISOString());
       return "failed";
     }
     ref.results.push(checked.result);
@@ -577,6 +641,10 @@ export async function advanceCloudExtraction(db: Client, input: { tenantId: stri
       sql: "UPDATE ai_audit_steps SET status = 'running', attempts = 0, result_ref = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'running')",
       args: [JSON.stringify(ref), input.now.toISOString(), t, input.stepId],
     });
+    if (!aiAuditModelSearchEnabled()) {
+      await closeRun(db, t, input.stepId, MODEL_SEARCH_DEFERRED, input.now.toISOString());
+      return "failed";
+    }
     if (saved.rowsAffected !== 1) return "idle";
   }
   if (ref.results.length >= ref.windows.length) {

@@ -51,6 +51,7 @@ import { PROFILE_FIELDS, profileFieldDef } from "@/lib/ai-audit/profile";
 import { shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { eventStatement, getEngagement, int, readLead, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
 import { inputHashOf } from "@/lib/tools/store";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 export const RESEARCH_SCHEMA = "ai_audit_research/v1" as const;
 export const RESEARCH_STEP = "research";
@@ -232,6 +233,7 @@ export async function startResearch(db: Client, input: { tenantId: string; engag
 
 /** What the Mac is handed: the prompt, built now from public facts only. */
 export async function searchJobInput(db: Client, job: { tenantId: string; input: Record<string, unknown> }): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; code: "gone" | "not_permitted" | "bad_input" }> {
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const t = requireTenant(job.tenantId);
   const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
   const engagementId = typeof job.input.engagement_id === "string" ? job.input.engagement_id : "";
@@ -450,14 +452,17 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   }
 
   if (state.phase === "search") {
-    if (auth.engine !== "mac_claude") {
+    const modelSearchEnabled = aiAuditModelSearchEnabled();
+    if (!modelSearchEnabled || auth.engine !== "mac_claude") {
       // The search is Claude on CC's Mac: it runs only when that is the engine CC authorized for this client.
       state.search = {
         job_id: null,
         queued_at: null,
         results: [],
         note:
-          auth.engine === "none"
+          !modelSearchEnabled
+            ? "Web search deferred: model and search processing is switched off."
+            : auth.engine === "none"
             ? "No web search was run: no AI engine was authorized for this audit."
             : "No web search was run: it runs on Claude on CC's Mac, and this audit was authorized for the workspace's cloud model.",
       };
@@ -484,6 +489,27 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   }
 
   if (state.phase === "waiting_search") {
+    if (!aiAuditModelSearchEnabled()) {
+      const at = input.now.toISOString();
+      if (state.search?.job_id) {
+        // A result that arrives after the independent switch turns off is not
+        // part of the audit. Close the job and retain only the discard reason.
+        await db.execute({
+          sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, result_json = '{"discarded":"model_search_deferred"}',
+                  error_code = 'model_search_deferred', error_message = NULL, finished_at = ?, updated_at = ?
+                WHERE tenant_id = ? AND id = ? AND tool_key = ? AND status IN ('queued', 'claimed', 'running', 'done')`,
+          args: [at, at, t, state.search.job_id, SEARCH_TOOL_KEY],
+        });
+      }
+      state.search = {
+        ...(state.search ?? { job_id: null, queued_at: null }),
+        results: [],
+        refused: [],
+        note: "Web search deferred: model and search processing is switched off.",
+      };
+      state.phase = "fetch";
+      return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
+    }
     const job = state.search?.job_id
       ? (await db.execute({ sql: "SELECT status, result_json, error_code, created_at FROM tool_jobs WHERE tenant_id = ? AND id = ? LIMIT 1", args: [t, state.search.job_id] })).rows[0]
       : null;
