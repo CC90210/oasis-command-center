@@ -182,6 +182,10 @@ const TESTS = [
   "tests/renewals-derive.test.ts",
   "tests/marketing-core.test.ts",
   "tests/marketing-founders-gate.test.ts",
+  // Maven's Cloudflare publish drain: tenant-scoped reads, queue signing,
+  // claim/CAS semantics, daily cap, idempotency and zero-network route wiring.
+  "tests/maven-publish-cloud.test.ts",
+  "tests/maven-publish-queue.test.ts",
   "tests/portal-boundaries.test.ts",
   "tests/shell-boundary.test.ts",
   "tests/font-selfhost.test.ts",

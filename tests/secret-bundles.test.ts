@@ -141,8 +141,10 @@ function testEntryWiring() {
     "the dedicated Telegram consumer is present");
   assert.match(wrangler, /"retry_delay"\s*:\s*30/,
     "failed Telegram jobs wait 30 seconds before Cloudflare redelivers them");
+  assert.match(wrangler, /"queue":\s*"oasis-maven-publish-jobs"/,
+    "the Maven queue binding is declared while the held Slack binding remains absent");
   assert.doesNotMatch(wrangler, /SLACK_AGENT_JOBS|oasis-slack-agent-jobs/,
-    "Slack bindings stay absent while its separate cutover is held");
+    "the Slack queue binding is still held for CC");
   assert.match(entry, /scrubBundlesFromProcessEnv\(process\.env\);\s*expanded\.set\(env, merged\);/,
     "the entry removes the raw bundles nodejs_compat copied into process.env");
 }

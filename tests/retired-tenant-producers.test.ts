@@ -566,6 +566,9 @@ async function main() {
       // The Free AI Audit's upkeep (2026-10-25): it iterates OASIS_INTERNAL_TENANT_IDS only and
       // drops any retired one (lib/ai-audit/tick.ts), so SunBiz is never in reach.
       "ai-audit-tick",
+      // Maven's explicit publish-intent drain is hard-bound to the OASIS tenant
+      // and ignores every other tenant before reading or writing queue state.
+      "maven-publish-queue",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

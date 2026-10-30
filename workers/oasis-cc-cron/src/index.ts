@@ -33,6 +33,7 @@ export type CronEntry = { path: string; schedule: string; timeZone?: string };
 export const CRON_TABLE: ReadonlyArray<CronEntry> = [
   { path: "/api/cron/dispatch-engine-fallbacks", schedule: "* * * * *" },
   { path: "/api/cron/dispatch-automations", schedule: "* * * * *" },
+  { path: "/api/cron/maven-publish-queue", schedule: "* * * * *" },
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
   { path: "/api/cron/dispatch-scheduled-sends", schedule: "*/5 * * * *" },
