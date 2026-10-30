@@ -7,9 +7,9 @@
  * process.env (and getCloudflareContext().env) like any other secret. Expanded once per env object (one per isolate).
  *
  * QUEUES. Every batch is dispatched by batch.queue in lib/worker/queue-router.ts.
- * Telegram can never fall into Slack (or a later Maven drain) when bindings share this Worker. The Telegram producer
- * and consumer are declared in wrangler.jsonc for oasis-telegram-agent-jobs. Rollback is TELEGRAM_WEBHOOK_ENABLED=off;
- * remove those two bindings only after the queue is drained or deliberately abandoned.
+ * Telegram and Maven each have dedicated producer/consumer bindings in wrangler.jsonc and can never fall into each
+ * other or Slack. Telegram rollback is TELEGRAM_WEBHOOK_ENABLED=off; Maven ships behind its own independent switch.
+ * Remove bindings only after their queue is drained or deliberately abandoned.
  *
  * Slack is still held for CC, see the Slack PR. Its queue does not exist yet, so its bindings remain absent. When it is
  * created the exact queue name is oasis-slack-agent-jobs:

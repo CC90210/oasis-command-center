@@ -287,6 +287,7 @@ export const SHARED_PREFIXES = [
   "lib/role-gates",
   "lib/tenant-access",
   "lib/path-prefix",
+  "lib/publish-targets",
   "lib/secret-redaction",
   "lib/llm-input-boundary",
   "lib/bridge-infer",

@@ -22,7 +22,8 @@
   ],
   "queues": {
     "producers": [
-      { "binding": "TELEGRAM_AGENT_JOBS", "queue": "oasis-telegram-agent-jobs" }
+      { "binding": "TELEGRAM_AGENT_JOBS", "queue": "oasis-telegram-agent-jobs" },
+      { "binding": "MAVEN_PUBLISH_JOBS", "queue": "oasis-maven-publish-jobs" }
     ],
     "consumers": [
       {
@@ -31,6 +32,12 @@
         "max_retries": 5,
         "retry_delay": 30,
         "dead_letter_queue": "oasis-telegram-agent-jobs-dlq"
+      },
+      {
+        "queue": "oasis-maven-publish-jobs",
+        "max_batch_size": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "oasis-maven-publish-jobs-dlq"
       }
     ]
   },

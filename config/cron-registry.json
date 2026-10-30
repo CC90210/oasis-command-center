@@ -10,6 +10,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/maven-publish-queue",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/materialize-plans",
       "schedule": "0 3 * * *"
     },
