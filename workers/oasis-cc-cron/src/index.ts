@@ -1,5 +1,5 @@
 /**
- * oasis-cc-cron — companion Worker that replaces the 29 registered crons.
+ * oasis-cc-cron — companion Worker that replaces the 28 registered crons.
  * Design + cutover choreography: Business-Empire-Agent
  * brain/WAVE3_OASIS_CC_RUNBOOK.md.
  *
