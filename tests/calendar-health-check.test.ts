@@ -294,8 +294,8 @@ run().catch((error) => {
   assert.match(route, /checks:\s*OASIS_GLOBAL_CHECKS/, "the OASIS run must contain only the OASIS-global checks");
   assert.match(
     runner,
-    /OASIS_GLOBAL_CHECKS: DripCheck\[\] = \[\.\.\.CALENDAR_CHECKS, \.\.\.WORKER_REPORTER_CHECKS\]/,
-    "the OASIS-global run is the calendar proof (first) plus the worker-status reporter check",
+    /OASIS_GLOBAL_CHECKS: DripCheck\[\] = \[\s*\.\.\.CALENDAR_CHECKS,\s*\.\.\.WORKER_REPORTER_CHECKS,\s*\.\.\.DASHBOARD_EMAIL_CHECKS,\s*\]/,
+    "the OASIS-global run keeps calendar first, then worker status and dashboard-email queue health",
   );
   // 2026-09-28: SunBiz was retired (runbook C-6a), so its tenant run is gone.
   // The estate-wide checks that rode on it are the route's second run now, and

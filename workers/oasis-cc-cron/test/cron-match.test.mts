@@ -52,7 +52,7 @@ function legacyCronMatches(expr: string, instant: Date): boolean {
 }
 
 test("every table expression parses", () => {
-  assert.equal(CRON_TABLE.length, 23, "the existing registry has 23 schedules");
+  assert.equal(CRON_TABLE.length, 24, "the registry has 23 pre-existing schedules plus the cloud email sender");
   for (const e of CRON_TABLE) {
     assert.doesNotThrow(() => cronMatches(e.schedule, at("2026-08-31T00:00:00Z")), e.schedule);
     assert.equal(isValidCronExpression(e.schedule), true, `${e.path}: ${e.schedule}`);
@@ -60,7 +60,7 @@ test("every table expression parses", () => {
   }
 });
 
-test("the optional zone defaults to UTC, preserving all 23 existing schedules", () => {
+test("the optional zone defaults to UTC, preserving the 23 existing schedules and the new sender cadence", () => {
   const first = Date.parse("2026-10-31T00:00:00Z");
   const last = Date.parse("2026-11-03T00:00:00Z");
   for (const entry of CRON_TABLE) {
@@ -195,6 +195,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
   assert.deepEqual(due, [
     "/api/cron/ai-audit-tick",
     "/api/cron/dispatch-automations",
+    "/api/cron/dashboard-email-sender",
     "/api/cron/dispatch-engine-fallbacks",
     "/api/cron/dispatch-drips",
     "/api/cron/dispatch-founder-meeting-reminders",
@@ -223,6 +224,7 @@ test("the books' daily jobs each fire once a day, sharing only the every-minute 
         due.sort(),
         [
           "/api/cron/dispatch-automations",
+          "/api/cron/dashboard-email-sender",
           "/api/cron/dispatch-engine-fallbacks",
           // Every minute since 2026-10-28: the reminder ladder ends 5 minutes out.
           "/api/cron/dispatch-founder-meeting-reminders",

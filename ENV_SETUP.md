@@ -50,6 +50,17 @@ keeps its previous mailbox and logs one `[support-mail]` line saying so. Every
 client-facing email answers to `support@oasisai.work` (Reply-To) either way.
 Sales email to leads is unaffected (`OASIS_MAIL_FROM`).
 
+### Cloud dashboard-email drain
+
+The once-per-minute dashboard-email cron is fail-closed behind its own switch.
+It remains off unless `OASIS_DASHBOARD_EMAIL_SENDER_FORWARD` is exactly a
+conventional true value (`on`, `true`, `1`, or `yes`). Live mode also requires
+both `OASIS_MAIL_FROM` (an OASIS sending address) and
+`OASIS_MAIL_APP_PASSWORD`; the route returns a credential-readiness error before
+reading the queue when either is absent. `BRAVO_FORCE_DRY_RUN` and the existing
+email send-mode controls remain authoritative even when the dedicated switch is
+on.
+
 | Variable | Notes |
 |---|---|
 | `SUPPORT_GMAIL_USER` | Must be exactly `support@oasisai.work`; any other mailbox is refused and logged as an error (`lib/email/support-mailbox.ts`) |

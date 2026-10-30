@@ -36,6 +36,9 @@ export const CRON_TABLE: ReadonlyArray<CronEntry> = [
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
   { path: "/api/cron/dispatch-scheduled-sends", schedule: "*/5 * * * *" },
+  // OASIS drawer + AI-audit transactional EMAIL queue only. Its route has an
+  // independent fail-closed switch and remains read-only while email is dry.
+  { path: "/api/cron/dashboard-email-sender", schedule: "* * * * *" },
   // Every minute (CC, 2026-10-28): the reminder ladder ends at 5 minutes
   // before the call, which a 5-minute cadence could deliver at the start time.
   { path: "/api/cron/dispatch-founder-meeting-reminders", schedule: "* * * * *" },

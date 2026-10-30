@@ -22,6 +22,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/dashboard-email-sender",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/dispatch-founder-meeting-reminders",
       "schedule": "* * * * *"
     },
