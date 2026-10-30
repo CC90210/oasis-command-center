@@ -88,6 +88,7 @@ import {
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 import { checkWindowAnswer, finishMacExtractionIfComplete, modelJobInput, type FinishDeps } from "@/lib/ai-audit/extraction";
 import { checkSearchAnswer, searchJobInput } from "@/lib/ai-audit/research";
 import { cancelWriting, finishWriting, writeJobInput } from "@/lib/ai-audit/writing";
@@ -763,8 +764,17 @@ async function completeAuditSearch(ref: LeaseRef, b: Record<string, unknown>, de
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
   if (job.toolKey !== "ai_audit_search") return invalid("tool_key");
-  const checked = checkSearchAnswer(b.text);
   const at = deps.now.toISOString();
+  if (!aiAuditModelSearchEnabled()) {
+    const rs = await deps.db.execute({
+      sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = '{"discarded":"model_search_deferred"}', error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+            WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+      args: [at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+    });
+    if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_search");
+    return toolsJson(200, { ok: true, duplicate: false, discarded: true, results: 0, unreadable: false });
+  }
+  const checked = checkSearchAnswer(b.text);
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,

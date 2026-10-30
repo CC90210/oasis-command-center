@@ -802,6 +802,39 @@ async function main() {
     const stored = String((await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].result_json);
     assert.ok(!stored.includes("double your revenue"), "the job never keeps the model's text");
   });
+  await check("turning model/search off while a writing answer is in flight cancels the pass and persists none of its prose", async () => {
+    const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;
+    const writing = await import("../lib/ai-audit/writing");
+    const beforeEngagement = (await store.getEngagement(db, OASIS, eid))!;
+    const before = (await versions.getAuditVersion(db, OASIS, beforeEngagement.current_audit_version_id!))!;
+    const started = await writing.startWriting(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(started.ok && started.created && started.runsOn === "mac", JSON.stringify(started));
+    const claimed = await runner.handleToolsClaim(macRequest("claim", { label: "CC's Mac", version: "1.0.0", tools: ["ai_audit_model"] }, NOW()), runnerDeps(NOW()) as never);
+    const job = ((await claimed.json()) as { job: { job_id: string; lease_id: string } | null }).job;
+    assert.ok(job);
+    const lateMarker = "LATE MODEL PROSE MUST NOT PERSIST";
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const completed = await runner.handleToolsComplete(
+        macRequest("complete", { job_id: job!.job_id, lease_id: job!.lease_id, tool_key: "ai_audit_model", text: JSON.stringify({ executive_overview: [{ text: lateMarker, cites: [] }] }) }, NOW()),
+        runnerDeps(NOW()) as never,
+      );
+      assert.equal(completed.status, 200);
+      assert.equal(((await completed.json()) as { written?: boolean }).written, false);
+      const afterEngagement = (await store.getEngagement(db, OASIS, eid))!;
+      const after = (await versions.getAuditVersion(db, OASIS, afterEngagement.current_audit_version_id!))!;
+      assert.equal(after.id, before.id, "no replacement draft was persisted");
+      assert.equal(after.content_sha256, before.content_sha256, "the deterministic/current draft stayed byte-identical");
+      assert.ok(!JSON.stringify(after.doc).includes(lateMarker));
+      const step = await writing.latestWriteStep(db, OASIS, eid);
+      assert.deepEqual([step?.status, step?.error], ["cancelled", "not_authorized"]);
+      const stored = String((await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].result_json);
+      assert.equal(stored, '{"write":"received"}');
+      assert.ok(!stored.includes(lateMarker), "the late model prose was never stored on the job");
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+  });
   await check("CC's own edit wins: a pass that answers after it changes nothing", async () => {
     const eid = (await db.execute("SELECT id FROM ai_audit_engagements WHERE business_name LIKE '%Tick Draft Co%' LIMIT 1")).rows[0].id as string;
     await login(USERS.cc);

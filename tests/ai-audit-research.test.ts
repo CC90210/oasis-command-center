@@ -585,6 +585,43 @@ async function main() {
     await assert.rejects(db.execute({ sql: "UPDATE ai_audit_research SET status = 'ready' WHERE id = ?", args: [latest!.id] }), /ai_audit_research_frozen/);
     assert.ok(alerts.some((a) => a.alertType === "ai_audit_research_ready"));
   });
+  await check("turning model/search off while a search answer is in flight discards it before the job or research stores its results", async () => {
+    const { eid } = await authorized("Late Search Co", "https://fixture-plumbing.ca");
+    const started = await research.startResearch(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() });
+    assert.ok(started.ok);
+    const id = started.ok ? started.stepId : "";
+    for (let i = 0; i < 3; i++) assert.equal(await research.advanceResearch(db, { tenantId: OASIS, stepId: id, now: NOW(), deps }), "advanced");
+    assert.equal(String((await stepOf(id)).status), "waiting_runner");
+    const job = await claimSearch();
+    assert.ok(job && job.tool_key === "ai_audit_search");
+    const lateMarker = "https://late-search-result.example/should-not-persist";
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const completed = await runner.handleToolsComplete(
+        macRequest("complete", { job_id: job!.job_id, lease_id: job!.lease_id, tool_key: "ai_audit_search", text: JSON.stringify({ results: [{ url: lateMarker, title: "Late", kind: "listing", claims: [] }] }) }, NOW()),
+        runnerDeps(NOW()) as never,
+      );
+      assert.equal(completed.status, 200);
+      assert.equal(((await completed.json()) as { discarded?: boolean }).discarded, true);
+      const afterComplete = String((await db.execute({ sql: "SELECT result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0].result_json);
+      assert.match(afterComplete, /model_search_deferred/);
+      assert.ok(!afterComplete.includes(lateMarker), "the late URL was not kept on the job");
+
+      assert.equal(await research.advanceResearch(db, { tenantId: OASIS, stepId: id, now: NOW(), deps }), "advanced");
+      const state = JSON.parse(String((await stepOf(id)).result_ref)) as { phase: string; search?: { results?: unknown[]; note?: string } };
+      assert.equal(state.phase, "fetch");
+      assert.deepEqual(state.search?.results, []);
+      assert.match(state.search?.note ?? "", /switched off/);
+      assert.equal(await research.advanceResearch(db, { tenantId: OASIS, stepId: id, now: NOW(), deps }), "advanced");
+      assert.equal(await research.advanceResearch(db, { tenantId: OASIS, stepId: id, now: NOW(), deps }), "finished");
+      assert.ok(!web.seen.includes(lateMarker), "the discarded result was never fetched");
+      const closed = (await db.execute({ sql: "SELECT status, error_code, result_json FROM tool_jobs WHERE id = ?", args: [job!.job_id] })).rows[0];
+      assert.deepEqual([String(closed.status), String(closed.error_code)], ["failed", "model_search_deferred"]);
+      assert.ok(!String(closed.result_json).includes(lateMarker));
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+  });
   await check("the page shows the run and the estimates with CC's ranges; only the owner changes the ranges or runs it again", async () => {
     await login(USERS.admin);
     assert.equal((await post(first.eid, { action: "start_research" })).status, 403);

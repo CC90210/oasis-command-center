@@ -27,6 +27,7 @@ import { getSettings } from "@/lib/ai-audit/store";
 import { DRY_RUN_CHANNEL as PAY_CHANNEL } from "@/lib/ai-audit/payment";
 import { AUDIT_EMAIL_CHANNEL } from "@/lib/ai-audit/delivery-payload";
 import { formatOperatorDate } from "@/lib/dates";
+import { hasUsableKey, LOCAL_MODEL_PROVIDER, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 
 export type SetupState = "ready" | "test_mode" | "deferred" | "missing" | "unknown";
 
@@ -45,6 +46,7 @@ export type SetupDeps = {
   stripeConnected: (tenantId: string) => Promise<boolean>;
   mailboxConnected: (tenantId: string) => Promise<boolean>;
   runnerFor: (db: Client, tenantId: string, tool: string, now: Date) => Promise<{ label: string; lastSeenAt: string } | null>;
+  workspaceAiAccountReady: (tenantId: string) => Promise<boolean>;
   modelSearchEnabled: () => boolean;
 };
 
@@ -56,6 +58,10 @@ export function defaultSetupDeps(): SetupDeps {
     stripeConnected: async (tenantId) => !!(await getTenantIntegrationValue(tenantId, "stripe", "secret_key")),
     mailboxConnected: oasisSharedMailboxConfigured,
     runnerFor: liveRunnerForTool,
+    workspaceAiAccountReady: async (tenantId) => {
+      const account = await readWorkspaceAiAccount(tenantId);
+      return hasUsableKey(account) && account.provider !== LOCAL_MODEL_PROVIDER;
+    },
     modelSearchEnabled: aiAuditModelSearchEnabled,
   };
 }
@@ -79,14 +85,20 @@ function unknown(key: SetupCheck["key"], label: string): SetupCheck {
 }
 
 export async function setupChecks(db: Client, tenantId: string, now: Date, deps: SetupDeps = defaultSetupDeps()): Promise<SetupCheck[]> {
-  const [catalogue, settings, runner, stripe, mailbox] = await Promise.all([
+  const [catalogue, settings, pdfRunner, modelRunner, searchRunner, stripe, mailbox] = await Promise.all([
     attempt("catalogue", () => listCatalogue(db, tenantId)),
     attempt("settings", () => getSettings(db, tenantId)),
-    // Each tool the Mac row speaks for, on its own: one runner may serve the PDF and not the model (CodeRabbit on #749).
-    attempt("Mac runner", () => Promise.all(MAC_TOOLS.map((tool) => deps.runnerFor(db, tenantId, tool, now)))),
+    // Each lookup stands alone: an optional model/search lookup must never hide a healthy PDF printer.
+    attempt("PDF runner", () => deps.runnerFor(db, tenantId, MAC_TOOLS[0], now)),
+    attempt("model runner", () => deps.runnerFor(db, tenantId, MAC_TOOLS[1], now)),
+    attempt("search runner", () => deps.runnerFor(db, tenantId, MAC_TOOLS[2], now)),
     attempt("Stripe", () => deps.stripeConnected(tenantId)),
     attempt("mailbox", () => deps.mailboxConnected(tenantId)),
   ]);
+  const workspaceAiAccount =
+    settings.ok && settings.value.settings.engine === "cloud_workspace"
+      ? await attempt("workspace AI account", () => deps.workspaceAiAccountReady(tenantId))
+      : null;
   const checks: SetupCheck[] = [];
   const modelSearchEnabled = deps.modelSearchEnabled();
 
@@ -126,9 +138,9 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
     );
   }
 
-  if (!runner.ok) checks.push(unknown("mac", "PDF printer"));
+  if (!pdfRunner.ok) checks.push(unknown("mac", "PDF printer"));
   else {
-    const [pdf] = runner.value;
+    const pdf = pdfRunner.value;
     if (!pdf) {
       checks.push({
         key: "mac",
@@ -154,10 +166,20 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
   else if (settings.value.settings.engine === "none") {
     checks.push({ key: "model_search", label: "Model and web search", state: "deferred", detail: "Deferred by default: this workspace's audit engine is No AI. Deterministic audit and PDF work keeps running." });
   } else if (settings.value.settings.engine === "cloud_workspace") {
-    checks.push({ key: "model_search", label: "Model and web search", state: "ready", detail: "The workspace cloud model is enabled. Mac-only web search is not used for this default." });
-  } else if (!runner.ok) checks.push(unknown("model_search", "Model and web search"));
+    if (!workspaceAiAccount?.ok) checks.push(unknown("model_search", "Model and web search"));
+    else if (!workspaceAiAccount.value) {
+      checks.push({
+        key: "model_search",
+        label: "Model and web search",
+        state: "missing",
+        detail: "The workspace cloud model is selected, but no usable cloud AI account is connected.",
+        link: { href: "/settings#providers", label: "Open AI brain" },
+      });
+    } else checks.push({ key: "model_search", label: "Model and web search", state: "ready", detail: "The workspace cloud model and its AI account are ready. Runner-only web search is not used for this default." });
+  } else if (!modelRunner.ok || !searchRunner.ok) checks.push(unknown("model_search", "Model and web search"));
   else {
-    const [, model, search] = runner.value;
+    const model = modelRunner.value;
+    const search = searchRunner.value;
     const lacking = [...(model ? [] : ["reading calls and writing (ai_audit_model)"]), ...(search ? [] : ["web search (ai_audit_search)"])];
     checks.push(
       lacking.length

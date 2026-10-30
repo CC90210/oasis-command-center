@@ -26,9 +26,9 @@ const PHASE_WORDS: Readonly<Record<string, string>> = {
   site: "Reading the website",
   pagespeed: "Running Google PageSpeed",
   // Neutral for every engine: cloud, No AI and switch-off runs skip search
-  // here, while an authorized Mac run may be waiting on its search job.
+  // here, while an authorized runner-backed search may wait for a runner.
   search: "Checking authorized public sources",
-  waiting_search: "Checking authorized public sources",
+  waiting_search: "Waiting for a runner to check authorized public sources",
   fetch: "Reading the pages the search found",
   assemble: "Checking the evidence and putting it together",
 };
@@ -38,6 +38,11 @@ const STOP_WORDS: Readonly<Record<string, string>> = {
   research_failed: "A step failed three times, so it stopped. Press Research again to start a new run.",
   not_authorized: "It stopped because the authorization no longer holds. Authorize the profile again first.",
 };
+
+/** Only an executed, still-valid Gate 1 chooses an engine for this engagement. */
+function executedEngine(view: EngagementView) {
+  return view.authorization?.status === "executed" ? view.authorization.engine : null;
+}
 
 /** Why a writing pass over the opening changed nothing (lib/ai-audit/writing.ts step error codes). */
 const WRITE_STOP_WORDS: Readonly<Record<string, string>> = {
@@ -271,8 +276,8 @@ function DraftBox({ view }: { view: EngagementView }) {
   const [message, setMessage] = useState<string | null>(null);
   const auditDraft = view.audit?.status === "draft";
   const proposalDraft = view.proposal?.status === "draft";
-  const authorizedEngine = view.authorization?.engine ?? view.settings.engine;
-  const modelWritingDeferred = !view.modelSearchEnabled || authorizedEngine === "none";
+  const authorizedEngine = executedEngine(view);
+  const modelWritingDeferred = !view.modelSearchEnabled || authorizedEngine === null || authorizedEngine === "none";
 
   async function draft(what: "audit" | "proposal") {
     const exists = what === "audit" ? auditDraft : proposalDraft;
@@ -360,8 +365,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const step = r?.step ?? null;
   const pack = r?.latest?.content ?? null;
   const running = !!step && IN_FLIGHT.includes(step.status);
-  const authorizedEngine = view.authorization?.engine ?? view.settings.engine;
-  const modelSearchDeferred = !view.modelSearchEnabled || authorizedEngine === "none";
+  const authorizedEngine = executedEngine(view);
+  const modelSearchDeferred = !view.modelSearchEnabled || authorizedEngine === null || authorizedEngine === "none";
   const cloudSearchSkipped = view.modelSearchEnabled && authorizedEngine === "cloud_workspace";
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -411,7 +416,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const canRun = isOwner && e.stage === "generating" && !running;
 
   let status: string;
-  if (running) status = `Running: ${PHASE_WORDS[step?.phase ?? ""] ?? "starting"}. Started ${when(step?.created_at)}.`;
+  if (running && step?.status === "waiting_runner") status = `${PHASE_WORDS[step.phase ?? ""] ?? "Waiting for a runner"}. Queued ${when(step.created_at)}.`;
+  else if (running) status = `Running: ${PHASE_WORDS[step?.phase ?? ""] ?? "starting"}. Started ${when(step?.created_at)}.`;
   else if (r.latest) status = `Version ${r.latest.version_no}, built ${when(r.latest.created_at)}${r.latest.status === "partial" ? ", with some parts missing (see Gaps)" : ""}.`;
   else if (step && step.status !== "done") status = `The last run did not finish. ${STOP_WORDS[step.error ?? ""] ?? (step.error ? `It stopped (${step.error}).` : "")}`.trim();
   else if (e.stage === "generating") status = "Not run yet. It starts by itself within a few minutes of Gate 1, or press the button.";

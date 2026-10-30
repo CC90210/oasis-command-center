@@ -489,6 +489,27 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   }
 
   if (state.phase === "waiting_search") {
+    if (!aiAuditModelSearchEnabled()) {
+      const at = input.now.toISOString();
+      if (state.search?.job_id) {
+        // A result that arrives after the independent switch turns off is not
+        // part of the audit. Close the job and retain only the discard reason.
+        await db.execute({
+          sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, result_json = '{"discarded":"model_search_deferred"}',
+                  error_code = 'model_search_deferred', error_message = NULL, finished_at = ?, updated_at = ?
+                WHERE tenant_id = ? AND id = ? AND tool_key = ? AND status IN ('queued', 'claimed', 'running', 'done')`,
+          args: [at, at, t, state.search.job_id, SEARCH_TOOL_KEY],
+        });
+      }
+      state.search = {
+        ...(state.search ?? { job_id: null, queued_at: null }),
+        results: [],
+        refused: [],
+        note: "Web search deferred: model and search processing is switched off.",
+      };
+      state.phase = "fetch";
+      return (await saveState(db, t, input.stepId, from, state, "running", input.now)) ? "advanced" : "idle";
+    }
     const job = state.search?.job_id
       ? (await db.execute({ sql: "SELECT status, result_json, error_code, created_at FROM tool_jobs WHERE tenant_id = ? AND id = ? LIMIT 1", args: [t, state.search.job_id] })).rows[0]
       : null;

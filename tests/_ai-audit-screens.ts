@@ -120,17 +120,35 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     });
   }
   {
-    const cloud = json(first as NonNullable<typeof first>);
-    cloud.modelSearchEnabled = true;
-    cloud.settings = { ...cloud.settings, engine: "cloud_workspace" };
-    cloud.authorization = null;
-    cloud.engagement = { ...cloud.engagement, stage: "generating" };
-    cloud.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
-    cloud.research.step = { id: "cloud-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
+    const pending = json(first as NonNullable<typeof first>);
+    pending.modelSearchEnabled = true;
+    pending.settings = { ...pending.settings, engine: "cloud_workspace" };
+    pending.authorization = { id: "pending-cloud", status: "pending", outcome: null, message: null, engine: "cloud_workspace", engine_label: "Workspace cloud model", plan: [] };
+    pending.engagement = { ...pending.engagement, stage: "generating" };
+    pending.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    pending.research.step = { id: "pending-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:cloud-pending", screen: "workspace", props: { view: pending, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:cloud-pending", {
+      has: ["Model and web search are deferred"],
+      hasNot: [/workspace cloud model is authorized/i, /AI web search is not run for this engine/i],
+    });
+
+    const cloud = json(pending);
+    cloud.authorization = { ...cloud.authorization!, id: "executed-cloud", status: "executed", outcome: "authorized" };
+    cloud.research!.step = { id: "cloud-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
     scenarios.push({ id: "workspace:cloud-search-skipped", screen: "workspace", props: { view: cloud, isOwner: true, initialTab: "research" } });
     expect.set("workspace:cloud-search-skipped", {
       has: ["Running: Checking authorized public sources.", "workspace cloud model is authorized", "AI web search is not run for this engine", "website checks, PageSpeed and evidence rules still run"],
       hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i, /web search waits for CC's Mac/i],
+    });
+
+    const waiting = json(cloud);
+    waiting.authorization = { ...waiting.authorization!, id: "executed-runner", engine: "mac_claude", engine_label: "Runner model" };
+    waiting.research!.step = { id: "waiting-search-step", status: "waiting_runner", phase: "waiting_search", error: null, created_at: new Date().toISOString() };
+    scenarios.push({ id: "workspace:search-waiting-runner", screen: "workspace", props: { view: waiting, isOwner: true, initialTab: "research" } });
+    expect.set("workspace:search-waiting-runner", {
+      has: ["Waiting for a runner to check authorized public sources. Queued"],
+      hasNot: [/Running: Waiting/i, /Waiting for .*CC's Mac/i, /web search waits for CC's Mac/i],
     });
   }
   // The proposal editor's two ways out of a stuck draft: a waiting line takes its now-confirmed price in place,
@@ -216,6 +234,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => false,
     mailboxConnected: async () => false,
     runnerFor: async () => null,
+    workspaceAiAccountReady: async () => false,
     modelSearchEnabled: () => false,
   });
   const live = await setup.setupChecks(db, tenantId, now, {
@@ -225,6 +244,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => true,
     mailboxConnected: async () => true,
     runnerFor: async () => ({ label: "oasis-mac-ai-audit", lastSeenAt: now.toISOString() }),
+    workspaceAiAccountReady: async () => true,
     modelSearchEnabled: () => true,
   });
   assert.ok(bare.some((c) => c.state === "missing"), "with nothing set up, setup says what is missing");
@@ -235,6 +255,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     stripeConnected: async () => true,
     mailboxConnected: async () => true,
     runnerFor: async (_db, _t, tool) => (tool === "ai_audit_pdf" ? { label: "old-runner", lastSeenAt: now.toISOString() } : null),
+    workspaceAiAccountReady: async () => true,
     modelSearchEnabled: () => true,
   });
   const mac = pdfOnly.find((c) => c.key === "mac");
@@ -249,6 +270,50 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
   } else {
     assert.equal(modelSearch?.state, "ready", "the cloud engine does not depend on Mac model tools");
   }
+
+  const pdfDespiteModelReadFailure = await setup.setupChecks(db, tenantId, now, {
+    isDryRun: () => false,
+    linkSecretSet: () => true,
+    pdfStorageSet: () => true,
+    stripeConnected: async () => true,
+    mailboxConnected: async () => true,
+    runnerFor: async (_db, _t, tool) => {
+      if (tool === "ai_audit_pdf") return { label: "pdf-only-runner", lastSeenAt: now.toISOString() };
+      throw new Error("injected model/search runner lookup failure");
+    },
+    workspaceAiAccountReady: async () => true,
+    modelSearchEnabled: () => true,
+  });
+  assert.equal(pdfDespiteModelReadFailure.find((c) => c.key === "mac")?.state, "ready", "model/search lookup failures never hide a healthy PDF printer");
+
+  const beforeCloud = await store.getSettings(db, tenantId);
+  assert.deepEqual(
+    await store.saveSettings(db, { tenantId, settings: { ...beforeCloud.settings, engine: "cloud_workspace" }, expectedRowVersion: beforeCloud.rowVersion, actorId: ownerUserId, now }),
+    { ok: true },
+  );
+  const cloudDeps = {
+    isDryRun: () => false,
+    linkSecretSet: () => true,
+    pdfStorageSet: () => true,
+    stripeConnected: async () => true,
+    mailboxConnected: async () => true,
+    runnerFor: async () => null,
+    modelSearchEnabled: () => true,
+  };
+  const cloudMissing = await setup.setupChecks(db, tenantId, now, { ...cloudDeps, workspaceAiAccountReady: async () => false });
+  const cloudUnknown = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    workspaceAiAccountReady: async () => {
+      throw new Error("injected workspace AI account read failure");
+    },
+  });
+  const cloudReady = await setup.setupChecks(db, tenantId, now, { ...cloudDeps, workspaceAiAccountReady: async () => true });
+  assert.equal(cloudMissing.find((c) => c.key === "model_search")?.state, "missing", "cloud model readiness requires a usable workspace AI account");
+  assert.equal(cloudUnknown.find((c) => c.key === "model_search")?.state, "unknown", "an unreadable workspace AI account is never reported ready");
+  assert.equal(cloudReady.find((c) => c.key === "model_search")?.state, "ready", "a usable workspace AI account makes the selected cloud engine ready");
+  const afterCloud = await store.getSettings(db, tenantId);
+  assert.deepEqual(await store.saveSettings(db, { tenantId, settings: beforeCloud.settings, expectedRowVersion: afterCloud.rowVersion, actorId: ownerUserId, now }), { ok: true });
+
   assert.equal(bare.filter((c) => c.state === "test_mode").length, 2, "both client-facing switches read as test mode");
   for (const k of ["mac", "pdf_storage", "link_secret", "mailbox", "stripe", "audit_email", "payments"] as const) {
     assert.equal(live.find((c) => c.key === k)?.state, "ready", `${k} reads ready when it is set up`);

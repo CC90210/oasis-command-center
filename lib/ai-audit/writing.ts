@@ -128,6 +128,9 @@ type WriteContext = { ok: true; stepId: string; engagement: Engagement; doc: Aud
 
 /** The pass's step, engagement and draft, if it may still run: in flight, after Gate 1, and the draft unchanged since it started. */
 async function writeContext(db: Client, tenantId: string, input: Record<string, unknown>): Promise<WriteContext> {
+  // Recheck at the result boundary too: a pass may have started while the
+  // independent switch was on and answered only after CC turned it off.
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const t = requireTenant(tenantId);
   const stepId = typeof input.step_id === "string" ? input.step_id : "";
   const engagementId = typeof input.engagement_id === "string" ? input.engagement_id : "";
