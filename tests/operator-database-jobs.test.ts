@@ -359,7 +359,7 @@ async function main(): Promise<void> {
     assert.equal(collected.computers[0].state, "online");
     assert.equal(collected.cronFlows.find((item) => item.path === "/api/cron/health-check")?.last?.ok, true);
     assert.equal(collected.cronFlows.find((item) => item.path === "/api/cron/health-check")?.observedAt, "2026-10-29T14:00:00.000Z");
-    assert.equal(collected.cronFlows.length, 26);
+    assert.equal(collected.cronFlows.length, 30);
     db.close();
   });
 

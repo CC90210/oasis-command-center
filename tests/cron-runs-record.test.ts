@@ -95,7 +95,7 @@ async function main(): Promise<void> {
     const row = (await db.execute("SELECT * FROM cron_runs WHERE route = '/api/cron/ai-audit-tick'")).rows[0];
     assert.deepEqual([Number(row.ok), row.http_status, Number(row.attempts), Number(row.duration_ms)], [1, "200", 1, 340]);
     const observations = await db.execute("SELECT route, observed_at FROM cron_route_observations ORDER BY route");
-    assert.equal(observations.rows.length, 26, "the first report from a deployed registry observes every registered route");
+    assert.equal(observations.rows.length, 30, "the first report from a deployed registry observes every registered route");
     assert.equal(
       observations.rows.find((item) => item.route === "/api/cron/morning-brief")?.observed_at,
       tickAt,
