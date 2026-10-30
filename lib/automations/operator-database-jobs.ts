@@ -1,10 +1,14 @@
 /**
- * Database-only replacements for the Windows Daily Bravo Brief and Hourly
- * Cron Health jobs.
+ * Database-only cloud routes for the OASIS morning brief and the narrow
+ * cloud-route + paired-computer health signal.
  *
  * Both jobs fail closed behind their own forwarding flag. Their dry mode reads
  * the same cloud truth and builds the same preview as live mode, but never
  * calls an alert, notification or recovery writer.
+ *
+ * Hourly health is not a replacement for the retired Windows watchdog. It has
+ * no view of arbitrary host processes; VPS daemon health remains a separate
+ * service-check concern in the later daemon-tier migration.
  */
 import "server-only";
 
@@ -17,6 +21,12 @@ import {
   type HotReply,
 } from "@/components/os/today/model";
 import { loadCronFlows, type CronFlow } from "@/lib/automations/cron-runs";
+import {
+  beginOperatorJobDeliveryAttempt,
+  claimOperatorJobDelivery,
+  completeOperatorJobDelivery,
+  markOperatorJobDeliveryUnknown,
+} from "@/lib/automations/operator-job-delivery";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { machineState, type MachineState } from "@/lib/devices/presence";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -29,11 +39,14 @@ import { listOasisPipelineWindow } from "@/lib/oasis-pipeline-query";
 import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
 import { priorityInbound } from "@/lib/queries";
+import { redactAll } from "@/lib/secret-redaction";
 import { getTursoClient } from "@/lib/turso";
 import { cronMatches } from "@/workers/oasis-cc-cron/src/cron-match";
 
 export const MORNING_BRIEF_FORWARD_ENV = "OASIS_MORNING_BRIEF_FORWARD";
 export const HOURLY_HEALTH_FORWARD_ENV = "OASIS_HOURLY_HEALTH_FORWARD";
+export const HOURLY_HEALTH_SCOPE_NOTE =
+  "Scope: cloud routes and paired computers only. VPS daemon health is a separate service-check concern.";
 
 const TRUTHY = new Set(["1", "on", "true", "yes"]);
 const MINUTE_MS = 60_000;
@@ -233,12 +246,66 @@ export type MorningBriefRun = {
   notification_writes: number;
   notification_sends: number;
   delivery: AlertPush | null;
+  delivery_state: "not_attempted" | "delivered" | "already_delivered";
+  delivery_key: string;
+  idempotent: boolean;
 };
 
 type MorningBriefDeps = {
   collect: () => Promise<MorningBriefFacts>;
   push: (tenantId: string, text: string) => Promise<AlertPush>;
+  db?: Client;
+  now?: () => number;
+  claimToken?: () => string;
+  requestReview?: (input: { deliveryKey: string; detail: string }) => Promise<void>;
 };
+
+async function defaultMorningBriefReview(input: { deliveryKey: string; detail: string }): Promise<void> {
+  const alert = await writeAgentAlert({
+    tenantId: OASIS_OPERATOR_TENANT_ID,
+    alertType: "operator_job_delivery_unknown",
+    severity: "warn",
+    title: "Morning brief delivery needs review",
+    body: `The ${input.deliveryKey} provider attempt has no trustworthy delivery receipt. ${input.detail}`,
+    subjectType: "operator_job_delivery",
+    subjectId: input.deliveryKey,
+    payload: { delivery_key: input.deliveryKey, status: "delivery_unknown" },
+    // Never recursively page the same Telegram destination whose receipt is
+    // uncertain. The durable Needs-you card plus the red cron run are the review path.
+    telegram: false,
+  });
+  if (!alert.stored) console.error("[morning-brief] delivery review card was not stored", { deliveryKey: input.deliveryKey });
+}
+
+async function flagMorningBriefUnknown(input: {
+  db: Client;
+  deliveryKey: string;
+  claimToken: string;
+  nowMs: number;
+  providerOutcome?: unknown;
+  error?: unknown;
+  requestReview: NonNullable<MorningBriefDeps["requestReview"]>;
+  detail: string;
+}): Promise<void> {
+  try {
+    await markOperatorJobDeliveryUnknown({
+      db: input.db,
+      tenantId: OASIS_OPERATOR_TENANT_ID,
+      deliveryKey: input.deliveryKey,
+      claimToken: input.claimToken,
+      nowMs: input.nowMs,
+      providerOutcome: input.providerOutcome,
+      error: input.error,
+    });
+  } catch (error) {
+    console.error("[morning-brief] delivery_unknown receipt update failed", redactAll(error instanceof Error ? error.message : String(error)));
+  }
+  try {
+    await input.requestReview({ deliveryKey: input.deliveryKey, detail: input.detail });
+  } catch (error) {
+    console.error("[morning-brief] delivery_unknown review write failed", redactAll(error instanceof Error ? error.message : String(error)));
+  }
+}
 
 export async function runMorningBrief(
   dryRun: boolean,
@@ -249,6 +316,7 @@ export async function runMorningBrief(
 ): Promise<MorningBriefRun> {
   const facts = await deps.collect();
   const preview = renderMorningBrief(facts);
+  const deliveryKey = `morning_brief:${facts.date}`;
   if (dryRun) {
     return {
       ok: true,
@@ -259,14 +327,121 @@ export async function runMorningBrief(
       notification_writes: 0,
       notification_sends: 0,
       delivery: null,
+      delivery_state: "not_attempted",
+      delivery_key: deliveryKey,
+      idempotent: false,
     };
   }
-  const delivery = await deps.push(OASIS_OPERATOR_TENANT_ID, preview);
+
+  const db = deps.db ?? getTursoClient();
+  const nowMs = deps.now?.() ?? Date.now();
+  const requestReview = deps.requestReview ?? defaultMorningBriefReview;
+  const claim = await claimOperatorJobDelivery({
+    db,
+    tenantId: OASIS_OPERATOR_TENANT_ID,
+    jobKey: "morning_brief",
+    scheduledFor: facts.date,
+    nowMs,
+    claimToken: deps.claimToken?.(),
+  });
+  if (claim.state === "already_delivered") {
+    return {
+      ok: true,
+      mode: "live",
+      tenant_id: OASIS_OPERATOR_TENANT_ID,
+      preview,
+      facts,
+      notification_writes: 0,
+      notification_sends: 0,
+      delivery: null,
+      delivery_state: "already_delivered",
+      delivery_key: claim.deliveryKey,
+      idempotent: true,
+    };
+  }
+  if (claim.state === "delivery_in_flight") {
+    throw new Error(`morning brief delivery in flight: ${claim.deliveryKey}`);
+  }
+  if (claim.state === "delivery_unknown") {
+    await requestReview({
+      deliveryKey: claim.deliveryKey,
+      detail: "The earlier attempt is terminally ambiguous and was not retried.",
+    });
+    throw new Error(`morning brief delivery unknown; operator review required: ${claim.deliveryKey}`);
+  }
+
+  await beginOperatorJobDeliveryAttempt({
+    db,
+    tenantId: OASIS_OPERATOR_TENANT_ID,
+    deliveryKey: claim.deliveryKey,
+    claimToken: claim.claimToken,
+    nowMs,
+  });
+
+  let delivery: AlertPush;
+  try {
+    delivery = await deps.push(OASIS_OPERATOR_TENANT_ID, preview);
+  } catch (error) {
+    await flagMorningBriefUnknown({
+      db,
+      deliveryKey: claim.deliveryKey,
+      claimToken: claim.claimToken,
+      nowMs,
+      error,
+      requestReview,
+      detail: "The provider call ended without a response, so automatic retry is blocked.",
+    });
+    throw new Error(`morning brief delivery unknown; operator review required: ${claim.deliveryKey}`);
+  }
   if (!delivery.delivered) {
-    // A green cron row must mean the founder was reached. Throwing makes the
-    // route non-2xx, so the Worker retries once and records the failed brief
-    // instead of turning a missed notification into an apparent success.
-    throw new Error(`morning brief was not delivered: ${delivery.outcome}`);
+    await flagMorningBriefUnknown({
+      db,
+      deliveryKey: claim.deliveryKey,
+      claimToken: claim.claimToken,
+      nowMs,
+      providerOutcome: delivery.outcome,
+      error: "provider did not return a delivered receipt",
+      requestReview,
+      detail: `The provider did not confirm delivery (${redactAll(delivery.outcome)}); automatic retry is blocked.`,
+    });
+    throw new Error(`morning brief delivery unknown; operator review required: ${claim.deliveryKey}`);
+  }
+
+  let receiptStored = false;
+  try {
+    receiptStored = await completeOperatorJobDelivery({
+      db,
+      tenantId: OASIS_OPERATOR_TENANT_ID,
+      deliveryKey: claim.deliveryKey,
+      claimToken: claim.claimToken,
+      nowMs: deps.now?.() ?? Date.now(),
+      providerOutcome: delivery.outcome,
+    });
+  } catch (error) {
+    await flagMorningBriefUnknown({
+      db,
+      deliveryKey: claim.deliveryKey,
+      claimToken: claim.claimToken,
+      nowMs: deps.now?.() ?? Date.now(),
+      providerOutcome: delivery.outcome,
+      error,
+      requestReview,
+      detail: "Telegram reported delivery, but the durable receipt could not be stored; automatic retry is blocked.",
+    });
+    throw new Error(`morning brief delivery unknown; operator review required: ${claim.deliveryKey}`);
+  }
+  if (!receiptStored) {
+    await flagMorningBriefUnknown({
+      db,
+      deliveryKey: claim.deliveryKey,
+      claimToken: claim.claimToken,
+      nowMs: deps.now?.() ?? Date.now(),
+      providerOutcome: delivery.outcome,
+      error: "delivered receipt compare-and-swap failed",
+      requestReview,
+      detail: "Telegram reported delivery, but the durable receipt lost its compare-and-swap; automatic retry is blocked.",
+    });
+    throw new Error(`morning brief delivery unknown; operator review required: ${claim.deliveryKey}`);
   }
   return {
     ok: true,
@@ -277,6 +452,9 @@ export async function runMorningBrief(
     notification_writes: 0,
     notification_sends: delivery.delivered ? 1 : 0,
     delivery,
+    delivery_state: "delivered",
+    delivery_key: claim.deliveryKey,
+    idempotent: false,
   };
 }
 
@@ -306,15 +484,19 @@ export async function collectHourlyHealthFacts(
   };
 }
 
-/** True after at least one scheduled occurrence has passed without a recorded run. */
+/**
+ * True after at least one completed scheduled occurrence has passed since the
+ * last run, or since this deployed registry first observed a never-run route.
+ */
 export function cronFlowIsStale(flow: CronFlow, nowMs: number): boolean {
-  if (!flow.last) return false; // Honest "unmeasured", not a fabricated outage.
-  const lastMs = Date.parse(flow.last.at);
-  if (!Number.isFinite(lastMs)) return true;
+  const baseline = flow.last?.at ?? flow.observedAt;
+  if (!baseline) return false; // Not deployed/observed yet: honestly unmeasured.
+  const baselineMs = Date.parse(baseline);
+  if (!Number.isFinite(baselineMs)) return true;
   const endMs = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS - MINUTE_MS;
-  if (endMs <= lastMs) return false; // Exclude the tick currently being recorded.
-  if (endMs - lastMs > EIGHT_DAYS_MS) return true;
-  const startMs = Math.floor(lastMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+  if (endMs <= baselineMs) return false; // Exclude the tick currently being recorded.
+  if (endMs - baselineMs > EIGHT_DAYS_MS) return true;
+  const startMs = Math.floor(baselineMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
   for (let at = startMs; at <= endMs; at += MINUTE_MS) {
     if (cronMatches(flow.schedule, new Date(at), flow.timeZone)) return true;
   }
@@ -335,9 +517,10 @@ export type HourlyHealthVerdict = {
 export function evaluateHourlyHealth(facts: HourlyHealthFacts, nowMs: number): HourlyHealthVerdict {
   const failed = facts.cronFlows.filter((flow) => flow.last && !flow.last.ok).map((flow) => flow.path);
   const stale = facts.cronFlows
-    .filter((flow) => flow.last?.ok && cronFlowIsStale(flow, nowMs))
+    .filter((flow) => (flow.last ? flow.last.ok : flow.observedAt !== null) && cronFlowIsStale(flow, nowMs))
     .map((flow) => flow.path);
-  const unmeasured = facts.cronFlows.filter((flow) => !flow.last).map((flow) => flow.path);
+  const staleSet = new Set(stale);
+  const unmeasured = facts.cronFlows.filter((flow) => !flow.last && !staleSet.has(flow.path)).map((flow) => flow.path);
   const issues = [
     ...failed.map((path) => `${path} last run failed`),
     ...stale.map((path) => `${path} missed a due run`),
@@ -364,6 +547,7 @@ export function renderHourlyHealth(verdict: HourlyHealthVerdict): string {
     `${verdict.ok ? "✅" : "⚠️"} OASIS hourly health`,
     `Cloud jobs: ${verdict.healthy}/${verdict.scheduled} healthy · ${verdict.failed.length} failed · ${verdict.stale.length} stale · ${verdict.unmeasured.length} not measured yet`,
     `Computers: ${computerLine}`,
+    HOURLY_HEALTH_SCOPE_NOTE,
   ];
   // writeAgentAlert owns Telegram escaping for this text. Keeping this raw
   // avoids rendering a computer named "Mac & Mini" as "Mac &amp; Mini".
@@ -418,7 +602,7 @@ export async function runHourlyHealth(
       tenantId: OASIS_OPERATOR_TENANT_ID,
       alertType: "cloud_cron_and_computer_health",
       severity: "warn",
-      title: "OASIS cloud or computer health needs attention",
+      title: "OASIS cloud-route or paired-computer health needs attention",
       body: preview,
       subjectType: "system_health",
       subjectId: "cloud-crons-and-computers",
@@ -439,7 +623,7 @@ export async function runHourlyHealth(
     tenantId: OASIS_OPERATOR_TENANT_ID,
     alertType: "cloud_cron_and_computer_health",
     subjectId: "cloud-crons-and-computers",
-    resolvedBy: "auto: cloud crons and an OASIS computer are healthy",
+    resolvedBy: "auto: cloud routes and paired OASIS computers are healthy",
   });
   return {
     ...base,

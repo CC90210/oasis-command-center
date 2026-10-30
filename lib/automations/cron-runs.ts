@@ -2,11 +2,12 @@
  * lib/automations/cron-runs.ts - what each scheduled route did (2026-10-28, Phase 7).
  *
  * The cron Worker (workers/oasis-cc-cron) posts one batch per tick to POST /api/cron/runs. This module
- * validates that batch, writes it to cron_runs (bravo__249), prunes rows older than 14 days, and reads
- * the last run and the last 24 hours of every schedule for the Automations flow cards.
+ * validates that batch, writes it to cron_runs (bravo__249), records the first deployed-registry
+ * observation (bravo__251), prunes runs older than 14 days, and reads every schedule's recent truth.
  *
- * Honest numbers: a schedule with no recorded run says "not measured yet", never a guessed "OK", and a
- * failed read is a failed read (null), never a row of zeros.
+ * Honest numbers: a schedule with no recorded run stays "not measured yet" only through its first
+ * schedule-aware grace; hourly health turns it red after a completed due tick. A failed read is null,
+ * never a row of zeros.
  */
 import type { Client } from "@libsql/client";
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
@@ -41,6 +42,8 @@ export function parseCronRunBatch(raw: unknown): { tickAt: string; runs: CronRun
 
 /** Store one tick's runs and prune what is older than the keep window. Throws on a failed write. */
 export async function recordCronRuns(db: Client, batch: { tickAt: string; runs: CronRunInput[] }, now: number): Promise<number> {
+  const observationValues = CRON_TABLE.map(() => "(?, ?)").join(", ");
+  const observationArgs = CRON_TABLE.flatMap((entry) => [entry.path, batch.tickAt]);
   await db.batch(
     [
       ...batch.runs.map((run) => ({
@@ -48,6 +51,13 @@ export async function recordCronRuns(db: Client, batch: { tickAt: string; runs: 
         sql: "INSERT OR IGNORE INTO cron_runs (route, tick_at, ok, http_status, attempts, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
         args: [run.path, batch.tickAt, run.ok ? 1 : 0, run.status, run.attempts, run.ms],
       })),
+      {
+        // The first run report after a registry deployment observes every
+        // registered route, including one that is not due yet. This is not a
+        // fabricated run; hourly health uses it only for initial grace.
+        sql: `INSERT OR IGNORE INTO cron_route_observations (route, observed_at) VALUES ${observationValues}`,
+        args: observationArgs,
+      },
       { sql: "DELETE FROM cron_runs WHERE tick_at < ?", args: [new Date(now - CRON_RUNS_KEEP_DAYS * DAY_MS).toISOString()] },
     ],
     "write",
@@ -98,13 +108,15 @@ export type CronFlow = {
   nextAt: string | null;
   last: { ok: boolean; status: string | null; ms: number | null; at: string } | null;
   day: { ok: number; total: number };
+  /** First report from a deployed registry containing this route. */
+  observedAt: string | null;
 };
 
 /** Every scheduled route with its last run and the last 24 hours, or null when the read failed. */
 export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[] | null> {
   try {
     const since = new Date(now - DAY_MS).toISOString();
-    const [lastRs, dayRs] = await Promise.all([
+    const [lastRs, dayRs, observationsRs] = await Promise.all([
       db.execute({
         sql: `SELECT c.route, c.ok, c.http_status, c.duration_ms, c.tick_at
               FROM cron_runs c
@@ -116,6 +128,7 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
         sql: "SELECT route, SUM(ok) AS ok, COUNT(*) AS total FROM cron_runs WHERE tick_at >= ? GROUP BY route",
         args: [since],
       }),
+      db.execute("SELECT route, observed_at FROM cron_route_observations"),
     ]);
     const last = new Map<string, CronFlow["last"]>();
     for (const r of lastRs.rows) {
@@ -128,6 +141,8 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
     }
     const day = new Map<string, CronFlow["day"]>();
     for (const r of dayRs.rows) day.set(String(r.route), { ok: Number(r.ok ?? 0), total: Number(r.total ?? 0) });
+    const observations = new Map<string, string>();
+    for (const r of observationsRs.rows) observations.set(String(r.route), String(r.observed_at));
     return CRON_TABLE.map((e) => {
       const timeZone = e.timeZone ?? "UTC";
       return {
@@ -138,6 +153,7 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
         nextAt: nextRunAt(e.schedule, now, timeZone),
         last: last.get(e.path) ?? null,
         day: day.get(e.path) ?? { ok: 0, total: 0 },
+        observedAt: observations.get(e.path) ?? null,
       };
     });
   } catch (err) {

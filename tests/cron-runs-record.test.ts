@@ -48,7 +48,11 @@ async function check(name: string, fn: () => Promise<void> | void): Promise<void
 }
 
 async function main(): Promise<void> {
-  for (const file of ["bravo__249_cron_runs.sql", "bravo__250_cron_runs_unique_tick.sql"]) {
+  for (const file of [
+    "bravo__249_cron_runs.sql",
+    "bravo__250_cron_runs_unique_tick.sql",
+    "bravo__251_operator_job_delivery_and_cron_observation.sql",
+  ]) {
     await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso", file), "utf8"));
   }
   const route = await import("../app/api/cron/runs/route");
@@ -90,6 +94,13 @@ async function main(): Promise<void> {
     assert.equal(await count(), 2, "the 15-day-old row is gone");
     const row = (await db.execute("SELECT * FROM cron_runs WHERE route = '/api/cron/ai-audit-tick'")).rows[0];
     assert.deepEqual([Number(row.ok), row.http_status, Number(row.attempts), Number(row.duration_ms)], [1, "200", 1, 340]);
+    const observations = await db.execute("SELECT route, observed_at FROM cron_route_observations ORDER BY route");
+    assert.equal(observations.rows.length, 26, "the first report from a deployed registry observes every registered route");
+    assert.equal(
+      observations.rows.find((item) => item.route === "/api/cron/morning-brief")?.observed_at,
+      tickAt,
+      "a never-run route gets a durable deployment observation without a fake run",
+    );
     // A repeated report of the same tick (a double-fired invocation) adds nothing (bravo__250).
     const again = await post({ ...tick(["/api/cron/ai-audit-tick"], false), tick: tickAt }, both);
     assert.equal(again.status, 200);

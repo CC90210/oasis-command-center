@@ -32,6 +32,14 @@ async function check(name: string, fn: () => Promise<void> | void): Promise<void
 }
 
 const NOW = Date.parse("2026-10-29T16:00:00.000Z");
+const DELIVERY_MIGRATION = "database/turso/bravo__251_operator_job_delivery_and_cron_observation.sql";
+
+async function deliveryDb(label: string) {
+  const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), `${label}-`)), "jobs.db")}` });
+  await db.executeMultiple(readFileSync(DELIVERY_MIGRATION, "utf8"));
+  return db;
+}
+
 const facts: MorningBriefFacts = {
   date: "2026-10-29",
   pipeline: {
@@ -59,7 +67,8 @@ function flow(input: Partial<CronFlow> & Pick<CronFlow, "path" | "schedule">): C
     nextAt: input.nextAt ?? null,
     last: input.last ?? null,
     day: input.day ?? { ok: 0, total: 0 },
-  };
+    observedAt: (input as Partial<CronFlow> & { observedAt?: string | null }).observedAt ?? null,
+  } as CronFlow;
 }
 
 async function main(): Promise<void> {
@@ -93,25 +102,178 @@ async function main(): Promise<void> {
   });
 
   await check("morning brief live mode uses exactly the approved workspace-alert lane", async () => {
+    const db = await deliveryDb("operator-brief-live");
     const pushes: Array<{ tenant: string; text: string }> = [];
     const result = await jobs.runMorningBrief(false, {
       collect: async () => facts,
       push: async (tenant, text) => { pushes.push({ tenant, text }); return { delivered: true, outcome: "Sent to Telegram" }; },
+      db,
+      now: () => NOW,
+      claimToken: () => "brief-live-claim",
+      requestReview: async () => undefined,
     });
     assert.equal(result.mode, "live");
     assert.equal(result.notification_sends, 1);
+    assert.equal(result.delivery_state, "delivered");
     assert.equal(pushes.length, 1);
     assert.equal(pushes[0].tenant, "ef8d389e-3f15-43f2-ae00-3660f69a1452");
+    db.close();
   });
 
   await check("morning brief fails loud when neither Telegram nor its approved fallback reached CC", async () => {
+    const db = await deliveryDb("operator-brief-refused");
+    let reviews = 0;
     await assert.rejects(
       jobs.runMorningBrief(false, {
         collect: async () => facts,
         push: async () => ({ delivered: false, outcome: "Not sent: Telegram and email both refused it" }),
+        db,
+        now: () => NOW,
+        claimToken: () => "brief-refused-claim",
+        requestReview: async () => { reviews += 1; },
       }),
-      /morning brief was not delivered/,
+      /delivery unknown|delivery_unknown/,
     );
+    const row = (await db.execute("SELECT status, attempt_started_at, delivered_at FROM operator_job_deliveries")).rows[0];
+    assert.equal(row.status, "delivery_unknown");
+    assert.ok(row.attempt_started_at);
+    assert.equal(row.delivered_at, null);
+    assert.equal(reviews, 1);
+    db.close();
+  });
+
+  await check("morning brief concurrent invocations claim once and send once", async () => {
+    const db = await deliveryDb("operator-brief-race");
+    let pushes = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const inPush = new Promise<void>((resolve) => { entered = resolve; });
+    const holdPush = new Promise<void>((resolve) => { release = resolve; });
+    const first = jobs.runMorningBrief(false, {
+      collect: async () => facts,
+      push: async () => {
+        pushes += 1;
+        entered();
+        await holdPush;
+        return { delivered: true, outcome: "Sent to Telegram" };
+      },
+      db,
+      now: () => NOW,
+      claimToken: () => "brief-race-a",
+      requestReview: async () => undefined,
+    });
+    await inPush;
+    await assert.rejects(
+      jobs.runMorningBrief(false, {
+        collect: async () => facts,
+        push: async () => { pushes += 1; return { delivered: true, outcome: "duplicate" }; },
+        db,
+        now: () => NOW,
+        claimToken: () => "brief-race-b",
+        requestReview: async () => undefined,
+      }),
+      /delivery in flight|delivery_in_flight/,
+    );
+    release();
+    const sent = await first;
+    assert.equal(sent.notification_sends, 1);
+    assert.equal(pushes, 1);
+    db.close();
+  });
+
+  await check("morning brief delivered retry is idempotent", async () => {
+    const db = await deliveryDb("operator-brief-retry");
+    let pushes = 0;
+    const run = (token: string) => jobs.runMorningBrief(false, {
+      collect: async () => facts,
+      push: async () => { pushes += 1; return { delivered: true, outcome: "Sent to Telegram" }; },
+      db,
+      now: () => NOW,
+      claimToken: () => token,
+      requestReview: async () => undefined,
+    });
+    const first = await run("brief-retry-a");
+    const retry = await run("brief-retry-b");
+    assert.equal(first.delivery_state, "delivered");
+    assert.equal(retry.delivery_state, "already_delivered");
+    assert.equal(retry.notification_sends, 0);
+    assert.equal(pushes, 1);
+    assert.equal(Number((await db.execute("SELECT COUNT(*) AS n FROM operator_job_deliveries")).rows[0].n), 1);
+    db.close();
+  });
+
+  await check("morning brief lost provider response becomes terminal unknown and never sends again", async () => {
+    const db = await deliveryDb("operator-brief-lost");
+    let pushes = 0;
+    let reviews = 0;
+    const deps = (token: string) => ({
+      collect: async () => facts,
+      push: async () => {
+        pushes += 1;
+        throw new Error("connection reset after provider accepted request https://provider.test/send?token=provider-secret-123456789");
+      },
+      db,
+      now: () => NOW,
+      claimToken: () => token,
+      requestReview: async () => { reviews += 1; },
+    });
+    await assert.rejects(jobs.runMorningBrief(false, deps("brief-lost-a")), /delivery unknown|delivery_unknown/);
+    await assert.rejects(jobs.runMorningBrief(false, deps("brief-lost-b")), /delivery unknown|delivery_unknown/);
+    const row = (await db.execute("SELECT status, attempt_started_at, delivered_at, last_error FROM operator_job_deliveries")).rows[0];
+    assert.equal(row.status, "delivery_unknown");
+    assert.ok(row.attempt_started_at);
+    assert.equal(row.delivered_at, null);
+    assert.match(String(row.last_error), /connection reset/);
+    assert.doesNotMatch(String(row.last_error), /provider-secret-123456789/);
+    assert.match(String(row.last_error), /token=\[REDACTED\]/);
+    assert.equal(pushes, 1, "the retry must not repeat an ambiguous provider attempt");
+    assert.ok(reviews >= 1, "the ambiguous row is surfaced for operator review");
+    db.close();
+  });
+
+  await check("only a lease that expired before any provider attempt can be reclaimed", async () => {
+    const reclaimable = await deliveryDb("operator-brief-reclaim");
+    await reclaimable.execute({
+      sql: `INSERT INTO operator_job_deliveries
+              (id, tenant_id, job_key, delivery_key, scheduled_for, status, claim_token, lease_expires_at, created_at, updated_at)
+            VALUES ('old-claim', ?, 'morning_brief', 'morning_brief:2026-10-29', '2026-10-29', 'claimed', 'old-token', ?, ?, ?)`,
+      args: ["ef8d389e-3f15-43f2-ae00-3660f69a1452", new Date(NOW - 1).toISOString(), new Date(NOW - 60_000).toISOString(), new Date(NOW - 60_000).toISOString()],
+    });
+    let safePushes = 0;
+    const reclaimed = await jobs.runMorningBrief(false, {
+      collect: async () => facts,
+      push: async () => { safePushes += 1; return { delivered: true, outcome: "Sent to Telegram" }; },
+      db: reclaimable,
+      now: () => NOW,
+      claimToken: () => "new-token",
+      requestReview: async () => undefined,
+    });
+    assert.equal(reclaimed.delivery_state, "delivered");
+    assert.equal(safePushes, 1);
+    reclaimable.close();
+
+    const ambiguous = await deliveryDb("operator-brief-no-reclaim");
+    await ambiguous.execute({
+      sql: `INSERT INTO operator_job_deliveries
+              (id, tenant_id, job_key, delivery_key, scheduled_for, status, claim_token, lease_expires_at, attempt_started_at, created_at, updated_at)
+            VALUES ('old-attempt', ?, 'morning_brief', 'morning_brief:2026-10-29', '2026-10-29', 'attempting', 'old-token', ?, ?, ?, ?)`,
+      args: ["ef8d389e-3f15-43f2-ae00-3660f69a1452", new Date(NOW - 1).toISOString(), new Date(NOW - 30_000).toISOString(), new Date(NOW - 60_000).toISOString(), new Date(NOW - 60_000).toISOString()],
+    });
+    let unsafePushes = 0;
+    await assert.rejects(
+      jobs.runMorningBrief(false, {
+        collect: async () => facts,
+        push: async () => { unsafePushes += 1; return { delivered: true, outcome: "duplicate" }; },
+        db: ambiguous,
+        now: () => NOW,
+        claimToken: () => "must-not-claim",
+        requestReview: async () => undefined,
+      }),
+      /delivery unknown|delivery_unknown/,
+    );
+    assert.equal(unsafePushes, 0);
+    assert.equal((await ambiguous.execute("SELECT status FROM operator_job_deliveries")).rows[0].status, "delivery_unknown");
+    ambiguous.close();
   });
 
   await check("staleness excludes the currently executing tick but catches one completed missed tick", () => {
@@ -129,14 +291,65 @@ async function main(): Promise<void> {
     assert.equal(jobs.cronFlowIsStale(missedHour, NOW), true, "15:00 completed without a run");
   });
 
+  await check("a registered route with no runs alerts only after its first due tick has completed", () => {
+    const neverRun = flow({
+      path: "/new-daily",
+      schedule: "0 6 * * *",
+      timeZone: "America/Toronto",
+      observedAt: "2026-10-29T09:55:00.000Z",
+    } as Partial<CronFlow> & Pick<CronFlow, "path" | "schedule"> & { observedAt: string });
+    assert.equal(jobs.cronFlowIsStale(neverRun, Date.parse("2026-10-29T10:00:59.000Z")), false, "the 06:00 EDT tick can still be recording");
+    assert.equal(jobs.cronFlowIsStale(neverRun, Date.parse("2026-10-29T10:01:00.000Z")), true, "the first due tick completed with no run");
+    const verdict = jobs.evaluateHourlyHealth({
+      cronFlows: [neverRun],
+      computers: [{ label: "CC Mac", lastSeenAt: "2026-10-29T10:00:30.000Z", state: "online" }],
+    }, Date.parse("2026-10-29T10:01:00.000Z"));
+    assert.deepEqual(verdict.stale, ["/new-daily"]);
+    assert.deepEqual(verdict.unmeasured, [], "late never-run routes are red, not indefinitely hidden as unmeasured");
+    assert.equal(verdict.ok, false);
+  });
+
+  await check("never-run grace follows Toronto DST schedule semantics", () => {
+    const spring = flow({
+      path: "/spring",
+      schedule: "30 2 * * *",
+      timeZone: "America/Toronto",
+      observedAt: "2026-03-08T05:00:00.000Z",
+    } as Partial<CronFlow> & Pick<CronFlow, "path" | "schedule"> & { observedAt: string });
+    assert.equal(jobs.cronFlowIsStale(spring, Date.parse("2026-03-08T07:30:59.000Z")), false, "the missing 02:30 shifts to 03:30 EDT and remains in-flight for its minute");
+    assert.equal(jobs.cronFlowIsStale(spring, Date.parse("2026-03-08T07:31:00.000Z")), true);
+
+    const fall = flow({
+      path: "/fall",
+      schedule: "30 1 * * *",
+      timeZone: "America/Toronto",
+      observedAt: "2026-11-01T04:00:00.000Z",
+    } as Partial<CronFlow> & Pick<CronFlow, "path" | "schedule"> & { observedAt: string });
+    assert.equal(jobs.cronFlowIsStale(fall, Date.parse("2026-11-01T05:30:59.000Z")), false);
+    assert.equal(jobs.cronFlowIsStale(fall, Date.parse("2026-11-01T05:31:00.000Z")), true, "the first 01:30 is the only fixed-time occurrence");
+  });
+
+  await check("a route not yet observed stays honestly unmeasured", () => {
+    const unseen = flow({ path: "/not-observed", schedule: "* * * * *" });
+    const verdict = jobs.evaluateHourlyHealth({
+      cronFlows: [unseen],
+      computers: [{ label: "CC Mac", lastSeenAt: "2026-10-29T15:59:30.000Z", state: "online" }],
+    }, NOW);
+    assert.equal(jobs.cronFlowIsStale(unseen, NOW), false);
+    assert.deepEqual(verdict.unmeasured, ["/not-observed"]);
+    assert.deepEqual(verdict.stale, []);
+    assert.equal(verdict.ok, true);
+  });
+
   await check("hourly collector reads platform cron history but only OASIS computer check-ins", async () => {
     const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "operator-health-")), "health.db")}` });
-    await db.executeMultiple(`
-      CREATE TABLE cron_runs (route TEXT NOT NULL, tick_at TEXT NOT NULL, ok INTEGER NOT NULL, http_status TEXT, attempts INTEGER, duration_ms INTEGER);
-      CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT, last_seen_at TEXT, revoked_at TEXT);
-    `);
+    await db.executeMultiple(readFileSync("database/turso/bravo__249_cron_runs.sql", "utf8"));
+    await db.executeMultiple(readFileSync("database/turso/bravo__250_cron_runs_unique_tick.sql", "utf8"));
+    await db.executeMultiple(readFileSync(DELIVERY_MIGRATION, "utf8"));
+    await db.executeMultiple("CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT, last_seen_at TEXT, revoked_at TEXT);");
     await db.batch([
       { sql: "INSERT INTO cron_runs (route, tick_at, ok, http_status, attempts, duration_ms) VALUES (?, ?, 1, '200', 1, 5)", args: ["/api/cron/health-check", "2026-10-29T15:45:00.000Z"] },
+      { sql: "INSERT INTO cron_route_observations (route, observed_at) VALUES (?, ?)", args: ["/api/cron/health-check", "2026-10-29T14:00:00.000Z"] },
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at) VALUES ('oasis-mac', ?, 'CC Mac', ?)", args: ["ef8d389e-3f15-43f2-ae00-3660f69a1452", "2026-10-29T15:59:30.000Z"] },
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at) VALUES ('foreign-pc', 'foreign-tenant', 'Someone else', ?)", args: ["2026-10-29T15:59:30.000Z"] },
       { sql: "INSERT INTO bridge_pairings (id, tenant_id, label, last_seen_at, revoked_at) VALUES ('old-pc', ?, 'Revoked PC', ?, ?)", args: ["ef8d389e-3f15-43f2-ae00-3660f69a1452", "2026-10-29T15:59:30.000Z", "2026-10-29T15:59:40.000Z"] },
@@ -145,7 +358,8 @@ async function main(): Promise<void> {
     assert.deepEqual(collected.computers.map((computer) => computer.label), ["CC Mac"]);
     assert.equal(collected.computers[0].state, "online");
     assert.equal(collected.cronFlows.find((item) => item.path === "/api/cron/health-check")?.last?.ok, true);
-    assert.equal(collected.cronFlows.length, 25);
+    assert.equal(collected.cronFlows.find((item) => item.path === "/api/cron/health-check")?.observedAt, "2026-10-29T14:00:00.000Z");
+    assert.equal(collected.cronFlows.length, 26);
     db.close();
   });
 
@@ -227,6 +441,18 @@ async function main(): Promise<void> {
     });
     assert.match(preview, /Mac & Mini <desk>/);
     assert.doesNotMatch(preview, /&amp;|&lt;/);
+    assert.match(preview, /cloud routes and paired computers only/i);
+    assert.match(preview, /VPS daemon health is a separate service-check concern/i);
+  });
+
+  await check("hourly health explicitly does not claim to replace broad daemon watchdog coverage", () => {
+    assert.equal(
+      jobs.HOURLY_HEALTH_SCOPE_NOTE,
+      "Scope: cloud routes and paired computers only. VPS daemon health is a separate service-check concern.",
+    );
+    const source = readFileSync("lib/automations/operator-database-jobs.ts", "utf8");
+    assert.match(source, /not a replacement for the retired Windows watchdog/i);
+    assert.match(source, /VPS daemon health/i);
   });
 
   await check("routes require two-leg cron auth and remain off without querying when flags are unset", async () => {
