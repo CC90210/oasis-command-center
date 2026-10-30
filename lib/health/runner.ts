@@ -26,6 +26,7 @@ import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
 import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
+import { DASHBOARD_EMAIL_CHECKS } from "./dashboard-email-checks";
 import { DEPARTMENT_CHAT_CHECKS } from "./department-chat-checks";
 import { healthAlertStateKey } from "./alert-state-key";
 import { isRetiredTenant } from "@/lib/tenant/retired";
@@ -47,11 +48,15 @@ export { DEPARTMENT_CHAT_CHECKS };
 
 /**
  * OASIS-global infrastructure checks, persisted under the OASIS tenant and
- * paged to CC's lane: the shared calendar, and (2026-09-24) whether worker
- * status still reaches the dashboard. Calendar stays FIRST — its probe owns a
+ * paged to CC's lane: the shared calendar, worker status, and the cloud-owned
+ * dashboard email queue. Calendar stays FIRST because its probe owns a
  * wall-clock budget the route depends on.
  */
-export const OASIS_GLOBAL_CHECKS: DripCheck[] = [...CALENDAR_CHECKS, ...WORKER_REPORTER_CHECKS];
+export const OASIS_GLOBAL_CHECKS: DripCheck[] = [
+  ...CALENDAR_CHECKS,
+  ...WORKER_REPORTER_CHECKS,
+  ...DASHBOARD_EMAIL_CHECKS.map((check) => ({ ...check, lane: "operator" as const })),
+];
 
 /** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */
 export function tenantOutcomeChecks(): DripCheck[] {

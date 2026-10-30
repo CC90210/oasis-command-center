@@ -116,7 +116,8 @@ jobs:
             "* * * * *")
               ROUTES="/api/cron/dispatch-engine-fallbacks
                       /api/cron/dispatch-automations
-                      /api/cron/dispatch-founder-meeting-reminders" ;;
+                      /api/cron/dispatch-founder-meeting-reminders
+                      /api/cron/dashboard-email-sender" ;;
             "*/5 * * * *")
               ROUTES="/api/cron/meet-relay
                       /api/cron/ai-audit-tick
@@ -153,6 +154,7 @@ jobs:
                       /api/cron/dispatch-automations
                       /api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
+                      /api/cron/dashboard-email-sender
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls

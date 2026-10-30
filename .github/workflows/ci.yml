@@ -102,6 +102,9 @@ jobs:
           # unknown-is-not-zero) and none of them had a CI entry: every OS PR
           # before this one deployed on typecheck + build alone.
           npm run test:os
+          # Cloud replacement for the PC dashboard-email drain: exact email
+          # lanes, CAS claims, receipt reconciliation, and operator health.
+          npm run test:dashboard-email-sender
           npm run test:seo
           # Repo invariant: the chat's CLI-runtime storage key is declared
           # once. It used to be a literal in two files synchronised by a

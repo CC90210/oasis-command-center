@@ -545,6 +545,9 @@ async function main() {
       "sms-reply-agent", "enroll-drips", "dispatch-drips", "reconcile-drip-telemetry",
       "reconcile-website-sales-payments", "dispatch-founder-meeting-reminders", "operator-email-agent",
       "health-check", "sla-check", "reconcile-sms",
+      // Cloud replacement for the retired PC sender. Its own query accepts
+      // only OASIS tenant ids and exact email lanes; it cannot reach SunBiz.
+      "dashboard-email-sender",
       // OASIS OS Connections (2026-09-29): multi-tenant, per-connection probes.
       "connection-health",
       // The OASIS business book's daily upkeep (2026-09-29): rates, Stripe, Wise.
