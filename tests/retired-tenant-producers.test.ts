@@ -548,6 +548,9 @@ async function main() {
       // Cloud replacement for the retired PC sender. Its own query accepts
       // only OASIS tenant ids and exact email lanes; it cannot reach SunBiz.
       "dashboard-email-sender",
+      // These operator jobs resolve the one platform operator/OASIS tenant
+      // directly; neither route discovers or iterates retired tenants.
+      "morning-brief", "hourly-health",
       // OASIS OS Connections (2026-09-29): multi-tenant, per-connection probes.
       "connection-health",
       // The OASIS business book's daily upkeep (2026-09-29): rates, Stripe, Wise.

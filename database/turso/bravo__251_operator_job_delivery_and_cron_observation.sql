@@ -19,7 +19,10 @@
 -- naturally bounded to one row per registered route; retired paths stay as
 -- deployment evidence. Neither table has a recurring deletion sweep.
 --
--- Additive only. Apply before enabling either new route.
+-- Deployment order: bravo__251 MUST be applied before deploying this code,
+-- not merely before enabling the new routes. The existing cron-run recorder
+-- reads and writes cron_route_observations on every Worker report regardless
+-- of either new route's forwarding switch.
 
 CREATE TABLE IF NOT EXISTS operator_job_deliveries (
   id                 TEXT PRIMARY KEY,
