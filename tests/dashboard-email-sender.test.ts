@@ -108,7 +108,8 @@ class MemoryStore implements DashboardEmailSenderStore {
     const md = metadata(current);
     if (md.status !== expected.status) return false;
     if (expected.claimToken !== undefined && md.claim_token !== expected.claimToken) return false;
-    if (expected.claimedAt !== undefined && md.claimed_at !== expected.claimedAt) return false;
+    if (expected.claimedAt === null && md.claimed_at != null) return false;
+    if (expected.claimedAt !== undefined && expected.claimedAt !== null && md.claimed_at !== expected.claimedAt) return false;
     this.rows.set(value.id, {
       ...current,
       metadata: structuredClone(write.metadata),
@@ -312,6 +313,21 @@ assert.deepEqual(
     ["metadata->>status", "sending"],
     ["metadata->>claim_token", "claim-1"],
   ]) assert.ok(hasOperation(cas, "eq", field, value), `CAS must fence ${field}`);
+
+  db.queries.length = 0;
+  const legacyRetry = row({
+    id: "legacy-retry-cas-row",
+    metadata: { status: "retry", attempts: 1, next_attempt_at: "2026-10-29T22:59:00.000Z" },
+  });
+  assert.equal(await store.compareAndSet(
+    legacyRetry,
+    { status: "retry", claimedAt: null },
+    { metadata: { ...metadata(legacyRetry), status: "sending" } },
+  ), true);
+  assert.ok(
+    hasOperation(db.queries[0], "is", "metadata->>claimed_at", null),
+    "a legacy retry without claimed_at must fence the CAS on that absence",
+  );
 }
 assert.equal(
   dashboardEmailCredentialReadiness({
@@ -413,7 +429,6 @@ assert.deepEqual(
     metadata: {
       status: "retry",
       attempts: 1,
-      claimed_at: "2026-10-29T22:58:00.000Z",
       next_attempt_at: "2026-10-29T22:59:00.000Z",
     },
   });
@@ -428,7 +443,7 @@ assert.deepEqual(
       return { ok: true, provider: "oasis_shared_gmail", gmail_message_id: "never", from_address: "sender@oasisai.work" };
     },
   });
-  assert.equal(sends, 0, "a stale retry snapshot must not send after a newer retry transition");
+  assert.equal(sends, 0, "a legacy retry snapshot without claimed_at must not send after a newer retry transition");
   assert.equal(result.raced, 1);
   assert.equal(metadata(store.rows.get(retry.id)!).attempts, 2);
   assert.equal(metadata(store.rows.get(retry.id)!).next_attempt_at, "2026-10-29T23:05:00.000Z");

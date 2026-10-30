@@ -173,7 +173,9 @@ export class SupabaseDashboardEmailSenderStore implements DashboardEmailSenderSt
     if (expected.claimToken !== undefined) {
       query = query.eq("metadata->>claim_token", expected.claimToken);
     }
-    if (expected.claimedAt !== undefined) {
+    if (expected.claimedAt === null) {
+      query = query.is("metadata->>claimed_at", null);
+    } else if (expected.claimedAt !== undefined) {
       query = query.eq("metadata->>claimed_at", expected.claimedAt);
     }
     const changed = await query.select("id").maybeSingle();

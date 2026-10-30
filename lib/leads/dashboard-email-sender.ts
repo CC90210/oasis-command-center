@@ -53,7 +53,7 @@ export type DashboardEmailReceipt = {
 export type DashboardEmailCasExpected = {
   status: string;
   claimToken?: string;
-  claimedAt?: string;
+  claimedAt?: string | null;
 };
 
 export type DashboardEmailCasWrite = {
@@ -237,7 +237,7 @@ function expectedFor(row: DashboardEmailQueueRow): DashboardEmailCasExpected {
   const claimToken = typeof metadata.claim_token === "string" ? metadata.claim_token : "";
   const claimedAt = typeof metadata.claimed_at === "string" ? metadata.claimed_at : "";
   if (claimToken) expected.claimToken = claimToken;
-  else if (claimedAt) expected.claimedAt = claimedAt;
+  else expected.claimedAt = claimedAt || null;
   return expected;
 }
 
