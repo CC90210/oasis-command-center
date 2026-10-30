@@ -16,7 +16,11 @@ import {
   OASIS_TELEGRAM_QUEUE_NAME,
   OASIS_TELEGRAM_TENANT_ID,
   TELEGRAM_WEBHOOK_SECRET_HEADER,
+  isOasisTelegramJob,
+  oasisTelegramConfig,
   parseOasisTelegramUpdate,
+  telegramIdempotencyKey,
+  telegramReceiptId,
   type OasisTelegramEnv,
   type OasisTelegramJob,
 } from "../lib/telegram/protocol";
@@ -30,6 +34,7 @@ import { handleOasisTelegramWebhook } from "../lib/telegram/webhook";
 import { routeQueueBatch, SLACK_AGENT_QUEUE_NAME } from "../lib/worker/queue-router";
 
 const CHAT = "7979676345";
+const BOT_ID = 123456789;
 const ENV: OasisTelegramEnv = {
   TELEGRAM_WEBHOOK_ENABLED: "on",
   OASIS_TELEGRAM_WEBHOOK_SECRET: "oasis_webhook_secret_0123456789",
@@ -76,8 +81,8 @@ const request = (body: unknown, secret = ENV.OASIS_TELEGRAM_WEBHOOK_SECRET!) =>
     body: JSON.stringify(body),
   });
 
-const parsedJob = (id: number, text?: string): OasisTelegramJob => {
-  const parsed = parseOasisTelegramUpdate(update(id, text), CHAT);
+const parsedJob = (id: number, text?: string, botId = BOT_ID): OasisTelegramJob => {
+  const parsed = parseOasisTelegramUpdate(update(id, text), CHAT, botId);
   assert.ok(parsed.ok);
   return parsed.job;
 };
@@ -126,6 +131,28 @@ await check("missing, wrong and different-length webhook secrets fail closed bef
     });
     assert.equal(response.status, 401, secret);
     assert.equal(req.bodyUsed, false, secret);
+  }
+});
+
+await check("the numeric bot id comes only from a valid token and malformed tokens fail before the body", async () => {
+  const config = oasisTelegramConfig(ENV);
+  assert.equal(config?.botId, BOT_ID);
+  assert.equal(parsedJob(2).botId, BOT_ID);
+  for (const botToken of [
+    "not-a-token",
+    "012345:test_bot_token_abcdefghijklmnopqrstuvwxyz",
+    "0:test_bot_token_abcdefghijklmnopqrstuvwxyz",
+    "1234:test_bot_token_abcdefghijklmnopqrstuvwxyz",
+    "123456789:",
+  ]) {
+    const req = request(update(2));
+    const response = await handleOasisTelegramWebhook(req, {
+      env: { ...ENV, OASIS_TELEGRAM_BOT_TOKEN: botToken },
+      database: () => { throw new Error("database must not be read"); },
+      queue: async () => { throw new Error("queue must not be read"); },
+    });
+    assert.equal(response.status, 503, botToken);
+    assert.equal(req.bodyUsed, false, botToken);
   }
 });
 
@@ -210,6 +237,29 @@ await check("an expired receipt lease cannot mutate after a new consumer claims 
     /telegram_receipt_lease_lost/,
   );
   await savePreparedTelegramReply(db, job, "current worker owns the receipt", reclaimed.leaseToken);
+});
+
+await check("the same update id from two bot generations creates two receipts and two run identities", async () => {
+  const oldBotJob = parsedJob(22, "old bot", BOT_ID);
+  const replacementBotJob = parsedJob(22, "replacement bot", 987654321);
+  assert.equal(isOasisTelegramJob({ ...oldBotJob, botId: undefined }), false, "bot id is required on every queued job");
+  assert.notEqual(telegramReceiptId(oldBotJob), telegramReceiptId(replacementBotJob));
+  assert.notEqual(telegramIdempotencyKey(oldBotJob), telegramIdempotencyKey(replacementBotJob));
+  assert.notDeepEqual(
+    telegramDeviceRunIdentity("auth-cc", oldBotJob),
+    telegramDeviceRunIdentity("auth-cc", replacementBotJob),
+  );
+
+  const first = await ensureTelegramReceipt(db, oldBotJob, NOW);
+  const second = await ensureTelegramReceipt(db, replacementBotJob, NOW);
+  assert.deepEqual([first.created, second.created], [true, true]);
+  const rows = await db.execute({
+    sql: "SELECT id, idempotency_key FROM agent_events WHERE event_type = ? AND idempotency_key LIKE ? ORDER BY idempotency_key",
+    args: ["oasis_telegram_message", "%:22"],
+  });
+  assert.equal(rows.rows.length, 2);
+  assert.notEqual(rows.rows[0].id, rows.rows[1].id);
+  assert.notEqual(rows.rows[0].idempotency_key, rows.rows[1].idempotency_key);
 });
 
 await check("queue routing is exact: Telegram, Slack and unknown queues never cross-consume", async () => {
@@ -304,7 +354,7 @@ await check("one update infers and replies once; retries read the terminal recei
   let sends = 0;
   const deps = {
     db,
-    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, chatId: CHAT },
+    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, botId: BOT_ID, chatId: CHAT },
     now: () => NOW,
     deviceTurn: async () => { turns += 1; return { outcome: "completed" as const, text: "The hot lead needs your reply." }; },
     sendReply: async () => { sends += 1; return { outcome: "sent" as const, messageId: 9001 }; },
@@ -320,7 +370,7 @@ await check("no exact online pairing gets the one deterministic Telegram reply",
   let text = "";
   const outcome = await runOasisTelegramJob(job, {
     db,
-    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, chatId: CHAT },
+    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, botId: BOT_ID, chatId: CHAT },
     now: () => NOW,
     deviceTurn: async () => ({ outcome: "no_computer", reason: "computer_offline" }),
     sendReply: async (input) => { text = input.text; return { outcome: "sent", messageId: 9002 }; },
@@ -336,7 +386,7 @@ await check("a known rejection retries the saved reply without a second inferenc
   let sends = 0;
   const deps = {
     db,
-    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, chatId: CHAT },
+    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, botId: BOT_ID, chatId: CHAT },
     now: () => NOW,
     deviceTurn: async () => { turns += 1; return { outcome: "completed" as const, text: "Saved once" }; },
     sendReply: async () => { sends += 1; return sends === 1
@@ -354,7 +404,7 @@ await check("an ambiguous outbound result is terminal and can never duplicate th
   let sends = 0;
   const deps = {
     db,
-    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, chatId: CHAT },
+    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, botId: BOT_ID, chatId: CHAT },
     now: () => NOW,
     deviceTurn: async () => ({ outcome: "completed" as const, text: "Maybe delivered" }),
     sendReply: async () => { sends += 1; return { outcome: "ambiguous" as const, reason: "network_unknown" }; },
@@ -391,8 +441,8 @@ await check("the exact-device lane forces fallback=none and stable department_ta
   assert.equal(sentArgs!.fallbackReason, null);
   assert.equal("computerFallbackDeps" in sentArgs!, false);
   const identity = sentArgs!.idempotency;
-  assert.deepEqual(identity, telegramDeviceRunIdentity("auth-cc", 40));
-  assert.deepEqual(identity, telegramDeviceRunIdentity("auth-cc", 40), "a queue retry follows one persisted run");
+  assert.deepEqual(identity, telegramDeviceRunIdentity("auth-cc", job));
+  assert.deepEqual(identity, telegramDeviceRunIdentity("auth-cc", job), "a queue retry follows one persisted run");
 
   const noAnswer = await runOasisTelegramDeviceTurn(db, job, {
     resolveContext: async () => ({
@@ -470,9 +520,12 @@ await check("cutover documentation keeps polling and webhook mutually exclusive"
   const wrangler = readFileSync("wrangler.jsonc", "utf8");
   assert.match(wrangler, /"binding": "TELEGRAM_AGENT_JOBS", "queue": "oasis-telegram-agent-jobs"/);
   assert.match(wrangler, /"dead_letter_queue": "oasis-telegram-agent-jobs-dlq"/);
+  assert.match(wrangler, /"retry_delay": 30/);
   assert.match(docs, /exhaust retries.*oasis-telegram-agent-jobs-dlq/s);
   const worker = readFileSync("worker-entry.ts", "utf8");
   assert.match(worker, /routeQueueBatch\(batch, full/);
+  const jobsRoute = readFileSync("app/api/webhooks/oasis-telegram/jobs/route.ts", "utf8");
+  assert.match(jobsRoute, /job\.botId !== config\.botId/, "a queued job from a replaced bot is terminally dropped");
 });
 
 db.close();

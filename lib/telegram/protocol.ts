@@ -28,6 +28,7 @@ export type OasisTelegramConfig = {
   webhookSecret: string;
   jobSigningSecret: string;
   botToken: string;
+  botId: number;
   chatId: string;
 };
 
@@ -36,6 +37,7 @@ export type OasisTelegramJob = {
   kind: "oasis_telegram_message";
   bot: "oasis";
   tenantId: typeof OASIS_TELEGRAM_TENANT_ID;
+  botId: number;
   updateId: number;
   messageId: number;
   chatId: string;
@@ -53,15 +55,18 @@ export function oasisTelegramConfig(env: OasisTelegramEnv): OasisTelegramConfig 
   const jobSigningSecret = String(env.OASIS_TELEGRAM_JOB_SIGNING_SECRET || "").trim();
   const botToken = String(env.OASIS_TELEGRAM_BOT_TOKEN || "").trim();
   const chatId = String(env.OASIS_TELEGRAM_CHAT_ID || "").trim();
+  const botTokenMatch = /^([1-9]\d{4,14}):[A-Za-z0-9_-]{20,}$/.exec(botToken);
+  const botId = botTokenMatch ? Number(botTokenMatch[1]) : NaN;
   if (
     !webhookSecret ||
     !jobSigningSecret ||
-    !/^\d{5,15}:[A-Za-z0-9_-]{20,}$/.test(botToken) ||
+    !Number.isSafeInteger(botId) ||
+    botId < 1 ||
     !/^[1-9]\d{3,18}$/.test(chatId)
   ) {
     return null;
   }
-  return { webhookSecret, jobSigningSecret, botToken, chatId };
+  return { webhookSecret, jobSigningSecret, botToken, botId, chatId };
 }
 
 /** Compare fixed-size SHA-256 digests, not the caller-controlled strings. */
@@ -112,7 +117,8 @@ export type TelegramUpdateParse =
  * Accept only an ordinary text message from CC's configured private chat.
  * Unsupported Telegram update types are acknowledged and ignored upstream.
  */
-export function parseOasisTelegramUpdate(value: unknown, allowedChatId: string): TelegramUpdateParse {
+export function parseOasisTelegramUpdate(value: unknown, allowedChatId: string, botId: number): TelegramUpdateParse {
+  if (!Number.isSafeInteger(botId) || botId < 1) return { ok: false, reason: "invalid_bot_id" };
   const update = record(value);
   if (!update) return { ok: false, reason: "invalid_update" };
   const updateId = telegramInteger(update.update_id);
@@ -157,6 +163,7 @@ export function parseOasisTelegramUpdate(value: unknown, allowedChatId: string):
       kind: "oasis_telegram_message",
       bot: "oasis",
       tenantId: OASIS_TELEGRAM_TENANT_ID,
+      botId,
       updateId,
       messageId,
       chatId: String(chatId),
@@ -174,6 +181,8 @@ export function isOasisTelegramJob(value: unknown): value is OasisTelegramJob {
       job.kind === "oasis_telegram_message" &&
       job.bot === "oasis" &&
       job.tenantId === OASIS_TELEGRAM_TENANT_ID &&
+      telegramInteger(job.botId) !== null &&
+      Number(job.botId) > 0 &&
       telegramInteger(job.updateId) !== null &&
       telegramInteger(job.messageId) !== null &&
       typeof job.chatId === "string" &&
@@ -185,12 +194,12 @@ export function isOasisTelegramJob(value: unknown): value is OasisTelegramJob {
   );
 }
 
-export function telegramReceiptId(job: Pick<OasisTelegramJob, "updateId">): string {
-  return `telegram-oasis-${job.updateId}`;
+export function telegramReceiptId(job: Pick<OasisTelegramJob, "botId" | "updateId">): string {
+  return `telegram-oasis-${job.botId}-${job.updateId}`;
 }
 
-export function telegramIdempotencyKey(job: Pick<OasisTelegramJob, "tenantId" | "updateId">): string {
-  return `telegram:oasis:${job.tenantId}:${job.updateId}`;
+export function telegramIdempotencyKey(job: Pick<OasisTelegramJob, "tenantId" | "botId" | "updateId">): string {
+  return `telegram:oasis:${job.tenantId}:${job.botId}:${job.updateId}`;
 }
 
 export function sameTelegramJob(a: OasisTelegramJob, b: OasisTelegramJob): boolean {
@@ -199,6 +208,7 @@ export function sameTelegramJob(a: OasisTelegramJob, b: OasisTelegramJob): boole
     a.kind === b.kind &&
     a.bot === b.bot &&
     a.tenantId === b.tenantId &&
+    a.botId === b.botId &&
     a.updateId === b.updateId &&
     a.messageId === b.messageId &&
     a.chatId === b.chatId &&

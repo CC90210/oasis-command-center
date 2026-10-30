@@ -47,9 +47,13 @@ export type TelegramDeviceTurnDeps = {
   executor?: typeof executorDepsFor;
 };
 
-function stableUuid(namespace: string, userId: string, updateId: number): string {
+function stableUuid(
+  namespace: string,
+  userId: string,
+  job: Pick<OasisTelegramJob, "botId" | "updateId">,
+): string {
   const hex = createHash("sha256")
-    .update(`oasis:telegram:${namespace}:${OASIS_TELEGRAM_TENANT_ID}:${userId}:${updateId}`, "utf8")
+    .update(`oasis:telegram:${namespace}:${OASIS_TELEGRAM_TENANT_ID}:${userId}:${job.botId}:${job.updateId}`, "utf8")
     .digest("hex")
     .slice(0, 32)
     .split("");
@@ -59,10 +63,13 @@ function stableUuid(namespace: string, userId: string, updateId: number): string
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
-export function telegramDeviceRunIdentity(userId: string, updateId: number): { conversationId: string; runId: string } {
+export function telegramDeviceRunIdentity(
+  userId: string,
+  job: Pick<OasisTelegramJob, "botId" | "updateId">,
+): { conversationId: string; runId: string } {
   return {
-    conversationId: stableUuid("conversation", userId, updateId),
-    runId: stableUuid("run", userId, updateId),
+    conversationId: stableUuid("conversation", userId, job),
+    runId: stableUuid("run", userId, job),
   };
 }
 
@@ -290,7 +297,7 @@ export async function runOasisTelegramDeviceTurn(
       apiAccountSnapshot: null,
       fallbackFrom: null,
       fallbackReason: null,
-      idempotency: telegramDeviceRunIdentity(userId, job.updateId),
+      idempotency: telegramDeviceRunIdentity(userId, job),
     });
     const raw = await response.text();
     if (response.status === 202) return { outcome: "retry", reason: "device_still_running" };

@@ -29,6 +29,7 @@
         "queue": "oasis-telegram-agent-jobs",
         "max_batch_size": 1,
         "max_retries": 5,
+        "retry_delay": 30,
         "dead_letter_queue": "oasis-telegram-agent-jobs-dlq"
       }
     ]

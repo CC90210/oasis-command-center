@@ -75,7 +75,7 @@ export async function handleOasisTelegramWebhook(req: Request, deps: WebhookDeps
   } catch {
     return json(400, { ok: false, error: "invalid_json" });
   }
-  const parsed = parseOasisTelegramUpdate(update, config.chatId);
+  const parsed = parseOasisTelegramUpdate(update, config.chatId, config.botId);
   // Telegram retries non-2xx. Unsupported or foreign updates can never become valid.
   if (!parsed.ok) return json(200, { ok: true, ignored: parsed.reason });
 
@@ -95,6 +95,7 @@ export async function handleOasisTelegramWebhook(req: Request, deps: WebhookDeps
     return json(200, { ok: true, queued: true, duplicate: !stored.created });
   } catch (error) {
     console.error("[oasis-telegram.webhook] ingress failed", {
+      botId: parsed.job.botId,
       updateId: parsed.job.updateId,
       error: error instanceof Error ? (error.stack ?? error.message) : String(error),
     });

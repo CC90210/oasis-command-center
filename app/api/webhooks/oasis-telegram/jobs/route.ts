@@ -49,7 +49,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   } catch {
     return json(200, { ok: true, dropped: "invalid_json" });
   }
-  if (!isOasisTelegramJob(job) || job.chatId !== config.chatId) {
+  if (!isOasisTelegramJob(job) || job.botId !== config.botId || job.chatId !== config.chatId) {
     console.error("[oasis-telegram.jobs] malformed or foreign job dropped");
     return json(200, { ok: true, dropped: "malformed_job" });
   }
@@ -62,11 +62,15 @@ export async function POST(req: NextRequest): Promise<Response> {
     });
     if (outcome.outcome === "retry") return json(503, { ok: false, error: "job_incomplete", reason: outcome.reason });
     if (outcome.outcome === "delivery_unknown") {
-      console.error("[oasis-telegram.jobs] Telegram delivery is ambiguous; suppressing retry", { updateId: job.updateId });
+      console.error("[oasis-telegram.jobs] Telegram delivery is ambiguous; suppressing retry", {
+        botId: job.botId,
+        updateId: job.updateId,
+      });
     }
     return json(200, { ok: true, ...outcome });
   } catch (error) {
     console.error("[oasis-telegram.jobs] job failed", {
+      botId: job.botId,
       updateId: job.updateId,
       error: error instanceof Error ? (error.stack ?? error.message) : String(error),
     });
