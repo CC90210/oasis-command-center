@@ -11,6 +11,10 @@ import {
   resolveWorkerControlMode,
   selectWorkerInventory,
 } from "../lib/automations/worker-status";
+import {
+  OASIS_WORKERS,
+  controllableOasisWorker,
+} from "../lib/automations/oasis-workers";
 
 const route = readFileSync("app/api/automations/background-workers/route.ts", "utf8");
 const panel = readFileSync("components/automations/BackgroundWorkersPanel.tsx", "utf8");
@@ -36,20 +40,34 @@ function workerWindow(service: string, width = 900): string {
   return source.slice(at, at + width);
 }
 
-// OASIS owns one local queue consumer and one local queue monitor.
-for (const service of [
+// The Windows handover fence is a lifecycle decision, not a health reading.
+// Every retired row must come from the shared inventory and expose no control
+// path even if an old integrations_health row still exists.
+const retiredByPlan = [
+  "pm2.bravo-scheduler",
+  "pm2.bravo-ig-dm",
+  "pm2.claude-bridge-ping",
+  "pm2.event-router",
   "pm2.dashboard-email-consumer",
   "pm2.dashboard-email-queue-monitor",
-]) {
-  const worker = workerWindow(service);
-  assert.match(worker, /runtime:\s*"local"/, `${service} must be classified as local`);
-  assert.match(worker, /control_mode:\s*"local_fleet"/, `${service} must use fleet control`);
-  assert.match(
-    worker,
-    /status_source:\s*"integrations_health"/,
-    `${service} must read the OASIS bridge health row`,
-  );
-  assert.doesNotMatch(worker, /Runs on the VPS/, `${service} must not carry the obsolete remote copy`);
+  "pm2.atlas-telegram",
+  "pm2.maven-telegram",
+] as const;
+for (const service of retiredByPlan) {
+  const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
+  assert.ok(worker, `${service} must remain visible in the shared inventory`);
+  assert.equal(worker.runtime, "retired", `${service} must be retired by lifecycle policy`);
+  assert.equal(worker.control_mode, "none", `${service} must expose no lifecycle controls`);
+  assert.equal(worker.status_source, "none", `${service} must not interpret a stale health row`);
+  assert.equal(worker.manageable_via_pm2, false, `${service} must never offer a PM2 fallback`);
+  assert.match(worker.not_expected_here ?? "", /^Retired by plan\b/);
+  assert.equal(controllableOasisWorker(service), null, `${service} must fail closed in the control allowlist`);
+}
+for (const service of ["pm2.bravo-telegram", "pm2.claude-bridge"] as const) {
+  const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
+  assert.ok(worker, `${service} must remain visible as the two active local services`);
+  assert.notEqual(worker.runtime, "retired", `${service} must not be retired by this display-only fence update`);
+  assert.ok(controllableOasisWorker(service), `${service} must keep its existing local control path`);
 }
 
 assert.deepEqual(
@@ -238,7 +256,7 @@ assert.equal(selectWorkerInventory({ isOasisTenant: false, isClientProfile: fals
 // The UI groups by execution/runtime, not historical ownership, and never
 // paints disabled lifecycle buttons for automatically managed/retired rows.
 {
-  for (const label of ["This computer", "OASIS cloud", "Inactive / retired"]) {
+  for (const label of ["This computer", "OASIS cloud", "Retired by plan"]) {
     assert.ok(panel.includes(label), `panel must render the ${label} group`);
   }
   assert.ok(panel.includes("Managed automatically"), "cloud rows need a plain-English management badge");
@@ -246,6 +264,8 @@ assert.equal(selectWorkerInventory({ isOasisTenant: false, isClientProfile: fals
   assert.ok(panel.includes('worker.control_mode !== "none"'), "controls must only render for controllable rows");
   assert.ok(!panel.includes("OWNER_GROUP_LABEL"), "owner-only grouping must not drive the worker layout");
   assert.ok(!panel.includes("Start this worker via pm2"), "Windows fleet controls must not be labelled PM2");
+  assert.ok(!panel.includes("Restarting &ldquo;Bridge heartbeat&rdquo;"), "the stale reporter banner must not restart a fenced poller");
+  assert.ok(panel.includes("Retired by plan — preserved for reference"));
 }
 
 console.log("background-workers-contract: all assertions passed");

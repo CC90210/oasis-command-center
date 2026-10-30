@@ -1,6 +1,7 @@
 /**
- * OASIS's own background workers: the processes CC's machine supervises for
- * the OASIS workspace, keyed by their integrations_health service name.
+ * OASIS's background-worker lifecycle registry: active local processes plus
+ * intentionally retired computer copies, keyed by their historical
+ * integrations_health service name.
  *
  * Moved out of app/api/automations/background-workers/route.ts (2026-09-30) so
  * three readers share one list instead of three copies drifting apart:
@@ -10,8 +11,9 @@
  *     the bridge answers 401 to a browser since its bearer went on, 09-29),
  *   - lib/admin/system-health.ts (System health's "Background work" card).
  *
- * Mirrors ecosystem.config.js on the operator's machine. Adding a supervised
- * daemon there without adding it here means the board shows it as unknown.
+ * Active rows mirror the operator machine's launch manifest. Retired rows stay
+ * here so stale health records render as planned retirement instead of an
+ * outage or a restart target.
  * Imported by server code only; no secrets, no fetch.
  */
 
@@ -43,6 +45,11 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "pm2.bravo-scheduler",
     label: "Empire scheduler",
     purpose: "Polls cron_jobs every 60s on the operator's machine and executes due jobs.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — scheduled work now runs on Cloudflare or its designated always-on host.",
   },
   {
     // The setter. Absent from this list until 2026-08-21, which meant its
@@ -54,6 +61,11 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "pm2.bravo-ig-dm",
     label: "Instagram DM setter",
     purpose: "Answers Instagram DMs on its own tick so a reply never queues behind the scheduler's batch jobs.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — the always-on setter is moving to the daemon VPS; this computer's copy stays off.",
   },
   {
     service: "pm2.bravo-telegram",
@@ -69,11 +81,21 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "pm2.claude-bridge-ping",
     label: "Bridge heartbeat + tenant cron poller",
     purpose: "Heartbeats to /api/bridge/ping every 60s and polls tenant_cron_jobs for due work.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — this poller is fenced because it can run unpinned computer jobs.",
   },
   {
     service: "pm2.event-router",
     label: "Event router",
     purpose: "Tails Postgres agent_events into state/event_router.log — feeds /feed page.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — event routing no longer runs on this computer.",
   },
   // Removed 2026-06-06 — three stale workers that aren't actually
   // running on CC's local machine for the OASIS personal Command Center:
@@ -92,30 +114,41 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "pm2.dashboard-email-consumer",
     label: "Dashboard email sender",
     purpose: "Sends emails queued from the Command Center's lead-drawer composer. Polls lead_interactions every 10s.",
-    // OASIS has its own company-scoped process on the operator's Windows fleet.
-    // A separate tenant process can share the executable name without sharing
-    // its queue because the consumer filters by the host mailbox's tenant map.
-    runtime: "local",
-    control_mode: "local_fleet",
-    status_source: "integrations_health",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — Cloudflare owns the dashboard email queue; local copies stay off.",
   },
   {
     service: "pm2.dashboard-email-queue-monitor",
     label: "Email queue monitor",
     purpose: "Watches the OASIS email sender and alerts if queued messages stop draining.",
-    runtime: "local",
-    control_mode: "local_fleet",
-    status_source: "integrations_health",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — Cloudflare reports sender health; the local monitor stays off.",
   },
   {
     service: "pm2.atlas-telegram",
     label: "Atlas CFO Telegram",
     purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — the local Atlas bridge is fenced and must not run computer jobs.",
   },
   {
     service: "pm2.maven-telegram",
     label: "Maven CMO Telegram",
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — the local Maven bridge is fenced while Telegram moves to the daemon VPS.",
   },
   {
     service: "skool_engine",
@@ -132,7 +165,7 @@ export const OASIS_WORKERS: OasisWorker[] = [
     // Standalone Python script — owns its own lock file. The supervisor does
     // not know about it, so the Start/Stop/Restart buttons are hidden.
     manageable_via_pm2: false,
-    not_expected_here: "Retired 2026-05-18 — nothing runs it until you launch a community",
+    not_expected_here: "Retired by plan — nothing runs it until you launch a community.",
   },
 ];
 

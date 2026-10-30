@@ -70,14 +70,15 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
       return (
         "WORKER STATUS IS NOT REACHING THE DASHBOARD — the local bridge reports it cannot read its " +
         "process list, so the Automations panel cannot say which background workers are running. The " +
-        "workers may be fine. The exact error is on the panel and in ~/.oasis/bridge.log; restarting " +
-        "\"Bridge heartbeat\" (claude-bridge-ping) reloads the reader."
+        "workers may be fine. The exact error is on the panel and in ~/.oasis/bridge.log. Check the " +
+        "active host's reporter; services retired on this computer stay off by plan."
       );
     }
     return (
       "WORKER STATUS HAS GONE SILENT — the bridge is online but has not reported the worker fleet for " +
       "over 10 minutes (an older bridge without the fleet report, or a reader stuck in the long-running " +
-      "process). Restart \"Bridge heartbeat\" (claude-bridge-ping) and check ~/.oasis/bridge.log."
+      "process). Check the active host's reporter and ~/.oasis/bridge.log; services retired on this " +
+      "computer stay off by plan."
     );
   },
 }];
