@@ -52,6 +52,8 @@ export const CRON_TABLE: ReadonlyArray<CronEntry> = [
   { path: "/api/cron/dispatch-scheduled-calls", schedule: "*/5 * * * *" },
   { path: "/api/cron/operator-email-agent?write=1", schedule: "*/10 * * * *" },
   { path: "/api/cron/health-check", schedule: "*/15 * * * *" },
+  // The database-only replacement for Windows' hourly cron/process check.
+  { path: "/api/cron/hourly-health", schedule: "0 * * * *" },
   { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
   { path: "/api/cron/connection-health", schedule: "*/15 * * * *" },
@@ -65,6 +67,8 @@ export const CRON_TABLE: ReadonlyArray<CronEntry> = [
   // The Free AI Audit's upkeep (lib/ai-audit/tick.ts): PDFs, delivery
   // approvals, Stripe checks, onboarding, stalls. OASIS's own workspaces only.
   { path: "/api/cron/ai-audit-tick", schedule: "*/5 * * * *" },
+  // Preserve the founder's 6 AM wall clock across Toronto DST changes.
+  { path: "/api/cron/morning-brief", schedule: "0 6 * * *", timeZone: "America/Toronto" },
 ];
 
 /** One registry row's due verdict. Kept as a named seam so simulation and the

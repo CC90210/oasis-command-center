@@ -72,7 +72,7 @@ export async function writeAgentAlert(input: {
    *  notification storm (codex review 2026-07-23). Default false = legacy
    *  behavior (page on every call). */
   telegramOncePerOpen?: boolean;
-}): Promise<{ stored: boolean; telegram: string | null }> {
+}): Promise<{ stored: boolean; telegram: string | null; delivered: boolean }> {
   const nowIso = new Date().toISOString();
   // agent_alerts.payload is NOT NULL DEFAULT '{}': an explicit null failed the
   // insert of every alert written without a payload, and the result was never
@@ -98,7 +98,7 @@ export async function writeAgentAlert(input: {
       // Fail closed. Not knowing whether a card is open, a write would open a
       // duplicate and page again on every call for as long as reads fail.
       console.error("[agent-alert] open-card lookup failed; alert not written:", existing.error.message);
-      return { stored: false, telegram: null };
+      return { stored: false, telegram: null, delivered: false };
     }
     const open = existing.data as { id: string; payload?: unknown } | null;
     const existingId = open?.id;
@@ -150,14 +150,15 @@ export async function writeAgentAlert(input: {
   const wantTelegram =
     (input.telegram ?? input.severity !== "info") &&
     !(input.telegramOncePerOpen && refreshedExisting);
-  if (!wantTelegram) return { stored: rowId !== null, telegram: null };
+  if (!wantTelegram) return { stored: rowId !== null, telegram: null, delivered: false };
 
   const tag = input.severity === "urgent" ? "🚨" : "⚠️";
   // Telegram HTML mode: a title or body holding "&" or "<" (a sequence or
   // business name) would otherwise be refused as unparseable.
   const text =
     `${tag} ${escapeTelegramHtml(input.title)}` + (input.body ? `\n${escapeTelegramHtml(input.body)}` : "");
-  const { outcome: telegram } = await pushWorkspaceAlert(input.tenantId, text);
+  const push = await pushWorkspaceAlert(input.tenantId, text);
+  const telegram = push.outcome;
 
   if (db && rowId) {
     try {
@@ -171,7 +172,7 @@ export async function writeAgentAlert(input: {
       console.error("[agent-alert] push outcome not recorded:", err instanceof Error ? err.message : err);
     }
   }
-  return { stored: rowId !== null, telegram };
+  return { stored: rowId !== null, telegram, delivered: push.delivered };
 }
 
 /**

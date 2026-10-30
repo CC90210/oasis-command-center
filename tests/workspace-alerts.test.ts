@@ -554,7 +554,7 @@ async function main() {
     assert.equal(calls[0].chatId, CLIENT_A_CHAT);
     assert.ok(!calls.some(usedEnvToken), "a client alert touched an OASIS or SunBiz token");
     assert.match(calls[0].text, /Q&amp;A &lt;follow-up&gt;/, "client text reaches Telegram HTML unescaped");
-    assert.deepEqual(result, { stored: true, telegram: "Sent to Telegram" });
+    assert.deepEqual(result, { stored: true, telegram: "Sent to Telegram", delivered: true });
     const card = await alertCard(CLIENT_A, "drip_missing_app_link");
     assert.equal(card.length, 1, "the client's in-app card is missing");
     assert.deepEqual(payloadOf(card[0].payload), { step_index: 2, telegram: "Sent to Telegram" });
@@ -592,7 +592,7 @@ async function main() {
       }),
     );
     assert.deepEqual(calls, [], "a client without a bot was paged somewhere");
-    assert.deepEqual(result, { stored: true, telegram: "Not sent: no Telegram bot connected" });
+    assert.deepEqual(result, { stored: true, telegram: "Not sent: no Telegram bot connected", delivered: false });
     const card = await alertCard(CLIENT_B, "sms_agent_dead_letter");
     assert.equal(card.length, 1, "no in-app card was written");
     assert.equal(card[0].resolved_at, null);
@@ -698,13 +698,41 @@ async function main() {
     assert.equal(payloadOf((await alertCard(OASIS, "oasis_operator_check"))[0].payload).telegram, "Sent to Telegram");
   });
 
+  await check("the Hourly Health body is Telegram-escaped exactly once by writeAgentAlert", async () => {
+    calls.length = 0;
+    const { renderHourlyHealth } = await import("../lib/automations/operator-database-jobs");
+    const body = renderHourlyHealth({
+      ok: false,
+      scheduled: 1,
+      healthy: 0,
+      failed: [],
+      stale: [],
+      unmeasured: [],
+      computers: [{ label: "Mac & Mini <desk>", lastSeenAt: null, state: "offline" }],
+      issues: ["Mac & Mini <desk> is offline"],
+    });
+    const result = await quietly(() => writeAgentAlert({
+      tenantId: OASIS,
+      alertType: "hourly_health_escape_probe",
+      severity: "warn",
+      title: "Hourly health & check",
+      body,
+      subjectType: "system_health",
+      subjectId: "hourly-health-escape-probe",
+    }));
+    assert.equal(result.delivered, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].text, /Mac &amp; Mini &lt;desk&gt;/);
+    assert.doesNotMatch(calls[0].text, /&amp;amp;|&amp;lt;/, "the Hourly Health body was escaped twice");
+  });
+
   await check("the retired SunBiz workspace keeps a card and pages nobody", async () => {
     calls.length = 0;
     const result = await quietly(() =>
       writeAgentAlert({ tenantId: SUNBIZ, alertType: "live_sub_promote_failed", severity: "urgent", title: "x" }),
     );
     assert.deepEqual(calls, [], "the retired workspace paged someone");
-    assert.deepEqual(result, { stored: true, telegram: "Not sent: this workspace is retired" });
+    assert.deepEqual(result, { stored: true, telegram: "Not sent: this workspace is retired", delivered: false });
     assert.equal(alertAudienceFor(SUNBIZ), "card_only");
   });
 
@@ -730,7 +758,7 @@ async function main() {
     } finally {
       await seed.execute("ALTER TABLE agent_alerts_offline RENAME TO agent_alerts");
     }
-    assert.deepEqual(result, { stored: false, telegram: null });
+    assert.deepEqual(result, { stored: false, telegram: null, delivered: false });
     assert.deepEqual(calls, [], "a lookup failure paged anyway");
   });
 

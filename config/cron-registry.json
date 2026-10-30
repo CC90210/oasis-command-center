@@ -70,6 +70,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/hourly-health",
+      "schedule": "0 * * * *"
+    },
+    {
       "path": "/api/cron/sla-check",
       "schedule": "*/15 * * * *"
     },
@@ -113,6 +117,11 @@
     {
       "path": "/api/cron/ai-audit-tick",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/morning-brief",
+      "schedule": "0 6 * * *",
+      "timeZone": "America/Toronto"
     }
   ]
 }

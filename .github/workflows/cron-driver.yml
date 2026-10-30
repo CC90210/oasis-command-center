@@ -142,8 +142,10 @@ jobs:
                                       /api/cron/reconcile-website-sales-payments
                                       /api/cron/library-post-linker
                                       /api/cron/post-analytics-sync" ;;
+            "0 * * * *")     ROUTES="/api/cron/hourly-health" ;;
             "30 3 * * SUN")   ROUTES="/api/cron/event-bus-retention" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
+            "0 6 * * *")     ROUTES="/api/cron/morning-brief" ;;
             # The books' daily upkeep (lib/founders-finances/books-cron.ts).
             "47 21 * * *")   ROUTES="/api/cron/finance-books?job=fx-refresh" ;;
             "53 21 * * *")   ROUTES="/api/cron/finance-books?job=stripe-reconcile" ;;

@@ -232,6 +232,7 @@ const TESTS = [
   "tests/sms-lawful-basis.test.ts",
   "tests/shopout-dispatch-honesty.test.ts",
   "tests/cron-driver-coverage.test.ts",
+  "tests/operator-database-jobs.test.ts",
   // Sits beside cron-driver-coverage deliberately: that one proves every
   // registered cron has something driving it, this one proves the one cron
   // that must NOT be driven can't be armed from the dashboard.

@@ -52,7 +52,7 @@ function legacyCronMatches(expr: string, instant: Date): boolean {
 }
 
 test("every table expression parses", () => {
-  assert.equal(CRON_TABLE.length, 28, "the registry has 23 pre-existing schedules, the cloud email sender, and four API-only migrations");
+  assert.equal(CRON_TABLE.length, 30, "23 pre-existing schedules plus email sender, four API jobs, morning brief and hourly health");
   for (const e of CRON_TABLE) {
     assert.doesNotThrow(() => cronMatches(e.schedule, at("2026-08-31T00:00:00Z")), e.schedule);
     assert.equal(isValidCronExpression(e.schedule), true, `${e.path}: ${e.schedule}`);
@@ -60,7 +60,7 @@ test("every table expression parses", () => {
   }
 });
 
-test("the optional zone preserves the 23 existing UTC schedules plus sender cadence and gives weekly retention Toronto wall time", () => {
+test("the optional zone preserves the 23 existing UTC schedules plus sender cadence while migrated wall times stay explicit", () => {
   const first = Date.parse("2026-10-31T00:00:00Z");
   const last = Date.parse("2026-11-03T00:00:00Z");
   const migrated = new Set([
@@ -68,6 +68,8 @@ test("the optional zone preserves the 23 existing UTC schedules plus sender cade
     "/api/cron/event-bus-retention",
     "/api/cron/library-post-linker",
     "/api/cron/post-analytics-sync",
+    "/api/cron/morning-brief",
+    "/api/cron/hourly-health",
   ]);
   const existing = CRON_TABLE.filter((entry) => !migrated.has(entry.path));
   assert.equal(existing.length, 24);
@@ -86,6 +88,15 @@ test("the optional zone preserves the 23 existing UTC schedules plus sender cade
     CRON_TABLE.find((entry) => entry.path === "/api/cron/event-bus-retention")?.timeZone,
     "America/Toronto",
   );
+});
+
+test("morning brief stays at 6 AM Toronto time and hourly health stays hourly", () => {
+  const morning = CRON_TABLE.find((entry) => entry.path === "/api/cron/morning-brief");
+  const health = CRON_TABLE.find((entry) => entry.path === "/api/cron/hourly-health");
+  assert.deepEqual(morning, { path: "/api/cron/morning-brief", schedule: "0 6 * * *", timeZone: "America/Toronto" });
+  assert.deepEqual(health, { path: "/api/cron/hourly-health", schedule: "0 * * * *" });
+  assert.equal(cronEntryMatches(morning!, at("2026-10-29T10:00:00Z")), true, "6 AM EDT");
+  assert.equal(cronEntryMatches(morning!, at("2026-11-02T11:00:00Z")), true, "6 AM EST");
 });
 
 test("day names are case-insensitive and work as singles, comma lists, and ranges", () => {
