@@ -214,19 +214,19 @@ async function main() {
       sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('g-new', 'p-cc', ?, 'guard_substrate', 'healthy', ?, ?)",
       args: [OASIS, ago(50 * S), JSON.stringify(allOn)],
     },
-    // Workers. Scheduler: fresh, with a stale profile_id NULL duplicate.
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1-old', NULL, ?, 'pm2.bravo-scheduler', 'down', ?)", args: [OASIS, ago(45 * 24 * H)] },
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1', 'p-cc', ?, 'pm2.bravo-scheduler', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
-    // The setter stopped reporting two hours ago: down.
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2', 'p-cc', ?, 'pm2.bravo-ig-dm', 'healthy', ?)", args: [OASIS, ago(2 * H)] },
-    // Atlas's bridge stopped by the operator: not down.
+    // Active workers. Telegram is fresh, with a stale profile_id NULL duplicate.
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1-old', NULL, ?, 'pm2.bravo-telegram', 'down', ?)", args: [OASIS, ago(45 * 24 * H)] },
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1', 'p-cc', ?, 'pm2.bravo-telegram', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
+    // The active chat bridge stopped reporting two hours ago: down.
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2', 'p-cc', ?, 'pm2.claude-bridge', 'healthy', ?)", args: [OASIS, ago(2 * H)] },
+    // A fresh row for a retired worker must remain excluded from System health.
     {
       sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('w3', 'p-cc', ?, 'pm2.atlas-telegram', 'degraded', ?, ?)",
       args: [OASIS, ago(30 * S), JSON.stringify({ pm2_status: "disabled by operator" })],
     },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w4', 'p-cc', ?, 'fleet_watchdog', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
-    // Another workspace's fresh scheduler must not count for OASIS.
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w5', NULL, ?, 'pm2.bravo-ig-dm', 'healthy', ?)", args: [CLIENT, ago(10 * S)] },
+    // Another workspace's fresh chat bridge must not count for OASIS.
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w5', NULL, ?, 'pm2.claude-bridge', 'healthy', ?)", args: [CLIENT, ago(10 * S)] },
     // Heartbeat cards: a retired host with a ping (never drawn) and a live one a day and a half old.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('h1', 'p-cc', ?, 'vercel', 'healthy', ?)", args: [OASIS, ago(10 * MIN)] },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('h2', 'p-cc', ?, 'cloudflare', 'healthy', ?)", args: [OASIS, ago(36 * H)] },
@@ -426,13 +426,13 @@ async function main() {
     assert.ok(health.guards?.guards.every((g) => g.state === "on"));
     assert.equal(health.verdict.text, "Everything is protected. CCPC (Windows) checked in just now.");
   });
-  await check("workers: newest row per service; stale is down, stopped-by-you is not; another workspace's ping is not OASIS's", () => {
+  await check("workers: newest row per active service; stale is down; retired workers and another workspace's ping are excluded", () => {
     const byService = new Map(health.workers?.map((w) => [w.service, w]));
-    assert.equal(byService.get("pm2.bravo-scheduler")?.state, "running", "the fresh row beats the month-old 'down' duplicate");
-    assert.equal(byService.get("pm2.bravo-ig-dm")?.state, "stale");
-    assert.match(byService.get("pm2.bravo-ig-dm")?.sentence ?? "", /^Stopped reporting since \d{4}-/);
-    assert.equal(byService.get("pm2.atlas-telegram")?.state, "stopped_by_you");
-    assert.equal(byService.get("pm2.maven-telegram")?.state, "no_report");
+    assert.equal(byService.get("pm2.bravo-telegram")?.state, "running", "the fresh row beats the month-old 'down' duplicate");
+    assert.equal(byService.get("pm2.claude-bridge")?.state, "stale");
+    assert.match(byService.get("pm2.claude-bridge")?.sentence ?? "", /^Stopped reporting since \d{4}-/);
+    assert.equal(byService.get("pm2.atlas-telegram"), undefined, "retired workers are not active health rows");
+    assert.equal(byService.get("pm2.bravo-scheduler"), undefined, "the retired scheduler is not an active health row");
     assert.equal(health.reporter?.state, "ok");
     assert.equal(health.attention.workersDown, 1);
   });
