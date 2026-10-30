@@ -32,7 +32,8 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
+process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
 
 const MAC_SECRET = "mac-runner-research-test-secret-0123456789abcdef";
 const NOW = () => new Date();

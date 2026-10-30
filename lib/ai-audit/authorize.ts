@@ -58,6 +58,7 @@ import { dbBool } from "@/lib/db-bool";
 import { stopEngagementRunsStatements } from "@/lib/ai-audit/extraction-stop";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import type { Executor, ExecutorContext, ExecutorOutcome } from "@/lib/os/approvals/executors";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 /** Stages from which CC may ask for Gate 1. The request moves Profile from the call on to Transcript to approve. */
 export const AUTHORIZE_FROM: readonly Engagement["stage"][] = ["call_completed", "transcript_review"];
@@ -94,16 +95,20 @@ export function engineFor(consent: boolean, settings: Pick<AiAuditSettings, "eng
 }
 
 /** What happens after approval, in the words the card shows. */
-export function planFor(input: { engine: AiEngine; versionNo: number; transcriptCount: number; gapCount: number }): string[] {
+export function planFor(input: { engine: AiEngine; versionNo: number; transcriptCount: number; gapCount: number; modelSearchEnabled?: boolean }): string[] {
   const plan = [
     `Freeze discovery profile version ${input.versionNo}${input.transcriptCount ? ` and the ${input.transcriptCount === 1 ? "call transcript" : `${input.transcriptCount} call transcripts`}` : ""} exactly as they are now.`,
     "Move the engagement to Research and writing.",
   ];
   // What the tick then does by itself (lib/ai-audit/research.ts, drafting.ts, writing.ts); each line under the
   // payload's 300-character limit.
+  const modelSearchEnabled = input.modelSearchEnabled ?? aiAuditModelSearchEnabled();
   if (input.engine === "none") {
     plan.push("No AI service receives the client's information. Research checks the client's public website and page speed (no web search).");
     plan.push("A first draft of the audit and proposal is built from what research finds, without AI. You write and check the rest yourself.");
+  } else if (!modelSearchEnabled) {
+    plan.push("Model and web search are deferred while the audit's independent model/search switch is off. Website and PageSpeed research still run.");
+    plan.push("The evidence rules still build the audit and proposal, and PDF printing still runs. You write and check the final wording yourself.");
   } else {
     plan.push(
       input.engine === "mac_claude"

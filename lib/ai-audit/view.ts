@@ -48,6 +48,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { DRY_RUN_CHANNEL } from "@/lib/ai-audit/payment";
 import { AUDIT_EMAIL_CHANNEL } from "@/lib/ai-audit/delivery-payload";
 import { WELCOME_APPROVAL_KEY_PREFIX } from "@/lib/ai-audit/onboarding";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 /** The outcome an approval's executor recorded ("sent", "dry_run", "failed"), or null. */
 function outcomeOf(raw: unknown): string | null {
@@ -219,6 +220,8 @@ export type EngagementView = {
   checkouts: Checkout[];
   receipts: Receipt[];
   settings: AiAuditSettings;
+  /** The independent, default-off switch for model-assisted reading, search and writing. */
+  modelSearchEnabled: boolean;
   catalogue: CatalogueItem[];
   /** Phase 2: the call, its transcripts and Gate 1. */
   transcripts: Transcript[];
@@ -357,6 +360,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     checkouts,
     receipts,
     settings: settings.settings,
+    modelSearchEnabled: aiAuditModelSearchEnabled(),
     catalogue: catalogue.filter((i) => i.status === "confirmed"),
     transcripts,
     callNotes,

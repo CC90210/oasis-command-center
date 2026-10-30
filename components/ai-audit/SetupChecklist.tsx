@@ -9,10 +9,11 @@
 import Link from "next/link";
 import type { SetupCheck, SetupState } from "@/lib/ai-audit/setup";
 
-const STATE_WORDS: Record<SetupState, string> = { ready: "Ready", test_mode: "Test mode", missing: "Needs you", unknown: "Not checked" };
+const STATE_WORDS: Record<SetupState, string> = { ready: "Ready", test_mode: "Test mode", deferred: "Deferred", missing: "Needs you", unknown: "Not checked" };
 const STATE_CLASS: Record<SetupState, string> = {
   ready: "text-status-engaged",
   test_mode: "text-status-warm",
+  deferred: "text-status-warm",
   missing: "text-status-hot",
   unknown: "text-status-warm",
 };
@@ -21,9 +22,13 @@ export function setupSummary(checks: SetupCheck[]): { text: string; tone: SetupS
   const missing = checks.filter((c) => c.state === "missing").length;
   const unchecked = checks.filter((c) => c.state === "unknown").length;
   const testing = checks.filter((c) => c.state === "test_mode").length;
+  const deferred = checks.filter((c) => c.state === "deferred").length;
   if (missing) return { text: `${missing} thing${missing === 1 ? "" : "s"} to set up before a real client`, tone: "missing" };
   if (unchecked) return { text: `${unchecked} check${unchecked === 1 ? "" : "s"} could not be read`, tone: "unknown" };
-  if (testing) return { text: "Set up. Client emails or payments are still in test mode.", tone: "test_mode" };
+  if (testing || deferred) {
+    const states = [...(testing ? ["client emails or payments are still in test mode"] : []), ...(deferred ? ["model and web search are deferred"] : [])];
+    return { text: `Set up. ${states.join("; ")}.`, tone: testing ? "test_mode" : "deferred" };
+  }
   return { text: "Set up and live.", tone: "ready" };
 }
 

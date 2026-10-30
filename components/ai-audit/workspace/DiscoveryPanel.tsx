@@ -18,7 +18,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { EngagementView } from "@/lib/ai-audit/view";
-import { AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payload";
+import { AI_ENGINES, AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payload";
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
@@ -122,6 +122,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
   // While a draft is reading the call, the page looks again every 15 seconds, so its status, report and
   // facts appear when it ends (Codex review of phase 2b: one refresh at the start showed "queued" for good).
   const drafting = !!view.extraction && ["queued", "running", "waiting_runner"].includes(view.extraction.status);
+  const profileModelDeferred = !view.modelSearchEnabled || view.settings.engine === "none";
   useEffect(() => {
     if (!drafting) return;
     const id = setInterval(() => router.refresh(), 15_000);
@@ -381,7 +382,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           <p className="text-fg-muted">
             A model reads the transcript and proposes facts for the profile. A fact is kept only when its quote is on the lines it names, the client said it, and a figure is the one quoted, for the right period; the rest is listed below with why. Check every fact before you authorize: the checks catch much, not everything. Your own entries, and anything you verified or corrected, are never overwritten.
           </p>
-          {view.consentAi ? (
+          {view.consentAi && !profileModelDeferred ? (
             <div className="flex flex-wrap items-end gap-2">
               <div>
                 <div className="label">Read by</div>
@@ -405,15 +406,19 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
               ) : (
                 <span className="text-[13px] text-fg-muted">Only the workspace owner can have the call read.</span>
               )}
-              {isOwner && view.extraction && ["queued", "running", "waiting_runner"].includes(view.extraction.status) ? (
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => act("cancel_extraction", {}, "Called off. Nothing it read was kept.")}>
-                  Cancel
-                </button>
-              ) : null}
+            </div>
+          ) : view.consentAi ? (
+            <div className="text-status-warm">
+              Profile model drafting is deferred {view.modelSearchEnabled ? "because this workspace defaults to No AI" : "while the independent model/search switch is off"}. Fill and verify the profile by hand.
             </div>
           ) : (
             <div className="text-fg-muted">The client did not agree to AI analysis, so the profile is filled by hand.</div>
           )}
+          {isOwner && drafting ? (
+            <button type="button" className="btn-secondary justify-self-start" disabled={busy} onClick={() => act("cancel_extraction", {}, "Called off. Nothing it read was kept.")}>
+              Cancel
+            </button>
+          ) : null}
           {view.extraction ? (
             <div className="text-fg-muted">
               Last run: <span className="text-fg">{EXTRACTION_STATUS_WORDS[view.extraction.status] ?? view.extraction.status.replace(/_/g, " ")}</span>
@@ -479,12 +484,17 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
           <div>
             <div className="label">Who processes it</div>
             <select className="select" value={engine} onChange={(ev) => setEngine(ev.target.value as AiEngine)}>
-              {(["mac_claude", "cloud_workspace"] as const).map((k) => (
+              {AI_ENGINES.map((k) => (
                 <option key={k} value={k}>
                   {AI_ENGINE_LABELS[k]}
                 </option>
               ))}
             </select>
+            {!view.modelSearchEnabled ? (
+              <div className="mt-1 text-[12px] text-status-warm">Model and web search are deferred. Website checks, PageSpeed, evidence rules, the audit, proposal and PDF still run.</div>
+            ) : engine === "none" ? (
+              <div className="mt-1 text-[12px] text-fg-muted">No model or AI web search will run. The deterministic audit, proposal and PDF still run.</div>
+            ) : null}
           </div>
         ) : null}
         {auth ? (

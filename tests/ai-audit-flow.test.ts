@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { CLIENT_A, OASIS, USERS, check, finish, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
 process.env.AI_AUDIT_LINK_SECRET = "ai-audit-flow-test-link-secret-000000000000001";
 
 const LEAD = "7a000000-0000-4000-8000-000000000001";
@@ -353,6 +353,7 @@ async function main() {
     const jobs = await db.execute({ sql: "SELECT tool_key, status, input_json FROM tool_jobs WHERE tenant_id = ?", args: [OASIS] });
     assert.equal(jobs.rows.length, 1);
     assert.equal(String(jobs.rows[0].tool_key), "ai_audit_pdf");
+    assert.equal(Number((await db.execute("SELECT COUNT(*) AS n FROM tool_jobs WHERE tool_key IN ('ai_audit_model', 'ai_audit_search')")).rows[0].n), 0, "the default-off model/search gate does not block the independent PDF path");
     assert.ok(!String(jobs.rows[0].input_json).includes("sig="), "the job holds no usable address");
     assert.equal(await leadStage(db, LEAD), "demo_completed");
   });

@@ -269,6 +269,8 @@ function DraftBox({ view }: { view: EngagementView }) {
   const [message, setMessage] = useState<string | null>(null);
   const auditDraft = view.audit?.status === "draft";
   const proposalDraft = view.proposal?.status === "draft";
+  const authorizedEngine = view.authorization?.engine ?? view.settings.engine;
+  const modelWritingDeferred = !view.modelSearchEnabled || authorizedEngine === "none";
 
   async function draft(what: "audit" | "proposal") {
     const exists = what === "audit" ? auditDraft : proposalDraft;
@@ -322,10 +324,11 @@ function DraftBox({ view }: { view: EngagementView }) {
         <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft} onClick={() => void draft("proposal")}>
           {busy === "proposal" ? "Drafting" : view.proposal ? "Draft the proposal again" : "Draft the proposal"}
         </button>
-        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft || writingNow} onClick={() => void prose()}>
-          {busy === "prose" ? "Starting" : writingNow ? "Writing the opening" : "Write the opening with AI"}
+        <button type="button" className="btn-secondary" disabled={!!busy || !auditDraft || writingNow || modelWritingDeferred} onClick={() => void prose()}>
+          {modelWritingDeferred ? "Model writing deferred" : busy === "prose" ? "Starting" : writingNow ? "Writing the opening" : "Write the opening with AI"}
         </button>
       </div>
+      {modelWritingDeferred ? <div className="text-[12px] text-status-warm">The opening stays in the deterministic draft for you to edit. Audit and proposal drafting are still available.</div> : null}
       {writing && !writingNow ? (
         <div className="text-[12px] text-fg-muted">
           {writing.written
@@ -355,6 +358,8 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
   const step = r?.step ?? null;
   const pack = r?.latest?.content ?? null;
   const running = !!step && IN_FLIGHT.includes(step.status);
+  const authorizedEngine = view.authorization?.engine ?? view.settings.engine;
+  const modelSearchDeferred = !view.modelSearchEnabled || authorizedEngine === "none";
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -374,7 +379,13 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       setMessage(describeError(res));
       return;
     }
-    setMessage(res.created ? "Research started. It moves one step every five minutes; the web search waits for CC's Mac." : "A research run is already going.");
+    setMessage(
+      res.created
+        ? modelSearchDeferred
+          ? "Research started. Website checks, PageSpeed and the evidence rules continue; model search is deferred."
+          : "Research started. It moves one step every five minutes; the web search waits for CC's Mac."
+        : "A research run is already going.",
+    );
     router.refresh();
   }
 
@@ -417,6 +428,11 @@ export function ResearchPanel({ view, isOwner }: { view: EngagementView; isOwner
       <div role="status" aria-live="polite">
         {message ? <div className="rounded-lg border border-hairline px-3 py-2 text-fg">{message}</div> : null}
       </div>
+      {modelSearchDeferred ? (
+        <div className="rounded-lg border border-hairline px-3 py-2 text-[12px] text-status-warm">
+          Model and web search are deferred. Deterministic website checks, PageSpeed, evidence rules, audit and proposal drafting, and PDF printing continue.
+        </div>
+      ) : null}
 
       {pack ? (
         <>

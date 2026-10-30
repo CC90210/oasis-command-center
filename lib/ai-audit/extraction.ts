@@ -38,6 +38,7 @@ import { inputHashOf } from "@/lib/tools/store";
 import { runToolModelCall, type ToolModelCall, type ToolModelResult } from "@/lib/tools/worker/ai";
 
 import { closeRunStatements, EXTRACT_STEP, MODEL_TOOL_KEY } from "@/lib/ai-audit/extraction-stop";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 export { EXTRACT_STEP, MODEL_TOOL_KEY };
 const IN_FLIGHT = ["queued", "running", "waiting_runner"] as const;
@@ -77,6 +78,7 @@ export async function startExtraction(
   const engagement = await getEngagement(db, t, input.engagementId);
   if (!engagement) return { ok: false, error: "not_found" };
   if (!PROFILE_EDIT_STAGES.includes(engagement.stage)) return { ok: false, error: "stage_closed" };
+  if (!aiAuditModelSearchEnabled()) return { ok: false, error: "model_search_deferred" };
   const all = await listTranscripts(db, t, engagement.id, { withLines: true });
   if (!all.length) return { ok: false, error: "no_transcript" };
   const fields = engagement.current_profile_version_id ? await listProfileFields(db, t, engagement.current_profile_version_id) : [];
@@ -186,6 +188,7 @@ function windowRefOf(input: Record<string, unknown>): (WindowRef & { step_id: st
 
 /** What the Mac is handed at claim time: the prompt, built now, never stored on the job. */
 export async function modelJobInput(db: Client, job: { tenantId: string; input: Record<string, unknown> }): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; code: "not_permitted" | "gone" | "bad_input" }> {
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const ref = windowRefOf(job.input);
   if (!ref) return { ok: false, code: "bad_input" };
   const p = await permittedWindow(db, job.tenantId, ref);

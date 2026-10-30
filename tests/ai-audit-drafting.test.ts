@@ -32,7 +32,8 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
+process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
 
 const MAC_SECRET = "mac-runner-drafting-test-secret-0123456789abcdef";
 const NOW = () => new Date();
@@ -700,6 +701,51 @@ async function main() {
     await login(null);
     // Out of the way of the next check's ticks.
     assert.ok((await lifecycle.advanceEngagement(db, { tenantId: OASIS, engagementId: eid, to: "cancelled", actor: cc, now: NOW() })).ok);
+  });
+  await check("the default-off retirement gate skips model/search jobs while the deterministic audit, proposal and main tick finish", async () => {
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const eid = await authorized("Deferred Model Co", "mac_claude");
+      const tickDeps = {
+        payment: { alert: async () => undefined } as never,
+        onboarding: {} as never,
+        site: deps.site,
+        research: deps,
+        extraction: { model: (async () => assert.fail("no extraction model call")) as never, alert: async () => undefined },
+        writing: { model: (async () => assert.fail("no writing model call")) as never, alert: async () => undefined },
+      };
+      let drafted = 0;
+      for (let i = 0; i < 12 && !drafted; i++) {
+        const report = await tick.runAiAuditTick(db, { tenantIds: [OASIS], deps: tickDeps });
+        assert.deepEqual(report.errors, [], JSON.stringify(report.errors));
+        assert.equal(report.writingStarted, 0);
+        drafted += report.auditsDrafted;
+      }
+      assert.equal(drafted, 1, "the deterministic audit drafted once");
+      const e = (await store.getEngagement(db, OASIS, eid))!;
+      assert.ok(e.current_audit_version_id, "the rule-based audit exists");
+      assert.ok(e.current_proposal_version_id, "the rule-based proposal exists");
+      const latest = await research.latestResearch(db, OASIS, eid);
+      assert.equal(latest?.content.plan.find((m) => m.module === "site")?.status, "done");
+      assert.equal(latest?.content.plan.find((m) => m.module === "pagespeed")?.status, "done");
+      assert.deepEqual(latest?.content.plan.find((m) => m.module === "search"), {
+        module: "search",
+        status: "skipped",
+        detail: "Web search deferred: model and search processing is switched off.",
+      });
+      const jobs = await db.execute({
+        sql: "SELECT tool_key FROM tool_jobs WHERE tenant_id = ? AND json_extract(input_json, '$.engagement_id') = ? AND tool_key IN ('ai_audit_model', 'ai_audit_search')",
+        args: [OASIS, eid],
+      });
+      assert.deepEqual(jobs.rows, [], "zero model/search jobs were enqueued");
+      const writing = await import("../lib/ai-audit/writing");
+      assert.deepEqual(await writing.startWriting(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW() }), { ok: false, error: "model_search_deferred" });
+      assert.equal(await writing.latestWriteStep(db, OASIS, eid), null, "the tick did not create a deferred writing step");
+      const approval = (await db.execute({ sql: "SELECT payload_json FROM approvals WHERE tenant_id = ? AND json_extract(payload_json, '$.engagement_id') = ? AND action_kind = 'authorize_ai_audit' ORDER BY created_at DESC LIMIT 1", args: [OASIS, eid] })).rows[0];
+      assert.match(String(approval?.payload_json ?? ""), /model and web search are deferred/i, "Gate 1 says what the off switch changes");
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
   });
   await check("the tick drafts the audit and the proposal once, when the first research run finishes", async () => {
     const eid = await authorized("Tick Draft Co");

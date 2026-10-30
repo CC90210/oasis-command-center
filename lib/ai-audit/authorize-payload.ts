@@ -24,7 +24,7 @@ export type AiEngine = (typeof AI_ENGINES)[number];
 export const AI_ENGINE_LABELS: Readonly<Record<AiEngine, string>> = {
   mac_claude: "Claude on CC's Mac, through his own Claude subscription",
   cloud_workspace: "The workspace's cloud AI account",
-  none: "No AI: the client did not agree to AI analysis, so CC writes the audit himself",
+  none: "No model or AI web search: CC writes and reviews the audit himself",
 };
 
 export type AuthorizeAiAuditPayload = {

@@ -464,6 +464,11 @@ async function main() {
     assert.equal(store.parseFxRate({ rate_ppm: 40_000_000, as_of: "2026-10-26" }), null);
     assert.equal(store.parseSettings({ fx_usd_cad: { rate_ppm: 1_402_500, as_of: "2026-10-26", source: "evil" } }).fx_usd_cad?.source, "owner", "an unknown source is the owner's own number");
     assert.equal(store.DEFAULT_SETTINGS.fx_usd_cad, null, "no rate until CC sets one");
+    assert.equal(store.DEFAULT_SETTINGS.engine, "none", "a new workspace defaults to deterministic audit work only");
+    assert.equal(store.parseSettings({}).engine, "none", "a missing or unknown engine fails closed to none");
+    assert.equal(store.parseSettings({ engine: "none" }).engine, "none");
+    assert.equal(store.parseSettings({ engine: "mac_claude" }).engine, "mac_claude", "an existing Mac-Claude settings row is not misparsed during retirement");
+    assert.equal(store.parseSettings({ engine: "cloud_workspace" }).engine, "cloud_workspace", "an existing cloud settings row is preserved too");
   });
 
   console.log("catalogue");

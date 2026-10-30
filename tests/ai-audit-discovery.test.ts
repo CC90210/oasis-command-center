@@ -27,7 +27,10 @@ import { join } from "node:path";
 import type { Client } from "@libsql/client";
 import { OASIS, USERS, check, finish, login, setupDatabase, setupProjectCustomers } from "./_delivery-harness";
 
-for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN"]) delete process.env[k];
+for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "LIVE_SEND_AI_AUDIT", "LIVE_SEND_STRIPE_CHECKOUT", "BRAVO_FORCE_DRY_RUN", "AI_AUDIT_MODEL_SEARCH_ENABLED"]) delete process.env[k];
+// This legacy-behaviour suite exercises the model paths deliberately. The
+// retirement regression below drops the switch and proves the default-off path.
+process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
 
 const LEAD = "7b000000-0000-4000-8000-000000000001";
 const MAC_SECRET = "mac-runner-discovery-test-secret-0123456789abcdef";
@@ -155,6 +158,18 @@ async function main() {
   console.log("extraction");
   const alerts: Array<Record<string, unknown>> = [];
   const runnerDeps = (now: Date) => ({ db, env: { TOOLS_RUNNER_SECRET_MAC: MAC_SECRET }, now, storage: null, aiAuditAlert: async (a: Record<string, unknown>) => void alerts.push(a) });
+  await check("the model/search gate defaults off and creates no extraction step or model job", async () => {
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      const beforeSteps = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n);
+      const beforeJobs = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] })).rows[0].n);
+      assert.deepEqual(await extraction.startExtraction(db, { tenantId: OASIS, engagementId: id, engine: "mac_claude", actor: cc, now: NOW() }), { ok: false, error: "model_search_deferred" });
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, id] })).rows[0].n), beforeSteps);
+      assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model'", args: [OASIS] })).rows[0].n), beforeJobs);
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+  });
   await check("drafting the profile queues one Mac job per part of the call; the jobs hold ids, never the call's words", async () => {
     // CC typed 35 leads a month on the call; the transcript says about 40: a disagreement for CC, never an overwrite.
     await versions.saveProfileField(db, { tenantId: OASIS, engagementId: id, field: { field_key: "sales.leads_per_month", value: 35, label: "client_reported", source_type: "call_notes" } as never, actor: cc, now: NOW() });

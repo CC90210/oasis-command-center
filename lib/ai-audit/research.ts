@@ -51,6 +51,7 @@ import { PROFILE_FIELDS, profileFieldDef } from "@/lib/ai-audit/profile";
 import { shortName, type AiAuditStage } from "@/lib/ai-audit/rules";
 import { eventStatement, getEngagement, int, readLead, requireTenant, type Actor, type Engagement } from "@/lib/ai-audit/store";
 import { inputHashOf } from "@/lib/tools/store";
+import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
 
 export const RESEARCH_SCHEMA = "ai_audit_research/v1" as const;
 export const RESEARCH_STEP = "research";
@@ -232,6 +233,7 @@ export async function startResearch(db: Client, input: { tenantId: string; engag
 
 /** What the Mac is handed: the prompt, built now from public facts only. */
 export async function searchJobInput(db: Client, job: { tenantId: string; input: Record<string, unknown> }): Promise<{ ok: true; input: Record<string, unknown> } | { ok: false; code: "gone" | "not_permitted" | "bad_input" }> {
+  if (!aiAuditModelSearchEnabled()) return { ok: false, code: "not_permitted" };
   const t = requireTenant(job.tenantId);
   const stepId = typeof job.input.step_id === "string" ? job.input.step_id : "";
   const engagementId = typeof job.input.engagement_id === "string" ? job.input.engagement_id : "";
@@ -450,14 +452,17 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
   }
 
   if (state.phase === "search") {
-    if (auth.engine !== "mac_claude") {
+    const modelSearchEnabled = aiAuditModelSearchEnabled();
+    if (!modelSearchEnabled || auth.engine !== "mac_claude") {
       // The search is Claude on CC's Mac: it runs only when that is the engine CC authorized for this client.
       state.search = {
         job_id: null,
         queued_at: null,
         results: [],
         note:
-          auth.engine === "none"
+          !modelSearchEnabled
+            ? "Web search deferred: model and search processing is switched off."
+            : auth.engine === "none"
             ? "No web search was run: no AI engine was authorized for this audit."
             : "No web search was run: it runs on Claude on CC's Mac, and this audit was authorized for the workspace's cloud model.",
       };
