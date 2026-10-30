@@ -38,6 +38,59 @@ const HOSTINGER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 
+const TRANSPORT_ERROR_NAMES = new Set(["AbortError", "NetworkError", "TimeoutError"]);
+const TRANSPORT_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ERR_NETWORK",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+const FETCH_TRANSPORT_MESSAGES = new Set([
+  "failed to fetch",
+  "fetch failed",
+  "load failed",
+  "network connection lost",
+  "network request failed",
+  "networkerror when attempting to fetch resource",
+]);
+
+type ErrorShape = {
+  cause?: unknown;
+  code?: unknown;
+  message?: unknown;
+  name?: unknown;
+};
+
+/**
+ * Fetch uses different error classes across Node/Undici, Workers and browsers.
+ * Match only their standard transport signals; a generic TypeError can be an
+ * adapter bug and must escape to the route's logged 500 handler.
+ */
+function isTransportFailure(error: unknown, seen = new Set<object>()): boolean {
+  if (!error || typeof error !== "object" || seen.has(error)) return false;
+  seen.add(error);
+  const shaped = error as ErrorShape;
+  const name = typeof shaped.name === "string" ? shaped.name : "";
+  if (TRANSPORT_ERROR_NAMES.has(name)) return true;
+  const code = typeof shaped.code === "string" ? shaped.code.toUpperCase() : "";
+  if (TRANSPORT_ERROR_CODES.has(code)) return true;
+  const message = typeof shaped.message === "string"
+    ? shaped.message.trim().replace(/\.$/, "").toLowerCase()
+    : "";
+  if (name === "TypeError" && FETCH_TRANSPORT_MESSAGES.has(message)) return true;
+  return isTransportFailure(shaped.cause, seen);
+}
+
 function first(env: EnvLike, ...names: string[]): string | null {
   for (const name of names) {
     const value = env[name]?.trim();
@@ -78,8 +131,9 @@ async function getStatus(
     });
     await response.body?.cancel().catch(() => undefined);
     return response.status;
-  } catch {
-    return 0;
+  } catch (error) {
+    if (isTransportFailure(error)) return 0;
+    throw error;
   }
 }
 
