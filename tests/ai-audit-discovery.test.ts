@@ -836,6 +836,70 @@ async function main() {
   };
   const stepOf = async (stepId: string) => (await db.execute({ sql: "SELECT status, error_code, result_ref FROM ai_audit_steps WHERE id = ?", args: [stepId] })).rows[0];
 
+  await check("a Mac answer that returns after the model/search switch turns off is discarded without profile or report writes", async () => {
+    const { eid } = await freshEngagement("Deferred Mac Answer Co");
+    const started = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });
+    assert.ok(started.ok);
+    const stepId = started.ok ? started.stepId : "";
+    const job = await macJob(eid);
+    let response: Response;
+    delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+    try {
+      response = await macAnswer(job, [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "misses about 40 calls a week" }]);
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(((await response.json()) as { discarded?: boolean }).discarded, true, "the late answer is explicitly discarded");
+    const step = await stepOf(stepId);
+    assert.deepEqual([String(step.status), String(step.error_code), step.result_ref], ["cancelled", "model_search_deferred", null]);
+    assert.ok((await jobsOf(stepId)).every(([, , result]) => result === null || result === '{"stored":false}'), "no checked model result remains on a Mac job");
+    const engagement = await engagementOf(eid);
+    const fields = await versions.listProfileFields(db, OASIS, engagement.current_profile_version_id!);
+    assert.ok(!fields.some((field) => field.source_type === "transcript"), "the late answer writes no profile fact");
+    const version = (await versions.getProfileVersion(db, OASIS, engagement.current_profile_version_id!))!;
+    assert.equal((version.summary as { extraction?: unknown }).extraction, undefined, "the late answer writes no extraction report");
+    assert.equal(await eventCount(eid, "extraction_done"), 0);
+  });
+
+  await check("a cloud answer that returns after the model/search switch turns off is discarded without profile or report writes", async () => {
+    const { eid } = await freshEngagement("Deferred Cloud Answer Co");
+    const started = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "cloud_workspace", actor: cc, now: NOW() });
+    assert.ok(started.ok);
+    const stepId = started.ok ? started.stepId : "";
+    let outcome: Awaited<ReturnType<typeof extraction.advanceCloudExtraction>>;
+    try {
+      outcome = await extraction.advanceCloudExtraction(db, {
+        tenantId: OASIS,
+        stepId,
+        now: NOW(),
+        deps: {
+          model: async () => {
+            delete process.env.AI_AUDIT_MODEL_SEARCH_ENABLED;
+            return {
+              ok: true as const,
+              provider: "test",
+              model: "test",
+              text: JSON.stringify({ facts: [{ key: "sales.missed_calls_per_week", value: 40, from: 1, to: 1, quote: "misses about 40 calls a week" }], summary: { goals: [], problems: [], commitments: [], open_questions: [] } }),
+            };
+          },
+          alert: async () => undefined,
+        },
+      });
+    } finally {
+      process.env.AI_AUDIT_MODEL_SEARCH_ENABLED = "on";
+    }
+    assert.equal(outcome, "failed");
+    const step = await stepOf(stepId);
+    assert.deepEqual([String(step.status), String(step.error_code), step.result_ref], ["cancelled", "model_search_deferred", null]);
+    const engagement = await engagementOf(eid);
+    const fields = await versions.listProfileFields(db, OASIS, engagement.current_profile_version_id!);
+    assert.ok(!fields.some((field) => field.source_type === "transcript"), "the late answer writes no profile fact");
+    const version = (await versions.getProfileVersion(db, OASIS, engagement.current_profile_version_id!))!;
+    assert.equal((version.summary as { extraction?: unknown }).extraction, undefined, "the late answer writes no extraction report");
+    assert.equal(await eventCount(eid, "extraction_done"), 0);
+  });
+
   await check("a transcript deleted mid-draft stops the draft: nothing it read is written, and every stored window is cleared (review of phase 2b, H1)", async () => {
     const { eid, transcriptId: tid } = await twoTranscripts("Deleted Midway Co");
     const r = await extraction.startExtraction(db, { tenantId: OASIS, engagementId: eid, engine: "mac_claude", actor: cc, now: NOW() });

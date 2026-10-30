@@ -732,9 +732,14 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
   if (!job) return systemRepeatOrLost(deps.db, ref, "ai_audit_model");
   if (job.toolKey !== "ai_audit_model") return invalid("tool_key");
   if (job.input.purpose === "write") return completeAuditWrite(job, ref, b.text, deps);
-  const checked = await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
+  // A claim made while the switch was on does not grandfather its answer.
+  // Recheck here, inside checkWindowAnswer, and again after the durable write:
+  // a late answer is acknowledged but retained nowhere.
+  const deferredBeforeCheck = !aiAuditModelSearchEnabled();
+  const checked = deferredBeforeCheck ? ({ ok: false, code: "not_permitted" } as const) : await checkWindowAnswer(deps.db, job.tenantId, job.input, b.text);
+  const deferredBeforeSave = deferredBeforeCheck || !aiAuditModelSearchEnabled();
   const at = deps.now.toISOString();
-  const resultJson = checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
+  const resultJson = deferredBeforeSave ? JSON.stringify({ discarded: "model_search_deferred" }) : checked.ok ? JSON.stringify({ window: checked.result }) : JSON.stringify({ discarded: checked.code });
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
@@ -750,7 +755,8 @@ async function completeAuditModel(ref: LeaseRef, b: Record<string, unknown>, dep
       console.error("[tools.complete] finishing the extraction failed; the tick will retry", { jobId: job.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return toolsJson(200, { ok: true, duplicate: false, kept: checked.ok ? checked.result.kept.length : 0 });
+  const discarded = deferredBeforeSave || !aiAuditModelSearchEnabled();
+  return toolsJson(200, { ok: true, duplicate: false, kept: discarded || !checked.ok ? 0 : checked.result.kept.length, ...(discarded ? { discarded: true } : {}) });
 }
 
 /**
