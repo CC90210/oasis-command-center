@@ -20,6 +20,20 @@
     { "binding": "WORKER_SELF_REFERENCE", "service": "oasis-command-center" },
     { "binding": "SEO_MEASURE", "service": "oasis-seo-measure" }
   ],
+  "queues": {
+    "producers": [
+      { "binding": "TELEGRAM_AGENT_JOBS", "queue": "oasis-telegram-agent-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "oasis-telegram-agent-jobs",
+        "max_batch_size": 1,
+        "max_retries": 5,
+        "retry_delay": 30,
+        "dead_letter_queue": "oasis-telegram-agent-jobs-dlq"
+      }
+    ]
+  },
   "observability": {
     "enabled": true
   },

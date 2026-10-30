@@ -1,27 +1,29 @@
 /**
  * worker-entry.ts - the Worker's entry point (wrangler.jsonc "main"): OpenNext's own handler, given the env with every
- * secret bundle expanded (lib/runtime/secret-bundles.ts), plus a queue() consumer for Slack agent turns.
+ * secret bundle expanded (lib/runtime/secret-bundles.ts), plus exact-name queue routing.
  *
  * SECRET BUNDLES (wired 2026-10-18). Cloudflare allows 128 secrets plus vars per Worker and this one reached it. A
  * bundle carries many secrets in one; this file expands them before OpenNext sees the env, so OpenNext copies them into
  * process.env (and getCloudflareContext().env) like any other secret. Expanded once per env object (one per isolate).
  *
- * SLACK QUEUE (still held for CC, see the Slack PR). Slack wants an answer in 3 seconds and a department's turn can
- * take longer than the 30 seconds a request may keep working after it answers; queue consumers get 15 minutes.
- * lib/slack/jobs.ts sends each @mention to the queue when the Worker has the binding and falls back to after() when it
- * does not, so Slack works either way. The queue bindings are NOT added yet: a deploy with a binding to a missing queue
- * fails, so the queue must exist in the Cloudflare account first. Then add to wrangler.jsonc:
+ * QUEUES. Every batch is dispatched by batch.queue in lib/worker/queue-router.ts.
+ * Telegram can never fall into Slack (or a later Maven drain) when bindings share this Worker. The Telegram producer
+ * and consumer are declared in wrangler.jsonc for oasis-telegram-agent-jobs. Rollback is TELEGRAM_WEBHOOK_ENABLED=off;
+ * remove those two bindings only after the queue is drained or deliberately abandoned.
+ *
+ * Slack is still held for CC, see the Slack PR. Its queue does not exist yet, so its bindings remain absent. When it is
+ * created the exact queue name is oasis-slack-agent-jobs:
  *
  *   "queues": {
  *     "producers": [{ "binding": "SLACK_AGENT_JOBS", "queue": "oasis-slack-agent-jobs" }],
  *     "consumers": [{ "queue": "oasis-slack-agent-jobs", "max_batch_size": 1, "max_retries": 3 }]
  *   }
  *
- * Until then queue() below is never called. The consumer logic is lib/slack/queue-consumer.ts (tested without a Worker).
+ * Queue consumers are kept outside this entry so they can be tested without a Worker bundle.
  */
 import handler from "./.open-next/worker.js";
 import { expandSecretBundles, scrubBundlesFromProcessEnv } from "./lib/runtime/secret-bundles";
-import { consumeSlackJobs, type QueueBatch } from "./lib/slack/queue-consumer";
+import { routeQueueBatch, type RoutedQueueBatch } from "./lib/worker/queue-router";
 
 type Env = { SLACK_SIGNING_SECRET?: string; PUBLIC_APP_URL?: string } & Record<string, unknown>;
 type Ctx = { waitUntil(p: Promise<unknown>): void; passThroughOnException?(): void };
@@ -46,9 +48,9 @@ const worker = {
   fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     return handler.fetch(request, withSecretBundles(env), ctx);
   },
-  async queue(batch: QueueBatch, env: Env, ctx: Ctx): Promise<void> {
+  async queue(batch: RoutedQueueBatch, env: Env, ctx: Ctx): Promise<void> {
     const full = withSecretBundles(env);
-    await consumeSlackJobs(batch, full, (request) => handler.fetch(request, full, ctx));
+    await routeQueueBatch(batch, full, (request) => handler.fetch(request, full, ctx));
   },
 };
 
