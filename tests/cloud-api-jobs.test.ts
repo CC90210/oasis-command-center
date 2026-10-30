@@ -103,6 +103,13 @@ test("each migrated route reads its own off-switch before cron auth", () => {
   }
 });
 
+test("library linker route makes unresolved conflicts visible to cron health", () => {
+  const source = readFileSync("app/api/cron/library-post-linker/route.ts", "utf8");
+  assert.match(source, /result\.conflicts\.length > 0/);
+  assert.match(source, /error: "library_post_linker_conflicts"/);
+  assert.match(source, /status: 409/);
+});
+
 test("service checks preserve provider verdicts and config-only test mode performs no I/O", async () => {
   assert.deepEqual(serviceHealthVerdict(200), { status: "healthy", error: null });
   assert.equal(serviceHealthVerdict(401).status, "down");
@@ -447,6 +454,41 @@ test("library linker accepts a concurrent same-asset replay as idempotent succes
   client.close();
 });
 
+test("library linker preserves Zernio metadata that becomes authoritative mid-run", async () => {
+  const client = await linkerDb();
+  const trackerMeta = '{"zernio":{"outcome":"published"}}';
+  const trackerPublishedAt = "2026-08-14T14:35:00Z";
+  const trackerPlatforms = JSON.stringify(["instagram", "linkedin"]);
+  let raced = false;
+  const db = {
+    execute: client.execute.bind(client),
+    async batch(statements: InStatement[]) {
+      if (!raced && statements[0]?.sql.includes("UPDATE marketing_asset")) {
+        raced = true;
+        await client.execute({
+          sql: `UPDATE marketing_asset
+                SET meta = ?, published_at = ?, platforms = ?
+                WHERE tenant_id = ? AND id = 'a'`,
+          args: [trackerMeta, trackerPublishedAt, trackerPlatforms, OASIS_OPERATOR_TENANT_ID],
+        });
+      }
+      return client.batch(statements, "write");
+    },
+  } as unknown as Pick<Client, "execute" | "batch">;
+
+  const result = await runLibraryPostLinker({ db, dryRun: false });
+  assert.equal(result.executed, true);
+  assert.equal(result.plan[0].zernio_tracked, true);
+  assert.deepEqual(result.conflicts, []);
+  const current = (await client.execute(
+    "SELECT meta, published_at, platforms FROM marketing_asset WHERE id = 'a'",
+  )).rows[0];
+  assert.equal(current.meta, trackerMeta);
+  assert.equal(current.published_at, trackerPublishedAt);
+  assert.equal(current.platforms, trackerPlatforms);
+  client.close();
+});
+
 function analyticsResponse(posts: unknown[], pagination: Record<string, unknown> = { pages: 1, total: posts.length }): Response {
   return Response.json({ posts, pagination, overview: { publishedPosts: posts.length, totalPosts: posts.length } });
 }
@@ -465,6 +507,48 @@ test("Zernio analytics follows every advertised page and refuses a short read", 
     () => fetchAllZernioAnalytics("late-test", async () => analyticsResponse([], { pages: 1, total: 2 })),
     /zernio_incomplete/,
   );
+  let duplicateCalls = 0;
+  await assert.rejects(
+    () => fetchAllZernioAnalytics("late-test", async () => {
+      duplicateCalls += 1;
+      return duplicateCalls === 1
+        ? analyticsResponse([{ _id: "post-A" }], { pages: 2, total: 2 })
+        : analyticsResponse([{ _id: "post-A" }]);
+    }),
+    /zernio_post_duplicate:2:post-A/,
+  );
+  assert.equal(duplicateCalls, 2);
+});
+
+test("analytics access loss fails before any database write", async () => {
+  const client = await analyticsDb();
+  let writes = 0;
+  const db = {
+    execute: client.execute.bind(client),
+    async batch(statements: InStatement[]) {
+      writes += statements.length;
+      return client.batch(statements, "write");
+    },
+  } as unknown as Pick<Client, "execute" | "batch">;
+  await assert.rejects(
+    () => runPostAnalyticsSync({
+      db,
+      dryRun: false,
+      env: { LATE_API_KEY: "late-test" },
+      fetchImpl: async () => Response.json({
+        hasAnalyticsAccess: false,
+        posts: [],
+        pagination: { pages: 1, total: 0 },
+      }),
+      now: () => NOW,
+    }),
+    /zernio_analytics_access_denied/,
+  );
+  assert.equal(writes, 0);
+  assert.equal(Number((await client.execute(
+    "SELECT views FROM post_analytics WHERE id = 'row-1'",
+  )).rows[0].views), 99);
+  client.close();
 });
 
 test("analytics transform is one row per platform and skips rows with no stable platform id", () => {

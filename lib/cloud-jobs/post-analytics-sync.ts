@@ -62,6 +62,22 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function zernioPostIdentity(value: unknown): string | null {
+  const post = object(value);
+  for (const candidate of [post._id, post.latePostId]) {
+    if (typeof candidate !== "string" && typeof candidate !== "number") continue;
+    const identity = String(candidate).trim();
+    if (identity) return identity;
+  }
+  return null;
+}
+
+function assertAnalyticsAccess(payload: ZernioPayload): void {
+  if (payload.hasAnalyticsAccess === false) {
+    throw new Error("zernio_analytics_access_denied");
+  }
+}
+
 async function fetchZernioPage(path: string, key: string, fetchImpl: FetchLike): Promise<ZernioPayload> {
   const response = await fetchImpl(`${ZERNIO_BASE}${path}`, {
     method: "GET",
@@ -82,15 +98,35 @@ async function fetchZernioPage(path: string, key: string, fetchImpl: FetchLike):
 export async function fetchAllZernioAnalytics(key: string, fetchImpl: FetchLike = fetch): Promise<ZernioPayload> {
   if (!key.trim()) throw new Error("late_api_key_missing");
   const first = await fetchZernioPage(`/v1/analytics?limit=${PAGE_LIMIT}`, key, fetchImpl);
+  assertAnalyticsAccess(first);
   const pagination = object(first.pagination);
   const pages = Math.max(1, integer(pagination.pages) || 1);
   if (pages > MAX_PAGES) throw new Error(`zernio_page_count_invalid:${pages}`);
   const firstPosts = list(first.posts);
   const posts = [...(firstPosts.length ? firstPosts : list(first.data))];
+  const seenPostIdentities = new Set<string>();
+  if (pages > 1 && !posts.length) throw new Error(`zernio_page_empty:1/${pages}`);
+  for (const post of posts) {
+    const identity = zernioPostIdentity(post);
+    if (!identity) throw new Error("zernio_post_identity_missing:1");
+    if (seenPostIdentities.has(identity)) {
+      throw new Error(`zernio_post_duplicate:1:${identity}`);
+    }
+    seenPostIdentities.add(identity);
+  }
   for (let page = 2; page <= pages; page += 1) {
     const next = await fetchZernioPage(`/v1/analytics?limit=${PAGE_LIMIT}&page=${page}`, key, fetchImpl);
+    assertAnalyticsAccess(next);
     const got = list(next.posts).length ? list(next.posts) : list(next.data);
     if (!got.length) throw new Error(`zernio_page_empty:${page}/${pages}`);
+    for (const post of got) {
+      const identity = zernioPostIdentity(post);
+      if (!identity) throw new Error(`zernio_post_identity_missing:${page}`);
+      if (seenPostIdentities.has(identity)) {
+        throw new Error(`zernio_post_duplicate:${page}:${identity}`);
+      }
+      seenPostIdentities.add(identity);
+    }
     posts.push(...got);
   }
   const total = integer(pagination.total) || posts.length;
@@ -254,6 +290,7 @@ export async function runPostAnalyticsSync(input: {
     }),
     fetchAllZernioAnalytics(key, input.fetchImpl ?? fetch),
   ]);
+  assertAnalyticsAccess(payload);
   if (assets.rows.length > DB_READ_LIMIT || existing.rows.length > DB_READ_LIMIT) {
     throw new Error("post_analytics_read_limit_exceeded");
   }

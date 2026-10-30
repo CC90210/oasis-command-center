@@ -1,4 +1,4 @@
-import type { Client, InStatement, Row } from "@libsql/client";
+import type { Client, InStatement, Row, Value } from "@libsql/client";
 import { OASIS_OPERATOR_TENANT_ID } from "@/lib/cloud-jobs/control";
 
 export const MIN_LIBRARY_HOOK = 24;
@@ -13,7 +13,7 @@ export type LibraryAsset = {
   platforms: string | null;
   status: string;
   brand_slug: string;
-  meta: unknown;
+  meta: Value;
 };
 
 export type AnalyticsPost = {
@@ -69,7 +69,7 @@ export function normalizePostText(value: string | null | undefined): string {
 }
 
 export function isZernioTracked(asset: Pick<LibraryAsset, "meta">): boolean {
-  let meta = asset.meta;
+  let meta: unknown = asset.meta;
   if (typeof meta === "string") {
     try {
       meta = JSON.parse(meta) as unknown;
@@ -206,8 +206,10 @@ export async function runLibraryPostLinker(input: {
   if (assetRead.rows.length > READ_LIMIT || postRead.rows.length > READ_LIMIT) {
     throw new Error("library_post_linker_read_limit_exceeded");
   }
+  const assets = assetRead.rows.map(assetFromRow);
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
   const posts = postRead.rows.map(postFromRow);
-  const result = planLibraryPostLinks(assetRead.rows.map(assetFromRow), posts);
+  const result = planLibraryPostLinks(assets, posts);
   if (input.dryRun || result.plan.length === 0) return result;
 
   const postWrites = result.plan.flatMap((row) => row.post_ids.map((postId) => ({
@@ -279,22 +281,61 @@ export async function runLibraryPostLinker(input: {
     }];
   });
 
-  const assetWrites: InStatement[] = result.plan
+  const assetWrites = result.plan
     .filter((row) => !row.zernio_tracked && row.published_at)
-    .map((row) => ({
-      sql: `UPDATE marketing_asset
-            SET published_at = ?, platforms = ?
-            WHERE tenant_id = ? AND id = ?`,
-      args: [
-        row.published_at,
-        JSON.stringify(row.platforms),
-        OASIS_OPERATOR_TENANT_ID,
-        row.asset_id,
-      ],
-    }));
-  const assetResults = assetWrites.length ? await input.db.batch(assetWrites, "write") : [];
-  if (assetResults.some((write) => write.rowsAffected !== 1)) {
-    throw new Error("library_post_linker_scoped_write_missed");
+    .map((row) => {
+      const initial = assetsById.get(row.asset_id);
+      if (!initial) throw new Error("library_post_linker_asset_snapshot_missing");
+      const plannedPlatforms = JSON.stringify(row.platforms);
+      return {
+        row,
+        plannedPlatforms,
+        statement: {
+          sql: `UPDATE marketing_asset
+                SET published_at = ?, platforms = ?
+                WHERE tenant_id = ? AND id = ?
+                  AND meta IS ? AND published_at IS ? AND platforms IS ?`,
+          args: [
+            row.published_at,
+            plannedPlatforms,
+            OASIS_OPERATOR_TENANT_ID,
+            row.asset_id,
+            initial.meta,
+            initial.published_at,
+            initial.platforms,
+          ],
+        } satisfies InStatement,
+      };
+    });
+  const assetResults = assetWrites.length
+    ? await input.db.batch(assetWrites.map((write) => write.statement), "write")
+    : [];
+  if (assetResults.length !== assetWrites.length) {
+    throw new Error("library_post_linker_asset_write_result_mismatch");
+  }
+  const missedAssets = assetWrites.filter((_, index) => assetResults[index]?.rowsAffected !== 1);
+  for (const missed of missedAssets) {
+    const currentRead = await input.db.execute({
+      sql: `SELECT id, tenant_id, title, hook, published_at, platforms, status, brand_slug, meta
+            FROM marketing_asset WHERE tenant_id = ? AND id = ? LIMIT 1`,
+      args: [OASIS_OPERATOR_TENANT_ID, missed.row.asset_id],
+    });
+    const currentRow = currentRead.rows[0];
+    if (!currentRow) throw new Error("library_post_linker_asset_missing");
+    const current = assetFromRow(currentRow);
+    if (isZernioTracked(current)) {
+      // Zernio became authoritative after the initial read. Preserve its fields.
+      missed.row.zernio_tracked = true;
+      continue;
+    }
+    if (
+      current.published_at === missed.row.published_at
+      && current.platforms === missed.plannedPlatforms
+    ) {
+      // A concurrent replay already wrote the same values. This is idempotent success.
+      continue;
+    }
+    throw new Error("library_post_linker_asset_concurrent_change");
   }
   result.linkable_assets = result.plan.length;
   result.linked_posts = successfulPostIds.size;

@@ -20,6 +20,15 @@ export async function GET(request: NextRequest) {
       db: getTursoClient(),
       dryRun,
     });
+    if (result.conflicts.length > 0) {
+      return NextResponse.json({
+        ok: false,
+        error: "library_post_linker_conflicts",
+        dry_run: dryRun,
+        dry_run_scope: dryRun ? "database_read_only" : "live",
+        ...result,
+      }, { status: 409 });
+    }
     return NextResponse.json({
       ok: true,
       dry_run: dryRun,
