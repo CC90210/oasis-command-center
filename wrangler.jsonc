@@ -20,6 +20,22 @@
     { "binding": "WORKER_SELF_REFERENCE", "service": "oasis-command-center" },
     { "binding": "SEO_MEASURE", "service": "oasis-seo-measure" }
   ],
+  // Telegram queues: create the main queue and its DLQ before deploying this binding.
+  // Immediate rollback is TELEGRAM_WEBHOOK_ENABLED=off. Once no work remains,
+  // remove both entries below; never leave the consumer without its producer.
+  "queues": {
+    "producers": [
+      { "binding": "TELEGRAM_AGENT_JOBS", "queue": "oasis-telegram-agent-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "oasis-telegram-agent-jobs",
+        "max_batch_size": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "oasis-telegram-agent-jobs-dlq"
+      }
+    ]
+  },
   "observability": {
     "enabled": true
   },
