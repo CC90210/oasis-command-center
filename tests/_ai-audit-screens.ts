@@ -307,7 +307,26 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
       throw new Error("injected workspace AI account read failure");
     },
   });
-  const cloudReady = await setup.setupChecks(db, tenantId, now, { ...cloudDeps, workspaceAiAccountReady: async () => true });
+  let deferredCloudAccountCalls = 0;
+  const cloudDeferred = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    modelSearchEnabled: () => false,
+    workspaceAiAccountReady: async () => {
+      deferredCloudAccountCalls += 1;
+      return true;
+    },
+  });
+  let enabledCloudAccountCalls = 0;
+  const cloudReady = await setup.setupChecks(db, tenantId, now, {
+    ...cloudDeps,
+    workspaceAiAccountReady: async () => {
+      enabledCloudAccountCalls += 1;
+      return true;
+    },
+  });
+  assert.equal(deferredCloudAccountCalls, 0, "the global OFF switch skips the workspace AI account lookup");
+  assert.equal(cloudDeferred.find((c) => c.key === "model_search")?.state, "deferred", "the global OFF switch still reports the cloud engine as deferred");
+  assert.equal(enabledCloudAccountCalls, 1, "the enabled cloud engine checks its workspace AI account exactly once");
   assert.equal(cloudMissing.find((c) => c.key === "model_search")?.state, "missing", "cloud model readiness requires a usable workspace AI account");
   assert.equal(cloudUnknown.find((c) => c.key === "model_search")?.state, "unknown", "an unreadable workspace AI account is never reported ready");
   assert.equal(cloudReady.find((c) => c.key === "model_search")?.state, "ready", "a usable workspace AI account makes the selected cloud engine ready");

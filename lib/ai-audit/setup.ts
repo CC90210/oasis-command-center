@@ -95,12 +95,12 @@ export async function setupChecks(db: Client, tenantId: string, now: Date, deps:
     attempt("Stripe", () => deps.stripeConnected(tenantId)),
     attempt("mailbox", () => deps.mailboxConnected(tenantId)),
   ]);
+  const modelSearchEnabled = deps.modelSearchEnabled();
   const workspaceAiAccount =
-    settings.ok && settings.value.settings.engine === "cloud_workspace"
+    modelSearchEnabled && settings.ok && settings.value.settings.engine === "cloud_workspace"
       ? await attempt("workspace AI account", () => deps.workspaceAiAccountReady(tenantId))
       : null;
   const checks: SetupCheck[] = [];
-  const modelSearchEnabled = deps.modelSearchEnabled();
 
   if (!catalogue.ok) checks.push(unknown("prices", "Prices"));
   else {
