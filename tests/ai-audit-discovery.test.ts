@@ -459,12 +459,18 @@ async function main() {
     const { eid } = await freshEngagement("Route Engine Fence Co");
     const stepsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n);
     const jobsBefore = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n);
+    let engagementReads = 0;
+    const getEngagementSpy: typeof store.getEngagement = async (...args) => {
+      engagementReads += 1;
+      return store.getEngagement(...args);
+    };
     await login(USERS.cc);
     try {
       for (const extra of [{}, { engine: null }, { engine: "none" }, { engine: "mac-claude" }, { engine: "cloud" }]) {
-        const response = await route.POST(postJson(`http://t.test/api/ai-audit/${eid}`, { action: "extract_profile", ...extra }), params(eid));
+        const response = await route.POST(postJson(`http://t.test/api/ai-audit/${eid}`, { action: "extract_profile", ...extra }), params(eid), { getEngagement: getEngagementSpy });
         assert.equal(response.status, 400);
         assert.deepEqual(await response.json(), { ok: false, error: "engine_invalid" });
+        assert.equal(engagementReads, 0, "an invalid extraction engine is refused before getEngagement");
         assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_steps WHERE tenant_id = ? AND engagement_id = ? AND step_key = 'extract'", args: [OASIS, eid] })).rows[0].n), stepsBefore);
         assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'ai_audit_model' AND json_extract(input_json, '$.engagement_id') = ?", args: [OASIS, eid] })).rows[0].n), jobsBefore);
       }

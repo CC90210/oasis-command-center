@@ -4,8 +4,8 @@
  * The research behind the audit, on the engagement's "Research" tab (phase 3).
  *
  * After Gate 1 the Command Center reads the client's website again, runs
- * Google PageSpeed, has CC's Mac search the web with public facts only, and
- * reads each page the search found itself. The evidence rules then decide
+ * Google PageSpeed, may run an authorized public web search, and reads each
+ * page that research found itself. The evidence rules then decide
  * every label (lib/ai-audit/evidence.ts) and the impact calculator gives
  * ranges (lib/ai-audit/impact.ts). This shows the stored run: what was
  * measured, what the client said, the likely problems to test, the estimates
@@ -25,8 +25,10 @@ const IN_FLIGHT = ["queued", "running", "waiting_runner"];
 const PHASE_WORDS: Readonly<Record<string, string>> = {
   site: "Reading the website",
   pagespeed: "Running Google PageSpeed",
-  search: "Handing the web search to CC's Mac",
-  waiting_search: "Waiting for the web search on CC's Mac",
+  // Neutral for every engine: cloud, No AI and switch-off runs skip search
+  // here, while an authorized Mac run may be waiting on its search job.
+  search: "Checking authorized public sources",
+  waiting_search: "Checking authorized public sources",
   fetch: "Reading the pages the search found",
   assemble: "Checking the evidence and putting it together",
 };

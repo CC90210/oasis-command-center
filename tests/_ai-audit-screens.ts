@@ -112,8 +112,12 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     deferred.settings = { ...deferred.settings, engine: "none" };
     deferred.engagement = { ...deferred.engagement, stage: "generating" };
     deferred.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    deferred.research.step = { id: "deferred-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
     scenarios.push({ id: "workspace:model-search-deferred", screen: "workspace", props: { view: deferred, isOwner: true, initialTab: "research" } });
-    expect.set("workspace:model-search-deferred", { has: ["Model and web search are deferred", "Deterministic website checks", "audit and proposal drafting", "PDF printing continue"] });
+    expect.set("workspace:model-search-deferred", {
+      has: ["Running: Checking authorized public sources.", "Model and web search are deferred", "Deterministic website checks", "audit and proposal drafting", "PDF printing continue"],
+      hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i],
+    });
   }
   {
     const cloud = json(first as NonNullable<typeof first>);
@@ -122,10 +126,11 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     cloud.authorization = null;
     cloud.engagement = { ...cloud.engagement, stage: "generating" };
     cloud.research ??= { latest: null, step: null, assumptions: {}, estimates: [], writing: null };
+    cloud.research.step = { id: "cloud-search-step", status: "running", phase: "search", error: null, created_at: new Date().toISOString() };
     scenarios.push({ id: "workspace:cloud-search-skipped", screen: "workspace", props: { view: cloud, isOwner: true, initialTab: "research" } });
     expect.set("workspace:cloud-search-skipped", {
-      has: ["workspace cloud model is authorized", "AI web search is not run for this engine", "website checks, PageSpeed and evidence rules still run"],
-      hasNot: [/web search waits for CC's Mac/i],
+      has: ["Running: Checking authorized public sources.", "workspace cloud model is authorized", "AI web search is not run for this engine", "website checks, PageSpeed and evidence rules still run"],
+      hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i, /web search waits for CC's Mac/i],
     });
   }
   // The proposal editor's two ways out of a stuck draft: a waiting line takes its now-confirmed price in place,

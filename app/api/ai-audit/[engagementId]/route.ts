@@ -104,14 +104,17 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   return json(200, { ok: true, view, viewer: { is_owner: access.session.isOwner } });
 }
 
-export async function POST(req: NextRequest, ctx: Ctx) {
+export async function POST(req: NextRequest, ctx: Ctx, deps: { getEngagement: typeof getEngagement } = { getEngagement }) {
   const access = await requireAiAuditSession();
   if (!access.ok) return access.response;
   const s = access.session;
   const { engagementId } = await ctx.params;
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body.action !== "string") return json(400, { ok: false, error: "action_required" });
-  const engagement = await getEngagement(s.db, s.tenantId, engagementId);
+  // Auth and JSON parsing still run first. Refuse an invalid model-processing
+  // request before reading which engagement (if any) that id names.
+  if (body.action === "extract_profile" && !isExtractionEngine(body.engine)) return json(400, { ok: false, error: "engine_invalid" });
+  const engagement = await deps.getEngagement(s.db, s.tenantId, engagementId);
   if (!engagement) return json(404, { ok: false, error: "not_found" });
   const actor: Actor = { type: "user", id: s.userId };
   const now = new Date();
