@@ -50,6 +50,14 @@
       "schedule": "17 * * * *"
     },
     {
+      "path": "/api/cron/library-post-linker",
+      "schedule": "17 * * * *"
+    },
+    {
+      "path": "/api/cron/post-analytics-sync",
+      "schedule": "17 * * * *"
+    },
+    {
       "path": "/api/cron/dispatch-scheduled-calls",
       "schedule": "*/5 * * * *"
     },
@@ -72,6 +80,15 @@
     {
       "path": "/api/cron/connection-health",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/service-checks",
+      "schedule": "7 * * * *"
+    },
+    {
+      "path": "/api/cron/event-bus-retention",
+      "schedule": "30 3 * * SUN",
+      "timeZone": "America/Toronto"
     },
     {
       "path": "/api/cron/finance-books?job=fx-refresh",

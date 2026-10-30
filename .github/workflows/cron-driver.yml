@@ -137,8 +137,12 @@ jobs:
                       /api/cron/sla-check
                       /api/cron/connection-health" ;;
             "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
+            "7 * * * *")     ROUTES="/api/cron/service-checks" ;;
             "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry
-                                      /api/cron/reconcile-website-sales-payments" ;;
+                                      /api/cron/reconcile-website-sales-payments
+                                      /api/cron/library-post-linker
+                                      /api/cron/post-analytics-sync" ;;
+            "30 3 * * SUN")   ROUTES="/api/cron/event-bus-retention" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
             # The books' daily upkeep (lib/founders-finances/books-cron.ts).
             "47 21 * * *")   ROUTES="/api/cron/finance-books?job=fx-refresh" ;;

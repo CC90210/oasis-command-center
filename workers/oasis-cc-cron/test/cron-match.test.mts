@@ -52,7 +52,7 @@ function legacyCronMatches(expr: string, instant: Date): boolean {
 }
 
 test("every table expression parses", () => {
-  assert.equal(CRON_TABLE.length, 24, "the registry has 23 pre-existing schedules plus the cloud email sender");
+  assert.equal(CRON_TABLE.length, 28, "the registry has 23 pre-existing schedules, the cloud email sender, and four API-only migrations");
   for (const e of CRON_TABLE) {
     assert.doesNotThrow(() => cronMatches(e.schedule, at("2026-08-31T00:00:00Z")), e.schedule);
     assert.equal(isValidCronExpression(e.schedule), true, `${e.path}: ${e.schedule}`);
@@ -60,10 +60,18 @@ test("every table expression parses", () => {
   }
 });
 
-test("the optional zone defaults to UTC, preserving the 23 existing schedules and the new sender cadence", () => {
+test("the optional zone preserves the 23 existing UTC schedules plus sender cadence and gives weekly retention Toronto wall time", () => {
   const first = Date.parse("2026-10-31T00:00:00Z");
   const last = Date.parse("2026-11-03T00:00:00Z");
-  for (const entry of CRON_TABLE) {
+  const migrated = new Set([
+    "/api/cron/service-checks",
+    "/api/cron/event-bus-retention",
+    "/api/cron/library-post-linker",
+    "/api/cron/post-analytics-sync",
+  ]);
+  const existing = CRON_TABLE.filter((entry) => !migrated.has(entry.path));
+  assert.equal(existing.length, 24);
+  for (const entry of existing) {
     assert.equal(entry.timeZone, undefined, `${entry.path} must remain on its current implicit UTC behavior`);
     for (let time = first; time <= last; time += 60_000) {
       const instant = new Date(time);
@@ -74,6 +82,10 @@ test("the optional zone defaults to UTC, preserving the 23 existing schedules an
       );
     }
   }
+  assert.equal(
+    CRON_TABLE.find((entry) => entry.path === "/api/cron/event-bus-retention")?.timeZone,
+    "America/Toronto",
+  );
 });
 
 test("day names are case-insensitive and work as singles, comma lists, and ranges", () => {
@@ -207,7 +219,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
   ].sort());
 });
 
-test("the books' daily jobs each fire once a day, sharing only the every-minute dispatchers (engine fallbacks, guided automations, meeting reminders), in order", () => {
+test("the books' daily jobs each fire once a day and keep their dependency order", () => {
   // lib/founders-finances/books-cron.ts: rates, then Stripe (payouts leave
   // clearing before the bank feed looks), then Wise invoice matches, then the
   // feed. Each on its own minute, off the 5-minute grid, so none shares a
@@ -220,16 +232,20 @@ test("the books' daily jobs each fire once a day, sharing only the every-minute 
     const books = due.filter((p) => p.startsWith("/api/cron/finance-books?job="));
     for (const p of books) {
       fired.push({ job: p.slice("/api/cron/finance-books?job=".length), minute: m });
+      const expected = [
+        "/api/cron/dispatch-automations",
+        "/api/cron/dashboard-email-sender",
+        "/api/cron/dispatch-engine-fallbacks",
+        // Every minute since 2026-10-28: the reminder ladder ends 5 minutes out.
+        "/api/cron/dispatch-founder-meeting-reminders",
+        p,
+      ];
+      // Service Checks keeps the PC job's :07 hourly cadence, so it shares
+      // the 22:07 Wise-reconcile minute without changing either job's order.
+      if (m % 60 === 7) expected.push("/api/cron/service-checks");
       assert.deepEqual(
         due.sort(),
-        [
-          "/api/cron/dispatch-automations",
-          "/api/cron/dashboard-email-sender",
-          "/api/cron/dispatch-engine-fallbacks",
-          // Every minute since 2026-10-28: the reminder ladder ends 5 minutes out.
-          "/api/cron/dispatch-founder-meeting-reminders",
-          p,
-        ].sort(),
+        expected.sort(),
         `${p} shares minute ${m} with an unexpected route: ${due.join(", ")}`,
       );
     }
