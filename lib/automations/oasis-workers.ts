@@ -48,12 +48,19 @@ export type OasisWorker = {
 // and controls.
 export const OASIS_WORKERS: OasisWorker[] = [
   {
+    // First on purpose (CC 2026-10-31): the bridge is what makes "this
+    // computer" part of OASIS at all.
+    service: "pm2.claude-bridge",
+    label: "Local chat bridge",
+    purpose: "Connects this computer to the Command Center (localhost:9100): dashboard agent chats and agent tools that need this computer run through it.",
+  },
+  {
     // Still the only runner of the active cron_jobs rows (Daily Bravo Brief,
     // Maven syncs, health checks) until they move to Cloudflare. It runs every
     // ACTIVE row; the risky rows are switched off in cron_jobs, not filtered here.
     service: "pm2.bravo-scheduler",
     label: "Empire scheduler",
-    purpose: "Polls cron_jobs every 60s and runs every active job (Daily Bravo Brief, Maven syncs, health checks) until each moves to Cloudflare.",
+    purpose: "Runs this computer's scheduled jobs (Daily Bravo Brief, Maven syncs, health checks) every minute, until each moves to Cloudflare.",
   },
   {
     // The setter. Absent from this list until 2026-08-21, which meant its
@@ -85,21 +92,16 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — Telegram runs 24/7 on the daemon VPS (oasis-telegram-bridge); a second poller on this computer would collide with it.",
   },
   {
-    service: "pm2.claude-bridge",
-    label: "Local chat bridge",
-    purpose: "localhost:9100 chat HTTP server — warm-pool Claude Code subprocess + tool proxy.",
-  },
-  {
     // The reporter for every tile on this board: without its heartbeat the
     // computer reads offline and Telegram/agent turns cannot reach it.
     service: "pm2.claude-bridge-ping",
-    label: "Bridge heartbeat + tenant cron poller",
-    purpose: "Heartbeats to /api/bridge/ping every 60s (keeps this computer online for Telegram and agent work), reports these worker statuses, and polls tenant_cron_jobs.",
+    label: "Bridge heartbeat",
+    purpose: "Tells the Command Center every minute that this computer is online, reports these worker statuses, and runs workspace schedules.",
   },
   {
     service: "pm2.event-router",
     label: "Event router",
-    purpose: "Read-only: copies every agent_events row into this computer's audit log (state/event_router.log).",
+    purpose: "Read-only: keeps a copy of every agent event in this computer's activity log.",
   },
   // Removed 2026-06-06 — three stale workers that aren't actually
   // running on CC's local machine for the OASIS personal Command Center:

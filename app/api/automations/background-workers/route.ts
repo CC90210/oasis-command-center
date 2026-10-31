@@ -397,6 +397,9 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     // bridge proxy (/api/automations/background-workers/control) instead of the
     // operator's localhost bridge. SunBiz (VPS daemons) with bridge env set.
     remote_control: sunbizControl,
+    // Whose fleet this is: the panel names OASIS's own VPS (a Hostinger
+    // server) and never puts that name on another tenant's host.
+    inventory,
     workers,
   });
 });

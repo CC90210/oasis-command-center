@@ -17,6 +17,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import {
   runHealthChecks,
   OASIS_GLOBAL_CHECKS,
@@ -33,6 +34,8 @@ export const maxDuration = 60;
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   // `?notify=0` runs and records without sending, for manual inspection.
   const notify = req.nextUrl.searchParams.get("notify") !== "0";

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getTenantIntegrationValue } from "@/lib/tenant-integration-store";
 import { getTursoClient } from "@/lib/turso";
 import { reconcileWebsiteSalesPayments } from "@/lib/website-sales-payment-reconciliation";
@@ -11,6 +12,8 @@ export const maxDuration = 300;
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   try {
     const result = await reconcileWebsiteSalesPayments(getTursoClient(), {

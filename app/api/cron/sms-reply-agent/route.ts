@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { runSmsReplyAgentWorker, smsAgentSafeErrorCode } from "@/lib/sms/reply-agent";
 
 export const runtime = "nodejs";
@@ -9,6 +10,8 @@ export const maxDuration = 60;
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   try {
     const result = await runSmsReplyAgentWorker();
     return NextResponse.json(result, { status: result.failed > 0 ? 503 : 200 });

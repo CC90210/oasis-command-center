@@ -16,6 +16,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { listActiveAgents, markProcessed, type AgentEmailSettings } from "@/lib/agents/operator-email/settings";
 import { readMailbox } from "@/lib/agents/operator-email/read-dispatch";
 import { ingestMessages, type IngestResult } from "@/lib/agents/operator-email/ingest";
@@ -130,6 +131,8 @@ async function runAgent(agent: AgentEmailSettings, write: boolean) {
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   const write = req.nextUrl.searchParams.get("write") === "1";
 
   let agents: AgentEmailSettings[] = [];

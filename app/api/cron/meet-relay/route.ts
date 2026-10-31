@@ -23,6 +23,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { meetSfuIfConfigured, r2MeetStorage } from "@/lib/meet/recording";
 import { handleMeetRelayCron } from "@/lib/meet/recording-routes";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
@@ -34,6 +35,8 @@ export const maxDuration = 60;
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   if (!tursoConfigured()) {
     return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   }

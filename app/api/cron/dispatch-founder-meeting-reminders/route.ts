@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient } from "@/lib/turso";
 import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
@@ -1067,6 +1068,8 @@ async function alertFailedReminders(db: Db, now: string): Promise<number> {
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   const runDeadline = Date.now() + RUN_DEADLINE_MS;
   const db = getServiceSupabase();
   const now = new Date().toISOString();

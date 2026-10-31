@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { reconcileDripEmailTelemetry } from "@/lib/drips/reconcile-email-telemetry";
 import { getServiceSupabase } from "@/lib/supabase-server";
 
@@ -10,6 +11,8 @@ export const maxDuration = 60;
 export async function GET(req: NextRequest) {
   const authError = checkCronAuth(req);
   if (authError) return authError;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   try {
     const result = await reconcileDripEmailTelemetry(getServiceSupabase());

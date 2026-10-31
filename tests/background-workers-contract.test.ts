@@ -95,10 +95,12 @@ for (const service of vpsServices) {
 assert.deepEqual(
   [...oasisInventory.matchAll(/service:\s*"([^"]+)"/g)].map((match) => match[1]),
   [
+    // The local chat bridge first (CC 2026-10-31): it is what connects this
+    // computer to the Command Center at all.
+    "pm2.claude-bridge",
     "pm2.bravo-scheduler",
     "pm2.bravo-ig-dm",
     "pm2.bravo-telegram",
-    "pm2.claude-bridge",
     "pm2.claude-bridge-ping",
     "pm2.event-router",
     "pm2.dashboard-email-consumer",
@@ -283,10 +285,30 @@ assert.equal(selectWorkerInventory({ isOasisTenant: false, isClientProfile: fals
 
 // The UI groups by execution/runtime, not historical ownership, and never
 // paints disabled lifecycle buttons for automatically managed/retired rows.
+//
+// Three categories only (CC 2026-10-31): the 24/7 cloud automations are the
+// Cloudflare jobs card (CronFlowCards, with its on/off switches); this panel
+// shows the 24/7 cloud workers on OASIS's Hostinger VPS and this computer.
+// Retired inventory and the cloud reminder row (a duplicate of the "Lead
+// Meeting Reminders" job) are not rendered here.
 {
-  for (const label of ["This computer", "OASIS cloud", "Retired by plan"]) {
-    assert.ok(panel.includes(label), `panel must render the ${label} group`);
-  }
+  const cronCard = readFileSync("components/automations/CronFlowCards.tsx", "utf8");
+  assert.ok(cronCard.includes('title="24/7 cloud automations (Cloudflare)"'), "category a: the Cloudflare jobs card");
+  assert.ok(panel.includes('const PANEL_GROUPS: WorkerRuntime[] = ["remote", "local"];'), "the panel renders the VPS and this computer only");
+  assert.ok(panel.includes('const OASIS_REMOTE_LABEL = "24/7 cloud workers (Hostinger VPS)";'), "category b: OASIS's VPS by name");
+  assert.ok(
+    panel.includes('workerRuntime === "remote" && data.inventory === "oasis"'),
+    "the Hostinger name is only ever put on OASIS's own fleet",
+  );
+  assert.match(route, /^ {4}inventory,\r?$/m, "the route says whose fleet it is");
+  assert.ok(panel.includes('label: "This computer (Windows / Mac)"'), "category c: this computer");
+  assert.ok(!panel.includes("RUNTIME_GROUP_ORDER"), "no group list beyond PANEL_GROUPS");
+  assert.ok(!panel.includes("<details"), "no collapsed retired section");
+  assert.ok(
+    panel.includes("const shown = data.workers.filter((w) => PANEL_GROUPS.includes(runtimeFor(w, legacyRemoteControl)));"),
+    "only listed rows count in the pill",
+  );
+  assert.ok(panel.includes("const active = shown.filter(countsTowardHealth);"));
   assert.ok(panel.includes("Managed automatically"), "cloud rows need a plain-English management badge");
   assert.ok(panel.includes("j.message || j.error"), "health failures must show the route's plain-English explanation");
   assert.ok(panel.includes('worker.control_mode !== "none"'), "controls must only render for controllable rows");
