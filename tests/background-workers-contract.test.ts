@@ -46,6 +46,7 @@ function workerWindow(service: string, width = 900): string {
 const retiredByPlan = [
   "pm2.bravo-scheduler",
   "pm2.bravo-ig-dm",
+  "pm2.bravo-telegram",
   "pm2.claude-bridge-ping",
   "pm2.event-router",
   "pm2.dashboard-email-consumer",
@@ -63,9 +64,11 @@ for (const service of retiredByPlan) {
   assert.match(worker.not_expected_here ?? "", /^Retired by plan\b/);
   assert.equal(controllableOasisWorker(service), null, `${service} must fail closed in the control allowlist`);
 }
-for (const service of ["pm2.bravo-telegram", "pm2.claude-bridge"] as const) {
+// Telegram moved to the VPS poller (2026-10-30); the chat bridge is the one
+// active local service left with a lifecycle control.
+for (const service of ["pm2.claude-bridge"] as const) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
-  assert.ok(worker, `${service} must remain visible as the two active local services`);
+  assert.ok(worker, `${service} must remain visible as the active local service`);
   assert.notEqual(worker.runtime, "retired", `${service} must not be retired by this display-only fence update`);
   assert.ok(controllableOasisWorker(service), `${service} must keep its existing local control path`);
 }

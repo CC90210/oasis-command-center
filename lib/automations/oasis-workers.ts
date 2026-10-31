@@ -68,9 +68,17 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — the always-on setter is moving to the daemon VPS; this computer's copy stays off.",
   },
   {
+    // Retired 2026-10-30: the VPS long-poll bridge (oasis-telegram-bridge) is
+    // the sole Telegram poller. A Start here would put a second getUpdates
+    // poller on the same bot token, and Telegram answers both with HTTP 409.
     service: "pm2.bravo-telegram",
     label: "Telegram bridge",
-    purpose: "Bridges Telegram messages to the chat backbone. Windows-default, Mac cold-standby.",
+    purpose: "Bridges Telegram messages to the chat backbone.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — Telegram runs 24/7 on the daemon VPS (oasis-telegram-bridge); a second poller on this computer would collide with it.",
   },
   {
     service: "pm2.claude-bridge",

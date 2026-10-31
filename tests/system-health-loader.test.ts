@@ -214,10 +214,12 @@ async function main() {
       sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('g-new', 'p-cc', ?, 'guard_substrate', 'healthy', ?, ?)",
       args: [OASIS, ago(50 * S), JSON.stringify(allOn)],
     },
-    // Active workers. Telegram is fresh, with a stale profile_id NULL duplicate.
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1-old', NULL, ?, 'pm2.bravo-telegram', 'down', ?)", args: [OASIS, ago(45 * 24 * H)] },
+    // Telegram moved to the VPS poller: a fresh Windows row for it is a retired
+    // worker's report and must stay out of the active health rows.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w1', 'p-cc', ?, 'pm2.bravo-telegram', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
-    // The active chat bridge stopped reporting two hours ago: down.
+    // The active chat bridge stopped reporting two hours ago (down), beside a
+    // month-old profile_id NULL duplicate that must not win.
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2-old', NULL, ?, 'pm2.claude-bridge', 'down', ?)", args: [OASIS, ago(45 * 24 * H)] },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2', 'p-cc', ?, 'pm2.claude-bridge', 'healthy', ?)", args: [OASIS, ago(2 * H)] },
     // A fresh row for a retired worker must remain excluded from System health.
     {
@@ -449,9 +451,13 @@ async function main() {
   });
   await check("workers: newest row per active service; stale is down; retired workers and another workspace's ping are excluded", () => {
     const byService = new Map(health.workers?.map((w) => [w.service, w]));
-    assert.equal(byService.get("pm2.bravo-telegram")?.state, "running", "the fresh row beats the month-old 'down' duplicate");
+    assert.equal(byService.get("pm2.bravo-telegram"), undefined, "Telegram moved to the VPS: its fresh Windows row is not an active health row");
     assert.equal(byService.get("pm2.claude-bridge")?.state, "stale");
-    assert.match(byService.get("pm2.claude-bridge")?.sentence ?? "", /^Stopped reporting since \d{4}-/);
+    assert.equal(
+      byService.get("pm2.claude-bridge")?.sentence,
+      `Stopped reporting since ${ago(2 * H)}.`,
+      "the newest row beats the month-old duplicate",
+    );
     assert.equal(byService.get("pm2.atlas-telegram"), undefined, "retired workers are not active health rows");
     assert.equal(byService.get("pm2.bravo-scheduler"), undefined, "the retired scheduler is not an active health row");
     assert.equal(health.reporter?.state, "ok");
