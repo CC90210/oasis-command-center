@@ -86,7 +86,8 @@ for (const service of vpsServices) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
   assert.ok(worker, `${service} must be visible`);
   assert.equal(worker.runtime, "remote");
-  assert.equal(worker.status_source, "none", `${service} has no live status source yet`);
+  // Live since 2026-10-31: the VPS reporter writes these rows (lib/automations/vps-health.ts).
+  assert.equal(worker.status_source, "integrations_health", `${service} reads the VPS reporter's live row`);
   assert.equal(worker.control_mode, "none");
   assert.equal(worker.manageable_via_pm2, false);
   assert.equal(controllableOasisWorker(service), null, `${service} must never be controllable from here`);
