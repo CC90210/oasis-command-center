@@ -25,6 +25,7 @@ import { AutomationsContent } from "./AutomationsContent";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { resolveScriptAutomationAccess } from "@/lib/automations/script-access";
 import { guidedBuilderAllowed } from "@/lib/automations/guided-access";
+import { cloudJobsSwitchableForViewer } from "@/lib/automations/cloud-job-control";
 
 export async function TenantAutomations({
   tenantSlug,
@@ -41,6 +42,8 @@ export async function TenantAutomations({
   const scriptAccess = tenantId ? await resolveScriptAutomationAccess(await resolvePlatformOperator()) : "not_allowed";
   // The guided builder is any owner's or admin's (the routes enforce it too); preview mode mounts nothing.
   const guidedEnabled = tenantId ? await guidedBuilderAllowed() : false;
+  // The cloud jobs' on/off switches, as on /automations: CC only, the toggle route's own verdict.
+  const cloudJobsSwitchable = tenantId ? await cloudJobsSwitchableForViewer() : false;
   return (
     <AutomationsContent
       previewMode={!tenantId}
@@ -48,6 +51,7 @@ export async function TenantAutomations({
       hideHeader
       scriptAccess={scriptAccess}
       guidedEnabled={guidedEnabled}
+      cloudJobsSwitchable={cloudJobsSwitchable}
     />
   );
 }

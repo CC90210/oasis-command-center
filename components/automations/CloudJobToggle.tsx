@@ -84,10 +84,11 @@ export function CloudJobToggle({
         role="switch"
         aria-checked={on}
         aria-label={`${name}: ${on ? "on" : "paused"}. ${on ? "Pause it" : "Turn it on"}.`}
-        title={on ? "Click to pause this job" : "Click to turn this job back on"}
-        disabled={busy}
+        title={on ? "Click to pause this job. A run already in progress finishes." : "Click to turn this job back on."}
+        // aria-disabled, not disabled: the switch keeps keyboard focus while it saves (flip ignores presses).
+        aria-disabled={busy}
         onClick={flip}
-        className="inline-flex items-center gap-2 rounded-full px-1 py-0.5 disabled:opacity-60"
+        className={`inline-flex items-center gap-2 rounded-full px-1 py-0.5 ${busy ? "cursor-wait opacity-60" : ""}`}
       >
         <span
           aria-hidden

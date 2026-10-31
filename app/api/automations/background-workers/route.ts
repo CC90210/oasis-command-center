@@ -339,48 +339,44 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       .eq("id", 1)
       .maybeSingle();
     if (cloudHealth.error) {
-      console.error("[background-workers] cloud worker health read failed", cloudHealth.error);
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "cloud_worker_health_unavailable",
-          message: "Cloud automation health could not be verified. Refresh in a moment.",
-        },
-        { status: 503 },
-      );
-    }
-    const health = cloudHealth.data as {
-      status: "healthy" | "degraded";
-      last_run_at: string;
-      processed: number;
-      failed: number;
-      last_error: string | null;
-    } | null;
-    const lastRunEpoch = health?.last_run_at ? Date.parse(health.last_run_at) : NaN;
-    const stale = Boolean(health) && (!Number.isFinite(lastRunEpoch) || now - lastRunEpoch > 10 * 60_000);
-    workers.push({
-      service: "cloud.founder-meeting-reminders",
-      label: "Founder meeting reminders",
-      purpose: "Every minute: the lead's reminder emails (at booking, the day before, 1 hour and 15 minutes before), the founder's 15-minute heads-up and lead-waiting alert, and missed calls closed out with the lead's rebook link. Reminder texts (with the lead's consent) stay off until a STOP texted back to the Quo number is read.",
-      runtime: "cloud",
-      control_mode: "none",
-      status_source: "website_sales_meeting_worker_health",
-      // Cloud-hosted, but it DOES report here (website_sales_meeting_worker_health),
-      // so it is a real member of the pill's denominator — unlike the two
-      // workers that carry a reason string.
-      not_expected_here: undefined,
-      status: !health ? "unconfigured" : stale ? "down" : health.status,
-      stale,
-      metadata: health ? {
-        processed_last_run: health.processed,
-        failed_last_run: health.failed,
-        last_error: health.last_error,
+      // The Automations panel no longer lists this row (2026-10-31: the "24/7 cloud
+      // automations" card carries Lead Meeting Reminders), so a failed read leaves the
+      // row out instead of failing the whole panel. It never renders as "never configured".
+      console.error("[background-workers] cloud worker health read failed; reminder row left out", cloudHealth.error);
+    } else {
+      const health = cloudHealth.data as {
+        status: "healthy" | "degraded";
+        last_run_at: string;
+        processed: number;
+        failed: number;
+        last_error: string | null;
+      } | null;
+      const lastRunEpoch = health?.last_run_at ? Date.parse(health.last_run_at) : NaN;
+      const stale = Boolean(health) && (!Number.isFinite(lastRunEpoch) || now - lastRunEpoch > 10 * 60_000);
+      workers.push({
+        service: "cloud.founder-meeting-reminders",
+        label: "Founder meeting reminders",
+        purpose: "Every minute: the lead's reminder emails (at booking, the day before, 1 hour and 15 minutes before), the founder's 15-minute heads-up and lead-waiting alert, and missed calls closed out with the lead's rebook link. Reminder texts (with the lead's consent) stay off until a STOP texted back to the Quo number is read.",
         runtime: "cloud",
-      } : { runtime: "cloud", state: "waiting for first scheduled run" },
-      last_ping_at: health?.last_run_at || null,
-      manageable_via_pm2: false,
-      owner: "cc",
-    });
+        control_mode: "none",
+        status_source: "website_sales_meeting_worker_health",
+        // Cloud-hosted, but it DOES report here (website_sales_meeting_worker_health),
+        // so it is a real member of the pill's denominator — unlike the two
+        // workers that carry a reason string.
+        not_expected_here: undefined,
+        status: !health ? "unconfigured" : stale ? "down" : health.status,
+        stale,
+        metadata: health ? {
+          processed_last_run: health.processed,
+          failed_last_run: health.failed,
+          last_error: health.last_error,
+          runtime: "cloud",
+        } : { runtime: "cloud", state: "waiting for first scheduled run" },
+        last_ping_at: health?.last_run_at || null,
+        manageable_via_pm2: false,
+        owner: "cc",
+      });
+    }
   }
 
   return NextResponse.json({

@@ -11,7 +11,7 @@ import { AutomationsContent } from "@/components/automations/AutomationsContent"
 import { requireOperator, resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { resolveScriptAutomationAccess } from "@/lib/automations/script-access";
 import { guidedBuilderAllowed } from "@/lib/automations/guided-access";
-import { authorizeCloudJobControl } from "@/lib/automations/cloud-job-control";
+import { cloudJobsSwitchableForViewer } from "@/lib/automations/cloud-job-control";
 
 export const dynamic = "force-dynamic";
 
@@ -37,12 +37,7 @@ export default async function AutomationsPage() {
   const guidedEnabled = await guidedBuilderAllowed();
   // The cloud jobs' on/off switches: the same verdict POST /api/automations/cloud-jobs enforces (CC
   // only), so a switch is offered exactly when a flip would be accepted. A failed check offers none.
-  let cloudJobsSwitchable = false;
-  try {
-    cloudJobsSwitchable = (await authorizeCloudJobControl()).ok;
-  } catch (err) {
-    console.error("[automations.cloud_jobs.can_toggle]", err instanceof Error ? err.message : String(err));
-  }
+  const cloudJobsSwitchable = await cloudJobsSwitchableForViewer();
   return (
     <AutomationsContent scriptAccess={scriptAccess} guidedEnabled={guidedEnabled} cloudJobsSwitchable={cloudJobsSwitchable} />
   );

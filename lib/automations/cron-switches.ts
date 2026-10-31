@@ -83,15 +83,15 @@ export async function readCronSwitch(db: Client, route: string): Promise<CronSwi
  * Only a real change is stored: switching ON a job that was never switched writes nothing (no row is
  * ON), and saving the state a job is already in keeps its changed_at. So every changed_at is the
  * moment the switch really flipped, which recordCronRuns relies on. Returns the switch as stored
- * (changedAt null: never switched).
+ * (changedAt null: never switched) and whether this call changed it.
  */
 export async function writeCronSwitch(
   db: Client,
   input: { route: string; enabled: boolean; actorUserId: string; now: Date },
-): Promise<{ enabled: boolean; changedAt: string | null }> {
+): Promise<{ enabled: boolean; changedAt: string | null; changed: boolean }> {
   if (!isSwitchableCloudJob(input.route)) throw new Error("cron_switch_unknown_route");
   const changedAt = input.now.toISOString();
-  await db.execute(
+  const written = await db.execute(
     input.enabled
       ? {
           sql: "UPDATE cron_job_switches SET enabled = 1, changed_at = ?, changed_by = ? WHERE route = ? AND enabled = 0",
@@ -104,20 +104,26 @@ export async function writeCronSwitch(
           args: [input.route, changedAt, input.actorUserId],
         },
   );
+  const changed = written.rowsAffected > 0;
   const stored = await readCronSwitch(db, input.route);
-  return stored ? { enabled: stored.enabled, changedAt: stored.changedAt } : { enabled: true, changedAt: null };
+  return stored
+    ? { enabled: stored.enabled, changedAt: stored.changedAt, changed }
+    : { enabled: true, changedAt: null, changed };
 }
 
-type GateDeps = { db?: () => Client | null };
+type GateDeps = { db?: () => Client | null; retryDelayMs?: number };
+
+/** Pause before the gate's one retry of a failed switch read. */
+const GATE_RETRY_DELAY_MS = 250;
 
 /**
  * The OFF switch, enforced where the work happens. Returns the response a
  * paused route must answer with, or null to carry on.
  *
- * Fails OPEN on a failed switch read, deliberately: a job's default is ON, a
- * database the gate cannot read is almost always one the job's own work cannot
- * use either, and skipping every job on a blip would silently drop meeting
- * reminders and queued email. The failure is logged.
+ * A failed switch read is tried once more, then fails OPEN, deliberately: a
+ * job's default is ON, a database the gate cannot read twice is almost always
+ * one the job's own work cannot use either, and skipping every job on a blip
+ * would silently drop meeting reminders and queued email. The failure is logged.
  */
 export async function cronPauseGate(req: Request, deps: GateDeps = {}): Promise<NextResponse | null> {
   const route = cronTableKeyFor(new URL(req.url));
@@ -127,12 +133,17 @@ export async function cronPauseGate(req: Request, deps: GateDeps = {}): Promise<
   let state: CronSwitch | null;
   try {
     state = await readCronSwitch(db, route);
-  } catch (error) {
-    console.error("[cron.pause_gate] switch read failed; running the job", {
-      route,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, deps.retryDelayMs ?? GATE_RETRY_DELAY_MS));
+    try {
+      state = await readCronSwitch(db, route);
+    } catch (error) {
+      console.error("[cron.pause_gate] switch read failed twice; running the job", {
+        route,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
   if (!state || state.enabled) return null;
   return NextResponse.json(

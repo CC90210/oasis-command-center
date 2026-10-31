@@ -19,7 +19,7 @@
  * Run: node --conditions=react-server --import tsx tests/cloud-job-switches.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
       assert.ok(job.name.length >= 8 && job.name.length <= 40, `${path}: name length`);
       assert.doesNotMatch(job.name, /\/|\bapi\b|cron|dispatch|materialize|relay|\btick\b/i, `${path}: no route jargon in "${job.name}"`);
       assert.doesNotMatch(job.name, /\b[a-z]+-[a-z]+\b/, `${path}: no lowercase route slug in "${job.name}"`);
-      assert.match(job.description, /^[A-Z].{20,220}\.$/, `${path}: one plain sentence`);
+      assert.match(job.description, /^[A-Z].{20,260}\.$/, `${path}: plain sentences`);
       assert.doesNotMatch(job.description, /\/api\//, `${path}: no route in the description`);
     }
   });
@@ -126,7 +126,11 @@ async function main(): Promise<void> {
 
   await check("store: a switch round-trips, a re-flip updates it, and only 0/1 is accepted", async () => {
     assert.equal(await switches.readCronSwitch(db, "/api/cron/sla-check"), null, "never switched = ON");
-    await switches.writeCronSwitch(db, { route: "/api/cron/sla-check", enabled: false, actorUserId: CC.userId, now: NOW });
+    assert.equal(
+      (await switches.writeCronSwitch(db, { route: "/api/cron/sla-check", enabled: false, actorUserId: CC.userId, now: NOW })).changed,
+      true,
+      "a real flip says so",
+    );
     assert.deepEqual(await switches.readCronSwitch(db, "/api/cron/sla-check"), {
       enabled: false,
       changedAt: NOW.toISOString(),
@@ -139,14 +143,14 @@ async function main(): Promise<void> {
     const later = new Date(NOW.getTime() + 60_000);
     assert.deepEqual(
       await switches.writeCronSwitch(db, { route: "/api/cron/connection-health", enabled: true, actorUserId: CC.userId, now: NOW }),
-      { enabled: true, changedAt: null },
+      { enabled: true, changedAt: null, changed: false },
       "switching ON a never-switched job changes nothing",
     );
     assert.equal(await switches.readCronSwitch(db, "/api/cron/connection-health"), null, "and writes no row");
     await switches.writeCronSwitch(db, { route: "/api/cron/connection-health", enabled: false, actorUserId: CC.userId, now: NOW });
     assert.deepEqual(
       await switches.writeCronSwitch(db, { route: "/api/cron/connection-health", enabled: false, actorUserId: "someone-else", now: later }),
-      { enabled: false, changedAt: NOW.toISOString() },
+      { enabled: false, changedAt: NOW.toISOString(), changed: false },
       "saving the state it is already in keeps the real flip time",
     );
     assert.equal((await switches.readCronSwitch(db, "/api/cron/connection-health"))?.changedBy, CC.userId);
@@ -179,17 +183,33 @@ async function main(): Promise<void> {
     assert.equal(await gate("/api/cron/health-check"), null, "never switched runs");
   });
 
-  await check("gate: an unscheduled route is never gated; a failed read runs and is logged", async () => {
+  await check("gate: an unscheduled route is never gated; a failed read is retried once, then runs and is logged", async () => {
     let touched = false;
     const spy = { execute: async () => { touched = true; throw new Error("unused"); } } as unknown as Client;
     assert.equal(await switches.cronPauseGate(new Request("https://oasisai.work/api/cron/runs"), { db: () => spy }), null);
     assert.equal(touched, false, "no read for a route that is not a job");
-    const broken = { execute: async () => { throw new Error("hrana: stream closed"); } } as unknown as Client;
+    let attempts = 0;
+    const broken = { execute: async () => { attempts += 1; throw new Error("hrana: stream closed"); } } as unknown as Client;
     const { value, logged } = await quietly(() =>
-      switches.cronPauseGate(new Request("https://oasisai.work/api/cron/meet-relay"), { db: () => broken }),
+      switches.cronPauseGate(new Request("https://oasisai.work/api/cron/meet-relay"), { db: () => broken, retryDelayMs: 0 }),
     );
     assert.equal(value, null, "fail open: the job's default is ON");
+    assert.equal(attempts, 2, "one retry before running");
     assert.ok(logged.some((line) => line.includes("[cron.pause_gate]")), "the failure is logged");
+    // A blip on the first read must not let a paused job run: the retry reads the real switch.
+    let calls = 0;
+    const blip = {
+      execute: async (stmt: unknown) => {
+        calls += 1;
+        if (calls === 1) throw new Error("hrana: stream closed");
+        return db.execute(stmt as never);
+      },
+    } as unknown as Client;
+    await switches.writeCronSwitch(db, { route: "/api/cron/meet-relay", enabled: false, actorUserId: CC.userId, now: NOW });
+    const retried = await switches.cronPauseGate(new Request("https://oasisai.work/api/cron/meet-relay"), { db: () => blip, retryDelayMs: 0 });
+    assert.equal(retried?.status, 200, "the retry found the job paused");
+    assert.equal(retried?.headers.get("x-oasis-cron-skipped"), "paused");
+    await db.execute("DELETE FROM cron_job_switches WHERE route = '/api/cron/meet-relay'");
   });
 
   await check("gate: a database without bravo__251 has no switches: every job runs, quietly", async () => {
@@ -244,7 +264,7 @@ async function main(): Promise<void> {
       now: () => NOW,
     });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true, route: "/api/cron/meet-relay", enabled: false, changed_at: NOW.toISOString() });
+    assert.deepEqual(await res.json(), { ok: true, route: "/api/cron/meet-relay", enabled: false, changed: true, changed_at: NOW.toISOString() });
     assert.equal((await switches.readCronSwitch(db, "/api/cron/meet-relay"))?.enabled, false);
     assert.equal(audits.length, 1);
     assert.deepEqual(
@@ -255,9 +275,20 @@ async function main(): Promise<void> {
         actionType: "cloud_job_switch",
         targetTable: "cron_job_switches",
         targetId: "/api/cron/meet-relay",
-        after: { enabled: false, job: "Meeting Room Cleanup" },
+        after: { enabled: false, changed: true, job: "Meeting Room Cleanup" },
       },
     );
+    // A second OFF (a double click, a second tab) is audited as asked, and as no change.
+    const again = await toggle.handleCloudJobSwitch(post({ route: "/api/cron/meet-relay", enabled: false }), {
+      authorize: async () => CC,
+      db: () => db,
+      audit: audit as never,
+      now: () => new Date(NOW.getTime() + 5_000),
+    });
+    assert.deepEqual(await again.json(), { ok: true, route: "/api/cron/meet-relay", enabled: false, changed: false, changed_at: NOW.toISOString() });
+    assert.equal(audits.length, 2);
+    assert.deepEqual((audits[1] as { after: unknown }).after, { enabled: false, changed: false, job: "Meeting Room Cleanup" });
+    audits.pop();
     const broken = { execute: async () => { throw new Error("write refused"); } } as unknown as Client;
     const { value: failedWrite } = await quietly(() =>
       toggle.handleCloudJobSwitch(post({ route: "/api/cron/meet-relay", enabled: true }), {
@@ -271,12 +302,53 @@ async function main(): Promise<void> {
     assert.equal(audits.length, 1, "a failed write is not audited as a change");
   });
 
+  await check("authorize: only the agents owner, as a platform operator and admin in an OASIS workspace, may switch", async () => {
+    const { authorizeCloudJobControl } = await import("../lib/automations/cloud-job-control");
+    const session = (over: Record<string, unknown> = {}) => async () =>
+      ({ ok: true, userId: CC.userId, profileId: "p-cc", tenantId: CC.tenantId, email: "cc@example.test", teamRole: "owner", isAdmin: true, isTrueAdmin: true, adminAccess: false, ...over }) as never;
+    const calls: string[] = [];
+    const yes = (deps: Record<string, unknown> = {}) => ({
+      session: session(),
+      tenant: async () => ({ slug: "oasis-ai-cc" }),
+      isOperator: async (id: string, email: string | null) => (calls.push(`operator:${id}:${email}`), true),
+      isAgentsOwner: async (tenantId: string, id: string) => (calls.push(`owner:${tenantId}:${id}`), true),
+      ...deps,
+    });
+    assert.deepEqual(await authorizeCloudJobControl(yes()), { ok: true, tenantId: CC.tenantId, userId: CC.userId });
+    assert.deepEqual(
+      calls,
+      [`operator:${CC.userId}:cc@example.test`, `owner:${CC.tenantId}:${CC.userId}`],
+      "both checks are asked about the session's own auth user, in its own workspace",
+    );
+    const refusals: Array<[string, Record<string, unknown>, number]> = [
+      ["signed out", { session: async () => ({ ok: false, reason: "no_session" }) as never }, 401],
+      ["a client workspace", { tenant: async () => ({ slug: "clientco" }) }, 404],
+      ["no workspace row", { tenant: async () => null }, 404],
+      ["a member, not an admin", { session: session({ teamRole: "member", isAdmin: false, isTrueAdmin: false }) }, 404],
+      ["not a platform operator", { isOperator: async () => false }, 404],
+      ["not the agents owner", { isAgentsOwner: async () => false }, 404],
+    ];
+    for (const [why, deps, status] of refusals) {
+      const verdict = await authorizeCloudJobControl(yes(deps));
+      assert.equal(verdict.ok, false, why);
+      assert.equal((verdict as { status: number }).status, status, why);
+    }
+    calls.length = 0;
+    await authorizeCloudJobControl(yes({ tenant: async () => ({ slug: "clientco" }) }));
+    assert.deepEqual(calls, [], "a client workspace is refused before any operator or owner lookup");
+  });
+
   await check("wiring: the page mount decides who gets switches; the card never loads the session code", () => {
     // tests/guided-automations-ui renders the real Automations page in plain Node, where any
     // "server-only" module in the page's imports throws. The CC-only check lives in the mount.
     const page = readFileSync(join(process.cwd(), "app/automations/page.tsx"), "utf8");
-    assert.ok(page.includes("cloudJobsSwitchable = (await authorizeCloudJobControl()).ok;"), "the mount runs the toggle route's own check");
+    assert.ok(page.includes("const cloudJobsSwitchable = await cloudJobsSwitchableForViewer();"), "the mount runs the toggle route's own check");
     assert.ok(page.includes("cloudJobsSwitchable={cloudJobsSwitchable}"), "and hands the verdict down");
+    const tenantMount = readFileSync(join(process.cwd(), "components/automations/TenantAutomations.tsx"), "utf8");
+    assert.ok(tenantMount.includes("const cloudJobsSwitchable = tenantId ? await cloudJobsSwitchableForViewer() : false;"), "the catch-all mount too");
+    assert.ok(tenantMount.includes("cloudJobsSwitchable={cloudJobsSwitchable}"));
+    const control = readFileSync(join(process.cwd(), "lib/automations/cloud-job-control.ts"), "utf8");
+    assert.match(control, /return \(await authorizeCloudJobControl\(\)\)\.ok;/, "the page helper is the route's verdict, not a copy");
     const content = readFileSync(join(process.cwd(), "components/automations/AutomationsContent.tsx"), "utf8");
     assert.ok(content.includes("<CronFlowCards canToggle={cloudJobsSwitchable} />"));
     assert.ok(content.includes("cloudJobsSwitchable = false,"), "defaults closed");
@@ -284,6 +356,24 @@ async function main(): Promise<void> {
     assert.doesNotMatch(card, /from "@\/lib\/automations\/cloud-job-control"/, "the card never imports the session check");
     const store = readFileSync(join(process.cwd(), "lib/automations/cron-switches.ts"), "utf8");
     assert.ok(!store.includes('import "server-only"'), "the switch store loads in plain Node (the page imports it)");
+  });
+
+  await check("bundles: no client component imports the switch store, the run history or the toggle's server code", () => {
+    // cron-switches.ts has no "server-only" marker (the page imports it, and tests render the page in
+    // plain Node), so this stands in for it: a "use client" file importing any of these would put
+    // server code in the browser bundle.
+    const SERVER_ONLY = /from ["'][^"']*automations\/(cron-switches|cron-runs|cloud-job-switch|cloud-job-control)["']/;
+    const offenders: string[] = [];
+    for (const dir of ["app", "components", "lib"]) {
+      for (const rel of readdirSync(join(process.cwd(), dir), { recursive: true }) as string[]) {
+        if (!/\.(ts|tsx)$/.test(rel)) continue;
+        const src = readFileSync(join(process.cwd(), dir, rel), "utf8");
+        if (/^\s*["']use client["']/.test(src) && SERVER_ONLY.test(src)) offenders.push(join(dir, rel));
+      }
+    }
+    assert.deepEqual(offenders, []);
+    const toggle = readFileSync(join(process.cwd(), "components/automations/CloudJobToggle.tsx"), "utf8");
+    assert.match(toggle, /^"use client";/, "the guard sees the one client file of this feature");
   });
 
   await check("route: the toggle route only delegates (no logic hides in the route file)", () => {

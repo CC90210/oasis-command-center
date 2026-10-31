@@ -276,7 +276,7 @@ export function BackgroundWorkersPanel() {
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">
           {hasRemoteWorkers && !hasLocalWorkers ? (
             <>
-              Remote infrastructure has not reported in the last 2 minutes, so
+              The cloud workers have not reported in the last 2 minutes, so
               that section may be lagging. Server-side controls remain available.
             </>
           ) : (

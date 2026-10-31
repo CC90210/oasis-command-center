@@ -281,6 +281,10 @@ assert.equal(selectWorkerInventory({ isOasisTenant: false, isClientProfile: fals
     cloudHealthErrorAt >= 0 && cloudHealthErrorAt < cloudValueAt,
     "a failed cloud-health read must stop before the reminder renders as never configured",
   );
+  // 2026-10-31: the panel no longer lists the cloud row, so its failed read leaves the row
+  // out rather than failing the whole panel (the jobs card carries Lead Meeting Reminders).
+  assert.ok(!route.includes('error: "cloud_worker_health_unavailable"'), "a hidden row's read must not fail the panel");
+  assert.ok(route.includes("reminder row left out"), "the failed read is still logged");
 }
 
 // The UI groups by execution/runtime, not historical ownership, and never

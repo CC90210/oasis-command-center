@@ -62,8 +62,9 @@ export async function handleCloudJobSwitch(req: Request, deps: CloudJobSwitchDep
     actionType: "cloud_job_switch",
     targetTable: "cron_job_switches",
     targetId: route,
-    after: { enabled, job: cloudJobInfo(route)?.name ?? route },
+    // changed: false when the job was already in that state (a double click, a second tab).
+    after: { enabled, changed: saved.changed, job: cloudJobInfo(route)?.name ?? route },
   });
   if (!audit.ok) console.error("[automations.cloud_jobs.switch.audit]", audit.error);
-  return NextResponse.json({ ok: true, route, enabled: saved.enabled, changed_at: saved.changedAt });
+  return NextResponse.json({ ok: true, route, enabled: saved.enabled, changed: saved.changed, changed_at: saved.changedAt });
 }

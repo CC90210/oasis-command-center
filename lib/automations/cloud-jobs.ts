@@ -8,8 +8,10 @@
  * 2026-10-31 audit counted zero rows for OASIS and every other non-retired
  * workspace): it is safe to pause, and a candidate for removal.
  *
- * PURE: no database, no session. tests/cloud-jobs.test.ts holds this map to
- * CRON_TABLE exactly, so a new schedule cannot ship without a plain name.
+ * PURE: no database, no session. tests/cloud-job-switches.test.ts holds this map
+ * to CRON_TABLE exactly, so a new schedule cannot ship without a plain name.
+ * A description names everything the job does, side work included: pausing a
+ * job stops all of it.
  */
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
 
@@ -52,12 +54,12 @@ export const CLOUD_JOBS: Readonly<Record<string, CloudJobInfo>> = {
   },
   "/api/cron/dashboard-email-sender": {
     name: "Dashboard Email Sender",
-    description: "Sends the emails you write in a lead's drawer and the AI Audit's emails. It replaced the old sender on your PC.",
+    description: "Sends the emails you write in a lead's drawer and the AI Audit's emails once its send switch is on. It replaced the old sender on your PC.",
   },
   "/api/cron/dispatch-founder-meeting-reminders": {
     name: "Lead Meeting Reminders",
     description:
-      "Reminds leads about booked calls (at booking, the day before, 1 hour and 15 minutes before), gives you a 15-minute heads-up, and sends a rebook link after a missed call.",
+      "Reminds leads about booked calls (at booking, the day before, 1 hour and 15 minutes before), gives you a 15-minute heads-up, sends a rebook link after a missed call, and repairs half-finished bookings.",
   },
   "/api/cron/sms-reply-agent": {
     name: "SMS Auto-Responder",
@@ -90,12 +92,14 @@ export const CLOUD_JOBS: Readonly<Record<string, CloudJobInfo>> = {
     noLiveUse: "No agent has it switched on.",
   },
   "/api/cron/health-check": {
-    name: "Nurture Delivery Health Check",
-    description: "Checks that nurture emails and texts are actually going out, and alerts you on Telegram when they are not.",
+    name: "Platform Health Watchdog",
+    description:
+      "Checks that the booking calendar, dashboard email queue, worker status reports, live site, alert delivery, forms and department chats are working, and alerts you on Telegram when one is not.",
   },
   "/api/cron/sla-check": {
     name: "Support Response-Time Watch",
-    description: "Flags support tickets that were not answered in time and alerts you once per ticket.",
+    description:
+      "Flags support tickets not answered in time (one alert each), repairs support requests that half-failed, alerts you when support@ goes unread for 20 minutes, and clears old non-ticket mail after 30 days.",
   },
   "/api/cron/reconcile-sms": {
     name: "Text Delivery Check",
@@ -104,7 +108,8 @@ export const CLOUD_JOBS: Readonly<Record<string, CloudJobInfo>> = {
   },
   "/api/cron/connection-health": {
     name: "Connection Health Check",
-    description: "Re-tests each connected service (Stripe, Google and the rest) so Settings only shows green when it really works.",
+    description:
+      "Re-tests each connected service (Stripe, Google and the rest) so Settings only shows green when it really works, and deletes Slack messages after 90 days and browser crash reports after 30.",
   },
   "/api/cron/finance-books?job=fx-refresh": {
     name: "Exchange Rate Update",
@@ -129,7 +134,7 @@ export const CLOUD_JOBS: Readonly<Record<string, CloudJobInfo>> = {
   "/api/cron/ai-audit-tick": {
     name: "AI Audit Pipeline Engine",
     description:
-      "Moves Free AI Audits along: makes the PDF, checks Stripe payments, starts onboarding after payment and flags stalls. It never contacts a client.",
+      "Moves Free AI Audits along: queues each PDF for your Mac to print, asks for your approval once it exists, checks payments, refunds and disputes in Stripe, starts onboarding after payment and flags stalls. It never contacts a client.",
   },
 };
 
