@@ -48,11 +48,12 @@ export type OasisWorker = {
 // and controls.
 export const OASIS_WORKERS: OasisWorker[] = [
   {
-    // Still the only runner of the cron rows owned by this computer (Daily
-    // Bravo Brief, Maven syncs, health checks) until they move to Cloudflare.
+    // Still the only runner of the active cron_jobs rows (Daily Bravo Brief,
+    // Maven syncs, health checks) until they move to Cloudflare. It runs every
+    // ACTIVE row; the risky rows are switched off in cron_jobs, not filtered here.
     service: "pm2.bravo-scheduler",
     label: "Empire scheduler",
-    purpose: "Polls cron_jobs every 60s and runs the due jobs this computer owns (Daily Bravo Brief, Maven syncs, health checks) until each moves to Cloudflare.",
+    purpose: "Polls cron_jobs every 60s and runs every active job (Daily Bravo Brief, Maven syncs, health checks) until each moves to Cloudflare.",
   },
   {
     // The setter. Absent from this list until 2026-08-21, which meant its
@@ -195,7 +196,9 @@ export function controllableOasisWorker(name: string): OasisWorker | null {
   const worker = OASIS_WORKERS.find((w) => w.service.replace(/^pm2\./, "") === bare);
   if (!worker) return null;
   if (!worker.service.startsWith("pm2.")) return null;
-  if (worker.runtime === "retired" || worker.runtime === "cloud" || worker.control_mode === "none") return null;
+  // Only this computer's own supervised processes: never a remote, cloud or
+  // retired row, whatever its name looks like.
+  if ((worker.runtime ?? "local") !== "local" || worker.control_mode === "none") return null;
   if (worker.archived_on || worker.not_expected_here) return null;
   return worker;
 }

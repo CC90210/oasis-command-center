@@ -172,6 +172,11 @@ import {
     true,
     "a reporting remote worker that is down is still a real outage",
   );
+  assert.equal(
+    countsTowardHealth({ status: "unconfigured", runtime: "local", status_source: "none" }),
+    true,
+    "a local worker with missing status wiring stays counted (loud), never quietly unmonitored",
+  );
 }
 
 // ── 3. A blind reporter is not twelve dead workers ────────────────────────

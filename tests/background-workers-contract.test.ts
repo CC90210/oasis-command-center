@@ -292,7 +292,30 @@ assert.equal(selectWorkerInventory({ isOasisTenant: false, isClientProfile: fals
   assert.ok(panel.includes('worker.control_mode !== "none"'), "controls must only render for controllable rows");
   assert.ok(!panel.includes("OWNER_GROUP_LABEL"), "owner-only grouping must not drive the worker layout");
   assert.ok(!panel.includes("Start this worker via pm2"), "Windows fleet controls must not be labelled PM2");
-  assert.ok(!panel.includes("Restarting &ldquo;Bridge heartbeat&rdquo;"), "the stale reporter banner must not restart a fenced poller");
+  assert.ok(
+    panel.includes("Restarting &ldquo;Bridge heartbeat&rdquo; usually clears it."),
+    "the heartbeat runs here again: the stale-reporter banner names the restart that clears it",
+  );
+  assert.ok(!panel.includes("stay off by plan"), "the heartbeat is not retired");
+  assert.ok(
+    panel.includes("Runs on the daemon VPS · live status isn't reported to this page yet"),
+    "an unmeasured VPS row says so instead of 'Waiting for remote status'",
+  );
+  assert.ok(panel.includes("not reported here"), "the pill names listed-but-unmeasured rows");
+  assert.ok(panel.includes('"computer offline"'), "an offline computer reads as one state, not six outages");
+  assert.ok(
+    panel.includes('reporterBlind={localUnseen && workerRuntime === "local"}'),
+    "stale local tiles are unseen (not down) while the computer is offline or the reporter is blind",
+  );
+}
+
+// A row with no live status source never reads a health row, even if a stale
+// one exists under its name.
+{
+  assert.match(
+    route,
+    /const h = archived \|\| runtime === "retired" \|\| statusSource === "none" \? undefined : healthMap\.get\(w\.service\);/,
+  );
   assert.ok(panel.includes("Retired by plan — preserved for reference"));
 }
 

@@ -269,7 +269,16 @@ async function main() {
   await check("control: a retired or unknown worker is refused before the bridge", async () => {
     await login(CC);
     calls = [];
-    for (const service of ["pm2.bravo-ig-dm", "pm2.bravo-telegram", "skool_engine", "pm2.sunbiz-sequence-runner", "pm2.not-a-worker"]) {
+    for (const service of [
+      "pm2.bravo-ig-dm",
+      "pm2.bravo-telegram",
+      "skool_engine",
+      "pm2.sunbiz-sequence-runner",
+      "pm2.not-a-worker",
+      // Listed on the board, never controllable from it (no status, no bridge).
+      "vps.oasis-telegram-bridge",
+      "vps.oasis-inbox-sweep",
+    ]) {
       const res = await post({ service, action: "start" });
       assert.equal(res.status, 400, service);
       assert.equal(((await res.json()) as { error: string }).error, "unknown_worker");
