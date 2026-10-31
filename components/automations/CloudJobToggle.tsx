@@ -11,7 +11,8 @@ import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 const MESSAGES: Record<string, string> = {
-  not_found: "Only CC can switch cloud jobs.",
+  // Also the answer when the check itself could not finish, so it never claims the viewer is not CC.
+  not_found: "Couldn't confirm you can switch cloud jobs (only CC can). Refresh and try again.",
   unauthorized: "Sign in again, then try.",
 };
 

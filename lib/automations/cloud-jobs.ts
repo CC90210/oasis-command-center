@@ -10,8 +10,8 @@
  *
  * PURE: no database, no session. tests/cloud-job-switches.test.ts holds this map
  * to CRON_TABLE exactly, so a new schedule cannot ship without a plain name.
- * A description names everything the job does, side work included: pausing a
- * job stops all of it.
+ * A description names the work that pausing the job stops, side work
+ * included (a retention purge, an intake repair), not only its headline.
  */
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
 
@@ -134,7 +134,7 @@ export const CLOUD_JOBS: Readonly<Record<string, CloudJobInfo>> = {
   "/api/cron/ai-audit-tick": {
     name: "AI Audit Pipeline Engine",
     description:
-      "Moves Free AI Audits along: queues each PDF for your Mac to print, asks for your approval once it exists, checks payments, refunds and disputes in Stripe, starts onboarding after payment and flags stalls. It never contacts a client.",
+      "Moves each Free AI Audit along: research and drafting (paid AI runs), pre-call briefs from the client's site, PDFs for your Mac to print, your delivery approval, payments, refunds, disputes, onboarding, Pipeline stages and stall flags. Never contacts a client.",
   },
 };
 

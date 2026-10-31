@@ -47,13 +47,15 @@ async function check(name: string, fn: () => Promise<void> | void): Promise<void
 }
 
 function quietly<T>(fn: () => Promise<T>): Promise<{ value: T; logged: string[] }> {
-  const original = console.error;
+  const original = { error: console.error, warn: console.warn };
   const logged: string[] = [];
   console.error = (...args: unknown[]) => void logged.push(args.map(String).join(" "));
+  console.warn = (...args: unknown[]) => void logged.push(args.map(String).join(" "));
   return fn()
     .then((value) => ({ value, logged }))
     .finally(() => {
-      console.error = original;
+      console.error = original.error;
+      console.warn = original.warn;
     });
 }
 
@@ -206,9 +208,12 @@ async function main(): Promise<void> {
       },
     } as unknown as Client;
     await switches.writeCronSwitch(db, { route: "/api/cron/meet-relay", enabled: false, actorUserId: CC.userId, now: NOW });
-    const retried = await switches.cronPauseGate(new Request("https://oasisai.work/api/cron/meet-relay"), { db: () => blip, retryDelayMs: 0 });
+    const { value: retried, logged: blipLog } = await quietly(() =>
+      switches.cronPauseGate(new Request("https://oasisai.work/api/cron/meet-relay"), { db: () => blip, retryDelayMs: 0 }),
+    );
     assert.equal(retried?.status, 200, "the retry found the job paused");
     assert.equal(retried?.headers.get("x-oasis-cron-skipped"), "paused");
+    assert.ok(blipLog.some((line) => line.includes("retrying once")), "a recovered blip is still logged");
     await db.execute("DELETE FROM cron_job_switches WHERE route = '/api/cron/meet-relay'");
   });
 
@@ -345,7 +350,10 @@ async function main(): Promise<void> {
     assert.ok(page.includes("const cloudJobsSwitchable = await cloudJobsSwitchableForViewer();"), "the mount runs the toggle route's own check");
     assert.ok(page.includes("cloudJobsSwitchable={cloudJobsSwitchable}"), "and hands the verdict down");
     const tenantMount = readFileSync(join(process.cwd(), "components/automations/TenantAutomations.tsx"), "utf8");
-    assert.ok(tenantMount.includes("const cloudJobsSwitchable = tenantId ? await cloudJobsSwitchableForViewer() : false;"), "the catch-all mount too");
+    assert.ok(
+      tenantMount.includes("const cloudJobsSwitchable = tenantId && isOasisSurfaceTenant(tenantSlug) ? await cloudJobsSwitchableForViewer() : false;"),
+      "the catch-all mount too, and a client workspace (no jobs card) costs no check",
+    );
     assert.ok(tenantMount.includes("cloudJobsSwitchable={cloudJobsSwitchable}"));
     const control = readFileSync(join(process.cwd(), "lib/automations/cloud-job-control.ts"), "utf8");
     assert.match(control, /return \(await authorizeCloudJobControl\(\)\)\.ok;/, "the page helper is the route's verdict, not a copy");
@@ -363,12 +371,15 @@ async function main(): Promise<void> {
     // plain Node), so this stands in for it: a "use client" file importing any of these would put
     // server code in the browser bundle.
     const SERVER_ONLY = /from ["'][^"']*automations\/(cron-switches|cron-runs|cloud-job-switch|cloud-job-control)["']/;
+    // The directive may follow a leading comment (lib/supabase-browser.ts does), so skip comments first.
+    const CLIENT = /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*["']use client["']/;
+    assert.ok(CLIENT.test(readFileSync(join(process.cwd(), "lib/supabase-browser.ts"), "utf8")), "a client file that opens with a comment is still seen");
     const offenders: string[] = [];
     for (const dir of ["app", "components", "lib"]) {
       for (const rel of readdirSync(join(process.cwd(), dir), { recursive: true }) as string[]) {
         if (!/\.(ts|tsx)$/.test(rel)) continue;
         const src = readFileSync(join(process.cwd(), dir, rel), "utf8");
-        if (/^\s*["']use client["']/.test(src) && SERVER_ONLY.test(src)) offenders.push(join(dir, rel));
+        if (CLIENT.test(src) && SERVER_ONLY.test(src)) offenders.push(join(dir, rel));
       }
     }
     assert.deepEqual(offenders, []);

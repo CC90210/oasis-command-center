@@ -133,7 +133,11 @@ export async function cronPauseGate(req: Request, deps: GateDeps = {}): Promise<
   let state: CronSwitch | null;
   try {
     state = await readCronSwitch(db, route);
-  } catch {
+  } catch (firstError) {
+    console.warn("[cron.pause_gate] switch read failed; retrying once", {
+      route,
+      error: firstError instanceof Error ? firstError.message : String(firstError),
+    });
     await new Promise((resolve) => setTimeout(resolve, deps.retryDelayMs ?? GATE_RETRY_DELAY_MS));
     try {
       state = await readCronSwitch(db, route);
