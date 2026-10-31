@@ -262,6 +262,14 @@ for (const notPublic of ["/api/internal/booking", "/api/internal/bookingx/book",
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/booking/* is public`);
 }
 
+// The daemon VPS's reporter (BEA scripts/ops/vps_health_report.py) posts its two
+// always-on workers' health to one exact path, HMAC-gated inside with the
+// Worker's CRON_SECRET (lib/automations/vps-health.ts). Nothing near it is public.
+assert.equal(isPublic("/api/internal/vps-health"), true, "/api/internal/vps-health is HMAC-gated inside its route and MUST bypass session middleware");
+for (const notPublic of ["/api/internal/vps-healthx", "/api/internal/vps-health-admin", "/api/internal/vps"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/vps-health is public`);
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.

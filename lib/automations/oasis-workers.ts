@@ -149,15 +149,17 @@ export const OASIS_WORKERS: OasisWorker[] = [
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
   },
   {
-    // The daemon VPS reports nothing to integrations_health yet, so these rows
-    // carry no live status (status_source "none") and stay out of the healthy
-    // count instead of reading as outages. Never controllable from here.
+    // Live since 2026-10-31: the VPS's reporter (oasis-vps-health.timer, every
+    // minute) posts these two rows to /api/internal/vps-health
+    // (lib/automations/vps-health.ts), which writes integrations_health under
+    // the agents owner's profile, where this panel reads. Never controllable
+    // from here.
     service: "vps.oasis-telegram-bridge",
     label: "Telegram bridge (daemon VPS)",
     purpose: "Long-polls the Bravo Telegram bot around the clock and hands each message from CC to the Command Center, which answers through this computer.",
     runtime: "remote",
     control_mode: "none",
-    status_source: "none",
+    status_source: "integrations_health",
     manageable_via_pm2: false,
   },
   {
@@ -166,7 +168,7 @@ export const OASIS_WORKERS: OasisWorker[] = [
     purpose: "Every 5 minutes: classifies new mail and alerts CC on Telegram about hot replies. A failed run alerts CC on Telegram.",
     runtime: "remote",
     control_mode: "none",
-    status_source: "none",
+    status_source: "integrations_health",
     manageable_via_pm2: false,
   },
   {
