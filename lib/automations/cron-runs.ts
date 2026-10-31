@@ -11,6 +11,10 @@
 import type { Client } from "@libsql/client";
 import { CRON_TABLE } from "@/workers/oasis-cc-cron/src/index";
 import { cronMatches, isValidCronExpression, isValidTimeZone } from "@/workers/oasis-cc-cron/src/cron-match";
+import { readCronSwitches, type CronSwitch } from "@/lib/automations/cron-switches";
+
+/** http_status stored for a tick a switched-off job skipped (it answered 200 without working). */
+export const PAUSED_RUN_STATUS = "paused";
 
 export const CRON_RUNS_MAX_BATCH = 60;
 export const CRON_RUNS_KEEP_DAYS = 14;
@@ -39,14 +43,38 @@ export function parseCronRunBatch(raw: unknown): { tickAt: string; runs: CronRun
   return { tickAt: new Date(tickMs).toISOString(), runs };
 }
 
-/** Store one tick's runs and prune what is older than the keep window. Throws on a failed write. */
+/**
+ * Store one tick's runs and prune what is older than the keep window. Throws on a failed write.
+ *
+ * A switched-off job still answers the Worker 200 (lib/automations/cron-switches.ts cronPauseGate), so
+ * its tick is stored as PAUSED_RUN_STATUS, never as a run that worked. A failed switch read records the
+ * batch as reported.
+ *
+ * The report arrives after the tick's calls, so the switch is read as the route saw it at the tick:
+ * every stored changed_at is a real flip (writeCronSwitch), so a flip after the tick began means the
+ * route still saw the other state. (The Worker stamps the tick, then calls every due route at once; a
+ * flip in the moment between the two, or before a retry, is the one case this can misread.)
+ */
 export async function recordCronRuns(db: Client, batch: { tickAt: string; runs: CronRunInput[] }, now: number): Promise<number> {
+  let switches = new Map<string, CronSwitch>();
+  try {
+    switches = await readCronSwitches(db);
+  } catch (err) {
+    console.error("[automations.cron_runs] switch read failed; recording as reported", err instanceof Error ? err.message : String(err));
+  }
+  const tickMs = Date.parse(batch.tickAt);
+  const offAtTick = (path: string): boolean => {
+    const flip = switches.get(path);
+    if (!flip) return false;
+    return Date.parse(flip.changedAt) > tickMs ? flip.enabled : !flip.enabled;
+  };
+  const statusOf = (run: CronRunInput) => (run.ok && offAtTick(run.path) ? PAUSED_RUN_STATUS : run.status);
   await db.batch(
     [
       ...batch.runs.map((run) => ({
         // One row per route per tick (bravo__250): a repeated report of the same tick is ignored.
         sql: "INSERT OR IGNORE INTO cron_runs (route, tick_at, ok, http_status, attempts, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
-        args: [run.path, batch.tickAt, run.ok ? 1 : 0, run.status, run.attempts, run.ms],
+        args: [run.path, batch.tickAt, run.ok ? 1 : 0, statusOf(run), run.attempts, run.ms],
       })),
       { sql: "DELETE FROM cron_runs WHERE tick_at < ?", args: [new Date(now - CRON_RUNS_KEEP_DAYS * DAY_MS).toISOString()] },
     ],
@@ -98,23 +126,38 @@ export type CronFlow = {
   nextAt: string | null;
   last: { ok: boolean; status: string | null; ms: number | null; at: string } | null;
   day: { ok: number; total: number };
+  /** The on/off switch: true = ON, false = paused, null = the switch could not be read. */
+  enabled: boolean | null;
+  /** When it was switched off, while it is off. */
+  pausedAt: string | null;
 };
 
-/** Every scheduled route with its last run and the last 24 hours, or null when the read failed. */
+/**
+ * Every scheduled route with its last run, the last 24 hours and its switch, or null when the run
+ * history could not be read. Paused ticks are not runs: they count in neither the last run nor the day.
+ * A failed switch read leaves every switch unknown (null) instead of failing the card.
+ */
 export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[] | null> {
+  let switches: Map<string, CronSwitch> | null;
+  try {
+    switches = await readCronSwitches(db);
+  } catch (err) {
+    console.error("[automations.cron_switches]", err instanceof Error ? err.message : String(err));
+    switches = null;
+  }
   try {
     const since = new Date(now - DAY_MS).toISOString();
     const [lastRs, dayRs] = await Promise.all([
       db.execute({
         sql: `SELECT c.route, c.ok, c.http_status, c.duration_ms, c.tick_at
               FROM cron_runs c
-              JOIN (SELECT route, MAX(tick_at) AS t FROM cron_runs GROUP BY route) m
+              JOIN (SELECT route, MAX(tick_at) AS t FROM cron_runs WHERE http_status IS NOT ? GROUP BY route) m
                 ON m.route = c.route AND m.t = c.tick_at`,
-        args: [],
+        args: [PAUSED_RUN_STATUS],
       }),
       db.execute({
-        sql: "SELECT route, SUM(ok) AS ok, COUNT(*) AS total FROM cron_runs WHERE tick_at >= ? GROUP BY route",
-        args: [since],
+        sql: "SELECT route, SUM(ok) AS ok, COUNT(*) AS total FROM cron_runs WHERE tick_at >= ? AND http_status IS NOT ? GROUP BY route",
+        args: [since, PAUSED_RUN_STATUS],
       }),
     ]);
     const last = new Map<string, CronFlow["last"]>();
@@ -130,6 +173,8 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
     for (const r of dayRs.rows) day.set(String(r.route), { ok: Number(r.ok ?? 0), total: Number(r.total ?? 0) });
     return CRON_TABLE.map((e) => {
       const timeZone = e.timeZone ?? "UTC";
+      const flip = switches?.get(e.path);
+      const enabled = switches === null ? null : flip ? flip.enabled : true;
       return {
         path: e.path,
         schedule: e.schedule,
@@ -138,6 +183,8 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
         nextAt: nextRunAt(e.schedule, now, timeZone),
         last: last.get(e.path) ?? null,
         day: day.get(e.path) ?? { ok: 0, total: 0 },
+        enabled,
+        pausedAt: enabled === false && flip ? flip.changedAt : null,
       };
     });
   } catch (err) {

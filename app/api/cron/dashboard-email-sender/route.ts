@@ -8,6 +8,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
@@ -29,6 +30,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   // The job-specific switch is deliberately read before any queue or
   // credential-store access. An explicit dry-run may inspect but never mutate.

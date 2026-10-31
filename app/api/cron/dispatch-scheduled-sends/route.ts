@@ -43,6 +43,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
@@ -396,6 +397,8 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
 async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   const startedAt = Date.now();
   const db = getServiceSupabase();

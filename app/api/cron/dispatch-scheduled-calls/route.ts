@@ -12,6 +12,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
@@ -24,6 +25,8 @@ const MISSED_AFTER_HOURS = 6;
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   const db = getServiceSupabase();
   const now = new Date();

@@ -11,6 +11,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { runEnrollDrips } from "@/lib/drips/enroller";
 
 export const runtime = "nodejs";
@@ -20,6 +21,8 @@ export const maxDuration = 60;
 async function handleEnroll(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   try {
     const result = await runEnrollDrips();

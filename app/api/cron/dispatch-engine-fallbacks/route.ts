@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { dispatchDueEngineFallbacks } from "@/lib/os/runs/fallback-dispatcher";
 
@@ -13,6 +14,8 @@ export const maxDuration = 800;
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   if (!tursoConfigured()) {
     return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   }

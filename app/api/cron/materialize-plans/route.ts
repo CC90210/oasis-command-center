@@ -11,6 +11,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorDateKey } from "@/lib/dates";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
@@ -19,6 +20,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
 
   const db = getServiceSupabase();
   // For every profile that has at least one enabled template, materialize tomorrow.

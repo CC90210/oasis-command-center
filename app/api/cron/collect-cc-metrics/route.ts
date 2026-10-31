@@ -7,6 +7,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getConstantContactClient } from "@/lib/integrations/constant-contact/store";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
@@ -43,6 +44,8 @@ function extractEmails(resp: unknown): string[] {
 export async function GET(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   const write = req.nextUrl.searchParams.get("write") === "1";
   const db = getServiceSupabase();
 

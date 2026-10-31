@@ -1,9 +1,11 @@
 "use client";
 
 /**
- * BackgroundWorkersPanel — an execution-aware view of local, cloud, remote,
- * and retired workers. Renders below the cron-jobs list on /automations so
- * the operator can see at a glance:
+ * BackgroundWorkersPanel — the always-on workers, grouped by where they run:
+ * the 24/7 cloud workers (VPS) and this computer (2026-10-31: scheduled cloud
+ * jobs are the CronFlowCards card above it, with their on/off switches, and
+ * retired inventory is not shown). Renders on /automations so the operator
+ * can see at a glance:
  *   - Where each worker runs and whether it is dashboard-controllable
  *   - Which are alive (status: healthy) vs stopped (down) vs unknown
  *     (bridge hasn't pushed a snapshot recently)
@@ -77,23 +79,30 @@ type Worker = {
 
 const RUNTIME_GROUP_META: Record<WorkerRuntime, { label: string; detail: string }> = {
   local: {
-    label: "This computer",
-    detail: "OASIS services supervised on this machine.",
+    label: "This computer (Windows / Mac)",
+    detail: "Runs while this computer is on. The chat bridge (localhost:9100) connects it to the Command Center.",
   },
   cloud: {
-    label: "OASIS cloud",
+    label: "24/7 cloud automations (Cloudflare)",
     detail: "Runs automatically whether this computer is on or off.",
   },
   remote: {
-    label: "Remote infrastructure",
-    detail: "Runs on this tenant's dedicated host.",
+    label: "24/7 cloud workers (VPS)",
+    detail: "Always-on listeners on a dedicated server. They keep running when this computer is off.",
   },
   retired: {
     label: "Retired by plan",
     detail: "Preserved for reference and excluded from active health.",
   },
 };
-const RUNTIME_GROUP_ORDER: WorkerRuntime[] = ["local", "cloud", "remote", "retired"];
+// CC 2026-10-31: three clean categories. Cloudflare's scheduled jobs (and the
+// reminder worker among them) are the "24/7 cloud automations" card above this
+// panel, with their on/off switches; this panel shows the always-on VPS
+// workers and this computer. Retired inventory is not shown at all.
+const PANEL_GROUPS: WorkerRuntime[] = ["remote", "local"];
+// OASIS's own always-on workers run on its Hostinger server (oasis-daemon-1).
+// A client tenant's host keeps the generic label: it is not ours to name.
+const OASIS_REMOTE_LABEL = "24/7 cloud workers (Hostinger VPS)";
 
 type ApiResponse = {
   ok: boolean;
@@ -108,6 +117,8 @@ type ApiResponse = {
   /** When true, worker actions route through the server-side bridge proxy
    * (SunBiz VPS daemons) instead of the operator's localhost bridge. */
   remote_control?: boolean;
+  /** Whose fleet: OASIS's own, or a client tenant's. Absent on an older API. */
+  inventory?: "oasis" | "client";
   error?: string;
   message?: string;
 };
@@ -182,25 +193,26 @@ export function BackgroundWorkersPanel() {
   // "your workers" for someone whose computer this isn't.
   if (data.scope === "not_yours") return null;
 
-  // Local, cloud, and remote workers are active health. Retired inventory is
-  // visible in its own collapsed section but never counts as an outage.
-  const active = data.workers.filter(countsTowardHealth);
+  const legacyRemoteControl = data.remote_control || false;
+  // Only the groups this panel shows count: a worker the panel does not list
+  // (the cloud reminder row, retired inventory) never sits in its pill.
+  const shown = data.workers.filter((w) => PANEL_GROUPS.includes(runtimeFor(w, legacyRemoteControl)));
+  const active = shown.filter(countsTowardHealth);
   const healthy = active.filter((w) => w.status === "healthy").length;
   const total = active.length;
   // Listed but unmeasured (the daemon VPS reports nothing here yet): said
-  // beside the pill so "7/7 healthy" is never read as covering them.
-  const unmeasured = data.workers.filter(
+  // beside the pill so "6/6 healthy" is never read as covering them.
+  const unmeasured = shown.filter(
     (w) => w.runtime === "remote" && w.status_source === "none",
   ).length;
-  const legacyRemoteControl = data.remote_control || false;
   const byRuntime = new Map<WorkerRuntime, Worker[]>();
-  for (const worker of data.workers) {
+  for (const worker of shown) {
     const workerRuntime = runtimeFor(worker, legacyRemoteControl);
     const list = byRuntime.get(workerRuntime) ?? [];
     list.push(worker);
     byRuntime.set(workerRuntime, list);
   }
-  const runtimesPresent = RUNTIME_GROUP_ORDER.filter(
+  const runtimesPresent = PANEL_GROUPS.filter(
     (workerRuntime) => (byRuntime.get(workerRuntime)?.length ?? 0) > 0,
   );
   const hasLocalWorkers = (byRuntime.get("local")?.length ?? 0) > 0;
@@ -238,6 +250,12 @@ export function BackgroundWorkersPanel() {
         )}
       </div>
 
+      {hasLocalWorkers && (
+        <p className="text-[11px] text-fg-dim">
+          Scheduled cloud jobs are in &ldquo;24/7 cloud automations (Cloudflare)&rdquo; above, with their on/off switches.
+        </p>
+      )}
+
       {reporterBlind && reporter && (
         <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-status-warm flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -258,13 +276,14 @@ export function BackgroundWorkersPanel() {
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">
           {hasRemoteWorkers && !hasLocalWorkers ? (
             <>
-              Remote infrastructure has not reported in the last 2 minutes, so
+              The cloud workers have not reported in the last 2 minutes, so
               that section may be lagging. Server-side controls remain available.
             </>
           ) : (
             <>
               This computer has not reported in the last 2 minutes, so its worker
-              statuses may be stale. OASIS cloud automations are unaffected.
+              statuses may be stale. The 24/7 cloud automations and cloud workers
+              don&apos;t depend on this computer.
             </>
           )}
         </div>
@@ -273,7 +292,10 @@ export function BackgroundWorkersPanel() {
       <div className="space-y-4">
         {runtimesPresent.map((workerRuntime) => {
           const groupWorkers = byRuntime.get(workerRuntime) ?? [];
-          const group = RUNTIME_GROUP_META[workerRuntime];
+          const group =
+            workerRuntime === "remote" && data.inventory === "oasis"
+              ? { ...RUNTIME_GROUP_META.remote, label: OASIS_REMOTE_LABEL }
+              : RUNTIME_GROUP_META[workerRuntime];
           const cards = (
             <div className="grid sm:grid-cols-2 gap-2">
               {groupWorkers.map((worker) => (
@@ -288,18 +310,6 @@ export function BackgroundWorkersPanel() {
               ))}
             </div>
           );
-
-          if (workerRuntime === "retired") {
-            return (
-              <details key={workerRuntime} className="rounded-lg border border-bg-border bg-bg-deep/20 p-3">
-                <summary className="cursor-pointer text-[10px] font-bold uppercase tracking-wider text-fg-dim">
-                  {group.label} ({groupWorkers.length})
-                </summary>
-                <div className="mt-1 mb-3 text-[11px] text-fg-dim">{group.detail}</div>
-                {cards}
-              </details>
-            );
-          }
 
           return (
             <section key={workerRuntime} className="space-y-2">

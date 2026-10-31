@@ -15,6 +15,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { cronPauseGate } from "@/lib/automations/cron-switches";
 import { financeBookJobFailure, isFinanceBookJob, runFinanceBookJob } from "@/lib/founders-finances/books-cron";
 
 export const runtime = "nodejs";
@@ -24,6 +25,8 @@ export const maxDuration = 300;
 async function handle(req: NextRequest) {
   const denied = checkCronAuth(req);
   if (denied) return denied;
+  const paused = await cronPauseGate(req);
+  if (paused) return paused;
   const job = req.nextUrl.searchParams.get("job");
   if (!isFinanceBookJob(job)) return NextResponse.json({ ok: false, error: "unknown_job" }, { status: 400 });
   try {

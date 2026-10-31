@@ -48,12 +48,12 @@ async function check(name: string, fn: () => Promise<void> | void): Promise<void
 }
 
 async function main(): Promise<void> {
-  for (const file of ["bravo__249_cron_runs.sql", "bravo__250_cron_runs_unique_tick.sql"]) {
+  for (const file of ["bravo__249_cron_runs.sql", "bravo__250_cron_runs_unique_tick.sql", "bravo__251_cron_job_switches.sql"]) {
     await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso", file), "utf8"));
   }
   const route = await import("../app/api/cron/runs/route");
   const runs = await import("../lib/automations/cron-runs");
-  const cards = await import("../components/automations/CronFlowCards");
+  const cards = await import("../lib/automations/cloud-job-display");
   const post = async (body: unknown, headers: Record<string, string>) => {
     const res = await route.POST(new NextRequest("https://app.test/api/cron/runs", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }));
     return { status: res.status, json: (await res.json()) as { ok?: boolean; recorded?: number; error?: string } };
@@ -113,6 +113,70 @@ async function main(): Promise<void> {
     assert.deepEqual(cards.lastRunLine(audit, NOW), { tone: "none", text: "Not measured yet" });
     assert.equal(cards.lastRunLine(health, NOW).tone, "failed");
     assert.match(cards.lastRunLine(health, NOW).text, /^Failed \(500\) · 120 ms · /);
+  });
+
+  await check("switches: a paused job's ticks are stored as 'paused' and are not runs", async () => {
+    await db.execute("DELETE FROM cron_runs");
+    const route = "/api/cron/meet-relay";
+    await db.execute({ sql: "INSERT INTO cron_runs (route, tick_at, ok, http_status, duration_ms) VALUES (?, ?, 1, '200', 90)", args: [route, iso(NOW - 30 * MIN)] });
+    await db.execute({
+      sql: "INSERT INTO cron_job_switches (route, enabled, changed_at, changed_by) VALUES (?, 0, ?, 'auth-cc-0001')",
+      args: [route, iso(NOW - 20 * MIN)],
+    });
+    const res = await post({ ...tick([route, "/api/cron/health-check"]), tick: iso(NOW - 10 * MIN) }, both);
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const stored = (await db.execute({ sql: "SELECT http_status FROM cron_runs WHERE route = ? AND tick_at = ?", args: [route, iso(NOW - 10 * MIN)] })).rows[0];
+    assert.equal(stored.http_status, runs.PAUSED_RUN_STATUS, "a 200 from a paused job is a skip, not a run");
+    const other = (await db.execute({ sql: "SELECT http_status FROM cron_runs WHERE route = '/api/cron/health-check'", args: [] })).rows[0];
+    assert.equal(other.http_status, "200", "a running job's tick is untouched");
+
+    const flows = (await runs.loadCronFlows(db, NOW))!;
+    const meet = flows.find((f) => f.path === route)!;
+    assert.equal(meet.enabled, false);
+    assert.equal(meet.pausedAt, iso(NOW - 20 * MIN));
+    assert.deepEqual(meet.last, { ok: true, status: "200", ms: 90, at: iso(NOW - 30 * MIN) }, "the last REAL run");
+    assert.deepEqual(meet.day, { ok: 1, total: 1 }, "skipped ticks are not counted as OK runs");
+    const health = flows.find((f) => f.path === "/api/cron/health-check")!;
+    assert.equal(health.enabled, true, "never switched = ON");
+    assert.equal(health.pausedAt, null);
+
+    assert.equal(cards.cloudJobName(route), "Meeting Room Cleanup");
+    assert.equal(cards.cloudJobName("/api/cron/not-a-known-job"), "Not a known job", "an unknown path falls back to its words");
+    const subtitle = cards.cloudJobsSubtitle(flows, true);
+    assert.match(subtitle, /^25 scheduled jobs run on Cloudflare whether or not your computer is on\./);
+    assert.match(subtitle, /1 paused\./);
+    assert.match(subtitle, /Switch any job off or on here\.$/);
+    assert.doesNotMatch(cards.cloudJobsSubtitle(flows, false), /Switch any job/, "no switch offered to a viewer who cannot use it");
+    await db.execute("DELETE FROM cron_job_switches");
+  });
+
+  await check("switches: a flip while a tick is in flight is read as the route saw it at the tick", async () => {
+    await db.execute("DELETE FROM cron_runs");
+    const tickAt = iso(NOW - 5 * MIN);
+    const stored = async (route: string) =>
+      (await db.execute({ sql: "SELECT http_status FROM cron_runs WHERE route = ? AND tick_at = ?", args: [route, tickAt] })).rows[0]?.http_status;
+    // Paused 20 s after the tick began: the route had already passed its gate and ran.
+    await db.execute({
+      sql: "INSERT INTO cron_job_switches (route, enabled, changed_at, changed_by) VALUES ('/api/cron/meet-relay', 0, ?, 'auth-cc-0001')",
+      args: [iso(NOW - 5 * MIN + 20_000)],
+    });
+    // Switched back ON 20 s after the tick began: the route saw it OFF and skipped.
+    await db.execute({
+      sql: "INSERT INTO cron_job_switches (route, enabled, changed_at, changed_by) VALUES ('/api/cron/sla-check', 1, ?, 'auth-cc-0001')",
+      args: [iso(NOW - 5 * MIN + 20_000)],
+    });
+    // Paused before the tick: skipped.
+    await db.execute({
+      sql: "INSERT INTO cron_job_switches (route, enabled, changed_at, changed_by) VALUES ('/api/cron/health-check', 0, ?, 'auth-cc-0001')",
+      args: [iso(NOW - 9 * MIN)],
+    });
+    const res = await post({ ...tick(["/api/cron/meet-relay", "/api/cron/sla-check", "/api/cron/health-check"]), tick: tickAt }, both);
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(await stored("/api/cron/meet-relay"), "200", "a run that happened just before the pause is a run");
+    assert.equal(await stored("/api/cron/sla-check"), runs.PAUSED_RUN_STATUS, "a skip is never shown as a run that worked");
+    assert.equal(await stored("/api/cron/health-check"), runs.PAUSED_RUN_STATUS);
+    await db.execute("DELETE FROM cron_job_switches");
+    await db.execute("DELETE FROM cron_runs");
   });
 
   await check("next run: a fixed Toronto time shifts through the spring gap", () => {
