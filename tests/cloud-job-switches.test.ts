@@ -271,6 +271,21 @@ async function main(): Promise<void> {
     assert.equal(audits.length, 1, "a failed write is not audited as a change");
   });
 
+  await check("wiring: the page mount decides who gets switches; the card never loads the session code", () => {
+    // tests/guided-automations-ui renders the real Automations page in plain Node, where any
+    // "server-only" module in the page's imports throws. The CC-only check lives in the mount.
+    const page = readFileSync(join(process.cwd(), "app/automations/page.tsx"), "utf8");
+    assert.ok(page.includes("cloudJobsSwitchable = (await authorizeCloudJobControl()).ok;"), "the mount runs the toggle route's own check");
+    assert.ok(page.includes("cloudJobsSwitchable={cloudJobsSwitchable}"), "and hands the verdict down");
+    const content = readFileSync(join(process.cwd(), "components/automations/AutomationsContent.tsx"), "utf8");
+    assert.ok(content.includes("<CronFlowCards canToggle={cloudJobsSwitchable} />"));
+    assert.ok(content.includes("cloudJobsSwitchable = false,"), "defaults closed");
+    const card = readFileSync(join(process.cwd(), "components/automations/CronFlowCards.tsx"), "utf8");
+    assert.doesNotMatch(card, /from "@\/lib\/automations\/cloud-job-control"/, "the card never imports the session check");
+    const store = readFileSync(join(process.cwd(), "lib/automations/cron-switches.ts"), "utf8");
+    assert.ok(!store.includes('import "server-only"'), "the switch store loads in plain Node (the page imports it)");
+  });
+
   await check("route: the toggle route only delegates (no logic hides in the route file)", () => {
     const src = readFileSync(join(process.cwd(), "app/api/automations/cloud-jobs/route.ts"), "utf8");
     assert.match(src, /export async function POST\(req: Request\): Promise<NextResponse> \{\r?\n\s*return handleCloudJobSwitch\(req\);\r?\n\}/);

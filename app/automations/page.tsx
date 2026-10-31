@@ -11,6 +11,7 @@ import { AutomationsContent } from "@/components/automations/AutomationsContent"
 import { requireOperator, resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import { resolveScriptAutomationAccess } from "@/lib/automations/script-access";
 import { guidedBuilderAllowed } from "@/lib/automations/guided-access";
+import { authorizeCloudJobControl } from "@/lib/automations/cloud-job-control";
 
 export const dynamic = "force-dynamic";
 
@@ -34,5 +35,15 @@ export default async function AutomationsPage() {
   // The guided builder (templates, a test run, then Turn on) is for any owner or admin of the workspace:
   // the routes enforce the same rule, so the page never offers a control that would answer 403.
   const guidedEnabled = await guidedBuilderAllowed();
-  return <AutomationsContent scriptAccess={scriptAccess} guidedEnabled={guidedEnabled} />;
+  // The cloud jobs' on/off switches: the same verdict POST /api/automations/cloud-jobs enforces (CC
+  // only), so a switch is offered exactly when a flip would be accepted. A failed check offers none.
+  let cloudJobsSwitchable = false;
+  try {
+    cloudJobsSwitchable = (await authorizeCloudJobControl()).ok;
+  } catch (err) {
+    console.error("[automations.cloud_jobs.can_toggle]", err instanceof Error ? err.message : String(err));
+  }
+  return (
+    <AutomationsContent scriptAccess={scriptAccess} guidedEnabled={guidedEnabled} cloudJobsSwitchable={cloudJobsSwitchable} />
+  );
 }

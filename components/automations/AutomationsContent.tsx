@@ -66,6 +66,7 @@ export async function AutomationsContent({
   scriptAccess = "not_allowed",
   guidedEnabled = false,
   guidedApi,
+  cloudJobsSwitchable = false,
 }: {
   /** Operator is viewing a tenant they don't own. Renders the chrome
    *  + empty scaffold; NO sub-components mount, so no client-side
@@ -92,6 +93,11 @@ export async function AutomationsContent({
   /** Tests only. A Server Component cannot pass a function to a Client Component, so a real mount
    *  leaves this out and GuidedAutomations uses the browser client (lib/automations/guided/api-types). */
   guidedApi?: GuidedApi;
+  /** Offer working on/off switches on the cloud jobs card? Resolved by the mount (app/automations/page.tsx)
+   *  with lib/automations/cloud-job-control.ts, the same verdict the toggle route enforces. Like
+   *  scriptAccess it decides which controls are offered, never which data is shown. Defaults closed:
+   *  without it the card shows each job's state read-only. */
+  cloudJobsSwitchable?: boolean;
 }) {
   if (previewMode) {
     return <PreviewAutomations tenantSlug={overrideSlug ?? "this tenant"} hideHeader={hideHeader} />;
@@ -278,7 +284,7 @@ export async function AutomationsContent({
         // canSeeSystemSurfaces is false (reps, managers), so no client
         // tenant and no rep gets CC's machine's daemon list.
         <>
-          <CronFlowCards />
+          <CronFlowCards canToggle={cloudJobsSwitchable} />
           <BackgroundWorkersPanel />
         </>
       )}

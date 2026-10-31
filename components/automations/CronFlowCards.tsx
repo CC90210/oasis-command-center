@@ -6,15 +6,15 @@
  * cloud-jobs.ts) and when it runs, what happened (the last run, the last 24 hours, the next run),
  * and its ON / PAUSED switch. Data: lib/automations/cron-runs.ts over cron_runs and
  * cron_job_switches. A schedule with no recorded run says "not measured yet"; a failed read says so,
- * never zeros. The switch works only for the viewer the toggle route accepts
- * (lib/automations/cloud-job-control.ts); everyone else sees the state read-only.
+ * never zeros. The switch works only for the viewer the toggle route accepts: the page mount
+ * resolves that (app/automations/page.tsx with lib/automations/cloud-job-control.ts) and passes
+ * canToggle, so this card never loads the session code; everyone else sees the state read-only.
  *
  * Server component. Solid status dots, no glow and no perpetual motion (#464).
  */
 import { Card } from "@/components/Card";
 import { CloudJobToggle } from "@/components/automations/CloudJobToggle";
 import { cloudJobInfo } from "@/lib/automations/cloud-jobs";
-import { authorizeCloudJobControl } from "@/lib/automations/cloud-job-control";
 import { cloudJobName, cloudJobsSubtitle, lastRunLine, nextRunText } from "@/lib/automations/cloud-job-display";
 import { loadCronFlows, type CronFlow } from "@/lib/automations/cron-runs";
 import { timeAgo } from "@/lib/devices/presence";
@@ -26,16 +26,9 @@ const DOT: Record<"ok" | "failed" | "none", string> = {
   none: "bg-fg-dim",
 };
 
-export async function CronFlowCards() {
+export async function CronFlowCards({ canToggle = false }: { canToggle?: boolean }) {
   const now = Date.now();
   const flows = tursoConfigured() ? await loadCronFlows(getTursoClient(), now) : null;
-  let canToggle = false;
-  try {
-    canToggle = (await authorizeCloudJobControl()).ok;
-  } catch (err) {
-    // No switch rather than a broken card: the route re-checks on every flip anyway.
-    console.error("[automations.cloud_jobs.can_toggle]", err instanceof Error ? err.message : String(err));
-  }
   return <CronFlowList flows={flows} now={now} canToggle={canToggle} />;
 }
 

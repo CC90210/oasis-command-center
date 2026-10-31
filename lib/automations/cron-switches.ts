@@ -11,9 +11,10 @@
  * oasis-cc-cron Worker, the GitHub rollback driver, a manual run). A paused job
  * answers 200 { skipped: "paused" } and does nothing else.
  *
- * Kept free of sessions and page code: 22 routes import it.
+ * Kept free of sessions and page code: 22 routes import it, and so does the Automations page
+ * (through lib/automations/cron-runs.ts), which tests render in plain Node. So, like lib/turso.ts,
+ * it carries no "server-only" marker.
  */
-import "server-only";
 import { NextResponse } from "next/server";
 import type { Client } from "@libsql/client";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
