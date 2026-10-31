@@ -40,16 +40,19 @@ export type OasisWorker = {
   not_expected_here?: string;
 };
 
+// 2026-10-31 (CC: "we have way more than two background workers"): the
+// 10-30 handover fence marked Windows processes "Retired by plan" before their
+// replacements existed, so the board counted 2 workers while six of these
+// still ran here. A row is retired only once its process is actually off;
+// workers that still run here are listed as this computer's, with live status
+// and controls.
 export const OASIS_WORKERS: OasisWorker[] = [
   {
+    // Still the only runner of the cron rows owned by this computer (Daily
+    // Bravo Brief, Maven syncs, health checks) until they move to Cloudflare.
     service: "pm2.bravo-scheduler",
     label: "Empire scheduler",
-    purpose: "Polls cron_jobs every 60s on the operator's machine and executes due jobs.",
-    runtime: "retired",
-    control_mode: "none",
-    status_source: "none",
-    manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — scheduled work now runs on Cloudflare or its designated always-on host.",
+    purpose: "Polls cron_jobs every 60s and runs the due jobs this computer owns (Daily Bravo Brief, Maven syncs, health checks) until each moves to Cloudflare.",
   },
   {
     // The setter. Absent from this list until 2026-08-21, which meant its
@@ -86,24 +89,16 @@ export const OASIS_WORKERS: OasisWorker[] = [
     purpose: "localhost:9100 chat HTTP server — warm-pool Claude Code subprocess + tool proxy.",
   },
   {
+    // The reporter for every tile on this board: without its heartbeat the
+    // computer reads offline and Telegram/agent turns cannot reach it.
     service: "pm2.claude-bridge-ping",
     label: "Bridge heartbeat + tenant cron poller",
-    purpose: "Heartbeats to /api/bridge/ping every 60s and polls tenant_cron_jobs for due work.",
-    runtime: "retired",
-    control_mode: "none",
-    status_source: "none",
-    manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — this poller is fenced because it can run unpinned computer jobs.",
+    purpose: "Heartbeats to /api/bridge/ping every 60s (keeps this computer online for Telegram and agent work), reports these worker statuses, and polls tenant_cron_jobs.",
   },
   {
     service: "pm2.event-router",
     label: "Event router",
-    purpose: "Tails Postgres agent_events into state/event_router.log — feeds /feed page.",
-    runtime: "retired",
-    control_mode: "none",
-    status_source: "none",
-    manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — event routing no longer runs on this computer.",
+    purpose: "Read-only: copies every agent_events row into this computer's audit log (state/event_router.log).",
   },
   // Removed 2026-06-06 — three stale workers that aren't actually
   // running on CC's local machine for the OASIS personal Command Center:
@@ -139,24 +134,37 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — Cloudflare reports sender health; the local monitor stays off.",
   },
   {
+    // CC's only Atlas bot: no VPS copy exists yet.
     service: "pm2.atlas-telegram",
     label: "Atlas CFO Telegram",
     purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
-    runtime: "retired",
-    control_mode: "none",
-    status_source: "none",
-    manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — the local Atlas bridge is fenced and must not run computer jobs.",
   },
   {
+    // CC's only Maven bot: no VPS copy exists yet.
     service: "pm2.maven-telegram",
     label: "Maven CMO Telegram",
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
-    runtime: "retired",
+  },
+  {
+    // The daemon VPS reports nothing to integrations_health yet, so these rows
+    // carry no live status (status_source "none") and stay out of the healthy
+    // count instead of reading as outages. Never controllable from here.
+    service: "vps.oasis-telegram-bridge",
+    label: "Telegram bridge (daemon VPS)",
+    purpose: "Long-polls the Bravo Telegram bot around the clock and hands each message from CC to the Command Center, which answers through this computer.",
+    runtime: "remote",
     control_mode: "none",
     status_source: "none",
     manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — the local Maven bridge is fenced while Telegram moves to the daemon VPS.",
+  },
+  {
+    service: "vps.oasis-inbox-sweep",
+    label: "Inbox sweep (daemon VPS)",
+    purpose: "Every 5 minutes: classifies new mail and alerts CC on Telegram about hot replies. A failed run alerts CC on Telegram.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
   },
   {
     service: "skool_engine",

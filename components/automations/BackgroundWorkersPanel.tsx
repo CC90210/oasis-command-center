@@ -423,6 +423,8 @@ function WorkerRow({
         : `Stopped${lastSeen}`;
   } else if (effectiveStatus === "degraded") {
     statusLabel = `Degraded — check logs${lastSeen}`;
+  } else if (workerRuntime === "remote" && worker.status_source === "none") {
+    statusLabel = "Runs on the daemon VPS · live status isn't reported to this page yet";
   } else {
     statusLabel = workerRuntime === "remote" ? "Waiting for remote status" : "Not yet reporting";
   }

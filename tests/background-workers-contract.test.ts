@@ -40,19 +40,15 @@ function workerWindow(service: string, width = 900): string {
   return source.slice(at, at + width);
 }
 
-// The Windows handover fence is a lifecycle decision, not a health reading.
-// Every retired row must come from the shared inventory and expose no control
-// path even if an old integrations_health row still exists.
+// Retirement is a lifecycle decision, not a health reading: a row is retired
+// once its process is actually off. Every retired row must come from the shared
+// inventory and expose no control path even if an old integrations_health row
+// still exists.
 const retiredByPlan = [
-  "pm2.bravo-scheduler",
   "pm2.bravo-ig-dm",
   "pm2.bravo-telegram",
-  "pm2.claude-bridge-ping",
-  "pm2.event-router",
   "pm2.dashboard-email-consumer",
   "pm2.dashboard-email-queue-monitor",
-  "pm2.atlas-telegram",
-  "pm2.maven-telegram",
 ] as const;
 for (const service of retiredByPlan) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
@@ -64,13 +60,36 @@ for (const service of retiredByPlan) {
   assert.match(worker.not_expected_here ?? "", /^Retired by plan\b/);
   assert.equal(controllableOasisWorker(service), null, `${service} must fail closed in the control allowlist`);
 }
-// Telegram moved to the VPS poller (2026-10-30); the chat bridge is the one
-// active local service left with a lifecycle control.
-for (const service of ["pm2.claude-bridge"] as const) {
+// CC 2026-10-31: these six still run on this computer, so the board must count
+// them with live status and the existing local control path. Retiring a
+// running process on the board is how it showed 2 workers while 8 ran.
+for (const service of [
+  "pm2.bravo-scheduler",
+  "pm2.claude-bridge",
+  "pm2.claude-bridge-ping",
+  "pm2.event-router",
+  "pm2.atlas-telegram",
+  "pm2.maven-telegram",
+] as const) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
-  assert.ok(worker, `${service} must remain visible as the active local service`);
-  assert.notEqual(worker.runtime, "retired", `${service} must not be retired by this display-only fence update`);
+  assert.ok(worker, `${service} must remain visible as an active local service`);
+  assert.notEqual(worker.runtime, "retired", `${service} still runs here and must not be retired`);
+  assert.equal(worker.not_expected_here, undefined, `${service} must not carry a retirement reason`);
+  assert.notEqual(worker.status_source, "none", `${service} must read its live health row`);
   assert.ok(controllableOasisWorker(service), `${service} must keep its existing local control path`);
+}
+
+// OASIS's own daemon-VPS services are listed so nothing that runs is missing,
+// but the VPS reports no health here yet: no status source, no controls.
+const vpsServices = ["vps.oasis-telegram-bridge", "vps.oasis-inbox-sweep"] as const;
+for (const service of vpsServices) {
+  const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
+  assert.ok(worker, `${service} must be visible`);
+  assert.equal(worker.runtime, "remote");
+  assert.equal(worker.status_source, "none", `${service} has no live status source yet`);
+  assert.equal(worker.control_mode, "none");
+  assert.equal(worker.manageable_via_pm2, false);
+  assert.equal(controllableOasisWorker(service), null, `${service} must never be controllable from here`);
 }
 
 assert.deepEqual(
@@ -86,11 +105,17 @@ assert.deepEqual(
     "pm2.dashboard-email-queue-monitor",
     "pm2.atlas-telegram",
     "pm2.maven-telegram",
+    "vps.oasis-telegram-bridge",
+    "vps.oasis-inbox-sweep",
     "skool_engine",
   ],
   "the OASIS inventory must stay exact and cannot absorb a remote tenant service",
 );
-assert.doesNotMatch(oasisInventory, /runtime:\s*"remote"/);
+// Remote rows are only OASIS's own VPS services, never a client tenant's.
+assert.deepEqual(
+  OASIS_WORKERS.filter((worker) => worker.runtime === "remote").map((worker) => worker.service),
+  [...vpsServices],
+);
 
 // Control capability is decided server-side per viewer. Internal viewers may
 // inspect the system without receiving lifecycle controls.

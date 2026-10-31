@@ -268,7 +268,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       "status_source" in w ? (w.status_source as WorkerStatusSource | undefined) : undefined;
     const statusSource: WorkerStatusSource =
       configuredStatusSource ?? (runtime === "retired" ? "none" : "integrations_health");
-    const h = archived || runtime === "retired" ? undefined : healthMap.get(w.service);
+    const h = archived || runtime === "retired" || statusSource === "none" ? undefined : healthMap.get(w.service);
     // Standalone (non-pm2) workers don't have their lifecycle in pm2's
     // jlist, so the bridge's heartbeat sometimes reports a stale
     // "healthy" status row (e.g., Skool was once running months ago,

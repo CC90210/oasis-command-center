@@ -162,6 +162,16 @@ import {
     true,
     "a reporting cloud automation is part of OASIS health",
   );
+  assert.equal(
+    countsTowardHealth({ status: "unconfigured", runtime: "remote", status_source: "none" }),
+    false,
+    "a listed worker whose host reports nothing here is neither healthy nor an outage",
+  );
+  assert.equal(
+    countsTowardHealth({ status: "down", runtime: "remote", status_source: "integrations_health" }),
+    true,
+    "a reporting remote worker that is down is still a real outage",
+  );
 }
 
 // ── 3. A blind reporter is not twelve dead workers ────────────────────────
