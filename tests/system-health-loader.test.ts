@@ -221,7 +221,8 @@ async function main() {
     // month-old profile_id NULL duplicate that must not win.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2-old', NULL, ?, 'pm2.claude-bridge', 'down', ?)", args: [OASIS, ago(45 * 24 * H)] },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w2', 'p-cc', ?, 'pm2.claude-bridge', 'healthy', ?)", args: [OASIS, ago(2 * H)] },
-    // A fresh row for a retired worker must remain excluded from System health.
+    // Atlas's bot still runs on this computer (2026-10-31): its fresh row is an
+    // active report, here one the operator switched off.
     {
       sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('w3', 'p-cc', ?, 'pm2.atlas-telegram', 'degraded', ?, ?)",
       args: [OASIS, ago(30 * S), JSON.stringify({ pm2_status: "disabled by operator" })],
@@ -458,10 +459,11 @@ async function main() {
       `Stopped reporting since ${ago(2 * H)}.`,
       "the newest row beats the month-old duplicate",
     );
-    assert.equal(byService.get("pm2.atlas-telegram"), undefined, "retired workers are not active health rows");
-    assert.equal(byService.get("pm2.bravo-scheduler"), undefined, "the retired scheduler is not an active health row");
+    assert.equal(byService.get("pm2.atlas-telegram")?.state, "stopped_by_you", "a running local worker is an active health row");
+    assert.equal(byService.get("pm2.bravo-scheduler")?.state, "no_report", "the scheduler still runs here: no row yet is not a retirement");
+    assert.equal(byService.get("vps.oasis-telegram-bridge"), undefined, "the VPS reports nothing to this computer's health rows");
     assert.equal(health.reporter?.state, "ok");
-    assert.equal(health.attention.workersDown, 1);
+    assert.equal(health.attention.workersDown, 1, "stopped-by-you and no-report are not outages");
   });
   await check("cron: this workspace's failures in 24 h, both registries, each with what to do", () => {
     assert.equal(health.cron?.count, 6);

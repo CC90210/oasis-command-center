@@ -146,9 +146,9 @@ export type WorkerHealth = {
 
 export type HealthRow = { service: string; status: string | null; last_ping_at: string | null; metadata: unknown };
 
-/** The OASIS workers the operator's machine supervises (not retired, not cloud). */
+/** The OASIS workers the operator's machine supervises (local runtime only). */
 export const LOCAL_OASIS_WORKERS = OASIS_WORKERS.filter(
-  (w) => w.service.startsWith("pm2.") && w.runtime !== "retired" && w.runtime !== "cloud" && !w.not_expected_here,
+  (w) => w.service.startsWith("pm2.") && (w.runtime ?? "local") === "local" && !w.not_expected_here,
 );
 
 /** PURE. One worker's state from its latest row. */
@@ -227,10 +227,14 @@ export function describeBackground(
   });
   const workers = LOCAL_OASIS_WORKERS.map((w) => describeWorker(w, workerRows.get(w.service), now));
   const blind = reporter.state === "failing" || reporter.state === "silent";
+  const down = workers.filter((w) => w.state === "down" || w.state === "stale").length;
+  // An offline computer is ONE thing needing you, not one alarm per worker it
+  // runs (2026-10-31: six local workers would otherwise page six times).
+  const offline = pc !== null && pc.state === "offline";
   return {
     workers,
     reporter,
-    workersDown: blind ? null : workers.filter((w) => w.state === "down" || w.state === "stale").length,
+    workersDown: blind ? null : offline ? Math.min(down, 1) : down,
   };
 }
 

@@ -187,6 +187,11 @@ export function BackgroundWorkersPanel() {
   const active = data.workers.filter(countsTowardHealth);
   const healthy = active.filter((w) => w.status === "healthy").length;
   const total = active.length;
+  // Listed but unmeasured (the daemon VPS reports nothing here yet): said
+  // beside the pill so "7/7 healthy" is never read as covering them.
+  const unmeasured = data.workers.filter(
+    (w) => w.runtime === "remote" && w.status_source === "none",
+  ).length;
   const legacyRemoteControl = data.remote_control || false;
   const byRuntime = new Map<WorkerRuntime, Worker[]>();
   for (const worker of data.workers) {
@@ -206,6 +211,10 @@ export function BackgroundWorkersPanel() {
   const reporter = data.status_reporter;
   const reporterBlind =
     hasLocalWorkers && (reporter?.state === "failing" || reporter?.state === "silent");
+  // An offline computer cannot report either: its local tiles are unseen, not
+  // one outage per worker. The offline banner below says why.
+  const computerOffline = hasLocalWorkers && !data.bridge_online;
+  const localUnseen = reporterBlind || computerOffline;
 
   return (
     <div className="space-y-3">
@@ -214,7 +223,11 @@ export function BackgroundWorkersPanel() {
           <Cpu className="w-4 h-4 text-fg-muted" />
           <div className="text-sm font-bold text-fg">Background workers</div>
           <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
-            {reporterBlind ? "status unknown" : `${healthy}/${total} healthy`}
+            {reporterBlind
+              ? "status unknown"
+              : computerOffline
+                ? "computer offline"
+                : `${healthy}/${total} healthy${unmeasured ? ` · ${unmeasured} not reported here` : ""}`}
           </span>
         </div>
         {(hasLocalWorkers || hasRemoteWorkers) && data.last_seen_at && (
@@ -236,7 +249,7 @@ export function BackgroundWorkersPanel() {
               : `This computer is online but its last worker report was ${
                   reporter.last_ping_at ? formatLastSeen(reporter.last_ping_at) : "never"
                 }.`}{" "}
-            Check the active host&apos;s reporter; services retired on this computer stay off by plan.
+            Restarting &ldquo;Bridge heartbeat&rdquo; usually clears it.
           </span>
         </div>
       )}
@@ -268,7 +281,7 @@ export function BackgroundWorkersPanel() {
                   key={worker.service}
                   worker={worker}
                   bridgeOnline={data.bridge_online}
-                  reporterBlind={reporterBlind && workerRuntime === "local"}
+                  reporterBlind={localUnseen && workerRuntime === "local"}
                   remoteControl={legacyRemoteControl}
                   onChange={refresh}
                 />
@@ -423,6 +436,8 @@ function WorkerRow({
         : `Stopped${lastSeen}`;
   } else if (effectiveStatus === "degraded") {
     statusLabel = `Degraded — check logs${lastSeen}`;
+  } else if (workerRuntime === "remote" && worker.status_source === "none") {
+    statusLabel = "Runs on the daemon VPS · live status isn't reported to this page yet";
   } else {
     statusLabel = workerRuntime === "remote" ? "Waiting for remote status" : "Not yet reporting";
   }

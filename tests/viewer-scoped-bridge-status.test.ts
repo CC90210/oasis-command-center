@@ -94,7 +94,7 @@ async function check(name: string, fn: () => Promise<void> | void) {
 async function main() {
   await createSchema();
   const { getTenantBridgeStatus, getBridgeOnline, getOnlineBridgeComputerLabels } = await import("../lib/queries");
-  const { loadMachines, describeBackground } = await import("../lib/admin/attention");
+  const { loadMachines, describeBackground, LOCAL_OASIS_WORKERS } = await import("../lib/admin/attention");
   const { loadSystemHealth } = await import("../lib/admin/system-health");
   const cliStatus = await import("../lib/bridge-cli-status");
   const { appStatusLines } = await import("../components/settings/YourComputersCard");
@@ -194,6 +194,25 @@ async function main() {
     assert.ok(Array.isArray(forCC.workers) && forCC.workers.length > 0);
     const forAdon = describeBackground(workerRows, machines, now.getTime(), { authUserId: ADON, isAgentsOwner: false });
     assert.deepEqual(forAdon, { workers: [], reporter: null, workersDown: 0 }, "not the agents owner's question to ask — zero known problems, never 'unknown'");
+  });
+
+  await check("describeBackground: an offline computer is one problem, not one alarm per local worker", () => {
+    const longAgo = new Date(now.getTime() - 30 * 60_000).toISOString();
+    const workerRows = new Map(
+      [...LOCAL_OASIS_WORKERS.map((w) => w.service), "fleet_watchdog"].map((service) => [
+        service,
+        { service, status: "healthy", last_ping_at: longAgo, metadata: {} },
+      ]),
+    );
+    const offlinePc = [{ label: "CCPC (Windows)", lastSeenAt: longAgo, state: "offline" as const }];
+    const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
+    assert.ok(LOCAL_OASIS_WORKERS.length >= 6, "the six workers that still run here are watched");
+    assert.ok(result.workers?.every((w) => w.state === "stale"), "each tile still says it stopped reporting");
+    assert.equal(result.workersDown, 1, "the computer being off is the one thing needing CC");
+    assert.ok(
+      LOCAL_OASIS_WORKERS.every((w) => (w.runtime ?? "local") === "local" && w.service.startsWith("pm2.")),
+      "remote (VPS) rows never enter the local alarm list",
+    );
   });
 
   await check("loadSystemHealth threads the viewer into describeBackground: Adon's /health shows no House-worker rows", async () => {

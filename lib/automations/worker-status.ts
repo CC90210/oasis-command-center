@@ -18,6 +18,8 @@ export type WorkerStatusInput = {
   runtime?: WorkerRuntime;
   /** Reason this worker is not meant to run on this machine, if it isn't. */
   not_expected_here?: string;
+  /** Where live status comes from; "none" means the host reports nothing here. */
+  status_source?: WorkerStatusSource;
 };
 
 export type WorkerRuntime = "local" | "cloud" | "remote" | "retired";
@@ -68,14 +70,19 @@ export function selectWorkerInventory(input: {
 /**
  * The workers the healthy/total pill should actually count.
  *
- * Active local, cloud, and remote workers count. Retired inventory does not.
- * `not_expected_here` remains as a rolling-deploy compatibility fallback so
- * an older response still cannot poison the denominator.
+ * Active local, cloud, and remote workers count. Retired inventory does not,
+ * and neither does a remote worker whose host reports no status here
+ * (status_source "none"): with nothing to read it can be neither healthy nor
+ * down. A LOCAL row always counts, so a local worker whose status wiring is
+ * missing shows up as not reporting instead of quietly leaving the count.
+ * `not_expected_here` remains as a rolling-deploy compatibility fallback so an
+ * older response still cannot poison the denominator.
  */
 export function countsTowardHealth(worker: WorkerStatusInput): boolean {
   return (
     worker.status !== "archived" &&
     worker.runtime !== "retired" &&
+    !(worker.runtime === "remote" && worker.status_source === "none") &&
     !worker.not_expected_here
   );
 }
