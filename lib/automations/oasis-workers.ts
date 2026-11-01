@@ -141,13 +141,13 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — Cloudflare reports sender health; the local monitor stays off.",
   },
   {
-    // CC's only Atlas bot: no VPS copy exists yet.
+    // Keep local status/controls until its actual cloud cutover is verified.
     service: "pm2.atlas-telegram",
     label: "Atlas CFO Telegram",
     purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
   },
   {
-    // CC's only Maven bot: no VPS copy exists yet.
+    // Keep local status/controls until its actual cloud cutover is verified.
     service: "pm2.maven-telegram",
     label: "Maven CMO Telegram",
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
@@ -206,6 +206,24 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "vps.oasis-workspace-scheduler",
     label: "Workspace scheduler (daemon VPS)",
     purpose: "Runs reviewed workspace scripts under exclusive server grants, including the Atlas inbox consumer. Its own heartbeat reports whether this service is running.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.atlas-telegram",
+    label: "Atlas CFO Telegram (daemon VPS)",
+    purpose: "Atlas's cloud Telegram service. Requires verified bot setup and the local bot to stop before activation; its own heartbeat reports whether it is running.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.maven-telegram",
+    label: "Maven CMO Telegram (daemon VPS)",
+    purpose: "Maven's cloud Telegram service. Requires verified bot setup and the local bot to stop before activation; its own heartbeat reports whether it is running.",
     runtime: "remote",
     control_mode: "none",
     status_source: "integrations_health",

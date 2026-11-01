@@ -32,6 +32,8 @@ export const VPS_HEALTH_SERVICES = [
   "vps.oasis-headless-bridge",
   "vps.oasis-content-tools-runner",
   "vps.oasis-workspace-scheduler",
+  "vps.atlas-telegram",
+  "vps.maven-telegram",
 ] as const;
 export type VpsHealthService = (typeof VPS_HEALTH_SERVICES)[number];
 export const VPS_HEALTH_STATUSES = ["healthy", "degraded", "down", "running"] as const;

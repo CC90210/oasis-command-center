@@ -155,6 +155,8 @@ async function main(): Promise<void> {
   await check("new daemons: no fabricated rows; mixed live states persist and omitted daemons do not get freshened", async () => {
     assert.equal((await rows()).some((r) => r.service === "vps.oasis-content-tools-runner"), false);
     assert.equal((await rows()).some((r) => r.service === "vps.oasis-workspace-scheduler"), false);
+    assert.equal((await rows()).some((r) => r.service === "vps.atlas-telegram"), false);
+    assert.equal((await rows()).some((r) => r.service === "vps.maven-telegram"), false);
     const report = {
       host: heartbeat.host,
       services: [
@@ -163,11 +165,13 @@ async function main(): Promise<void> {
         { service: "vps.oasis-headless-bridge", status: "degraded", detail: "activating/auto-restart; restarts=2" },
         { service: "vps.oasis-content-tools-runner", status: "down", detail: "inactive/dead; restarts=0" },
         { service: "vps.oasis-workspace-scheduler", status: "down", detail: "inactive/dead; awaiting cutover" },
+        { service: "vps.atlas-telegram", status: "down", detail: "inactive/dead; awaiting bot setup" },
+        { service: "vps.maven-telegram", status: "down", detail: "inactive/dead; awaiting bot setup" },
       ],
     };
-    assert.deepEqual(await call(signed(report)), { status: 200, body: { ok: true, recorded: 6 } });
+    assert.deepEqual(await call(signed(report)), { status: 200, body: { ok: true, recorded: 8 } });
     const stored = await rows();
-    assert.equal(stored.length, 6);
+    assert.equal(stored.length, 8);
     for (const service of report.services) {
       const actual = stored.find((r) => r.service === service.service)!;
       assert.equal(actual.status, service.status);
@@ -185,6 +189,11 @@ async function main(): Promise<void> {
     assert.equal(content.last_error, null);
     assert.equal(content.last_ping_at, later.toISOString());
     assert.equal(updated.find((r) => r.service === "vps.oasis-headless-bridge")!.last_ping_at, NOW.toISOString(), "omitted daemon keeps its old timestamp");
+    for (const service of ["vps.atlas-telegram", "vps.maven-telegram"]) {
+      const bot = updated.find((r) => r.service === service)!;
+      assert.equal(bot.status, "down", "another worker's heartbeat cannot make a bot ready");
+      assert.equal(bot.last_ping_at, NOW.toISOString(), "omitted bot keeps its old timestamp");
+    }
   });
 
   await check("owner: the agents owner's profiles; a missing or failed owner lookup is 503", async () => {

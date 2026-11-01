@@ -20,7 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(__dirname, "..");
-const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
+const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
 
 async function main(): Promise<void> {
   const { deliveryStateOf, keyChanges, agentName, DELIVERY_STARTED_AT } = await import("../lib/os/agent-ops");

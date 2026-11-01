@@ -206,8 +206,15 @@ async function main() {
     );
     const offlinePc = [{ label: "CCPC (Windows)", lastSeenAt: longAgo, state: "offline" as const }];
     const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
-    assert.ok(LOCAL_OASIS_WORKERS.length >= 6, "the six workers that still run here are watched");
-    assert.ok(result.workers?.every((w) => w.state === "stale"), "each tile still says it stopped reporting");
+    assert.ok(!LOCAL_OASIS_WORKERS.some(w => w.service === "pm2.bravo-scheduler"),
+      "the retired local scheduler must not create a Windows dependency");
+    assert.ok(["pm2.atlas-telegram", "pm2.maven-telegram"].every(service =>
+      LOCAL_OASIS_WORKERS.some(w => w.service === service)),
+      "the bots remain watched locally until their cloud cutover is verified");
+    assert.ok(result.workers?.filter(w => !w.service.startsWith("vps.")).every(w => w.state === "stale"),
+      "local tiles still say they stopped reporting");
+    assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
+      "the offline computer cannot invent a status for an unreported cloud service");
     assert.equal(result.workersDown, 1, "the computer being off is the one thing needing CC");
     assert.ok(
       LOCAL_OASIS_WORKERS.every((w) => (w.runtime ?? "local") === "local" && w.service.startsWith("pm2.")),

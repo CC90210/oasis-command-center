@@ -88,6 +88,8 @@ const vpsServices = [
   "vps.oasis-headless-bridge",
   "vps.oasis-content-tools-runner",
   "vps.oasis-workspace-scheduler",
+  "vps.atlas-telegram",
+  "vps.maven-telegram",
 ] as const;
 for (const service of vpsServices) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
@@ -121,6 +123,8 @@ assert.deepEqual(
     "vps.oasis-headless-bridge",
     "vps.oasis-content-tools-runner",
     "vps.oasis-workspace-scheduler",
+    "vps.atlas-telegram",
+    "vps.maven-telegram",
     "skool_engine",
   ],
   "the OASIS inventory must stay exact and cannot absorb a remote tenant service",
