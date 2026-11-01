@@ -128,20 +128,6 @@ export async function briefForPage(db: Client, tenantId: string, engagementId: s
 
 export type BuildBriefResult = { ok: true; brief: StoredBrief; created: boolean } | { ok: false; error: "not_found" | "stage_closed" | "too_soon" | "not_installed" };
 
-// Only embedded SQLite needs local serialization. Remote clients in Workers
-// must never await another request's I/O; their database serializes writes.
-const saves = new WeakMap<Client, Promise<void>>();
-async function saveInOrder<T>(db: Client, work: () => Promise<T>): Promise<T> {
-  if (db.protocol !== "file") return work();
-  const previous = saves.get(db) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>(resolve => { release = resolve; });
-  saves.set(db, current);
-  await previous;
-  try { return await work(); }
-  finally { release(); if (saves.get(db) === current) saves.delete(db); }
-}
-
 /** Build a new version of the engagement's brief: read the site, read the form, put it together, store it. */
 export async function buildBrief(
   db: Client,
@@ -203,7 +189,6 @@ export async function buildBrief(
     });
   }
 
-  return saveInOrder<BuildBriefResult>(db, async () => {
   const winner = await latestBrief(db, t, engagement.id);
   if (winner && winner.version_no >= versionNo) return { ok: true, brief: winner, created: false };
   const preflight = await preflightStatements(db, { tenantId: t, engagementId: engagement.id, briefId, brief: content, actor: input.actor, now: input.now });
@@ -222,7 +207,11 @@ export async function buildBrief(
         eventStatement({ tenantId: t, engagementId: engagement.id, event: "brief_built", actor: input.actor, at, refType: "brief", refId: briefId, meta: { version_no: versionNo, status, pages_read: pagesRead, facts: content.facts.length, hypotheses: content.hypotheses.length } }),
       ],
     );
-    if (!saved) return { ok: false, error: "too_soon" };
+    if (!saved) {
+      const winner = await latestBrief(db, t, engagement.id);
+      if (winner && winner.version_no >= versionNo) return { ok: true, brief: winner, created: false };
+      return { ok: false, error: "too_soon" };
+    }
   } catch (err) {
     // Two builds at once (a double press, or the tick and a press) started from
     // the same brief: the other stored this version first, and its brief is the answer.
@@ -234,7 +223,6 @@ export async function buildBrief(
   const stored = await latestBrief(db, t, engagement.id);
   if (!stored) throw new Error("ai-audit.briefs: stored a brief but cannot read it back");
   return { ok: true, brief: stored, created: true };
-  });
 }
 
 /**

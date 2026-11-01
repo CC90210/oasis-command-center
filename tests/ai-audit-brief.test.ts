@@ -1126,7 +1126,28 @@ async function main() {
       return base.fetch(u, init);
     };
     const d = { fetch: gated as never, clock: () => (clock += 10) };
-    const [a, b] = await Promise.all([0, 1].map(() => briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: d })));
+    // The embedded test client has one SQLite connection. Model the remote
+    // database's write-transaction queue here, not in Worker module state.
+    // Both builds still read/fetch concurrently and compete through real SQL CAS.
+    const originalTransaction = db.transaction.bind(db);
+    let lastTransaction = Promise.resolve();
+    db.transaction = async mode => {
+      const previous = lastTransaction;
+      let release!: () => void;
+      lastTransaction = new Promise<void>(resolve => { release = resolve; });
+      await previous;
+      try {
+        const tx = await originalTransaction(mode);
+        const close = tx.close.bind(tx);
+        tx.close = () => { try { close(); } finally { release(); } };
+        return tx;
+      } catch (error) { release(); throw error; }
+    };
+    let results: Awaited<ReturnType<typeof briefs.buildBrief>>[];
+    try {
+      results = await Promise.all([0, 1].map(() => briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: d })));
+    } finally { db.transaction = originalTransaction; }
+    const [a, b] = results;
     assert.ok(a.ok && b.ok, JSON.stringify([a, b].map((x) => (x.ok ? x.created : x.error))));
     assert.deepEqual([a.created, b.created].sort(), [false, true]);
     assert.equal(a.brief.id, b.brief.id);
