@@ -51,8 +51,14 @@ export async function handleContentUpload(ref: Ref, body: Record<string, unknown
   });
   if (rs.rowsAffected !== 1) return lost();
   const uploads = [];
-  for (const f of files) uploads.push({ ...f, upload: { url: (await deps.storage.createSignedUploadUrl(f.storage_path)).signedUrl,
-    headers: { "content-type": "video/mp4" } } });
+  try {
+    for (const f of files) uploads.push({ ...f, upload: { url: (await deps.storage.createSignedUploadUrl(f.storage_path)).signedUrl,
+      headers: { "content-type": "video/mp4" } } });
+  } catch {
+    // Keep the reserved manifest for retry; never log a possibly signed URL.
+    console.error("[tools.content-upload] presign failed", { jobId: job.id });
+    return toolsRefuse(500, "upload_url_failed");
+  }
   return toolsJson(200, { ok: true, uploads });
 }
 
@@ -81,7 +87,14 @@ export async function handleContentComplete(ref: Ref, tool: ContentToolKey, body
     if (!clip || clip.storage_path !== f.storage_path || !Number.isFinite(clip.duration_s) || Number(clip.duration_s) <= 0 || Number(clip.duration_s) > 90 ||
         clip.width !== 1080 || clip.height !== 1920 || clip.captions !== true) return invalid("clips");
     if (!f.storage_path.startsWith(`${job.tenantId}/${f.asset_id}/`)) return invalid("storage_path");
-    const head = await deps.storage.info(f.storage_path);
+    let head: Awaited<ReturnType<NonNullable<RunnerDeps["storage"]>["info"]>>;
+    try {
+      head = await deps.storage.info(f.storage_path);
+    } catch {
+      // No asset statements run until every object has been verified.
+      console.error("[tools.content-complete] storage HEAD failed", { jobId: job.id, clip: i + 1 });
+      return toolsRefuse(500, "complete_failed");
+    }
     if (!head || Number(head.size) !== f.size_bytes || (head.etag ?? "").replace(/"/g, "").toLowerCase() !== f.md5) return toolsRefuse(422, "upload_mismatch");
     const holds = `EXISTS (SELECT 1 FROM tool_jobs WHERE ${guard} AND result_json = ?)`;
     const leaseArgs = [...args, JSON.stringify(job.result)];

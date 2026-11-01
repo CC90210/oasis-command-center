@@ -39,6 +39,8 @@ function conversion(row: Record<string, unknown>, event: unknown): number | null
   if (!Array.isArray(row.actions)) return null;
   const found = row.actions.map(object).filter(action => action.action_type === event);
   if (found.length > 1) return fail("invalid_report");
+  // Preserve an explicit zero. An omitted action is not evidence of zero;
+  // do not convert unavailable or suppressed conversion reporting into a count.
   return found.length ? count(found[0].value) : null;
 }
 async function bodyOf(response: Response): Promise<Record<string, unknown>> {
@@ -165,22 +167,34 @@ export async function importMetaDelivery(tenantId: string, deps: Deps = {}): Pro
     if (observations.length) {
       const tx = await db.transaction("write");
       try {
-        const measured = new Map(observations.map(o => [o.asset.id, o.asset]));
-        for (const asset of measured.values()) {
+        const measured = [...new Map(observations.map(o => [o.asset.id, o.asset])).values()];
+        // At most 500 IDs: one tenant-bound read avoids a network round trip
+        // per asset while keeping all history checks inside the write transaction.
+        const existing = await tx.execute({
+          sql: `SELECT DISTINCT asset_id FROM marketing_metric_daily WHERE tenant_id = ?
+            AND asset_id IN (${measured.map(() => "?").join(",")}) AND source IN ('meta','meta_ads','meta-api')`,
+          args: [tenantId, ...measured.map(asset => asset.id)],
+        });
+        const withHistory = new Set(existing.rows.map(row => String(row.asset_id)));
+        const metadataUpdates: InStatement[] = [];
+        for (const asset of measured) {
           const meta = asset.meta;
           const conversionEvent = meta.conversion_event === "lead" || meta.conversion_event === "purchase" ? meta.conversion_event : null;
           if ((meta.currency && meta.currency !== currency) || (meta.ads_reporting_timezone && meta.ads_reporting_timezone !== timezone) || (meta.meta_ad_account_id && meta.meta_ad_account_id !== accountId)) return fail("report_context_conflict");
-          const existing = await tx.execute({ sql: "SELECT 1 FROM marketing_metric_daily WHERE tenant_id = ? AND asset_id = ? AND source IN ('meta','meta_ads','meta-api') LIMIT 1", args: [tenantId, asset.id] });
-          if (existing.rows.length && (!meta.currency || !meta.ads_reporting_timezone || !meta.meta_ad_account_id)) return fail("report_context_conflict");
-          if (existing.rows.length && meta.ads_conversion_event !== conversionEvent) return fail("report_context_conflict");
+          const hasHistory = withHistory.has(asset.id);
+          if (hasHistory && (!meta.currency || !meta.ads_reporting_timezone || !meta.meta_ad_account_id)) return fail("report_context_conflict");
+          if (hasHistory && meta.ads_conversion_event !== conversionEvent) return fail("report_context_conflict");
           // The asset is the history key. A changed ad mapping must not blend
           // different ads across days, including history without provenance.
-          if (existing.rows.length && meta.ads_imported_ad_id !== asset.adId) return fail("report_context_conflict");
-          const updated = await tx.execute({
+          if (hasHistory && meta.ads_imported_ad_id !== asset.adId) return fail("report_context_conflict");
+          metadataUpdates.push({
             sql: "UPDATE marketing_asset SET meta = ? WHERE tenant_id = ? AND id = ? AND channel = 'paid-meta' AND external_id IS ? AND meta = ?",
             args: [JSON.stringify({ ...meta, currency, ads_reporting_timezone: timezone, meta_ad_account_id: accountId, ads_conversion_event: conversionEvent, ads_imported_ad_id: asset.adId }), tenantId, asset.id, asset.externalId, asset.rawMeta],
           });
-          if (updated.rowsAffected !== 1) return fail("mapping_changed");
+        }
+        for (let i = 0; i < metadataUpdates.length; i += 100) {
+          const updated = await tx.batch(metadataUpdates.slice(i, i + 100));
+          if (updated.some(result => result.rowsAffected !== 1)) return fail("mapping_changed");
         }
         const statements: InStatement[] = observations.map(o => ({
           sql: `INSERT INTO marketing_metric_daily (tenant_id, asset_id, date, impressions, reach, clicks, spend, conversions, source, captured_at)
@@ -191,7 +205,9 @@ export async function importMetaDelivery(tenantId: string, deps: Deps = {}): Pro
             WHERE marketing_metric_daily.captured_at <= excluded.captured_at`,
           args: [tenantId, o.asset.id, o.day, o.impressions, o.reach, o.clicks, o.spend, o.conversions, capturedAt],
         }));
-        for (let i = 0; i < statements.length; i += 100) await tx.batch(statements.slice(i, i + 100));
+        // Daily uniqueness, the seven-day range and MAX_ASSETS bound this to
+        // 3,500 rows: at most seven metric batches, not 35 network round trips.
+        for (let i = 0; i < statements.length; i += 500) await tx.batch(statements.slice(i, i + 500));
         await tx.commit();
       } catch (error) { await tx.rollback(); throw error; }
       finally { tx.close(); }

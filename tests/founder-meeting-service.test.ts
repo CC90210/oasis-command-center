@@ -2163,6 +2163,12 @@ async function testCancellationDetachesOpenAuditAndRetryIsSafe() {
     });
   }
   const input = { tenantId: TENANT, leadId: LEAD, appointmentId: "meeting-audit-cancel", requestId: "audit-cancel" };
+  const auditDb = deps.auditDb;
+  deps.auditDb = () => { throw new Error("fixture audit store unavailable"); };
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled", "audit outage cannot undo committed cancellation");
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled", "idempotent cancellation remains successful during the outage");
+  assert.equal((await raw.execute("SELECT appointment_id FROM ai_audit_engagements WHERE id='open-audit'")).rows[0].appointment_id, "meeting-audit-cancel");
+  deps.auditDb = auditDb;
   assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled");
   assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled");
   const open = (await raw.execute("SELECT * FROM ai_audit_engagements WHERE id='open-audit'")).rows[0];

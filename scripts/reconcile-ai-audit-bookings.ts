@@ -1,4 +1,7 @@
-/** Scoped maintenance: preview by default; --apply opens/links only the named leads' verified future bookings. */
+/** Scoped maintenance: preview by default; --apply opens/links only the named leads' verified future bookings.
+ * Run with credentials supplied by the sanctioned maintenance launcher:
+ * node --conditions=react-server --import tsx scripts/reconcile-ai-audit-bookings.ts --tenant=<uuid> --lead=<uuid> [--apply]
+ */
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { autoOpenForBookedMeetings } from "../lib/ai-audit/auto-open";

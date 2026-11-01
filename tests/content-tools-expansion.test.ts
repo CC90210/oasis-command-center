@@ -99,6 +99,67 @@ async function main() {
     assert.ok(oldFiles.every((f: any) => !storage.objects.has(f.storage_path)));
     assert.ok(newFiles.every((f: any) => storage.objects.has(f.storage_path)), "current asset objects stay intact");
   });
+  await check("partial presign failure returns JSON 500 and retries the same three reserved paths", async () => {
+    const id = await queueDownload(db, OASIS, now, { toolKey: "video_remix" });
+    const job = await claim("video_remix");
+    const ref = { job_id: id, lease_id: job.lease_id };
+    const originalSign = storage.storage.createSignedUploadUrl;
+    let attempts = 0;
+    storage.storage.createSignedUploadUrl = async path => {
+      if (++attempts === 2) throw new Error("presign unavailable");
+      return originalSign(path);
+    };
+    try {
+      const failed = await call("upload-url", { ...ref, files });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.body.error, "upload_url_failed");
+      assert.equal(failed.body.ok, false);
+      assert.equal(failed.body.uploads, undefined, "a partial set of signed URLs is never returned");
+    } finally { storage.storage.createSignedUploadUrl = originalSign; }
+    const manifest = JSON.parse(String(await scalar(db, "SELECT result_json FROM tool_jobs WHERE id = ? AND tenant_id = ?", [id, OASIS])));
+    assert.equal(manifest.pending_uploads.length, 3);
+    assert.equal(await scalar(db, "SELECT status FROM tool_jobs WHERE id = ?", [id]), "claimed");
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset WHERE tenant_id = ? AND source LIKE ?", [OASIS, `tool:video_remix:${id}:%`])), 0);
+    const retry = await call("upload-url", { ...ref, files });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(retry.body.uploads.map((f: any) => f.storage_path), manifest.pending_uploads.map((f: any) => f.storage_path));
+    for (const f of retry.body.uploads) storage.put(f.storage_path, f.size_bytes, f.md5);
+    const clips = retry.body.uploads.map((f: any) => ({ storage_path: f.storage_path, width: 1080, height: 1920, duration_s: 30, captions: true }));
+    assert.equal((await call("complete", { ...ref, tool_key: "video_remix", clips })).status, 200);
+    assert.equal((await call("complete", { ...ref, tool_key: "video_remix", clips })).body.duplicate, true);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset WHERE tenant_id = ? AND source LIKE ?", [OASIS, `tool:video_remix:${id}:%`])), 3);
+  });
+  await check("storage HEAD outage writes no assets or completion and a retry completes exactly once", async () => {
+    const id = await queueDownload(db, OASIS, now, { toolKey: "video_remix" });
+    const job = await claim("video_remix");
+    const ref = { job_id: id, lease_id: job.lease_id };
+    const reservation = await call("upload-url", { ...ref, files });
+    for (const f of reservation.body.uploads) storage.put(f.storage_path, f.size_bytes, f.md5);
+    const clips = reservation.body.uploads.map((f: any) => ({ storage_path: f.storage_path, width: 1080, height: 1920, duration_s: 30, captions: true }));
+    const before = await scalar(db, "SELECT result_json FROM tool_jobs WHERE id = ? AND tenant_id = ?", [id, OASIS]);
+    const mediaBefore = Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset_media WHERE tenant_id = ?", [OASIS]));
+    const originalHead = storage.storage.info;
+    let attempts = 0;
+    storage.storage.info = async path => {
+      if (++attempts === 2) throw new Error("storage unavailable");
+      return originalHead(path);
+    };
+    try {
+      const failed = await call("complete", { ...ref, tool_key: "video_remix", clips });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.body.error, "complete_failed");
+      assert.equal(failed.body.ok, false);
+    } finally { storage.storage.info = originalHead; }
+    assert.equal(await scalar(db, "SELECT status FROM tool_jobs WHERE id = ?", [id]), "claimed");
+    assert.equal(await scalar(db, "SELECT finished_at FROM tool_jobs WHERE id = ?", [id]), null);
+    assert.equal(await scalar(db, "SELECT result_json FROM tool_jobs WHERE id = ?", [id]), before);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset WHERE tenant_id = ? AND source LIKE ?", [OASIS, `tool:video_remix:${id}:%`])), 0);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset_media WHERE tenant_id = ?", [OASIS])), mediaBefore);
+    assert.equal((await call("complete", { ...ref, tool_key: "video_remix", clips })).status, 200);
+    assert.equal((await call("complete", { ...ref, tool_key: "video_remix", clips })).body.duplicate, true);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset WHERE tenant_id = ? AND source LIKE ?", [OASIS, `tool:video_remix:${id}:%`])), 3);
+    assert.equal(Number(await scalar(db, "SELECT COUNT(*) FROM marketing_asset_media WHERE tenant_id = ?", [OASIS])), mediaBefore + 3);
+  });
   db.close();
   finish("content tools expansion");
 }

@@ -1,4 +1,7 @@
-/** Scoped pre-call preparation: preview by default; no client contact or AI calls. */
+/** Scoped pre-call preparation: preview by default; no client contact or AI calls.
+ * Run with credentials supplied by the sanctioned maintenance launcher:
+ * node --conditions=react-server --import tsx scripts/prepare-ai-audit-briefs.ts --tenant=<uuid> --engagement=<uuid> [--apply]
+ */
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { buildBrief, defaultSiteDeps, latestBrief } from "../lib/ai-audit/briefs";

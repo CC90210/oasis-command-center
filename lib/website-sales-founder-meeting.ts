@@ -291,6 +291,17 @@ async function storeMeetRoomId(
   return saved.data as AppointmentRow;
 }
 
+async function detachCancelledAuditMeeting(
+  deps: FounderMeetingServiceDependencies,
+  input: { tenantId: string; leadId: string; appointmentId: string; now: Date },
+): Promise<void> {
+  try { await unlinkCancelledAuditMeeting(deps.auditDb(), input); }
+  catch {
+    // Cancellation has committed. The audit tick retries the separate unlink.
+    console.error("[founder-meeting] audit_unlink_failed", { appointmentId: input.appointmentId });
+  }
+}
+
 async function removeMeetRoomForAppointment(
   appointment: AppointmentRow,
   deps: FounderMeetingServiceDependencies,
@@ -2306,7 +2317,7 @@ export async function cancelVerifiedFounderMeeting(input: {
     appointment.workflow_status === "cancelled"
   ) {
     appointment = await removeMeetRoomForAppointment(appointment, deps, appointment.assigned_to);
-    await unlinkCancelledAuditMeeting(deps.auditDb(), { tenantId: input.tenantId, leadId: input.leadId, appointmentId: appointment.id, now: new Date(deps.now()) });
+    await detachCancelledAuditMeeting(deps, { tenantId: input.tenantId, leadId: input.leadId, appointmentId: appointment.id, now: new Date(deps.now()) });
     return { disposition: "cancelled", appointmentId: appointment.id, requestId: input.requestId };
   }
   if (cancellationPreservesHistory(appointment, deps.now())) {
@@ -2377,7 +2388,7 @@ export async function cancelVerifiedFounderMeeting(input: {
         error: "meeting_cancel_write_failed",
       };
     }
-    await unlinkCancelledAuditMeeting(deps.auditDb(), { tenantId: input.tenantId, leadId: input.leadId, appointmentId: appointment.id, now: new Date(nowIso) });
+    await detachCancelledAuditMeeting(deps, { tenantId: input.tenantId, leadId: input.leadId, appointmentId: appointment.id, now: new Date(nowIso) });
     return { disposition: "cancelled", appointmentId: appointment.id, requestId: input.requestId };
   } catch (error) {
     const code = errorCode(error, "calendar_cancel_failed");
@@ -2980,7 +2991,7 @@ async function reconcileTenantFounderMeetingSagas(
         )) {
           throw new Error("meeting_cancel_reconcile_pending");
         }
-        await unlinkCancelledAuditMeeting(deps.auditDb(), { tenantId, leadId: appointment.lead_id, appointmentId: appointment.id, now: new Date(nowIso) });
+        await detachCancelledAuditMeeting(deps, { tenantId, leadId: appointment.lead_id, appointmentId: appointment.id, now: new Date(nowIso) });
         result.cancelled += 1;
         continue;
       }

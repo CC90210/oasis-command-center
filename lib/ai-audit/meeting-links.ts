@@ -41,7 +41,7 @@ export async function unlinkCancelledAuditMeeting(
 }
 
 /** Repairs a process interruption after cancellation committed, before detaching the audit. */
-export async function repairCancelledAuditMeetingLinks(db: Client, tenantId: string, now: Date): Promise<void> {
+export async function repairCancelledAuditMeetingLinks(db: Client, tenantId: string, now: Date, onError?: (appointmentId: string, error: unknown) => void): Promise<void> {
   const rs = await db.execute({
     sql: `SELECT e.lead_id, e.appointment_id FROM ai_audit_engagements e
           JOIN call_appointments a ON a.tenant_id = e.tenant_id AND a.id = e.appointment_id AND a.lead_id = e.lead_id
@@ -50,7 +50,12 @@ export async function repairCancelledAuditMeetingLinks(db: Client, tenantId: str
           ORDER BY e.updated_at LIMIT 100`,
     args: [requireTenant(tenantId)],
   });
-  for (const row of rs.rows) await unlinkCancelledAuditMeeting(db, {
-    tenantId, leadId: String(row.lead_id), appointmentId: String(row.appointment_id), now,
-  });
+  for (const row of rs.rows) {
+    try {
+      await unlinkCancelledAuditMeeting(db, { tenantId, leadId: String(row.lead_id), appointmentId: String(row.appointment_id), now });
+    } catch (error) {
+      if (onError) onError(String(row.appointment_id), error);
+      else console.error("[ai-audit.meeting-links] audit_unlink_failed", { appointmentId: String(row.appointment_id) });
+    }
+  }
 }

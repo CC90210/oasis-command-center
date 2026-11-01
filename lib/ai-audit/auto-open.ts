@@ -88,7 +88,10 @@ export async function autoOpenForBookedMeetings(
   const tenantId = requireTenant(input.tenantId);
   const report: AutoOpenReport = { opened: 0, linked: 0 };
   if (!(await callAppointmentsInstalled(db))) return report;
-  if (!input.leadIds) await repairCancelledAuditMeetingLinks(db, tenantId, input.now);
+  if (!input.leadIds) {
+    try { await repairCancelledAuditMeetingLinks(db, tenantId, input.now, input.onError); }
+    catch (error) { input.onError?.("cancelled_link_repair", error); }
+  }
   for (const meeting of await upcomingFounderMeetings(db, tenantId, input.now, AUTO_OPEN_LIMIT, input.leadIds)) {
     try {
       const opened = await openEngagement(db, { tenantId, leadId: meeting.lead_id, actor: SYSTEM, now: input.now });

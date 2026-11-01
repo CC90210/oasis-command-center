@@ -124,11 +124,92 @@ async function main() {
     mode = "empty"; const result = await run(); assert.ok(result.ok); assert.equal(result.imported, 0); assert.equal((await rows()).length, 1);
     mode = "normal";
   });
+  await check("explicit zero lead/purchase counts remain zero; omitted actions remain unknown", async () => {
+    const tenant = "meta-actions-fixture";
+    try {
+      for (const event of ["lead", "purchase"]) {
+        await asset("conversion", tenant, adId, { conversion_event: event });
+        for (const actions of [[{ action_type: event, value: "0" }], [{ action_type: "link_click", value: "5" }], [], undefined]) {
+          const response: typeof fetch = async input => new URL(String(input)).pathname.endsWith("/insights")
+            ? Response.json({ data: [{ account_id: accountId, account_currency: currency, ad_id: adId,
+              date_start: "2026-10-31", date_stop: "2026-10-31", actions }] })
+            : Response.json({ id: `act_${accountId}`, currency, timezone_name: timezone });
+          assert.ok((await importMetaDelivery(tenant, { db, now, credentials, fetch: response })).ok);
+          const saved = (await db.execute({ sql: "SELECT conversions FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] })).rows;
+          assert.equal(saved.length, 1);
+          assert.equal(saved[0].conversions, actions?.[0]?.action_type === event ? 0 : null);
+        }
+        await db.execute({ sql: "DELETE FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] });
+      }
+    } finally {
+      await db.execute({ sql: "DELETE FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] });
+      await db.execute({ sql: "DELETE FROM marketing_asset WHERE tenant_id=?", args: [tenant] });
+    }
+  });
   await check("creative changes during fetch abort the whole write", async () => {
     const before = JSON.stringify(await rows()); mode = "mapping_race";
     assert.deepEqual(await run(), { ok: false, error: "mapping_changed" });
     assert.equal(JSON.stringify(await rows()), before); mode = "normal";
     await db.execute({ sql: "UPDATE marketing_asset SET external_id=? WHERE tenant_id=? AND id='a'", args: [adId, OASIS] });
+  });
+  await check("500 ads across seven days use 13 transaction data calls and a late mapping conflict rolls back earlier updates", async () => {
+    const tenant = "meta-batch-fixture";
+    const bulk = Array.from({ length: 500 }, (_, i) => ({ id: `bulk-${i}`, adId: String(70000000000 + i) }));
+    const counts = { execute: 0, batches: [] as number[] };
+    const monitored = new Proxy(db, {
+      get(target, key) {
+        if (key === "transaction") return async (...args: Parameters<typeof db.transaction>) => {
+          const tx = await target.transaction(...args);
+          return new Proxy(tx, {
+            get(transaction, property) {
+              if (property === "execute") return (...statements: Parameters<typeof tx.execute>) => {
+                counts.execute++; return transaction.execute(...statements);
+              };
+              if (property === "batch") return (...statements: Parameters<typeof tx.batch>) => {
+                counts.batches.push(statements[0].length); return transaction.batch(...statements);
+              };
+              const value = Reflect.get(transaction, property);
+              return typeof value === "function" ? value.bind(transaction) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let changeLastMapping = false;
+    const bulkFetch: typeof fetch = async input => {
+      const url = new URL(String(input));
+      if (!url.pathname.endsWith("/insights")) return Response.json({ id: `act_${accountId}`, currency, timezone_name: timezone });
+      if (changeLastMapping) await db.execute({ sql: "UPDATE marketing_asset SET external_id='99999999999' WHERE tenant_id=? AND id='bulk-499'", args: [tenant] });
+      const page = Number(url.searchParams.get("after") ?? 0);
+      const day = `2026-10-${25 + page}`;
+      return Response.json({ data: bulk.map(item => ({ account_id: accountId, account_currency: currency, ad_id: item.adId,
+        date_start: day, date_stop: day, impressions: "10", spend: "1.00" })),
+        ...(page < 6 ? { paging: { next: "https://graph.facebook.com/unused", cursors: { after: String(page + 1) } } } : {}) });
+    };
+    const importBulk = () => importMetaDelivery(tenant, { db: monitored, now, credentials, fetch: bulkFetch });
+    try {
+      await db.batch(bulk.map(item => ({ sql: "INSERT INTO marketing_asset (tenant_id,id,channel,external_id,meta) VALUES (?,?,'paid-meta',?,'{}')", args: [tenant, item.id, item.adId] })));
+      const first = await importBulk(); assert.ok(first.ok); assert.equal(first.imported, 3500);
+      assert.equal(counts.execute, 1, "history is read together within the transaction");
+      assert.equal(counts.batches.length, 12, "500 metadata updates and the maximum 3,500 daily rows take twelve bounded batches");
+      assert.ok(counts.batches.slice(0, 5).every(size => size <= 100));
+      assert.ok(counts.batches.slice(5).every(size => size <= 500));
+      assert.equal(Number((await db.execute({ sql: "SELECT count(*) n FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] })).rows[0].n), 3500);
+      // Reset only this synthetic tenant; a conflict in the final update batch
+      // must roll back the provenance already written for the first 400 ads.
+      await db.execute({ sql: "DELETE FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] });
+      await db.execute({ sql: "UPDATE marketing_asset SET meta='{}' WHERE tenant_id=?", args: [tenant] });
+      changeLastMapping = true; counts.execute = 0; counts.batches = [];
+      assert.deepEqual(await importBulk(), { ok: false, error: "mapping_changed" });
+      assert.equal(counts.execute, 1); assert.equal(counts.batches.length, 5);
+      assert.equal(Number((await db.execute({ sql: "SELECT count(*) n FROM marketing_asset WHERE tenant_id=? AND meta<>'{}'", args: [tenant] })).rows[0].n), 0);
+      assert.equal(Number((await db.execute({ sql: "SELECT count(*) n FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] })).rows[0].n), 0);
+    } finally {
+      await db.execute({ sql: "DELETE FROM marketing_metric_daily WHERE tenant_id=?", args: [tenant] });
+      await db.execute({ sql: "DELETE FROM marketing_asset WHERE tenant_id=?", args: [tenant] });
+    }
   });
   await check("mixed reporting timezones are not presented as one comparable total", async () => {
     await asset("zone-b", OASIS, "33333333333", { currency: "CAD", ads_reporting_timezone: "America/Vancouver" });
