@@ -66,18 +66,24 @@ for (const link of invalidMeetingLinks) {
 }
 // The ladder CC asked for (2026-10-28): the day before, an hour, then texts at
 // 30, 15 and 5 minutes, with email at the day before, the hour and 15 minutes.
+// CC 2026-11-01 added email at 30 and a text at 60.
 assert.deepEqual(FOUNDER_REMINDER_TIERS, [1440, 60, 30, 15, 5]);
 assert.deepEqual(
   FOUNDER_REMINDER_SCHEDULE.map((step) => [step.minutes, [...step.channels]]),
-  [[1440, ["email", "sms"]], [60, ["email"]], [30, ["sms"]], [15, ["email", "sms"]], [5, ["sms"]]],
+  [[1440, ["email", "sms"]], [60, ["email", "sms"]], [30, ["email", "sms"]], [15, ["email", "sms"]], [5, ["sms"]]],
 );
+// CC 2026-11-01: every lead gets an email at 60, 30 and 15 minutes, whether or
+// not a text can reach them.
+for (const minutes of [60, 30, 15]) {
+  assert(reminderChannelsFor(minutes).includes("email"), `T-${minutes} always emails`);
+}
 assert.equal(reminderKindFor(1440), "reminder_1440");
 assert.equal(reminderKindFor(60), "reminder_60");
 assert.equal(reminderKindFor(30), "reminder_30");
 assert.equal(reminderKindFor(15), "reminder_15");
 assert.equal(reminderKindFor(5), "reminder_5");
 assert.equal(reminderKindFor(10), "ten_minute", "rows queued before the ladder keep their kind");
-assert.deepEqual([...reminderChannelsFor(30)], ["sms"], "T-30 is a text only");
+assert.deepEqual([...reminderChannelsFor(30)], ["email", "sms"], "T-30 emails and texts");
 assert.deepEqual([...reminderChannelsFor(10)], ["email", "sms"]);
 assert.throws(() => reminderKindFor(20 as never), /unsupported_reminder_tier/);
 assert(isKnownReminderTier(10) && isKnownReminderTier(5) && !isKnownReminderTier(20));
@@ -107,11 +113,15 @@ assert.deepEqual(
   "a 20-minute lead time never invents T-60/T-30 reminders",
 );
 // Superseded only by the next step on the SAME channel (Codex review of #774).
-// Email steps: 1440, 60, 15. Text steps: 1440, 30, 15, 5.
+// Email steps: 1440, 60, 30, 15. Text steps: 1440, 60, 30, 15, 5.
 assert(!reminderTierStillValid(1440, 60, "email"), "the day-before email is dropped once the hour email is due");
 assert(reminderTierStillValid(1440, 61, "email"));
-assert(!reminderTierStillValid(1440, 30, "sms"), "the day-before text is dropped once the 30-minute text is due");
-assert(reminderTierStillValid(60, 30, "email"), "no 30-minute email exists, so the hour email still goes out at 30");
+assert(!reminderTierStillValid(1440, 60, "sms"), "the day-before text is dropped once the hour text is due");
+assert(!reminderTierStillValid(60, 30, "email"), "T-60 email is superseded when the 30-minute email is due");
+assert(reminderTierStillValid(60, 31, "email"));
+assert(!reminderTierStillValid(60, 30, "sms"), "T-60 text is superseded when the 30-minute text is due");
+assert(!reminderTierStillValid(30, 15, "email"), "T-30 email is superseded exactly when the T-15 email is due");
+assert(reminderTierStillValid(30, 16, "email"));
 assert(!reminderTierStillValid(60, 15, "email"), "T-60 email is superseded when the 15-minute email is due");
 assert(!reminderTierStillValid(30, 15, "sms"), "T-30 text is superseded exactly when the T-15 text is due");
 assert(reminderTierStillValid(30, 16, "sms"));

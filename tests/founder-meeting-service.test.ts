@@ -381,18 +381,27 @@ async function testCreateAuditAndFullIdempotency() {
           ORDER BY reminder_minutes_before DESC, channel`,
     args: [meeting.appointmentId],
   });
-  // Two hours out: email at 60 and 15, texts at 30, 15 and 5, both
+  // Two hours out: email at 60, 30 and 15, texts at 60, 30, 15 and 5, both
   // confirmations, and the founder's own 15-minute heads-up.
-  assert.equal(notificationRows.rows.length, 8, "confirmations, the ladder inside the hour, and the host heads-up are planned");
+  assert.equal(notificationRows.rows.length, 10, "confirmations, the ladder inside the hour, and the host heads-up are planned");
   const reminders = notificationRows.rows.filter((notification) => notification.reminder_minutes_before !== null);
-  assert.equal(reminders.length, 6);
+  assert.equal(reminders.length, 8);
   assert.deepEqual(
     [...new Set(reminders.map((notification) => Number(notification.reminder_minutes_before)))].sort((a, b) => b - a),
     [60, 30, 15, 5],
   );
   assert.deepEqual(
     reminders.map((notification) => `${notification.kind}:${notification.channel}`).sort(),
-    ["host_15:email", "reminder_15:email", "reminder_15:sms", "reminder_30:sms", "reminder_5:sms", "reminder_60:email"],
+    [
+      "host_15:email",
+      "reminder_15:email",
+      "reminder_15:sms",
+      "reminder_30:email",
+      "reminder_30:sms",
+      "reminder_5:sms",
+      "reminder_60:email",
+      "reminder_60:sms",
+    ],
   );
 
   await createVerifiedFounderMeeting(bookingInput(), deps);
@@ -1210,8 +1219,9 @@ async function testBackfillHydratesLatePhoneAndRepairsTiers() {
           WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
     args: ["meeting-backfill"],
   });
-  assert.equal(reminders.rows.length, 6);
-  assert.equal(reminders.rows.filter((row) => row.channel === "sms").length, 3);
+  // Email at 60, 30 and 15 joins the texts the late phone now allows.
+  assert.equal(reminders.rows.length, 8);
+  assert.equal(reminders.rows.filter((row) => row.channel === "sms").length, 4);
   await raw.close();
 }
 
@@ -1256,7 +1266,7 @@ async function testBackfillLimitScansPastAlreadyCompleteAppointments() {
           WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
     args: ["meeting-backfill-missing-second"],
   });
-  assert.equal(Number(repairedLater.rows[0].count), 6, "the later missing appointment is not starved by the limit");
+  assert.equal(Number(repairedLater.rows[0].count), 8, "the later missing appointment is not starved by the limit");
   await raw.close();
 }
 
