@@ -671,6 +671,7 @@ async function main() {
     const { getToolCatalog, CONTENT_TOOLS_HIDDEN } = await import("../lib/tools/catalog");
     const now = new Date();
     const keys = (c: Awaited<ReturnType<typeof getToolCatalog>>) => (c.installed ? c.tools.map((tl) => `${tl.key}:${tl.state}`) : ["not installed"]);
+    const newOffline = ["video_remix:runner_offline", "hook_rewriter:runner_offline", "broll_matcher:runner_offline"];
     // CC, 2026-10-17: Repurpose (answering ai_failed) is off the Content Tools page.
     assert.ok(CONTENT_TOOLS_HIDDEN.has("repurpose_post"));
     // A client workspace: no runner can ever serve it, so no extractor card, and
@@ -681,12 +682,12 @@ async function main() {
     // stays and says the PC is offline (no runner named).
     await seedRunner(db, later(now, -minutes(60)));
     const never = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.deepEqual(keys(never), ["video_download:runner_offline"]);
+    assert.deepEqual(keys(never), ["video_download:runner_offline", ...newOffline]);
     assert.equal(never.installed ? never.tools[0].runner : "x", undefined);
     // OASIS with a runner seen 4 minutes ago: ready, naming the runner.
     await seedRunner(db, later(now, -minutes(4)));
     const live = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.deepEqual(keys(live), ["video_download:ready"]);
+    assert.deepEqual(keys(live), ["video_download:ready", ...newOffline]);
     const dl = live.installed ? live.tools.find((tl) => tl.key === "video_download") : undefined;
     assert.equal(dl?.title, "Video extractor");
     // The catalog hands the grid the check-in time itself; the grid counts the minutes on the viewer's clock.
@@ -695,7 +696,10 @@ async function main() {
     // Eleven minutes: not live; the card stays, offline.
     await seedRunner(db, later(now, -minutes(11)));
     const stale = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => ACCOUNT });
-    assert.deepEqual(keys(stale), ["video_download:runner_offline"]);
+    assert.deepEqual(keys(stale), ["video_download:runner_offline", ...newOffline]);
+    await seedRunner(db, now, ["video_download", "video_remix", "hook_rewriter", "broll_matcher"]);
+    const allReady = await getToolCatalog({ tenantId: OASIS }, { db, now, readAccount: async () => null });
+    assert.deepEqual(keys(allReady), ["video_download:ready", "video_remix:ready", "hook_rewriter:ready", "broll_matcher:ready"]);
     assert.deepEqual(await getToolCatalog({ tenantId: OASIS }, { db: emptyDatabase(), now, readAccount: async () => ACCOUNT }), { installed: false });
 
     // The "operator" audience (Admin > Agent training): ONLY the operatorOnly

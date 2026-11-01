@@ -50,6 +50,8 @@ export type ProfileFieldDef = {
   columns?: readonly string[];
   /** The audit needs this figure for an estimate. Shown on the call screen's coverage meter. */
   needed_for_estimates?: boolean;
+  /** Captured by website checks rather than a discovery-call question. */
+  automated?: boolean;
 };
 
 export const PROFILE_FIELDS: readonly ProfileFieldDef[] = [
@@ -69,6 +71,7 @@ export const PROFILE_FIELDS: readonly ProfileFieldDef[] = [
   { key: "tech.tools", group: "technology", label: "Tools in use", type: "rows", columns: ["tool", "what it is for", "monthly cost"] },
   { key: "tech.disconnected", group: "technology", label: "Systems that do not talk to each other", type: "text" },
   { key: "tech.frustrations", group: "technology", label: "Biggest frustrations with the tools", type: "text" },
+  { key: "website.diagnostics", group: "technology", label: "Website measurements", type: "rows", columns: ["check", "result", "source"], automated: true },
   { key: "sales.lead_sources", group: "sales", label: "Where leads come from", type: "rows", columns: ["source", "per month"] },
   { key: "sales.leads_per_month", group: "sales", label: "New leads per month", type: "number", unit: "leads/month", needed_for_estimates: true },
   { key: "sales.lead_handling", group: "sales", label: "What happens when a lead comes in", type: "text" },

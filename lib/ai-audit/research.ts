@@ -145,7 +145,7 @@ function parsePack(raw: unknown): ResearchPack | null {
 export async function latestResearch(db: Client, tenantId: string, engagementId: string): Promise<StoredResearch | null> {
   const t = requireTenant(tenantId);
   const r = (
-    await db.execute({ sql: "SELECT id, version_no, status, content, content_sha256, created_at FROM ai_audit_research WHERE tenant_id = ? AND engagement_id = ? ORDER BY version_no DESC LIMIT 1", args: [t, engagementId] })
+    await db.execute({ sql: "SELECT id, version_no, status, content, content_sha256, created_at FROM ai_audit_research WHERE tenant_id = ? AND engagement_id = ? AND CASE WHEN json_valid(content) THEN json_extract(content, '$.schema') END = 'ai_audit_research/v1' ORDER BY version_no DESC LIMIT 1", args: [t, engagementId] })
   ).rows[0];
   const content = r ? parsePack(r.content) : null;
   if (!r || !content) return null;
@@ -896,7 +896,7 @@ export async function dueResearch(db: Client, tenantId: string, now = new Date()
   const at = now.toISOString();
   const candidates = await db.execute({
     sql: `SELECT e.id FROM ai_audit_engagements e WHERE e.tenant_id = ? AND e.stage IN (${RESEARCH_STAGES.map(() => "?").join(", ")})
-            AND NOT EXISTS (SELECT 1 FROM ai_audit_research r WHERE r.tenant_id = e.tenant_id AND r.engagement_id = e.id)
+            AND NOT EXISTS (SELECT 1 FROM ai_audit_research r WHERE r.tenant_id = e.tenant_id AND r.engagement_id = e.id AND CASE WHEN json_valid(r.content) THEN json_extract(r.content, '$.schema') END = 'ai_audit_research/v1')
             AND NOT EXISTS (SELECT 1 FROM ai_audit_steps s WHERE s.tenant_id = e.tenant_id AND s.engagement_id = e.id AND s.step_key = ? AND (s.status IN ('queued', 'running', 'waiting_runner') OR s.created_at > ?))
           ORDER BY e.updated_at LIMIT 10`,
     // A run that ended in the last hour is not started again by the tick (CC can press Research again).

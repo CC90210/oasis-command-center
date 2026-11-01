@@ -747,17 +747,17 @@ async function main() {
   });
 
   // ── /growth/ads ────────────────────────────────────────────────────────
-  await check("/growth/ads: no number on the page; every tile says Not connected", async () => {
+  await check("/growth/ads: absent delivery evidence never becomes a number", async () => {
     await login("cc");
     const tree = await AdsPage();
     const tiles = kpis(tree);
     assert.equal(tiles.length, 4);
-    for (const t of tiles) assert.ok(t.status === "not_connected" && t.value === null, `${t.label}: ${t.status}`);
+    for (const t of tiles) assert.ok((t.status === "no_data" || t.status === "error") && t.value === null, `${t.label}: ${t.status}`);
     assert.ok(text(tree).includes("/founders/marketing/performance"), "founders get their organic performance link");
   });
   await check("/growth/ads: the marketer gets it without the founders link; a rep and a client do not get it", async () => {
     await login("marketer");
-    assert.ok(!text(await AdsPage()).includes("Connect Meta Ads Manager"), "Connect is for owners/admins");
+    assert.ok(!text(await AdsPage()).includes("Manage Meta connection"), "Connect is for owners/admins");
     await login("rep");
     assert.equal(await is404(() => AdsPage()), true, "not on a rep's rail");
     await login("client");

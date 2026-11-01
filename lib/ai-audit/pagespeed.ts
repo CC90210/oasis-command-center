@@ -67,7 +67,7 @@ export function parsePageSpeed(url: string, body: unknown, fetchedAt: string): P
 }
 
 /** One PageSpeed run for the home page. Never throws. */
-export async function runPageSpeed(url: string, deps: { fetch: PageSpeedFetch; key?: string | null; now: () => Date }): Promise<PageSpeedResult> {
+export async function runPageSpeed(url: string, deps: { fetch: PageSpeedFetch; key?: string | null; now: () => Date; timeoutMs?: number }): Promise<PageSpeedResult> {
   let target: URL;
   try {
     target = new URL(url);
@@ -79,7 +79,8 @@ export async function runPageSpeed(url: string, deps: { fetch: PageSpeedFetch; k
   for (const c of ["PERFORMANCE", "ACCESSIBILITY", "SEO", "BEST_PRACTICES"]) q.append("category", c);
   if (deps.key) q.set("key", deps.key);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), PAGESPEED_TIMEOUT_MS);
+  const timeoutMs = Math.min(PAGESPEED_TIMEOUT_MS, Math.max(1, deps.timeoutMs ?? PAGESPEED_TIMEOUT_MS));
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await deps.fetch(`${PAGESPEED_ENDPOINT}?${q.toString()}`, { method: "GET", signal: ctrl.signal, headers: { accept: "application/json" } });
     if (res.status === 429) return { ok: false, url, error: "rate_limited", detail: "Google asked us to slow down (no PageSpeed key is set)" };
@@ -95,7 +96,7 @@ export async function runPageSpeed(url: string, deps: { fetch: PageSpeedFetch; k
     return parsePageSpeed(target.toString(), body, deps.now().toISOString());
   } catch (err) {
     const aborted = ctrl.signal.aborted || (err instanceof Error && err.name === "AbortError");
-    return { ok: false, url, error: aborted ? "timeout" : "refused", detail: aborted ? "PageSpeed did not answer within a minute" : "PageSpeed could not be reached" };
+    return { ok: false, url, error: aborted ? "timeout" : "refused", detail: aborted ? `PageSpeed did not answer within ${Math.ceil(timeoutMs / 1000)} seconds` : "PageSpeed could not be reached" };
   } finally {
     clearTimeout(timer);
   }

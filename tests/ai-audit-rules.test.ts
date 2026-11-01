@@ -505,7 +505,7 @@ async function main() {
 
   console.log("discovery framework");
   const framework = await import("../lib/ai-audit/framework");
-  await check("every question fills real profile fields, and every profile field has a question", () => {
+  await check("every question fills real profile fields, and every manually captured field has a question", () => {
     const keys = new Set(profile.PROFILE_FIELDS.map((f) => f.key));
     const ids = new Set<string>();
     for (const q of framework.DISCOVERY_QUESTIONS) {
@@ -514,7 +514,7 @@ async function main() {
       for (const k of q.fills) assert.ok(keys.has(k), `${q.id} fills unknown field ${k}`);
     }
     const filled = new Set(framework.frameworkFields());
-    for (const k of keys) assert.ok(filled.has(k), `no question fills ${k}`);
+    for (const f of profile.PROFILE_FIELDS.filter(f => !f.automated)) assert.ok(filled.has(f.key), `no question fills ${f.key}`);
     assert.deepEqual([...new Set(framework.DISCOVERY_QUESTIONS.map((q) => q.category))], [...framework.QUESTION_CATEGORIES], "categories in the brief's order");
   });
   await check("the handbook carries every question word for word", () => {

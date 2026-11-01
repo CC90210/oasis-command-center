@@ -19,15 +19,10 @@
  */
 import Link from "next/link";
 import type { EngagementView } from "@/lib/ai-audit/view";
+import { diagnosticSignals, meetingTime, presentationOptions } from "@/lib/ai-audit/presentation";
 
 /** How many of each list the card shows; the rest are on the "Call and transcripts" tab. */
 const SHOW = 4;
-
-function when(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("en-CA", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
 
 /**
  * The room to join: the room booked with this engagement's meeting while it is open; otherwise, of the
@@ -45,10 +40,10 @@ export function roomToJoin(rooms: EngagementView["meetRooms"], linkedRoomId: str
 export function PresentationBrief({ view, onOpenResearch }: { view: EngagementView; onOpenResearch: () => void }) {
   const e = view.engagement;
   const b = view.brief?.content ?? null;
-  const readSite = b?.site.kind === "site" ? b.site.url : null;
+  const readSite = b?.site.kind === "site" && b.site.pages_read > 0 ? b.site.url : null;
   const statedSite = view.lead?.website ?? null;
-  const problems = b?.hypotheses ?? [];
-  const siteFacts = (b?.facts ?? []).filter((f) => f.source.kind === "site");
+  const signals = diagnosticSignals(b);
+  const options = presentationOptions(b, e.business_type, view.catalogue);
   const opportunities = view.audit?.doc?.sections.opportunities.items ?? [];
   const room = roomToJoin(view.meetRooms, e.meet_room_id);
 
@@ -57,7 +52,7 @@ export function PresentationBrief({ view, onOpenResearch }: { view: EngagementVi
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-fg">Presentation brief</h2>
-          {room?.startsAt ? <div className="text-[13px] text-fg">Call: {when(room.startsAt)}</div> : null}
+          {room?.startsAt ? <div className="text-[13px] tabular-nums text-fg">Call: {meetingTime(room.startsAt)}</div> : null}
           <div className="text-[12px] text-fg-muted">Everything prepared for this call, in one place. Nothing here is shown to the client.</div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -95,28 +90,22 @@ export function PresentationBrief({ view, onOpenResearch }: { view: EngagementVi
         </div>
 
         <div className="grid content-start gap-1">
-          <h3 className="text-[13px] font-semibold text-fg">What the checks found</h3>
+          <h3 className="text-[13px] font-semibold text-fg">Key diagnostic signals</h3>
           {!b ? (
             <div className="text-fg-muted">The website check runs by itself once the call is booked. Nothing is built yet.</div>
-          ) : problems.length || siteFacts.length ? (
+          ) : signals.length ? (
             <ul className="grid gap-1.5">
-              {problems.slice(0, SHOW).map((h) => (
-                <li key={h.id}>
-                  <span className="text-fg">{h.statement}</span>
-                  <div className="text-[12px] text-fg-muted">Test it: {h.test}</div>
+              {signals.map((signal) => (
+                <li key={signal.text}>
+                  <span className="text-fg">{signal.text}</span>
+                  <div className="text-[12px] text-fg-muted">{signal.basis}</div>
                 </li>
               ))}
-              {problems.length < SHOW
-                ? siteFacts.slice(0, SHOW - problems.length).map((f) => (
-                    <li key={f.id} className="text-fg-muted">
-                      {f.statement}
-                    </li>
-                  ))
-                : null}
             </ul>
           ) : (
-            <div className="text-fg-muted">The website check found nothing to flag.</div>
+            <div className="text-fg-muted">No measured diagnostic signals are available yet.</div>
           )}
+          {b?.diagnostics?.pagespeed && !b.diagnostics.pagespeed.ok ? <p className="text-[12px] text-fg-muted">Mobile performance unavailable: {b.diagnostics.pagespeed.detail}.</p> : null}
           {b ? (
             <button type="button" className="justify-self-start text-[12px] text-fg-muted underline underline-offset-2" onClick={onOpenResearch}>
               The whole brief
@@ -125,7 +114,7 @@ export function PresentationBrief({ view, onOpenResearch }: { view: EngagementVi
         </div>
 
         <div className="grid content-start gap-1">
-          <h3 className="text-[13px] font-semibold text-fg">What to offer</h3>
+          <h3 className="text-[13px] font-semibold text-fg">Recommended architecture</h3>
           {opportunities.length ? (
             <ul className="grid gap-1.5">
               {opportunities.slice(0, SHOW).map((o) => (
@@ -134,6 +123,16 @@ export function PresentationBrief({ view, onOpenResearch }: { view: EngagementVi
                   <div className="text-[12px] text-fg-muted">{o.what_it_does}</div>
                 </li>
               ))}
+            </ul>
+          ) : options.length ? (
+            <ul className="grid gap-3">
+              {options.map(option => <li key={option.id}>
+                <div className="font-medium text-fg">{option.title}</div>
+                <div className="text-[12px] text-fg-muted">{option.question}</div>
+                <div className="mt-1 text-[12px] tabular-nums text-fg">
+                  {option.item ? `${option.item.name}: ${new Intl.NumberFormat("en-CA", { style: "currency", currency: option.item.currency, currencyDisplay: "code" }).format(option.item.price_cents! / 100)}${option.item.unit === "per_month" ? "/month" : ""} · confirmed catalogue price` : "Scope and price need confirmation in the catalogue."}
+                </div>
+              </li>)}
             </ul>
           ) : (
             <div className="text-fg-muted">

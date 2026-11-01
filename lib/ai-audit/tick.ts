@@ -395,33 +395,6 @@ export async function runAiAuditTick(
       });
     }
 
-    // 7c. The first pre-call brief, two per tick at most: each reads a website (up to 25 seconds).
-    // Each engagement is tried on its own, and the try is marked before it starts, so one
-    // that throws (or a run killed mid-build) waits its turn instead of blocking the rest.
-    let dueForBrief: string[] = [];
-    await guard("briefs", undefined, async () => {
-      if (!briefsInstalled) throw new Error("the brief tables are missing: apply database/turso/bravo__241_ai_audit_briefs.sql");
-      dueForBrief = await dueBriefs(db, tenantId, 2, now());
-    });
-    for (const id of dueForBrief) {
-      if (over()) break;
-      await guard("brief", id, async () => {
-        const system = { type: "system" as const, id: null };
-        await db.execute(eventStatement({ tenantId, engagementId: id, event: BRIEF_ATTEMPT_EVENT, actor: system, at: now().toISOString() }));
-        try {
-          const r = await buildBrief(db, { tenantId, engagementId: id, actor: system, now: now(), deps: deps.site ?? defaultSiteDeps() });
-          if (r.ok && r.created) report.briefsBuilt += 1;
-        } catch (err) {
-          // Kept on the engagement too, for whoever looks into why it has no brief.
-          const error = err instanceof Error ? err.message : String(err);
-          await db
-            .execute(eventStatement({ tenantId, engagementId: id, event: "brief_failed", actor: system, at: now().toISOString(), meta: { error: error.slice(0, 300) } }))
-            .catch((e) => console.error("[ai-audit.tick] could not record brief_failed", { tenantId, engagementId: id, error: e instanceof Error ? e.message : String(e) }));
-          throw err;
-        }
-      });
-    }
-
     // 7d. Research after Gate 1: two starts and three phases a tick at most (a phase reads a website or
     // the pages the search found, up to 25 seconds each, or runs PageSpeed, up to a minute).
     let research: { start: string[]; advance: string[] } = { start: [], advance: [] };
@@ -471,6 +444,33 @@ export async function runAiAuditTick(
         // Then the model's pass over the opening, on the engine CC authorized (none when the client said no to AI).
         const write = await startWriting(db, { tenantId, engagementId, actor: system, now: now() });
         if (write.ok && write.created) report.writingStarted += 1;
+      });
+    }
+
+    // 7c. Public briefs run after authorized research so website/PageSpeed latency cannot starve it.
+    // Each engagement is tried on its own, and the try is marked before it starts, so one
+    // that throws (or a run killed mid-build) waits its turn instead of blocking the rest.
+    let dueForBrief: string[] = [];
+    await guard("briefs", undefined, async () => {
+      if (!briefsInstalled) throw new Error("the brief tables are missing: apply database/turso/bravo__241_ai_audit_briefs.sql");
+      dueForBrief = await dueBriefs(db, tenantId, 2, now());
+    });
+    for (const id of dueForBrief) {
+      if (over() || budget - (Date.now() - started) < 40_000) break;
+      await guard("brief", id, async () => {
+        const system = { type: "system" as const, id: null };
+        await db.execute(eventStatement({ tenantId, engagementId: id, event: BRIEF_ATTEMPT_EVENT, actor: system, at: now().toISOString() }));
+        try {
+          const r = await buildBrief(db, { tenantId, engagementId: id, actor: system, now: now(), deps: deps.site ?? defaultSiteDeps() });
+          if (r.ok && r.created) report.briefsBuilt += 1;
+        } catch (err) {
+          // Kept on the engagement too, for whoever looks into why it has no brief.
+          const error = err instanceof Error ? err.message : String(err);
+          await db
+            .execute(eventStatement({ tenantId, engagementId: id, event: "brief_failed", actor: system, at: now().toISOString(), meta: { error: error.slice(0, 300) } }))
+            .catch((e) => console.error("[ai-audit.tick] could not record brief_failed", { tenantId, engagementId: id, error: e instanceof Error ? e.message : String(e) }));
+          throw err;
+        }
       });
     }
 

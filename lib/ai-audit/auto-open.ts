@@ -25,7 +25,8 @@
  */
 import "server-only";
 import type { Client } from "@libsql/client";
-import { openEngagement, patchEngagement, requireTenant, type Actor } from "@/lib/ai-audit/store";
+import { casWrite, eventStatement, openEngagement, requireTenant, type Actor } from "@/lib/ai-audit/store";
+import { repairCancelledAuditMeetingLinks } from "@/lib/ai-audit/meeting-links";
 
 /** Meetings handled per tenant per tick, nearest first. */
 export const AUTO_OPEN_LIMIT = 10;
@@ -49,13 +50,15 @@ export async function callAppointmentsInstalled(db: Client): Promise<boolean> {
  * engagement is already linked (to it, with its room, or to another appointment), is filtered out by the
  * query itself, so ten of them can never keep an eleventh meeting from being reached.
  */
-export async function upcomingFounderMeetings(db: Client, tenantId: string, now: Date, limit = AUTO_OPEN_LIMIT): Promise<UpcomingMeeting[]> {
+export async function upcomingFounderMeetings(db: Client, tenantId: string, now: Date, limit = AUTO_OPEN_LIMIT, leadIds?: readonly string[]): Promise<UpcomingMeeting[]> {
+  if (leadIds && leadIds.length === 0) return [];
   const rs = await db.execute({
     sql: `SELECT a.id, a.lead_id, a.meet_room_id FROM call_appointments a
           JOIN tenant_records l ON l.tenant_id = a.tenant_id AND l.id = a.lead_id AND l.entity_type = 'lead'
           WHERE a.tenant_id = ? AND a.entity_type = 'lead' AND a.meeting_kind = 'founder_audit'
             AND a.status = 'scheduled' AND a.workflow_status = 'active' AND a.calendar_status = 'verified'
             AND a.scheduled_for > ?
+            ${leadIds ? `AND a.lead_id IN (${leadIds.map(() => "?").join(",")})` : ""}
             AND COALESCE(CASE WHEN json_valid(l.data) THEN json_extract(l.data, '$.stage') END, '') <> 'lost'
             AND NOT EXISTS (
               SELECT 1 FROM ai_audit_engagements e
@@ -64,7 +67,7 @@ export async function upcomingFounderMeetings(db: Client, tenantId: string, now:
                 AND (e.appointment_id <> a.id OR a.meet_room_id IS NULL OR e.meet_room_id IS a.meet_room_id)
             )
           ORDER BY a.scheduled_for ASC LIMIT ?`,
-    args: [requireTenant(tenantId), now.toISOString(), limit],
+    args: [requireTenant(tenantId), now.toISOString(), ...(leadIds ?? []), limit],
   });
   return rs.rows.map((r) => ({
     id: String(r.id),
@@ -80,12 +83,16 @@ export async function upcomingFounderMeetings(db: Client, tenantId: string, now:
  */
 export async function autoOpenForBookedMeetings(
   db: Client,
-  input: { tenantId: string; now: Date; onError?: (appointmentId: string, err: unknown) => void },
+  input: { tenantId: string; now: Date; leadIds?: readonly string[]; onError?: (appointmentId: string, err: unknown) => void },
 ): Promise<AutoOpenReport> {
   const tenantId = requireTenant(input.tenantId);
   const report: AutoOpenReport = { opened: 0, linked: 0 };
   if (!(await callAppointmentsInstalled(db))) return report;
-  for (const meeting of await upcomingFounderMeetings(db, tenantId, input.now)) {
+  if (!input.leadIds) {
+    try { await repairCancelledAuditMeetingLinks(db, tenantId, input.now, input.onError); }
+    catch (error) { input.onError?.("cancelled_link_repair", error); }
+  }
+  for (const meeting of await upcomingFounderMeetings(db, tenantId, input.now, AUTO_OPEN_LIMIT, input.leadIds)) {
     try {
       const opened = await openEngagement(db, { tenantId, leadId: meeting.lead_id, actor: SYSTEM, now: input.now });
       // A lead that is gone or marked Lost has nothing to prepare.
@@ -99,19 +106,24 @@ export async function autoOpenForBookedMeetings(
       // The appointment's room is the one to join: a reschedule that replaced the room moves the link with it.
       if (meeting.meet_room_id && e.meet_room_id !== meeting.meet_room_id) patch.meet_room_id = meeting.meet_room_id;
       if (!Object.keys(patch).length) continue;
-      const saved = await patchEngagement(db, {
-        tenantId,
-        id: e.id,
-        expectedRowVersion: e.row_version,
-        patch,
-        event: "meeting_linked",
-        actor: SYSTEM,
-        now: input.now,
-        refType: "call_appointment",
-        refId: meeting.id,
-      });
+      // Recheck the appointment inside the write: a cancellation that committed
+      // after the scan must not be reattached by this earlier scan result.
+      const saved = await casWrite(db, {
+        sql: `UPDATE ai_audit_engagements SET appointment_id = ?, meet_room_id = ?,
+                row_version = row_version + 1, updated_at = ?
+              WHERE tenant_id = ? AND id = ? AND row_version = ? AND closed_at IS NULL
+                AND (appointment_id IS NULL OR appointment_id = ?)
+                AND EXISTS (SELECT 1 FROM call_appointments a WHERE a.tenant_id = ? AND a.id = ? AND a.lead_id = ?
+                  AND a.meeting_kind = 'founder_audit' AND a.status = 'scheduled' AND a.workflow_status = 'active'
+                  AND a.calendar_status = 'verified' AND a.scheduled_for > ? AND a.meet_room_id IS ?)`,
+        args: [patch.appointment_id ?? e.appointment_id, patch.meet_room_id ?? e.meet_room_id, input.now.toISOString(),
+          tenantId, e.id, e.row_version, meeting.id, tenantId, meeting.id, meeting.lead_id, input.now.toISOString(), meeting.meet_room_id],
+      }, [eventStatement({
+        tenantId, engagementId: e.id, event: "meeting_linked", actor: SYSTEM,
+        at: input.now.toISOString(), refType: "call_appointment", refId: meeting.id,
+      })]);
       // A conflict means someone changed the engagement meanwhile: the next tick tries again.
-      if (saved.ok) report.linked += 1;
+      if (saved) report.linked += 1;
     } catch (err) {
       input.onError?.(meeting.id, err);
     }

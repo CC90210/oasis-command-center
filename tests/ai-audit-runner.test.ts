@@ -99,9 +99,13 @@ async function main() {
     assert.ok(!String(row.rows[0].input_json).includes("sig="));
 
     // complete: a PDF that is not the reported bytes is refused, and nothing is stamped.
-    const bytes = Buffer.from("%PDF-1.7\n" + "x".repeat(600) + "\n%%EOF");
+    // Optional local browser canary: exercise the exact Chromium bytes through
+    // signed completion and private storage without using a production job.
+    const canaryPath = process.env.AI_AUDIT_PDF_CANARY;
+    const bytes = canaryPath ? readFileSync(canaryPath) : Buffer.from("%PDF-1.7\n" + "x".repeat(600) + "\n%%EOF");
+    const pages = canaryPath ? Math.max(1, [...bytes.toString("latin1").matchAll(/\/Type\s*\/Page(?![s\w])/g)].length) : 4;
     const sha = createHash("sha256").update(bytes).digest("hex");
-    const report = { job_id: job.job_id, lease_id: job.lease_id, runner_id: "oasis-mac-audit", tool_key: "ai_audit_pdf", pdf_base64: bytes.toString("base64"), sha256: sha, bytes: bytes.length, pages: 4 };
+    const report = { job_id: job.job_id, lease_id: job.lease_id, runner_id: "oasis-mac-audit", tool_key: "ai_audit_pdf", pdf_base64: bytes.toString("base64"), sha256: sha, bytes: bytes.length, pages };
     const bad = await answerOf(await h.handleToolsComplete(signedRequest("complete", { ...report, sha256: "0".repeat(64) }, now, { producer: "mac", secret: MAC_SECRET }), deps() as never));
     assert.equal(bad.status, 422);
     assert.equal(String((await db.execute("SELECT COALESCE(pdf_sha256, '') AS s FROM ai_audit_versions WHERE id = 'ver-r'")).rows[0].s), "");
@@ -111,8 +115,9 @@ async function main() {
     assert.equal(good.body.stored, true);
     const v = (await db.execute("SELECT pdf_sha256, pdf_pages, pdf_path FROM ai_audit_versions WHERE id = 'ver-r'")).rows[0];
     assert.equal(String(v.pdf_sha256), sha);
-    assert.equal(Number(v.pdf_pages), 4);
+    assert.equal(Number(v.pdf_pages), pages);
     assert.ok(store.has(String(v.pdf_path)), "the bytes are in the private store");
+    assert.deepEqual(store.get(String(v.pdf_path)), new Uint8Array(bytes), "stored bytes exactly match the runner's PDF");
   });
 
   await check("without the link secret the claim ends the job instead of handing out an address nobody can open", async () => {

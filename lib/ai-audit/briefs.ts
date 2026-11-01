@@ -30,7 +30,9 @@ import { readSite, type SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { visibleText } from "@/lib/ai-audit/site-checks";
 import { siteTarget } from "@/lib/ai-audit/site-url";
 import { PROFILE_EDIT_STAGES, type AiAuditStage } from "@/lib/ai-audit/rules";
-import { eventStatement, getEngagement, int, readLead, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
+import { casWrite, engagementUpdateStatement, eventStatement, getEngagement, int, readLead, requireTenant, text, type Actor } from "@/lib/ai-audit/store";
+import { runPageSpeed } from "@/lib/ai-audit/pagespeed";
+import { preflightStatements } from "@/lib/ai-audit/preflight";
 
 export const SOURCE_KINDS = ["site_page", "robots_txt", "sitemap", "http_check", "form_answers"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
@@ -154,8 +156,15 @@ export async function buildBrief(
     form,
     site: { target, start: report?.start, checks: report?.checks ?? [], pagesRead, notes: report?.notes ?? [], unread: report?.unread ?? null },
   });
+  const pagespeed = target.kind === "site" && pagesRead > 0 && !report?.unread
+    ? await runPageSpeed(report?.start ?? target.start, {
+        fetch: (url, init) => input.deps.fetch(url, { ...init, redirect: "manual" }), key: process.env.PAGESPEED_API_KEY || null,
+        now: () => input.now, timeoutMs: 15_000,
+      }) : null;
+  content.diagnostics = { checks: report?.checks ?? [], pagespeed };
+  if (pagespeed && !pagespeed.ok) content.gaps.push(`Mobile performance was not measured: ${pagespeed.detail}.`);
   // Partial: something about the site is a gap (nothing read, a request that failed, a check not known).
-  const status: StoredBrief["status"] = report && (report.unread !== null || report.notes.length > 0 || report.checks.some((c) => c.status === "unknown")) ? "partial" : "ready";
+  const status: StoredBrief["status"] = (pagespeed && !pagespeed.ok) || (report && (report.unread !== null || report.notes.length > 0 || report.checks.some((c) => c.status === "unknown"))) ? "partial" : "ready";
   const sha = contentHash(content);
   const briefId = newId();
 
@@ -180,18 +189,29 @@ export async function buildBrief(
     });
   }
 
+  const winner = await latestBrief(db, t, engagement.id);
+  if (winner && winner.version_no >= versionNo) return { ok: true, brief: winner, created: false };
+  const preflight = await preflightStatements(db, { tenantId: t, engagementId: engagement.id, briefId, brief: content, actor: input.actor, now: input.now });
+  const current = await getEngagement(db, t, engagement.id);
+  if (!current || !BRIEF_STAGES.includes(current.stage)) return { ok: false, error: "stage_closed" };
   try {
-    await db.batch(
+    const saved = await casWrite(db,
+      engagementUpdateStatement(t, current.id, current.row_version, {}, at, undefined, BRIEF_STAGES),
       [
         {
           sql: "INSERT INTO ai_audit_briefs (id, tenant_id, engagement_id, version_no, status, site_url, content, content_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           args: [briefId, t, engagement.id, versionNo, status, content.site.url, JSON.stringify(content), sha, input.actor.id, at],
         },
         ...sources,
+        ...preflight,
         eventStatement({ tenantId: t, engagementId: engagement.id, event: "brief_built", actor: input.actor, at, refType: "brief", refId: briefId, meta: { version_no: versionNo, status, pages_read: pagesRead, facts: content.facts.length, hypotheses: content.hypotheses.length } }),
       ],
-      "write",
     );
+    if (!saved) {
+      const winner = await latestBrief(db, t, engagement.id);
+      if (winner && winner.version_no >= versionNo) return { ok: true, brief: winner, created: false };
+      return { ok: false, error: "too_soon" };
+    }
   } catch (err) {
     // Two builds at once (a double press, or the tick and a press) started from
     // the same brief: the other stored this version first, and its brief is the answer.
@@ -216,7 +236,8 @@ export async function dueBriefs(db: Client, tenantId: string, limit = 2, now = n
   const rs = await db.execute({
     sql: `SELECT e.id FROM ai_audit_engagements e
           WHERE e.tenant_id = ? AND e.stage IN (${AUTO_BRIEF_STAGES.map(() => "?").join(", ")})
-            AND NOT EXISTS (SELECT 1 FROM ai_audit_briefs b WHERE b.tenant_id = e.tenant_id AND b.engagement_id = e.id)
+            AND NOT EXISTS (SELECT 1 FROM ai_audit_briefs b WHERE b.tenant_id = e.tenant_id AND b.engagement_id = e.id
+              AND CASE WHEN json_valid(b.content) THEN json_type(b.content, '$.diagnostics') END = 'object')
             AND NOT EXISTS (SELECT 1 FROM ai_audit_events a WHERE a.tenant_id = e.tenant_id AND a.engagement_id = e.id AND a.event = ? AND a.created_at > ?)
             AND (SELECT COUNT(*) FROM ai_audit_events a WHERE a.tenant_id = e.tenant_id AND a.engagement_id = e.id AND a.event = ?) < ?
           ORDER BY e.updated_at LIMIT ?`,

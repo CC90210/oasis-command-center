@@ -114,6 +114,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
   const e = view.engagement;
   // A link can open one tab (/ai-audits/<id>?tab=call, from an approval card); anything else opens the overview.
   const [tab, setTab] = useState<Tab>(initialTab && TAB_KEYS.has(initialTab) ? (initialTab as Tab) : "overview");
+  const [showDetails, setShowDetails] = useState(!!initialTab && initialTab !== "overview" && TAB_KEYS.has(initialTab));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
@@ -226,6 +227,11 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
         </div>
       ) : null}
 
+      {!showDetails || tab === "overview" ? <PresentationBrief view={view} onOpenResearch={() => { setTab("call"); setShowDetails(true); }} /> : null}
+      <button type="button" className="btn-secondary justify-self-start" aria-expanded={showDetails} aria-controls="audit-workspace-details" onClick={() => setShowDetails(!showDetails)}>
+        {showDetails ? "Back to presentation brief" : "Edit details and review workflow"}
+      </button>
+      <div id="audit-workspace-details" hidden={!showDetails}>
       <nav className="flex flex-wrap gap-1 border-b border-hairline" aria-label="Engagement sections">
         {TABS.map((t) => (
           <button
@@ -239,8 +245,6 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
           </button>
         ))}
       </nav>
-
-      {tab === "overview" ? <PresentationBrief view={view} onOpenResearch={() => setTab("call")} /> : null}
 
       {tab === "overview" ? (
         <div className="grid gap-5 lg:grid-cols-2">
@@ -565,6 +569,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
           </ol>
         </section>
       ) : null}
+      </div>
     </div>
     </PageFrame>
   );

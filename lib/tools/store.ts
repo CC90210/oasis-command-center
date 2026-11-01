@@ -26,6 +26,7 @@
  * object nothing will ever point at.
  */
 import "server-only";
+import { contentUploadPaths } from "./content-results";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Client, InStatement, InValue, Row } from "@libsql/client";
 import { toolErrorLine } from "@/lib/tools/errors";
@@ -371,7 +372,7 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
                      finished_at = ?, updated_at = ?
               WHERE runs_on = 'runner' AND tenant_id IN (${tin}) AND status IN ('claimed','running')
                 AND lease_expires_at < ? AND attempts >= ?
-              RETURNING tenant_id, upload_path`,
+              RETURNING tenant_id, upload_path, result_json`,
         args: [toolErrorLine("attempts_exhausted", "runner"), at, at, ...tenantIds, at, MAX_ATTEMPTS],
       },
       {
@@ -382,7 +383,7 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
                 AND NOT EXISTS (SELECT 1 FROM tool_runners r
                                 WHERE r.tenant_id = tool_jobs.tenant_id AND r.last_seen_at >= ?
                                   AND EXISTS (SELECT 1 FROM json_each(r.tools_json) t WHERE t.value = tool_jobs.tool_key))
-              RETURNING tenant_id, upload_path`,
+              RETURNING tenant_id, upload_path, result_json`,
         args: [
           toolErrorLine("runner_offline", "runner"), at, at, ...tenantIds, ...SYSTEM_RUNNER_TOOL_KEYS,
           offlineCutoff, offlineCutoff, minutesBefore(now, RUNNER_LIVE_MINUTES),
@@ -402,7 +403,8 @@ export async function sweepToolJobs(db: Client, tenantIds: readonly string[], no
   for (const rs of results.slice(0, 2)) {
     for (const r of rs.rows) {
       const path = str(r.upload_path);
-      if (path) orphanUploads.push({ tenantId: String(r.tenant_id), path });
+      const paths = [...new Set([...(path ? [path] : []), ...contentUploadPaths(parseAny(r.result_json))])];
+      for (const p of paths) orphanUploads.push({ tenantId: String(r.tenant_id), path: p });
     }
   }
   // Counted from the rows each statement returned: libSQL reports rowsAffected 0
@@ -450,7 +452,7 @@ export async function touchRunner(db: Client, tenantIds: readonly string[], runn
  */
 const CLAIMABLE = "(status = 'queued' OR (status IN ('claimed','running') AND lease_expires_at < ?))";
 
-export type ClaimedJob = { id: string; tenantId: string; toolKey: string; input: Record<string, unknown>; attempt: number; createdAt: string };
+export type ClaimedJob = { id: string; tenantId: string; toolKey: string; input: Record<string, unknown>; attempt: number; createdAt: string; createdBy: string | null };
 
 /**
  * Take the oldest claimable runner job of these workspaces and tools, in one
@@ -475,7 +477,7 @@ export async function claimNextJob(
                           AND (target_runner IS NULL OR target_runner = ?)
                         ORDER BY created_at ASC, id ASC LIMIT 1)
              AND attempts < ? AND ${CLAIMABLE}
-           RETURNING id, tenant_id, tool_key, input_json, attempts, created_at`,
+           RETURNING id, tenant_id, tool_key, input_json, attempts, created_at, created_by`,
     args: [
       args.runnerKey, args.leaseId, at, at, expires, at,
       ...args.tenantIds, ...args.toolKeys, MAX_ATTEMPTS, at, args.runnerKey,
@@ -491,6 +493,7 @@ export async function claimNextJob(
     input: parseObject(r.input_json),
     attempt: num(r.attempts) ?? 1,
     createdAt: String(r.created_at),
+    createdBy: str(r.created_by),
   };
 }
 
@@ -528,7 +531,7 @@ export { placeholders as sqlPlaceholders };
 export function inputSummary(job: Pick<ToolJob, "input">): string {
   const i = job.input;
   if (typeof i.url === "string") return i.url;
-  const t = typeof i.hook === "string" ? i.hook : typeof i.post === "string" ? i.post : "";
+  const t = typeof i.hook === "string" ? i.hook : typeof i.post === "string" ? i.post : typeof i.transcript === "string" ? i.transcript : "";
   return t.length > 80 ? `${t.slice(0, 80)}...` : t;
 }
 

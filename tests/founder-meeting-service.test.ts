@@ -147,8 +147,8 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
   });
 }
 
-async function fixture() {
-  const raw = createClient({ url: ":memory:" });
+async function fixture(url = ":memory:") {
+  const raw = createClient({ url });
   const [migration167, migration169, migration224, migration232, migration250] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
     readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
@@ -171,6 +171,7 @@ async function fixture() {
   };
   const deps = {
     db: db as never,
+    auditDb: () => raw,
     now: () => NOW,
     createCalendar: async (input: { durationMinutes: number; offerLabel?: string; meetingLink?: string; meetingRecorded?: boolean }) => {
       calls.created += 1;
@@ -2145,6 +2146,43 @@ async function testFinalCompensationConflictLeavesRemindersRecoverable() {
   await raw.close();
 }
 
+async function testCancellationDetachesOpenAuditAndRetryIsSafe() {
+  // libSQL opens a fresh connection after a transaction; use the existing
+  // file-backed harness (with its after-exit cleanup) for this integration.
+  const { dbFile } = await import("./_delivery-harness");
+  const { raw, deps } = await fixture(`file:${dbFile}`);
+  await insertVerifiedAppointment(raw, { id: "meeting-audit-cancel" });
+  await raw.execute(`CREATE TABLE ai_audit_engagements (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, appointment_id TEXT,
+      meet_room_id TEXT, stage TEXT, closed_at TEXT, row_version INTEGER, updated_at TEXT)`);
+  await raw.execute(`CREATE TABLE ai_audit_events (id TEXT PRIMARY KEY, tenant_id TEXT, engagement_id TEXT, event TEXT,
+      from_stage TEXT, to_stage TEXT, actor_type TEXT, actor_id TEXT, ref_type TEXT, ref_id TEXT, meta TEXT, created_at TEXT)`);
+  for (const [id, tenantId, closedAt] of [["open-audit", TENANT, null], ["closed-audit", TENANT, "2026-08-31"], ["foreign-audit", "tenant-b", null]]) {
+    await raw.execute({
+      sql: "INSERT INTO ai_audit_engagements VALUES (?,?,?,?,?,'call_scheduled',?,3,?)",
+      args: [id, tenantId, LEAD, "meeting-audit-cancel", "room-audit", closedAt, new Date(NOW).toISOString()],
+    });
+  }
+  const input = { tenantId: TENANT, leadId: LEAD, appointmentId: "meeting-audit-cancel", requestId: "audit-cancel" };
+  const auditDb = deps.auditDb;
+  deps.auditDb = () => { throw new Error("fixture audit store unavailable"); };
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled", "audit outage cannot undo committed cancellation");
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled", "idempotent cancellation remains successful during the outage");
+  assert.equal((await raw.execute("SELECT appointment_id FROM ai_audit_engagements WHERE id='open-audit'")).rows[0].appointment_id, "meeting-audit-cancel");
+  deps.auditDb = auditDb;
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled");
+  assert.equal((await cancelVerifiedFounderMeeting(input, deps)).disposition, "cancelled");
+  const open = (await raw.execute("SELECT * FROM ai_audit_engagements WHERE id='open-audit'")).rows[0];
+  assert.equal(open.appointment_id, null);
+  assert.equal(open.meet_room_id, null);
+  assert.equal(open.stage, "call_scheduled");
+  assert.equal(open.closed_at, null);
+  assert.equal(open.row_version, 4);
+  const untouched = await raw.execute("SELECT appointment_id FROM ai_audit_engagements WHERE id IN ('closed-audit','foreign-audit')");
+  assert(untouched.rows.every(row => row.appointment_id === "meeting-audit-cancel"));
+  assert.equal((await raw.execute("SELECT COUNT(*) AS n FROM ai_audit_events")).rows[0].n, 1);
+  raw.close();
+}
+
 async function main() {
   testBackfillChunkRotatesBeyondFirstFiveHundred();
   testConsentReplayErrorResponseClassification();
@@ -2182,6 +2220,7 @@ async function main() {
   await testBoundedSameRequestTakeoverAndActivationGuard();
   await testCancellationPreservesHistory();
   await testCancellationReservationPrecedesProviderMutation();
+  await testCancellationDetachesOpenAuditAndRetryIsSafe();
   await testSagaReconciliation();
   await testSagaRoomCompensation();
   await testNoShowCompensationRestoresTerminalHistory();

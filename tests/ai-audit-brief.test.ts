@@ -1111,6 +1111,8 @@ async function main() {
   });
   await check("two builds at once store one brief: the one that loses the insert answers with the winner's (review 9c)", async () => {
     const eid = await openWith(7, "fixture-plumbing.ca", FORM);
+    const { ensureDraftProfile } = await import("../lib/ai-audit/versions");
+    await ensureDraftProfile(db, OASIS, eid, cc, NOW());
     // Each build's first request waits until both have made theirs: both have passed the
     // "too soon" check by then, and both go on to store version 1.
     const base = fakeWeb(ROUTES);
@@ -1126,7 +1128,43 @@ async function main() {
       return base.fetch(u, init);
     };
     const d = { fetch: gated as never, clock: () => (clock += 10) };
-    const [a, b] = await Promise.all([0, 1].map(() => briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: d })));
+    // The embedded test client has one SQLite connection. Model the remote
+    // database's write-transaction queue here, not in Worker module state.
+    // Both builds still read/fetch concurrently and compete through real SQL CAS.
+    const originalTransaction = db.transaction.bind(db);
+    let lastTransaction = Promise.resolve();
+    let transactionCalls = 0;
+    const guardedWrites: number[] = [];
+    let releaseTransactions!: () => void;
+    const transactionsReady = new Promise<void>(resolve => { releaseTransactions = resolve; });
+    db.transaction = async mode => {
+      const previous = lastTransaction;
+      let release!: () => void;
+      lastTransaction = new Promise<void>(resolve => { release = resolve; });
+      // Force both builds to capture the same row_version before either writes.
+      if (++transactionCalls === 2) releaseTransactions();
+      await transactionsReady;
+      await previous;
+      try {
+        const tx = await originalTransaction(mode);
+        const execute = tx.execute.bind(tx);
+        tx.execute = async statement => {
+          const result = await execute(statement);
+          guardedWrites.push(result.rowsAffected);
+          return result;
+        };
+        const close = tx.close.bind(tx);
+        tx.close = () => { try { close(); } finally { release(); } };
+        return tx;
+      } catch (error) { release(); throw error; }
+    };
+    let results: Awaited<ReturnType<typeof briefs.buildBrief>>[];
+    try {
+      results = await Promise.all([0, 1].map(() => briefs.buildBrief(db, { tenantId: OASIS, engagementId: eid, actor: cc, now: NOW(), deps: d })));
+    } finally { db.transaction = originalTransaction; }
+    const [a, b] = results;
+    assert.equal(transactionCalls, 2, "both builders reach the real write transaction");
+    assert.deepEqual(guardedWrites.sort(), [0, 1], "one real SQL CAS wins and the other rolls back");
     assert.ok(a.ok && b.ok, JSON.stringify([a, b].map((x) => (x.ok ? x.created : x.error))));
     assert.deepEqual([a.created, b.created].sort(), [false, true]);
     assert.equal(a.brief.id, b.brief.id);

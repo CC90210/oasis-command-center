@@ -47,11 +47,11 @@ export const CONNECT_AI = "Connect an AI account in Settings > AI brain to use t
 export const AI_UNREADABLE = "Couldn't read the AI account. Try again.";
 /** A runner tool whose computer has not checked in lately (CatalogToolState runner_offline). */
 export const RUNNER_OFFLINE =
-  "This tool runs on the OASIS PC, which is offline right now. Turn it on, give it a minute, then press Check connection. Past runs stay below.";
+  "This tool is unavailable right now. Press Check connection to refresh its status. Past runs stay below.";
 export const CHECK_CONNECTION = "Check connection";
 export const CHECKING_CONNECTION = "Checking...";
 /** Check connection re-read the page and the PC had still not checked in. */
-export const STILL_OFFLINE = "Still offline. Give the PC a minute, then check again.";
+export const STILL_OFFLINE = "Still unavailable. Wait a minute, then check again.";
 export const SAVED_TO_TRAINING = "Saved to Training material.";
 export const RUN_STOPPED = "This run stopped before it finished. Run it again.";
 /** The run request got no clear answer: it may or may not have started. The card keeps the same idempotency key, so a second press is the same run. */
@@ -218,6 +218,10 @@ export function statusLabel(job: Pick<JobView, "status" | "stage">, runsOn: "wor
       return runsOn === "runner" ? STATUS_DOWNLOADING : STATUS_WORKING;
     case "running":
       if (runsOn === "worker") return STATUS_WORKING;
+      if (job.stage === "transcribing") return "Transcribing";
+      if (job.stage === "rendering") return "Rendering";
+      if (job.stage === "thinking") return "Writing";
+      if (job.stage === "matching") return "Matching";
       return job.stage === "uploading" ? STATUS_UPLOADING : STATUS_DOWNLOADING;
     case "done":
       return STATUS_DONE;
