@@ -53,7 +53,7 @@ export async function upcomingFounderMeetings(db: Client, tenantId: string, now:
   const rs = await db.execute({
     sql: `SELECT a.id, a.lead_id, a.meet_room_id FROM call_appointments a
           JOIN tenant_records l ON l.tenant_id = a.tenant_id AND l.id = a.lead_id AND l.entity_type = 'lead'
-          WHERE a.tenant_id = ? AND a.entity_type = 'lead'
+          WHERE a.tenant_id = ? AND a.entity_type = 'lead' AND a.meeting_kind = 'founder_audit'
             AND a.status = 'scheduled' AND a.workflow_status = 'active' AND a.calendar_status = 'verified'
             AND a.scheduled_for > ?
             AND COALESCE(CASE WHEN json_valid(l.data) THEN json_extract(l.data, '$.stage') END, '') <> 'lost'
@@ -61,7 +61,7 @@ export async function upcomingFounderMeetings(db: Client, tenantId: string, now:
               SELECT 1 FROM ai_audit_engagements e
               WHERE e.tenant_id = a.tenant_id AND e.lead_id = a.lead_id AND e.closed_at IS NULL
                 AND e.appointment_id IS NOT NULL
-                AND (e.appointment_id <> a.id OR e.meet_room_id IS NOT NULL OR a.meet_room_id IS NULL)
+                AND (e.appointment_id <> a.id OR a.meet_room_id IS NULL OR e.meet_room_id IS a.meet_room_id)
             )
           ORDER BY a.scheduled_for ASC LIMIT ?`,
     args: [requireTenant(tenantId), now.toISOString(), limit],
@@ -96,7 +96,8 @@ export async function autoOpenForBookedMeetings(
       if (e.appointment_id && e.appointment_id !== meeting.id) continue;
       const patch: { appointment_id?: string; meet_room_id?: string } = {};
       if (!e.appointment_id) patch.appointment_id = meeting.id;
-      if (!e.meet_room_id && meeting.meet_room_id) patch.meet_room_id = meeting.meet_room_id;
+      // The appointment's room is the one to join: a reschedule that replaced the room moves the link with it.
+      if (meeting.meet_room_id && e.meet_room_id !== meeting.meet_room_id) patch.meet_room_id = meeting.meet_room_id;
       if (!Object.keys(patch).length) continue;
       const saved = await patchEngagement(db, {
         tenantId,

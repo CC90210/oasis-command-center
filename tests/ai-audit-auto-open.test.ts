@@ -55,7 +55,7 @@ const room = (n: number) => `7d000000-0000-4000-8000-0000000000${String(n).padSt
 const CALL_APPOINTMENTS = `CREATE TABLE call_appointments (
   id text primary key, tenant_id text not null, lead_id text not null, entity_type text not null,
   scheduled_for text not null, status text not null, workflow_status text not null,
-  calendar_status text not null, meet_room_id text)`;
+  calendar_status text not null, meet_room_id text, meeting_kind text not null default 'founder_audit')`;
 
 async function main() {
   const db = await setupDatabase();
@@ -202,6 +202,23 @@ async function main() {
     const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], now: () => NOW, deps: tickDeps() });
     assert.equal(rep.auditsOpened, 1);
     assert.equal((await openFor(40))?.appointment_id, appt(40));
+  });
+
+  await check("a sales call is not a founder audit: it opens nothing (CodeRabbit on #789)", async () => {
+    await addLead(42, "founder_meeting_booked");
+    await addMeeting(42, 52);
+    await db.execute({ sql: "UPDATE call_appointments SET meeting_kind = 'sales_call' WHERE id = ?", args: [appt(42)] });
+    await tick.runAiAuditTick(db, { tenantIds: [OASIS], now: () => NOW, deps: tickDeps() });
+    assert.equal(await openFor(42), null);
+  });
+
+  await check("a reschedule that replaced the room moves the engagement's room link with it (CodeRabbit on #789)", async () => {
+    await db.execute({ sql: "UPDATE call_appointments SET meet_room_id = ? WHERE id = ?", args: ["room-replaced", appt(1)] });
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], now: () => NOW, deps: tickDeps() });
+    assert.equal(rep.meetingsLinked, 1);
+    const e = await openFor(1);
+    assert.equal(e?.appointment_id, appt(1));
+    assert.equal(e?.meet_room_id, "room-replaced");
   });
 
   await check("a lead row with broken JSON does not stop the query", async () => {
