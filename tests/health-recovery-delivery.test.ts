@@ -91,7 +91,7 @@ assert.doesNotMatch(
 
 assert.match(
   RUNNER,
-  /const owed = pendingRecoveryLanes\(state\.last_signature\) \?\? lanesFor\(check\);/,
+  /const owed = \(pendingRecoveryLanes\(state\.last_signature\) \?\? currentLanes\)\.filter/,
   "the retry no longer narrows to the owed lanes — the reachable audience gets 'RECOVERED' every 15 minutes",
 );
 assert.match(
@@ -276,8 +276,100 @@ const TENANT = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 const NOW = Date.parse("2026-09-19T12:00:00.000Z");
 
 async function main() {
+  // Real runner + route + Worker: a persisted undelivered alert and a parallel
+  // component exception must not retry into a misleading successful receipt.
+  for (const failedComponent of ["calendar", "department_chat"]) {
+    const memory = tenantIsolationDb();
+    const realRun = runHealthChecks;
+    const calendarChecks: never[] = [];
+    const failingCheck = { id: "synthetic.mixed", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => 1, describe: () => "fixture failed" };
+    let requests = 0; let sends = 0;
+    const mock = (path: string, exports: object) => {
+      const id = require.resolve(path); require.cache[id] = { id, filename: id, loaded: true, exports } as NodeModule;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- isolated route dependency seam, actual runner retained above
+    const originalRunner = require("../lib/health/runner");
+    mock("../lib/health/runner", { ...originalRunner, OASIS_GLOBAL_CHECKS: calendarChecks, ESTATE_WIDE_CHECKS: [failingCheck],
+      runHealthChecks: async (tenant: string, opts: { checks: readonly unknown[] }) => {
+        if (failedComponent === "calendar" && opts.checks === calendarChecks && requests === 1) throw new Error("fixture_calendar_exception");
+        return realRun(tenant, { ...opts, checks: opts.checks as never, db: memory.db as never, nowMs: NOW,
+          sendTelegramImpl: (async () => { sends++; return { ok: false }; }) as never });
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- preserve the real brokenSummary while injecting discovery failure
+    const department = require("../lib/health/department-chat-run");
+    mock("../lib/health/department-chat-run", { ...department, runDepartmentChatHealth: async () => {
+      if (failedComponent === "department_chat" && requests === 1) throw new Error("fixture_discovery_exception");
+      return [];
+    } });
+    mock("../lib/automations/cron-switches", { cronPauseGate: async () => null });
+    process.env.CRON_SECRET = "health-mixed-fixture"; process.env.CRON_ATTEST_SECRET = "health-mixed-attest";
+    delete require.cache[require.resolve("../app/api/cron/health-check/route")];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- reload the route against each fixture's dependencies
+    const { GET } = require("../app/api/cron/health-check/route") as typeof import("../app/api/cron/health-check/route");
+    const { NextRequest } = await import("next/server");
+    const worker = (await import("../workers/oasis-cc-cron/src/index")).default;
+    const original = { fetch: globalThis.fetch, log: console.log, error: console.error };
+    const receipts: Array<{ path: string; ok: boolean; status: string; attempts: number }> = [];
+    let firstBody: { failed_alerts?: number; failed_pieces?: string[] } = {};
+    try {
+      console.log = () => undefined; console.error = () => undefined;
+      globalThis.fetch = async (url, init) => {
+        const target = new URL(String(url)); assert.equal(target.origin, "https://fixture.invalid");
+        if (target.pathname === "/api/cron/runs") { receipts.push(...JSON.parse(String(init?.body)).results); return Response.json({ ok: true }); }
+        if (target.pathname === "/api/cron/health-check") {
+          requests++;
+          const response = await GET(new NextRequest(target, { headers: init?.headers }));
+          if (requests === 1) firstBody = await response.clone().json();
+          return response;
+        }
+        return Response.json({ ok: true });
+      };
+      const pending: Promise<unknown>[] = [];
+      await worker.scheduled({ scheduledTime: Date.parse("2026-11-01T12:15:00Z"), cron: "* * * * *" },
+        { APP_ORIGIN: "https://fixture.invalid", CRON_FORWARD: "on", CRON_SECRET: process.env.CRON_SECRET, CRON_ATTEST_SECRET: process.env.CRON_ATTEST_SECRET },
+        { waitUntil: promise => { pending.push(promise); } });
+      await Promise.all(pending);
+      assert.equal(requests, 1); assert.equal(sends, 1);
+      assert.equal(firstBody.failed_alerts, 1); assert.deepEqual(firstBody.failed_pieces, [failedComponent]);
+      assert.deepEqual(receipts.filter(row => row.path === "/api/cron/health-check").map(row => [row.ok, row.status, row.attempts]), [[false, "409", 1]]);
+      assert.equal(memory.runRows.filter(row => row.check_id === "alerting.telegram_delivery").length, 1);
+      requests++;
+      const retry = await GET(new NextRequest("https://fixture.invalid/api/cron/health-check", { headers: {
+        authorization: `Bearer ${process.env.CRON_SECRET}`, "x-oasis-cron-attest": process.env.CRON_ATTEST_SECRET,
+      } }));
+      assert.equal(retry.status, 200, "a retry would find the persisted alert decay and hide the original failure");
+      assert.equal(sends, 1);
+    } finally { globalThis.fetch = original.fetch; console.log = original.log; console.error = original.error; }
+  }
+
   const alerting = DEPLOY_CHECKS.find((c) => c.id === "alerting.delivery_failures");
   assert.ok(alerting, "alerting.delivery_failures is not in DEPLOY_CHECKS — it runs nowhere");
+
+  // A retired audience left in durable recovery state must neither be paged
+  // forever nor cause the already-notified current audience to be paged again.
+  {
+    const tenant = "11111111-1111-4111-8111-111111111111";
+    const memory = tenantIsolationDb();
+    const check = { id: "synthetic.recovery", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => 0, describe: () => "recovered" };
+    const key = healthAlertStateKey(tenant, check.id);
+    const seed = (lanes: string) => memory.states.set(key, { alert_key: key, tenant_id: tenant,
+      last_signature: `recovery-pending:${lanes}`, last_alerted_at: new Date(NOW - 60_000).toISOString(), repeat_n: 0,
+      first_failed_at: new Date(NOW - 120_000).toISOString(), updated_at: new Date(NOW).toISOString() });
+    const delivered: string[] = [];
+    const send = async (_message: string, options: { lane: string }) => { delivered.push(options.lane); return { ok: false }; };
+    seed("sunbiz-ops");
+    let summary = await runHealthChecks(tenant, { checks: [check], db: memory.db as never, nowMs: NOW, sendTelegramImpl: send as never });
+    assert.deepEqual(delivered, []); assert.equal(summary.failedAlerts, 0);
+    assert.equal(memory.states.get(key)?.first_failed_at, null);
+    seed("operator,sunbiz-ops");
+    summary = await runHealthChecks(tenant, { checks: [check], db: memory.db as never, nowMs: NOW, sendTelegramImpl: send as never });
+    assert.deepEqual(delivered, ["operator"]); assert.equal(summary.failedAlerts, 1);
+    assert.equal(memory.states.get(key)?.last_signature, "recovery-pending:operator");
+    assert.equal(memory.runRows.filter(row => row.check_id === "alerting.telegram_delivery").length, 1);
+  }
 
   {
     const { db, calls } = recordingDb({ count: 0 });
@@ -402,15 +494,15 @@ async function main() {
 }
 assert.match(
   DEPLOY_CHECKS_SRC,
-  /id: "alerting\.delivery_failures"[\s\S]{0,900}lane: \["operator", "sunbiz-ops"\]/,
-  "the alerting check no longer names both lanes — whichever audience can still be reached must hear it",
+  /id: "alerting\.delivery_failures"[\s\S]{0,900}lane: "operator"/,
+  "estate delivery alerts must reach only CC's current operator lane",
 );
 // Production serving the wrong commit is estate-wide; it had been inheriting
 // the runner's sunbiz-ops default, so an OASIS-only regression would have
 // paged the client's ops channel and nobody else.
 assert.match(
   DEPLOY_CHECKS_SRC,
-  /id: "deploy\.prod_serves_main"[\s\S]{0,700}lane: \["operator", "sunbiz-ops"\]/,
+  /id: "deploy\.prod_serves_main"[\s\S]{0,700}lane: "operator"/,
   "deploy.prod_serves_main inherits the default lane again — an estate-wide fault paging one company",
 );
 

@@ -49,7 +49,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const queue = dryRun ? { send: async () => undefined } : await mavenPublishQueueBinding();
     if (!queue) return NextResponse.json({ ok: false, error: "queue_binding_missing" }, { status: 503 });
     const result = await runMavenPublishProducer({ store, queue, dryRun, now: new Date() });
-    return NextResponse.json({ ok: true, enabled: true, reconciliation, reconcile_error: reconcileError, ...result });
+    const ok = !reconcileError && (reconciliation?.readFailures ?? 0) === 0 && result.reaped.failed === 0;
+    return NextResponse.json({ ok, enabled: true, reconciliation, reconcile_error: reconcileError, ...result }, { status: ok ? 200 : 409 });
   } catch (error) {
     console.error("[cron.maven-publish-queue]", error instanceof Error ? error.stack : String(error));
     return NextResponse.json({ ok: false, error: "producer_failed" }, { status: 500 });

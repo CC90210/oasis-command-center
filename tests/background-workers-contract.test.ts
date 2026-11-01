@@ -45,6 +45,7 @@ function workerWindow(service: string, width = 900): string {
 // inventory and expose no control path even if an old integrations_health row
 // still exists.
 const retiredByPlan = [
+  "pm2.bravo-scheduler",
   "pm2.bravo-ig-dm",
   "pm2.bravo-telegram",
   "pm2.dashboard-email-consumer",
@@ -60,11 +61,10 @@ for (const service of retiredByPlan) {
   assert.match(worker.not_expected_here ?? "", /^Retired by plan\b/);
   assert.equal(controllableOasisWorker(service), null, `${service} must fail closed in the control allowlist`);
 }
-// CC 2026-10-31: these six still run on this computer, so the board must count
+// Verified 2026-11-01: these five still run on this computer, so the board must count
 // them with live status and the existing local control path. Retiring a
 // running process on the board is how it showed 2 workers while 8 ran.
 for (const service of [
-  "pm2.bravo-scheduler",
   "pm2.claude-bridge",
   "pm2.claude-bridge-ping",
   "pm2.event-router",
@@ -80,8 +80,15 @@ for (const service of [
 }
 
 // OASIS's own daemon-VPS services are listed so nothing that runs is missing,
-// but the VPS reports no health here yet: no status source, no controls.
-const vpsServices = ["vps.oasis-telegram-bridge", "vps.oasis-inbox-sweep"] as const;
+// and each must wait for its own signed live heartbeat. No machine controls.
+const vpsServices = [
+  "vps.oasis-telegram-bridge",
+  "vps.oasis-inbox-sweep",
+  "vps.oasis-scheduler",
+  "vps.oasis-headless-bridge",
+  "vps.oasis-content-tools-runner",
+  "vps.oasis-workspace-scheduler",
+] as const;
 for (const service of vpsServices) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
   assert.ok(worker, `${service} must be visible`);
@@ -110,6 +117,10 @@ assert.deepEqual(
     "pm2.maven-telegram",
     "vps.oasis-telegram-bridge",
     "vps.oasis-inbox-sweep",
+    "vps.oasis-scheduler",
+    "vps.oasis-headless-bridge",
+    "vps.oasis-content-tools-runner",
+    "vps.oasis-workspace-scheduler",
     "skool_engine",
   ],
   "the OASIS inventory must stay exact and cannot absorb a remote tenant service",

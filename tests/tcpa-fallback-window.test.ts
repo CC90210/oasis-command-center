@@ -23,6 +23,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { checkTcpaWindow } from "../lib/tcpa-window";
 
+// A verified missing Canadian prefix must resolve on both sides of DST.
+for (const [instant, hour, within] of [
+  ["2026-10-31T11:59:00Z", 7, false], ["2026-10-31T12:00:00Z", 8, true],
+  ["2026-11-01T12:59:00Z", 7, false], ["2026-11-01T13:00:00Z", 8, true],
+  ["2026-11-02T02:00:00Z", 21, false],
+] as const) {
+  const result = checkTcpaWindow("+19055550123", new Date(instant));
+  assert.equal(result.usedFallback, false); assert.equal(result.hour, hour); assert.equal(result.withinWindow, within);
+}
+assert.equal(checkTcpaWindow("+99955550123").usedFallback, true);
+
 // ── US TERRITORIES MUST RESOLVE, not fall through to the safe hour ────────
 // The 18:00 UTC anchor was justified as "inside 8am-9pm for every US zone",
 // and that reasoning quietly meant every US STATE. It breaks in both

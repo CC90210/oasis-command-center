@@ -27,6 +27,7 @@ import {
   type WorkerControlMode,
   type WorkerRuntime,
   type WorkerStatusSource,
+  type WorkerHealthStatus,
 } from "@/lib/automations/worker-status";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
@@ -51,7 +52,7 @@ type Worker = {
   service: string;
   label: string;
   purpose: string;
-  status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
+  status: WorkerHealthStatus;
   /** True when a status row exists but stopped refreshing (>5 min old) — the
    * server already degraded `status` to "down"; this flag only changes the
    * copy from "Stopped" to "stopped reporting". */
@@ -435,6 +436,8 @@ function WorkerRow({
             : "Waiting for first scheduled run";
   } else if (operatorStopped) {
     statusLabel = `Off — you stopped this. Start it to resume.${lastSeen}`;
+  } else if (effectiveStatus === "pending") {
+    statusLabel = `Running — awaiting result${lastSeen}`;
   } else if (effectiveStatus === "healthy") {
     statusLabel = uptimeStr ? `Running · up ${uptimeStr}` : "Running";
   } else if (effectiveStatus === "down") {

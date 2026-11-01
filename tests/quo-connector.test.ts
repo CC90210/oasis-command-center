@@ -253,7 +253,9 @@ async function main() {
     const schema = schemas.findTenantManuallyEditableIntegrationSchema("quo");
     assert.ok(schema, "an owner can save Quo keys");
     assert.equal(schema!.label, "Quo");
-    assert.deepEqual(schema!.fields.map((f) => f.key), ["api_key", "from_number"]);
+    assert.deepEqual(schema!.fields.map((f) => f.key), ["api_key", "from_number", "webhook_key", "webhook_id", "webhook_org_id", "webhook_phone_number_id"]);
+    assert.ok(schema!.fields.slice(2).every(f => f.optional), "webhook fields do not break manual replies");
+    assert.equal(schema!.fields.find(f => f.key === "webhook_key")!.sensitive, true);
     const [apiKey, from] = schema!.fields;
     assert.equal(apiKey.sensitive, true, "the key is a password field");
     assert.equal(from.sensitive, false);

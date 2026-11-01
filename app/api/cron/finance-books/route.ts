@@ -30,7 +30,9 @@ async function handle(req: NextRequest) {
   const job = req.nextUrl.searchParams.get("job");
   if (!isFinanceBookJob(job)) return NextResponse.json({ ok: false, error: "unknown_job" }, { status: 400 });
   try {
-    return NextResponse.json({ ok: true, job, result: await runFinanceBookJob(job) });
+    const result = await runFinanceBookJob(job);
+    const ok = !(typeof result.errors === "number" && result.errors > 0);
+    return NextResponse.json({ ok, job, result }, { status: ok ? 200 : 409 });
   } catch (e) {
     const { code, status } = financeBookJobFailure(e);
     console.error(`[cron.finance-books:${job}]`, e instanceof Error ? e.stack : e);

@@ -371,18 +371,18 @@ export async function quoSender(
   return { ok: true, number: sole.number.number, source: "workspace" };
 }
 
-/**
- * Is a STOP texted back to the Quo number read by OASIS? Not yet: there is no
- * authenticated Quo inbound handler that puts a STOP on the workspace's STOP
- * list (lib/sms-opt-out.ts applyInboundSmsStop). Automated texts (the
- * founder-meeting reminders) promise "Reply STOP to opt out", so they are held
- * until it exists. Closed in code, not by a setting, so no key or switch can
- * open it early (Codex review of #774): the PR that adds the verified handler,
- * with its STOP-then-blocked-resend canary, replaces this body. A person's own
- * reply in Conversations is not automated and is unaffected.
- */
-export function quoStopIntakeConnected(): boolean {
-  return false;
+/** A signed delivery plus current provider configuration must prove this tenant's STOP intake. */
+export async function quoStopIntakeConnected(tenantId?: string, sender?: Pick<QuoCredentials, "apiKey" | "fromNumber">): Promise<boolean> {
+  return (await quoStopIntakeReadiness(tenantId, sender)).ready;
+}
+
+/** Preserve temporary backlog versus broken configuration for scheduled callers. */
+export async function quoStopIntakeReadiness(tenantId?: string, sender?: Pick<QuoCredentials, "apiKey" | "fromNumber">): Promise<{ ready: boolean; reason: string }> {
+  if (!tenantId) return { ready: false, reason: "configuration_missing" };
+  const [{ quoWebhookReadiness }, { publicAppBaseUrl }] = await Promise.all([
+    import("@/lib/integrations/quo-webhook"), import("@/lib/api-helpers"),
+  ]);
+  return quoWebhookReadiness(tenantId, publicAppBaseUrl(), true, sender);
 }
 
 // -- Sending --------------------------------------------------------------------------

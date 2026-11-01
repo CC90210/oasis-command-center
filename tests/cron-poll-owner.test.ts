@@ -23,7 +23,7 @@
  * Run: node --conditions=react-server --import tsx tests/cron-poll-owner.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient } from "@libsql/client";
@@ -237,6 +237,49 @@ async function main() {
     assert.equal(res.status, 200);
     assert.deepEqual(((await res.json()) as PollBody).jobs, []);
     assert.equal(await lastPollOkAt("pair-mac"), null, "a computer that is not the executor never stamps the scheduler's health");
+  });
+
+  await check("POST cannot overwrite another person's job even on an otherwise allowed computer", async () => {
+    const result = await poll.POST(new NextRequest("http://localhost/api/cron-jobs/poll", {
+      method: "POST", headers: { authorization: `Bearer ${ADON_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ job_id: "cc-job", status: "success" }),
+    }));
+    assert.equal(result.status, 403);
+    assert.equal((await result.json()).error, "owner_mismatch");
+  });
+
+  await check("OASIS grants only its exact approved VPS, requires leases, and rejects label copies and the old PC", async () => {
+    const { OASIS_SCRIPT_EXECUTOR: cloud } = await import("../lib/automations/tenant-script-lease");
+    await db.executeMultiple(readFileSync("database/turso/bravo__252_tenant_cron_execution_leases.sql", "utf8"));
+    await db.execute({ sql: `INSERT INTO "_supabase_auth_users" (id,email) VALUES (?, 'cloud@test')`, args: [cloud.userId] });
+    await db.execute(seat("p-cloud", cloud.userId, cloud.tenantId, "owner"));
+    for (const [id, label, token] of [[cloud.pairingId, "oasis-daemon-1 (Linux)", "approved-cloud-token"],
+      ["copied-label", "oasis-daemon-1 (Linux)", "copied-label-token"], ["old-pc", "CCPC (Windows)", "old-pc-token"]]) {
+      await db.execute({ sql: `INSERT INTO bridge_pairings
+        (id,tenant_id,label,user_id,bridge_token_hash,scope,paired_via,claim_enabled_at)
+        VALUES (?,?,?,?,?,'daemon','pair_code',?)`, args: [id, cloud.tenantId, label, cloud.userId, sha256(token), STAMP] });
+    }
+    await db.execute({ sql: `INSERT INTO tenant_cron_jobs
+      (id,tenant_id,name,schedule,action_type,action_payload,enabled,owner_user_id,created_at)
+      VALUES ('cloud-job',?,'Cloud test','* * * * *','script_run','{}',1,?,?)`, args: [cloud.tenantId, cloud.userId, STAMP] });
+    const post = (token: string, payload: object) => poll.POST(new NextRequest("http://localhost/api/cron-jobs/poll", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(payload),
+    }));
+    const ok = await (await get("approved-cloud-token")).json();
+    assert.equal(ok.claim_protocol, 2);
+    assert.equal(ok.timezone, "America/Toronto");
+    for (const token of ["old-pc-token", "copied-label-token"]) {
+      assert.deepEqual((await (await get(token)).json()).jobs, []);
+      assert.equal((await post(token, { job_id: "cloud-job", operation: "claim" })).status, 403);
+    }
+    assert.equal((await post("approved-cloud-token", { job_id: "cloud-job", status: "success" })).status, 400);
+    const claimed = await (await post("approved-cloud-token", { job_id: "cloud-job", operation: "claim" })).json();
+    assert.equal(claimed.claimed, true);
+    const receipt = await post("approved-cloud-token", { job_id: "cloud-job", lease_token: claimed.lease_token, status: "success" });
+    assert.equal(receipt.status, 200);
+    await db.execute({ sql: "UPDATE bridge_pairings SET claim_enabled_at=NULL WHERE id=?", args: [cloud.pairingId] });
+    assert.deepEqual((await (await get("approved-cloud-token")).json()).jobs, []);
+    assert.equal((await post("approved-cloud-token", { job_id: "cloud-job", operation: "claim" })).status, 403);
   });
 
   if (failures > 0) {

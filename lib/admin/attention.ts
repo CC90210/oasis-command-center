@@ -46,6 +46,7 @@ import {
   FLEET_REPORTER_SERVICE,
   SUPERVISOR_DISABLED,
   describeStatusReporter,
+  reportedWorkerStatus,
   type StatusReporter,
 } from "@/lib/automations/worker-status";
 import { loadOutcomeChecks, type OutcomeCheckData } from "@/lib/health/outcome-panel-data";
@@ -134,7 +135,7 @@ export async function loadMachines(db: AdminDb, tenantId: string, now: number, v
 
 // ── Workers ───────────────────────────────────────────────────────────────
 
-export type WorkerState = "running" | "stopped_by_you" | "trouble" | "down" | "stale" | "no_report";
+export type WorkerState = "running" | "pending" | "stopped_by_you" | "trouble" | "down" | "stale" | "no_report";
 
 export type WorkerHealth = {
   service: string;
@@ -150,6 +151,8 @@ export type HealthRow = { service: string; status: string | null; last_ping_at: 
 export const LOCAL_OASIS_WORKERS = OASIS_WORKERS.filter(
   (w) => w.service.startsWith("pm2.") && (w.runtime ?? "local") === "local" && !w.not_expected_here,
 );
+const REMOTE_OASIS_WORKERS = OASIS_WORKERS.filter((w) => w.runtime === "remote" && w.status_source === "integrations_health");
+const MONITORED_OASIS_WORKERS = [...LOCAL_OASIS_WORKERS, ...REMOTE_OASIS_WORKERS];
 
 /** PURE. One worker's state from its latest row. */
 export function describeWorker(
@@ -158,7 +161,8 @@ export function describeWorker(
   now: number,
 ): WorkerHealth {
   const base = { service: worker.service, label: worker.label, lastPingAt: row?.last_ping_at ?? null };
-  if (!row) return { ...base, state: "no_report", sentence: "No report from your computer yet." };
+  const host = worker.service.startsWith("vps.") ? "the daemon VPS" : "your computer";
+  if (!row) return { ...base, state: "no_report", sentence: `No report from ${host} yet.` };
   const pinged = row.last_ping_at ? Date.parse(row.last_ping_at) : NaN;
   if (!Number.isFinite(pinged) || now - pinged > DAEMON_HEALTH_STALE_MS) {
     return {
@@ -167,13 +171,15 @@ export function describeWorker(
       sentence: Number.isFinite(pinged) ? `Stopped reporting since ${new Date(pinged).toISOString()}.` : "Stopped reporting.",
     };
   }
-  if (row.status === "healthy") return { ...base, state: "running", sentence: "Running." };
+  const status = reportedWorkerStatus(worker.service, row.status, metadataObject(row.metadata));
+  if (status === "pending") return { ...base, state: "pending", sentence: "Running — awaiting result" };
+  if (status === "healthy") return { ...base, state: "running", sentence: "Running." };
   if (row.status === "degraded" && String(metadataObject(row.metadata)?.pm2_status ?? "") === SUPERVISOR_DISABLED) {
     return { ...base, state: "stopped_by_you", sentence: "Stopped by you." };
   }
   if (row.status === "degraded") return { ...base, state: "trouble", sentence: "Running with problems." };
-  if (row.status === "down") return { ...base, state: "down", sentence: "Down: your computer reports it isn't running." };
-  return { ...base, state: "no_report", sentence: "No usable report from your computer yet." };
+  if (status === "down") return { ...base, state: "down", sentence: `Down: ${host} reports it isn't running.` };
+  return { ...base, state: "no_report", sentence: `No usable report from ${host} yet.` };
 }
 
 /**
@@ -182,7 +188,8 @@ export function describeWorker(
  * the bridge sends every minute. Throws on a failed read.
  */
 export async function loadWorkerRows(db: AdminDb, tenantId: string): Promise<Map<string, HealthRow>> {
-  const services = [...LOCAL_OASIS_WORKERS.map((w) => w.service), FLEET_REPORTER_SERVICE];
+  if (tenantId !== WEBDEV_TENANT_ID) return new Map();
+  const services = [...MONITORED_OASIS_WORKERS.map((w) => w.service), FLEET_REPORTER_SERVICE];
   const r = await db
     .from("integrations_health")
     .select("service, status, last_ping_at, metadata")
@@ -212,7 +219,9 @@ export function describeBackground(
   machines: PairedMachine[] | null,
   now: number,
   viewer?: AttentionViewer,
+  tenantId = WEBDEV_TENANT_ID,
 ): { workers: WorkerHealth[] | null; reporter: StatusReporter | null; workersDown: number | null } {
+  if (tenantId !== WEBDEV_TENANT_ID) return { workers: [], reporter: null, workersDown: 0 };
   if (viewer && !viewer.isAgentsOwner) return { workers: [], reporter: null, workersDown: 0 };
   if (workerRows === null) return { workers: null, reporter: null, workersDown: null };
   const pc = machines?.[0] ?? null;
@@ -225,16 +234,18 @@ export function describeBackground(
     now,
     staleMs: DAEMON_HEALTH_STALE_MS,
   });
-  const workers = LOCAL_OASIS_WORKERS.map((w) => describeWorker(w, workerRows.get(w.service), now));
+  const workers = MONITORED_OASIS_WORKERS.map((w) => describeWorker(w, workerRows.get(w.service), now));
   const blind = reporter.state === "failing" || reporter.state === "silent";
-  const down = workers.filter((w) => w.state === "down" || w.state === "stale").length;
+  const down = workers.filter((w) => w.state === "down" || w.state === "stale");
+  const localDown = down.filter((w) => !w.service.startsWith("vps.")).length;
+  const remoteDown = down.length - localDown;
   // An offline computer is ONE thing needing you, not one alarm per worker it
   // runs (2026-10-31: six local workers would otherwise page six times).
   const offline = pc !== null && pc.state === "offline";
   return {
     workers,
     reporter,
-    workersDown: blind ? null : offline ? Math.min(down, 1) : down,
+    workersDown: blind ? null : remoteDown + (offline ? Math.min(localDown, 1) : localDown),
   };
 }
 
@@ -650,7 +661,7 @@ export async function loadAttentionSummary(
     errors: events?.errors ?? null,
     warnings: events?.warnings ?? null,
     cronFailures: cron?.count ?? null,
-    workersDown: describeBackground(workerRows, machines, now, viewer).workersDown,
+    workersDown: describeBackground(workerRows, machines, now, viewer, tenantId).workersDown,
     coldLeads,
     // Omitted entirely (not even `undefined`) when no viewer was given, so a
     // caller that builds its OWN AttentionSummary without this field (lib/

@@ -11,8 +11,10 @@
  */
 
 /** The subset of a worker row these rules read. */
+export type WorkerHealthStatus = "healthy" | "degraded" | "down" | "pending" | "unconfigured" | "archived";
+
 export type WorkerStatusInput = {
-  status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
+  status: WorkerHealthStatus;
   metadata?: Record<string, unknown> | null;
   /** Where the process executes. Missing is accepted for older API rows. */
   runtime?: WorkerRuntime;
@@ -21,6 +23,15 @@ export type WorkerStatusInput = {
   /** Where live status comes from; "none" means the host reports nothing here. */
   status_source?: WorkerStatusSource;
 };
+
+/** Decode persisted readings without trusting a cast or treating an in-flight result as success. */
+export function reportedWorkerStatus(service: string, status: unknown, metadata?: Record<string, unknown> | null): WorkerHealthStatus {
+  if (status === "healthy" || status === "degraded" || status === "down") return status;
+  if (service === "vps.oasis-inbox-sweep" && status === "unknown" && metadata?.via === "vps-heartbeat" && metadata.phase === "running") {
+    return "pending";
+  }
+  return "unconfigured";
+}
 
 export type WorkerRuntime = "local" | "cloud" | "remote" | "retired";
 export type WorkerControlMode = "local_fleet" | "remote_bridge" | "none";

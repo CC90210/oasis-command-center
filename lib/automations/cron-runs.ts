@@ -130,6 +130,8 @@ export type CronFlow = {
   enabled: boolean | null;
   /** When it was switched off, while it is off. */
   pausedAt: string | null;
+  /** Latest explicit switch-on, so an old pre-pause run cannot make a resumed job overdue. */
+  resumedAt?: string | null;
 };
 
 /**
@@ -185,6 +187,7 @@ export async function loadCronFlows(db: Client, now: number): Promise<CronFlow[]
         day: day.get(e.path) ?? { ok: 0, total: 0 },
         enabled,
         pausedAt: enabled === false && flip ? flip.changedAt : null,
+        resumedAt: enabled === true && flip ? flip.changedAt : null,
       };
     });
   } catch (err) {

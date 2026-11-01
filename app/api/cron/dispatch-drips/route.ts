@@ -34,7 +34,11 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await runDispatchDrips();
-    return NextResponse.json(result);
+    const failed = result.failed > 0 || result.retryPending > 0 || result.creditHalted;
+    // The executor already stored the outcome and owns any later retry.
+    // A non-retryable failure preserves this tick instead of immediately
+    // dispatching again and replacing it with a green no-work result.
+    return NextResponse.json({ ...result, ok: result.ok && !failed }, { status: failed ? 409 : 200 });
   } catch (err) {
     console.error("[dispatch-drips] unhandled error", err);
     return NextResponse.json(

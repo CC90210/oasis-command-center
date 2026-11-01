@@ -89,17 +89,33 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       ),
       // Department chat: once per workspace with department turns, bounded and
       // isolated per workspace (lib/health/department-chat-run.ts).
-      runDepartmentChatHealth({ notify }),
+      guard("department_chat", runDepartmentChatHealth({ notify }), (reason) => [{
+        tenantId: WEBDEV_TENANT_ID, summary: brokenSummary("health.department_chat_run", reason), failed: true,
+      }]),
     ]);
-    if (departmentRuns.some((d) => d.failed)) failedPieces.push("department_chat");
+    if (departmentRuns.some((d) => d.failed) && !failedPieces.includes("department_chat")) failedPieces.push("department_chat");
     // A client workspace's ids carry its tenant so two workspaces' rows differ.
     const tag = (tenantId: string, id: string) => (tenantId === WEBDEV_TENANT_ID ? id : `${tenantId.slice(0, 8)}:${id}`);
     const departmentResults = departmentRuns.flatMap((d) =>
       d.summary.results.map((r) => ({ ...r, id: tag(d.tenantId, r.id) })));
     const results = [...estateSummary.results, ...calendarSummary.results, ...departmentResults];
+    const failedAlerts = estateSummary.failedAlerts + calendarSummary.failedAlerts + departmentRuns.reduce((n, d) => n + d.summary.failedAlerts, 0);
+    const brokenChecks = results.filter(r => r.verdict === "check_broken").length;
+    const businessFailed = failedAlerts > 0 || brokenChecks > 0;
+    // Synthetic broken summaries describe a component that threw; those alone
+    // may retry. Results from completed runners already changed durable alert
+    // state, so any such failure must survive a simultaneous component exception.
+    const completedResults = [
+      ...(failedPieces.includes("estate") ? [] : estateSummary.results),
+      ...(failedPieces.includes("calendar") ? [] : calendarSummary.results),
+      ...departmentRuns.filter(d => !d.failed).flatMap(d => d.summary.results),
+    ];
+    const durableBusinessFailed = failedAlerts > 0 || completedResults.some(r => r.verdict === "check_broken");
 
     return NextResponse.json({
-      ok: failedPieces.length === 0,
+      ok: failedPieces.length === 0 && !businessFailed,
+      failed_alerts: failedAlerts,
+      broken_checks: brokenChecks,
       ...(failedPieces.length ? { failed_pieces: failedPieces } : {}),
       worst: worstVerdict(results),
       ran: estateSummary.ran + calendarSummary.ran + departmentRuns.reduce((n, d) => n + d.summary.ran, 0),
@@ -116,7 +132,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       results: results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
       })),
-    }, { status: failedPieces.length ? 500 : 200 });
+    // These failures have already advanced alert decay/recovery state. An
+    // immediate retry could find no alert due and hide the failed delivery.
+    }, { status: durableBusinessFailed ? 409 : failedPieces.length ? 500 : businessFailed ? 409 : 200 });
   } catch (err) {
     // The route failing is itself a monitoring failure. Return 500 so the
     // Cloudflare runtime and scheduler record a failure rather than a cheerful 200.

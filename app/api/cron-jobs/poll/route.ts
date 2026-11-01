@@ -26,8 +26,11 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, isMissingColumnError } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { isScriptActionType, SCRIPT_ACTION_TYPES } from "@/lib/automations/action-types";
-import { resolvePairingFromBearer, isDaemonScope } from "@/lib/bridge/pairing-auth";
+import { resolvePairingFromBearer, isDaemonScope, pairingCanClaim } from "@/lib/bridge/pairing-auth";
 import { liveSeat } from "@/lib/os/seat";
+import { getTursoClient } from "@/lib/turso";
+import { OASIS_SCRIPT_EXECUTOR, isOasisScriptExecutor, claimTenantScript,
+  heartbeatTenantScript, completeTenantScript } from "@/lib/automations/tenant-script-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,11 +66,14 @@ function checkPollRateLimit(req: NextRequest): NextResponse | null {
 // Pairing stays open for ping/health; the cron pipe is exclusive.
 // Mirrors cron_health_check.EXPECTED_PAIRINGS in the harness — change both.
 const EXPECTED_EXECUTOR_BY_TENANT_PREFIX: Record<string, string> = {
-  ef8d389e: "CCPC (Windows)", // OASIS — CC's PC
   aa04fa1f: "srv1723601 (Linux)", // SunBiz — the VPS
 };
 
-function isExpectedExecutor(tenantId: string, label: string): boolean {
+function isExpectedExecutor(bridge: BridgeOk): boolean {
+  const { tenantId, label } = bridge;
+  if (tenantId === OASIS_SCRIPT_EXECUTOR.tenantId) {
+    return bridge.claimApproved && isOasisScriptExecutor(bridge);
+  }
   const expected = EXPECTED_EXECUTOR_BY_TENANT_PREFIX[tenantId.slice(0, 8)];
   // Tenants without a declared executor keep the old open behavior — this
   // gate hardens the governed tenants without bricking future ones.
@@ -76,7 +82,7 @@ function isExpectedExecutor(tenantId: string, label: string): boolean {
 
 type BridgeRefusal = { status: number; message: string };
 /** pairingId and userId feed O2's owner filter and last_poll_ok_at stamp. */
-type BridgeOk = { pairingId: string; tenantId: string; label: string; userId: string | null };
+type BridgeOk = { pairingId: string; tenantId: string; label: string; userId: string | null; claimApproved: boolean };
 
 /**
  * The shared pairing resolver, PLUS the two gates this route adds on top:
@@ -95,7 +101,8 @@ async function resolveBridge(req: NextRequest): Promise<BridgeOk | BridgeRefusal
     const seat = await liveSeat(pairing.tenantId, pairing.userId);
     if (!seat.live) return { status: 403, message: `seat_inactive: ${seat.reason}` };
   }
-  return { pairingId: pairing.pairingId, tenantId: pairing.tenantId, label: pairing.label, userId: pairing.userId };
+  return { pairingId: pairing.pairingId, tenantId: pairing.tenantId, label: pairing.label,
+    userId: pairing.userId, claimApproved: pairingCanClaim(pairing) };
 }
 
 function isBridgeOk(r: BridgeOk | BridgeRefusal): r is BridgeOk {
@@ -126,7 +133,7 @@ export async function GET(req: NextRequest) {
   const bridge = await resolveBridge(req);
   if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
   const db = getServiceSupabase();
-  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
+  if (!isExpectedExecutor(bridge)) {
     // 200 with an empty list, not an error: the machine is paired and healthy,
     // it is simply not this tenant's executor. An error would make its daemon
     // retry-spin; an empty list makes it idle politely. It does NOT stamp
@@ -179,7 +186,8 @@ export async function GET(req: NextRequest) {
   // A row with an owner goes only to the computer whose paired user_id IS that
   // owner. A row with no owner (a legacy row the migration's backfill could
   // not resolve) keeps today's label-only rule — it has no person to prefer.
-  const owned = rows.filter((row) => !row.owner_user_id || row.owner_user_id === bridge.userId);
+  const cloud = bridge.tenantId === OASIS_SCRIPT_EXECUTOR.tenantId;
+  const owned = rows.filter((row) => row.owner_user_id === bridge.userId || (!cloud && !row.owner_user_id));
   // There ARE enabled rows for this tenant, but every one of them belongs to
   // someone else: this is the computer being paired to the wrong PERSON, not
   // an empty tenant. An empty 200 here is exactly what makes Bravo's runner
@@ -190,7 +198,8 @@ export async function GET(req: NextRequest) {
   }
   await stampLastPollOk(db, bridge.pairingId);
   const jobs = owned.map(({ owner_user_id: _ownerUserId, ...job }) => job);
-  return NextResponse.json({ ok: true, jobs, polled_at: new Date().toISOString() });
+  return NextResponse.json({ ok: true, jobs, polled_at: new Date().toISOString(),
+    ...(cloud ? { claim_protocol: 2, timezone: OASIS_SCRIPT_EXECUTOR.timezone } : {}) });
 }
 
 export async function POST(req: NextRequest) {
@@ -198,7 +207,7 @@ export async function POST(req: NextRequest) {
   if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
-  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
+  if (!isExpectedExecutor(bridge)) {
     // The WRITE side is the one that poisons rows — refuse it loudly so the
     // machine's own log says exactly why its report was not accepted.
     return bad(403, "executor_not_authorized_for_tenant");
@@ -213,6 +222,32 @@ export async function POST(req: NextRequest) {
 
   const jobId = String(body?.job_id || "").trim();
   if (!jobId) return bad(400, "missing_job_id");
+  if (bridge.tenantId === OASIS_SCRIPT_EXECUTOR.tenantId) {
+    try {
+      const client = getTursoClient();
+      if (body.operation === "claim") {
+        const grant = await claimTenantScript(client, bridge, jobId);
+        return NextResponse.json(grant, { status: grant.ok ? 200 : 409 });
+      }
+      const token = typeof body.lease_token === "string" ? body.lease_token : "";
+      if (!/^[0-9a-f-]{36}$/.test(token)) return bad(400, "valid_lease_token_required");
+      if (body.operation === "heartbeat") {
+        const ok = await heartbeatTenantScript(client, bridge, jobId, token);
+        return NextResponse.json({ ok, ...(ok ? {} : { error: "lease_lost" }) }, { status: ok ? 200 : 409 });
+      }
+      if (body.status !== "success" && body.status !== "error") return bad(400, "status_must_be_success_or_error");
+      const result = await completeTenantScript(client, bridge, {
+        jobId, token, status: body.status,
+        output: typeof body.output === "string" ? body.output : null,
+        error: typeof body.error === "string" ? body.error : null,
+      });
+      return NextResponse.json(result, { status: result.ok ? 200 : 409 });
+    } catch {
+      // A missing migration or database failure cannot authorize execution or
+      // manufacture a completed run. No raw provider details reach the caller.
+      return bad(503, "script_execution_store_unavailable");
+    }
+  }
   const status = String(body?.status || "").trim();
   if (status !== "success" && status !== "error") {
     return bad(400, "status_must_be_success_or_error");
@@ -227,7 +262,7 @@ export async function POST(req: NextRequest) {
   // last-run status are only ever the dispatcher's.
   const typeRead = await db
     .from("tenant_cron_jobs")
-    .select("id, action_type")
+    .select("id, action_type, owner_user_id, enabled")
     .eq("id", jobId)
     .eq("tenant_id", bridge.tenantId)
     .maybeSingle();
@@ -236,6 +271,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "job_lookup_failed" }, { status: 500 });
   }
   if (!typeRead.data) return bad(404, "job_not_found_or_other_tenant");
+  const reportRow = typeRead.data as { owner_user_id?: string | null; enabled?: boolean | number };
+  if (reportRow.owner_user_id && reportRow.owner_user_id !== bridge.userId) return bad(403, "owner_mismatch");
+  if (!reportRow.enabled) return bad(409, "job_disabled");
   if (!isScriptActionType((typeRead.data as { action_type?: unknown }).action_type)) {
     return NextResponse.json(
       {

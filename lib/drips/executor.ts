@@ -808,7 +808,7 @@ export function buildContext(
  * signer and apply-link slug, and classifyRep's admin wire, the tenant's shared
  * line. An active rep gets `data` itself back.
  *
- * A failed standing read keeps today's behaviour; see assignedRepDeactivated.
+ * A failed standing read stops this attempt; the row's retry/error state records it.
  */
 async function signingData(row: ClaimedRow, data: LeadData, run: RunState): Promise<LeadData> {
   if (!(await assignedRepDeactivated(row.tenant_id, data.assigned_to, run.repDeactivated))) return data;
@@ -2107,12 +2107,17 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
         db.from("drip_runs").select("id", { count: "exact", head: true }).in("status", ["sent", "done"]).gte("sent_at", oneHourAgoIso),
         db.from("drip_runs").select("id", { count: "exact", head: true }).eq("status", "sending"),
       ]);
-      const sentLastHour = (settled.count || 0) + (inflight.count || 0);
+      if (settled.error || inflight.error ||
+          !Number.isSafeInteger(settled.count) || (settled.count as number) < 0 ||
+          !Number.isSafeInteger(inflight.count) || (inflight.count as number) < 0) {
+        throw new Error("drip_hourly_budget_unavailable");
+      }
+      const sentLastHour = (settled.count as number) + (inflight.count as number);
       claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
     } catch (err) {
-      // Can't measure the rate → trickle a few rather than risk a burst.
-      console.error("[dispatch-drips] hourly-cap count failed, trickling", err);
-      claimBudget = Math.min(BATCH_LIMIT, 5);
+      // Unknown usage is not permission to send. Fail before claiming due work.
+      console.error("[dispatch-drips] hourly-cap count unavailable", err);
+      throw new Error("drip_hourly_budget_unavailable");
     }
     if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
   }

@@ -66,10 +66,11 @@ const quoSends: Array<{ to: string; text: string; from: string | null }> = [];
 let quoResult: Record<string, unknown> | null = null;
 let quoSenderResult: Record<string, unknown> | null = null;
 let stopIntake = true;
+let intakeReason = "configuration_missing";
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
   quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
-  quoStopIntakeConnected: () => stopIntake,
+  quoStopIntakeReadiness: () => ({ ready: stopIntake, reason: stopIntake ? "ready" : intakeReason }),
   sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
     quoSends.push({ ...input, from: creds.fromNumber });
     return quoResult ?? { ok: true, id: `QU${quoSends.length}`, status: "queued" };
@@ -236,7 +237,9 @@ async function main() {
           headers: { authorization: `Bearer ${process.env.CRON_SECRET}`, "x-vercel-cron": "1" },
         }),
       );
-      return (await res.json()) as { sent?: number; failed?: number };
+      const body = (await res.json()) as { sent?: number; failed?: number };
+      assert.equal(res.status, body.failed ? 409 : 200, "persisted reminder failures must not trigger an immediate scheduler retry");
+      return body;
     } finally {
       console.error = originalError;
     }
@@ -357,10 +360,36 @@ async function main() {
   await check("without STOP intake on the Quo number, reminders are not texted", async () => {
     const row = await rowOf("lead-sms-nostop");
     assert.equal(row.status, "skipped");
-    assert.equal(row.last_error, "quo_stop_intake_not_connected");
+    assert.equal(row.last_error, "quo_stop_intake:configuration_missing");
     assert.equal(quoSends.length, beforeNoStop);
   });
   stopIntake = true;
+
+  await check("temporary incoming delivery backlog defers without attempts; recovery sends once and expired reminders stay unsent", async () => {
+    stopIntake = false; intakeReason = "provider_delivery_backlog";
+    await appointment("appt-backlog", 15);
+    await appointment("appt-backlog-expired", 15);
+    await queue("sms-backlog", "appt-backlog", "reminder_15", 15, "sms", PHONE);
+    await queue("sms-backlog-expired", "appt-backlog-expired", "reminder_15", 15, "sms", PHONE);
+    const before = quoSends.length;
+    await dispatch();
+    for (const id of ["sms-backlog", "sms-backlog-expired"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.equal(row.last_error, "quo_stop_intake:provider_delivery_backlog");
+      assert.ok(Date.parse(String(row.due_at)) > Date.now());
+    }
+    assert.equal(quoSends.length, before);
+    stopIntake = true; intakeReason = "configuration_missing";
+    await seed.execute("UPDATE website_sales_meeting_notifications SET due_at='2026-01-01T00:00:00Z' WHERE id IN ('sms-backlog','sms-backlog-expired')");
+    await seed.execute("UPDATE call_appointments SET scheduled_for='2026-01-01T00:00:00Z' WHERE id='appt-backlog-expired'");
+    await dispatch();
+    assert.equal((await rowOf("sms-backlog")).status, "sent");
+    assert.equal(Number((await rowOf("sms-backlog")).attempts), 1);
+    assert.equal((await rowOf("sms-backlog-expired")).status, "skipped");
+    assert.equal(quoSends.length, before + 1);
+    await dispatch(); assert.equal(quoSends.length, before + 1);
+  });
 
   // Pass 2e: the sending number cannot be looked up: nothing was sent, so it retries.
   quoSenderResult = { ok: false, code: "quo_unreachable", reason: "Quo did not answer." };

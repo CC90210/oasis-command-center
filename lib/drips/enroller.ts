@@ -549,9 +549,10 @@ export async function wasShoppedRecently(
       .gte("created_at", new Date(cutoff).toISOString())
       .ilike("agent_source", "%shop_out%")
       .limit(1);
-    if (!r.error && Array.isArray(r.data) && r.data.length > 0) return true;
+    if (r.error) throw new Error("drip_shopped_lookup_unavailable");
+    if (Array.isArray(r.data) && r.data.length > 0) return true;
   } catch {
-    /* best-effort — a query failure here does not block enrollment */
+    throw new Error("drip_shopped_lookup_unavailable");
   }
 
   return false;
@@ -569,11 +570,9 @@ export async function wasShoppedRecently(
  * `cache` is per pass, keyed (tenant, rep): one read per rep, not per lead. A
  * failed read is not cached, so a blip costs one row rather than the pass.
  *
- * READ ERROR → false, i.e. TODAY'S behaviour (the rep is treated as active),
- * plus a tagged warning. Drips are SunBiz revenue automation that runs for
- * active reps every day; a standing read that hiccups must not change who signs
- * or which line a text leaves from. Every dispatched step asks again, so a
- * genuinely retired rep is caught by the next step that reads cleanly.
+ * A read error stops this enrollment/dispatch attempt. Unknown standing is not
+ * permission to sign as the rep or use their line. The caller records the
+ * failure and can retry after the lookup recovers.
  * "not_member" also keeps today's behaviour: only a deactivated member is
  * withheld.
  */
@@ -597,7 +596,7 @@ export async function assignedRepDeactivated(
       assignedTo: rep,
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    throw new Error("drip_rep_standing_unavailable");
   }
 }
 
@@ -686,12 +685,12 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   // run. This is the surge brake on the two enrollment fixes in this file: they
   // release leads that have been frozen out of the funnel, potentially many at
   // once, and the send-side caps alone would leave a very large queue of
-  // scheduled rows behind. Fails SOFT (-1 -> treat as unlimited) because the
-  // per-sequence limit and the stage allowlist still bound each run.
+  // scheduled rows behind. An unreadable ceiling must not become unlimited.
   let enrollBudget = Number.POSITIVE_INFINITY;
   if (enrollDailyCap > 0) {
     const used = await countEnrolledLast24h(db);
-    if (used >= 0) enrollBudget = Math.max(0, enrollDailyCap - used);
+    if (used < 0) throw new Error("drip_enrollment_budget_unavailable");
+    enrollBudget = Math.max(0, enrollDailyCap - used);
   }
 
   // A retired tenant's sequences never enrol anyone, even if a row is
@@ -702,7 +701,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
     .eq("enabled", true)
     .not("tenant_id", "in", RETIRED_TENANT_ID_LIST);
   if (seqRes.error) {
-    return { live, sequencesScanned: 0, perSequence: [], totals: { candidates: 0, enrolled: 0, skipped: 0 } };
+    throw new Error("drip_sequences_unavailable");
   }
 
   const sequences = ((seqRes.data || []) as SequenceRow[]).filter((s) => {
@@ -799,20 +798,29 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
 
       // Expensive per-lead guards — only reached for leads we're about to
       // actually enroll (bounded by DRIPS_ENROLL_LIMIT).
-      if (await wasShoppedRecently(db, seq.tenant_id, lead.id, data)) {
-        skipped.shopped_recently++;
-        continue;
-      }
+      try {
+        if (await wasShoppedRecently(db, seq.tenant_id, lead.id, data)) {
+          skipped.shopped_recently++;
+          continue;
+        }
       // Accelerated-chase overlap suppression (Adon 2026-07-22): a lead being
       // ACTIVELY chased doesn't get stage drips — one track at a time. The
       // predicate is an active chase run, not the flag alone, so a flagged
       // lead the chase can't enroll keeps its stage follow-up (codex P1).
-      if (
-        acceleratedSystemLive() &&
-        isTruthyFlag(data[ACCELERATED_FLAG]) &&
-        (await hasActiveAcceleratedRun(db, seq.tenant_id, lead.id))
-      ) {
-        skipped.accelerated_chase++;
+        if (
+          acceleratedSystemLive() &&
+          isTruthyFlag(data[ACCELERATED_FLAG]) &&
+          (await hasActiveAcceleratedRun(db, seq.tenant_id, lead.id))
+        ) {
+          skipped.accelerated_chase++;
+          continue;
+        }
+        // Read before creating work, even when the lead already has a rep name.
+        // Confirmed deactivation still uses the existing generic signer policy.
+        await assignedRepDeactivated(seq.tenant_id, data.assigned_to, repDeactivated);
+      } catch (error) {
+        errorMsg = error instanceof Error && /^drip_[a-z_]+_unavailable$/.test(error.message)
+          ? error.message : "drip_enrollment_guard_unavailable";
         continue;
       }
 
@@ -838,6 +846,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       if (ins.error) {
         if (!/duplicate key|unique constraint/i.test(ins.error.message)) {
           console.error("[enroll-drips] insert failed", { leadId: lead.id, sequenceId: seq.id, err: ins.error.message });
+          errorMsg = "drip_enrollment_write_failed";
         }
         continue;
       }
@@ -846,7 +855,8 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
 
       const patch = await backfillLeadMetadata(db, seq.tenant_id, lead, repDeactivated);
       if (patch) {
-        await db.from("tenant_records").update({ data: patch }).eq("id", lead.id).eq("tenant_id", seq.tenant_id);
+        const updated = await db.from("tenant_records").update({ data: patch }).eq("id", lead.id).eq("tenant_id", seq.tenant_id);
+        if (updated.error) errorMsg = "drip_enrollment_metadata_failed";
       }
 
       // Stamp the sending brand once, at enrolment. Deliberately AFTER the
@@ -863,6 +873,7 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
           lead.created_at,
         );
       } catch (err) {
+        errorMsg = "drip_enrollment_brand_failed";
         console.error("[enroll-drips] brand stamp failed", {
           leadId: lead.id,
           err: err instanceof Error ? err.message : String(err),

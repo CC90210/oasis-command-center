@@ -57,9 +57,46 @@ function stubModule(path: string, exports: Record<string, unknown>) {
 }
 
 let standingReads = 0;
+let guardReadFailure = "";
 
 /** Installed before the drip modules load, so they bind to these. */
 async function installStubs() {
+  const realDb = await import("../lib/supabase-server");
+  stubModule(require.resolve("../lib/supabase-server"), {
+    ...realDb,
+    getServiceSupabase: () => {
+      const db = realDb.getServiceSupabase();
+      return new Proxy(db, { get(target, property) {
+        if (property !== "from") return Reflect.get(target, property);
+        return (table: string) => {
+          const state = { shopped: false, accelerated: false, head: false, hourly: "" };
+          const wrap = (query: object): object => new Proxy(query, { get(builder, method) {
+            if (method === "then" && state.head && state.hourly && guardReadFailure.startsWith(`hourly_${state.hourly}`)) {
+              const result = guardReadFailure.endsWith("_missing")
+                ? { data: null, error: null, count: null }
+                : { data: null, error: { message: "fixture_budget_read_failed" }, count: null };
+              return (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => Promise.resolve(result).then(resolve, reject);
+            }
+            if (method === "then" && ((guardReadFailure === "shopped" && state.shopped) || (guardReadFailure === "accelerated" && state.accelerated))) {
+              return (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => Promise.resolve({ data: null, error: { message: "fixture_guard_read_failed" } }).then(resolve, reject);
+            }
+            const value = Reflect.get(builder, method);
+            if (typeof value !== "function") return value;
+            return (...args: unknown[]) => {
+              if (table === "lead_interactions" && method === "ilike" && args[0] === "agent_source") state.shopped = true;
+              if (table === "drip_sequences" && method === "select" && args[0] === "id, trigger_filter") state.accelerated = true;
+              if (table === "drip_runs" && method === "select" && (args[1] as { head?: boolean } | undefined)?.head) state.head = true;
+              if (table === "drip_runs" && method === "in" && args[0] === "status") state.hourly = "settled";
+              if (table === "drip_runs" && method === "eq" && args[0] === "status" && args[1] === "sending") state.hourly = "inflight";
+              const result = value.apply(builder, args);
+              return result && typeof result === "object" && !(result instanceof Promise) ? wrap(result) : result;
+            };
+          } });
+          return wrap(db.from(table));
+        };
+      } });
+    },
+  });
   // The recipient's clock. Timezone resolution stays real; only "is it daytime
   // there right now" is pinned open.
   const realTcpa = await import("../lib/tcpa-window");
@@ -272,9 +309,9 @@ async function main() {
   });
 
   await check("enrol: one standing read per rep for the whole pass", () => {
-    // Only the two leads missing rep_name ask (Alex, Jordan), once per rep even
-    // though each is enrolled into two sequences.
-    assert.equal(standingReads, 2);
+    // Every assigned rep is checked before enrollment, even with an existing
+    // name; the per-pass cache still avoids duplicate checks across sequences.
+    assert.equal(standingReads, 3);
   });
 
   // ── 2. Dispatch (dry run): signer, apply link, sending line ───────────────
@@ -377,7 +414,7 @@ async function main() {
     assert.equal(tagged(dispatch.warned, "[drips] rep standing unavailable").length, 0);
   });
 
-  // ── 3. Read error: SunBiz keeps sending exactly as today, and says so ─────
+  // ── 3. Read error: unknown rep standing blocks this dispatch attempt ─────
   await seed.batch(
     [
       sequence(LATE_SEQ, "Late SMS", "sms", SMS_BODY),
@@ -395,23 +432,53 @@ async function main() {
   const blip = await captureWarn(() => runDispatchDrips());
   await seed.execute("ALTER TABLE user_profiles_unreadable RENAME TO user_profiles");
 
-  await check("read error: the row still goes out, with today's rep identity (treated as active)", async () => {
-    assert.equal(blip.result.dryRun, 1, JSON.stringify(blip.result));
+  await check("read error: no message is emitted using an unverified rep identity", async () => {
+    assert.equal(blip.result.dryRun, 0, JSON.stringify(blip.result));
+    assert.equal(blip.result.retryPending, 1);
     const rows = await sent(L_JORDAN_OLD, "sms");
-    const late = rows[rows.length - 1];
-    assert.equal(late.meta.sequence_id, LATE_SEQ);
-    assert.match(late.content, /^Hi Morgan, Jordan Retired here at SunBiz\. /);
-    assert.equal(late.meta.rep, "jordan");
-    assert.equal(late.meta.from_number, JORDAN_LINE);
+    assert.ok(rows.every(row => row.meta.sequence_id !== LATE_SEQ));
+    const retry = (await seed.execute({ sql: "SELECT status,last_error FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+    assert.equal(retry.status, "scheduled"); assert.equal(retry.last_error, "drip_rep_standing_unavailable");
   });
 
-  await check("read error: the fallback is logged under the drips tag", () => {
+  await check("read error: the failure is logged under the drips tag", () => {
     const warns = tagged(blip.warned, "[drips] rep standing unavailable");
     assert.equal(warns.length, 1);
     const detail = warns[0][1] as { tenantId?: string; assignedTo?: string; error?: string };
     assert.equal(detail.tenantId, TENANT);
     assert.equal(detail.assignedTo, JORDAN);
     assert.ok(detail.error, "the underlying error is carried");
+  });
+
+  await check("shared shopped/accelerated guards block the real executor on read errors without recording a send", async () => {
+    const before = (await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n;
+    await seed.execute({ sql: "UPDATE tenant_records SET data=json_set(data,'$.accelerated_followup',true) WHERE id=?", args: [L_JORDAN_OLD] });
+    process.env.ACCELERATED_ENROLL_LIVE = "1";
+    for (const guard of ["shopped", "accelerated"]) {
+      guardReadFailure = guard;
+      await seed.execute({ sql: "UPDATE drip_runs SET status='scheduled',attempts=0,scheduled_for='2026-09-01T00:00:00Z' WHERE sequence_id=?", args: [LATE_SEQ] });
+      const blocked = await captureWarn(() => runDispatchDrips());
+      assert.equal(blocked.result.dryRun, 0); assert.equal(blocked.result.sent, 0); assert.equal(blocked.result.retryPending, 1);
+      const row = (await seed.execute({ sql: "SELECT last_error FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+      assert.equal(row.last_error, `drip_${guard}_lookup_unavailable`);
+      assert.equal((await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n, before);
+    }
+    guardReadFailure = ""; delete process.env.ACCELERATED_ENROLL_LIVE;
+  });
+
+  await check("hourly usage read errors and missing counts block before claiming or sending", async () => {
+    const before = (await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n;
+    process.env.DRIPS_LIVE = "1";
+    try {
+      for (const fault of ["hourly_settled", "hourly_inflight", "hourly_settled_missing", "hourly_inflight_missing"]) {
+        guardReadFailure = fault;
+        await seed.execute({ sql: "UPDATE drip_runs SET status='scheduled',attempts=0,scheduled_for='2026-09-01T00:00:00Z' WHERE sequence_id=?", args: [LATE_SEQ] });
+        await assert.rejects(() => captureWarn(() => runDispatchDrips()), /drip_hourly_budget_unavailable/);
+        const row = (await seed.execute({ sql: "SELECT status,attempts FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+        assert.equal(row.status, "scheduled"); assert.equal(row.attempts, 0);
+        assert.equal((await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n, before);
+      }
+    } finally { guardReadFailure = ""; delete process.env.DRIPS_LIVE; }
   });
 
   if (failures) {
