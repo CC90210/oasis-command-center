@@ -4,7 +4,6 @@ import type { Client, InStatement } from "@libsql/client";
 import { getTursoClient } from "@/lib/turso";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { META_GRAPH_VERSION } from "@/lib/integrations/key-probes";
-import { parseAssetMeta } from "@/lib/founders/library-meta";
 
 const DAY = 86_400_000;
 const ID = /^\d{5,25}$/;
@@ -84,7 +83,9 @@ export async function importMetaDelivery(tenantId: string, deps: Deps = {}): Pro
     const assets = new Map<string, Asset>();
     for (const row of result.rows) {
       const rawMeta = typeof row.meta === "string" ? row.meta : "{}";
-      const meta = parseAssetMeta(rawMeta);
+      let meta: Record<string, unknown>;
+      try { meta = object(JSON.parse(rawMeta)); }
+      catch { meta = {}; }
       const externalId = typeof row.external_id === "string" ? row.external_id : null;
       const external = externalId && ID.test(externalId) ? externalId : null;
       const explicit = typeof meta.platform_ad_id === "string" && ID.test(meta.platform_ad_id) ? meta.platform_ad_id : null;
