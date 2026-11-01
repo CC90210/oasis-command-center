@@ -181,7 +181,8 @@ async function main() {
           WHERE appointment_id = ? AND channel = 'sms' AND reminder_minutes_before IS NOT NULL`,
     args: ["legacy-meeting"],
   });
-  assert.equal(smsTiers.rows.length, 3, "late consent repairs every still-valid SMS tier");
+  // Texts at 60, 30, 15 and 5 minutes (CC 2026-11-01 added the 60-minute text).
+  assert.equal(smsTiers.rows.length, 4, "late consent repairs every still-valid SMS tier");
   await assert.rejects(
     grantFounderMeetingSmsConsent({
       tenantId: TENANT,
