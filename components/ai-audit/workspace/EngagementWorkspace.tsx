@@ -30,6 +30,7 @@ import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { ResearchPanel } from "./ResearchPanel";
+import { PresentationBrief } from "./PresentationBrief";
 import { describeError, postAction } from "./api";
 import { approvalStatusWords } from "./words";
 
@@ -238,6 +239,8 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
           </button>
         ))}
       </nav>
+
+      {tab === "overview" ? <PresentationBrief view={view} onOpenResearch={() => setTab("call")} /> : null}
 
       {tab === "overview" ? (
         <div className="grid gap-5 lg:grid-cols-2">

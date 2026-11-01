@@ -119,6 +119,39 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
       hasNot: [/Handing the web search to CC's Mac/i, /Waiting for the web search on CC's Mac/i],
     });
   }
+  // The presentation brief opens the overview (CC, 2026-11-01): the booked room to join, the live-call notes,
+  // and what the checks found and what to offer, each saying so when it is not prepared yet.
+  {
+    const briefed = json(first as NonNullable<typeof first>);
+    briefed.meetRooms = [
+      {
+        id: "room-booked",
+        code: "abcdefghjk",
+        path: "/meet/abc-defg-hjk",
+        title: "Audit call",
+        status: "scheduled",
+        recordAudio: true,
+        startsAt: "2026-11-02T17:00:00.000Z",
+        createdAt: "2026-10-31T20:52:50.000Z",
+        endedAt: null,
+        transcript: null,
+        guests: [],
+        attachedTranscriptId: null,
+        holds: [],
+      },
+    ];
+    scenarios.push({ id: "workspace:presentation-brief", screen: "workspace", props: { view: briefed, isOwner: true } });
+    expect.set("workspace:presentation-brief", {
+      has: ["Presentation brief", "Call: Mon, Nov 2", "Join the call room", "Live-call notes", "What the checks found", "What to offer"],
+    });
+    const roomless = json(first as NonNullable<typeof first>);
+    roomless.meetRooms = [];
+    scenarios.push({ id: "workspace:presentation-brief-no-room", screen: "workspace", props: { view: roomless, isOwner: true } });
+    expect.set("workspace:presentation-brief-no-room", {
+      has: ["Presentation brief", "No Oasis Meet room is booked with this call yet."],
+      hasNot: [/Join the call room/],
+    });
+  }
   {
     const pending = json(first as NonNullable<typeof first>);
     pending.modelSearchEnabled = true;

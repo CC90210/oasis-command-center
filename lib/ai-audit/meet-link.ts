@@ -32,6 +32,7 @@
 import "server-only";
 import type { Client } from "@libsql/client";
 import { createMeetRoomUnlessLeadHasOpen } from "@/lib/meet/rooms";
+import { meetRoomPath } from "@/lib/meet/links";
 import { meetRecordingTablesInstalled, readTranscript, type TranscriptLine as MeetLine } from "@/lib/meet/recording";
 import { parseMeetLines, type ParseError } from "@/lib/ai-audit/transcript";
 import { addTranscript } from "@/lib/ai-audit/transcripts";
@@ -45,6 +46,8 @@ export type AuditRoomGuest = { name: string; consented: boolean; removed: boolea
 export type AuditRoom = {
   id: string;
   code: string;
+  /** The room's address in the app, /meet/abc-defg-hjk (lib/meet/links.ts). */
+  path: string;
   title: string;
   status: string;
   recordAudio: boolean;
@@ -182,6 +185,7 @@ export async function roomsForEngagement(db: Client, tenantId: string, engagemen
     return {
       id,
       code: String(r.code),
+      path: meetRoomPath({ code: String(r.code) }),
       title: String(r.title),
       status: String(r.status),
       recordAudio: Number(r.record_audio) === 1,

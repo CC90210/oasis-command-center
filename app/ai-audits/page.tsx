@@ -28,7 +28,6 @@ import { AUDIT_STAGES, boardColumns, pipelineColumnKey, pipelineColumnMeta, pipe
 import { ownerPipelineSnapshot, type PipelineDeal } from "@/lib/ai-audit/pipeline-deals";
 import { StartAiAuditButton } from "@/components/ai-audit/StartAiAuditButton";
 import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
-import { SetupChecklist } from "@/components/ai-audit/SetupChecklist";
 
 export const dynamic = "force-dynamic";
 
@@ -56,10 +55,11 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
   } catch (err) {
     console.error("[ai-audits] the board's numbers could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));
   }
-  // Setup reads each check on its own; if even that throws, the board says so instead of hiding the list.
-  let setup: SetupCheck[] | null = null;
+  // The setup checklist lives on /ai-audits/settings (CC, 2026-11-01: the board is for working deals). Only a
+  // check that is missing right now is named here, in one line, so a stopped PDF printer is never hidden.
+  let blocked: SetupCheck[] = [];
   try {
-    setup = await setupChecks(session.db, session.tenantId, new Date());
+    blocked = (await setupChecks(session.db, session.tenantId, new Date())).filter((c) => c.state === "missing");
   } catch (err) {
     console.error("[ai-audits] the setup checks could not be read", err instanceof Error ? (err.stack ?? err.message) : String(err));
   }
@@ -121,13 +121,14 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
         />
       </div>
 
-      <div className="mb-5">
-        {setup ? (
-          <SetupChecklist checks={setup} />
-        ) : (
-          <div className="rounded-xl border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-status-warm">Setup could not be checked just now. Reload the page; the error was logged.</div>
-        )}
-      </div>
+      {blocked.length ? (
+        <div className="mb-5 rounded-xl border border-hairline bg-bg-panel px-4 py-2.5 text-sm">
+          <span className="text-status-warm">Needs you: {blocked.map((c) => c.label).join(", ")}.</span>{" "}
+          <Link href="/ai-audits/settings#setup" className="underline underline-offset-2">
+            Open AI audit settings
+          </Link>
+        </div>
+      ) : null}
 
       <section aria-label="Audits by Pipeline stage" className="mb-5">
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">

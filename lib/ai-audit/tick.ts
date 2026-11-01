@@ -3,6 +3,9 @@
  * (/api/cron/ai-audit-tick, every five minutes in phase 1).
  *
  * Each run, for each of OASIS's own workspaces, within a time budget:
+ *   0. open the audit for every founder meeting still ahead and record its
+ *      appointment and room (lib/ai-audit/auto-open.ts), so step 7c builds
+ *      its brief before the call;
  *   1. queue a PDF print for any submitted audit that has none and no job;
  *   2. file Gate 2 (the delivery approval) once its PDF exists;
  *   3. check open Stripe checkouts with Stripe (the fallback to the webhook);
@@ -58,11 +61,15 @@ import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
 import { fileFollowUp, withdrawStaleFollowUps } from "@/lib/ai-audit/follow-up";
+import { autoOpenForBookedMeetings } from "@/lib/ai-audit/auto-open";
 
 export type TickDeps = { payment: PaymentDeps; onboarding: OnboardingDeps; extraction?: CloudDeps; site?: SiteReadDeps; research?: ResearchDeps; writing?: WriteDeps };
 
 export type TickReport = {
   tenants: number;
+  /** Audits opened by themselves for a booked founder meeting, and engagements tied to their appointment and room. */
+  auditsOpened: number;
+  meetingsLinked: number;
   pdfsQueued: number;
   approvalsFiled: number;
   checkoutsChecked: number;
@@ -115,6 +122,8 @@ export async function runAiAuditTick(
   const deps: TickDeps = opts.deps ?? { payment: defaultPaymentDeps(), onboarding: defaultOnboardingDeps() };
   const report: TickReport = {
     tenants: 0,
+    auditsOpened: 0,
+    meetingsLinked: 0,
     pdfsQueued: 0,
     approvalsFiled: 0,
     checkoutsChecked: 0,
@@ -168,6 +177,21 @@ export async function runAiAuditTick(
         report.errors.push({ tenantId, step, ...(engagementId ? { engagementId } : {}), error: error.slice(0, 300) });
       }
     };
+
+    // 0. Before the list, so an audit opened here is in it and gets its brief this run.
+    await guard("auto_open", undefined, async () => {
+      const r = await autoOpenForBookedMeetings(db, {
+        tenantId,
+        now: now(),
+        onError: (appointmentId, err) => {
+          const error = err instanceof Error ? err.message : String(err);
+          console.error("[ai-audit.tick]", { tenantId, step: "auto_open", appointmentId, error });
+          report.errors.push({ tenantId, step: "auto_open", error: `${appointmentId}: ${error}`.slice(0, 300) });
+        },
+      });
+      report.auditsOpened += r.opened;
+      report.meetingsLinked += r.linked;
+    });
 
     let open: Engagement[] = [];
     await guard("list", undefined, async () => {
