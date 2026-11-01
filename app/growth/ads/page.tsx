@@ -1,144 +1,93 @@
-/**
- * /growth/ads — Growth › Marketing › Ads: Meta Ads, run by the Marketing
- * department.
- *
- * NOT CONNECTED IS THE WHOLE TRUTH TODAY. No workspace has a Meta connection
- * yet: the partner-access pilot and App Review are Phase 2 (plan pillar 12,
- * docs/os-revamp/03 §(c).1). So this page shows no numbers at all — every tile
- * says "Not connected", and the rest says what Marketing will do once it is.
- * A plausible spend figure on a page with no data source is the defect this
- * product promises not to ship.
- *
- * GATE, first statement: requireOsRoute("/growth/ads") — the rail's rule
- * (module `ads`; today OASIS's internal tier only). Connect links go to
- * Settings › Connections and only for owners/admins, who are the ones the rail
- * gives the Connections door to.
- */
-
+/** Meta connection health and stored delivery evidence are separate facts. */
 import Link from "next/link";
-import { Copy, Gauge, LineChart, PauseCircle, Rocket } from "lucide-react";
-import type { ReactNode } from "react";
 import { Card } from "@/components/Card";
-import { KpiTile } from "@/components/os/KpiTile";
+import { KpiTile, type KpiStatus } from "@/components/os/KpiTile";
 import { PageFrame } from "@/components/os/PageFrame";
+import { StatusLine } from "@/components/os/connections/StatusLine";
+import { loadWorkspaceConnectorStatus } from "@/components/os/connections/connector-facts";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
 import { resolveFounder } from "@/lib/founders/gate";
+import { loadLibraryPage } from "@/lib/founders/marketing-queries";
+import { AssetTile } from "@/components/founders/marketing-shared";
+import { loadAdsReport } from "@/lib/marketing/ads-report";
 import { setupHref } from "@/lib/setup-links";
+import { ImportMetaDelivery } from "@/components/marketing/ImportMetaDelivery";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Ads" };
-
-// Meta's own card in Connections (lib/setup-links.ts), not the hub.
 const META_CONNECT_HREF = setupHref("connector:meta");
-const ICON = { size: 16, strokeWidth: 1.75 } as const;
-
-const TILES = ["Ad spend 7d", "Cost per lead", "Leads from ads 7d", "Cost per paid customer"] as const;
-
-const ONCE_CONNECTED: Array<{ icon: ReactNode; title: string; body: string }> = [
-  {
-    icon: <LineChart {...ICON} />,
-    title: "Live campaigns",
-    body: "Every campaign, ad set and ad with spend, cost per lead and cost per paying customer, synced from Meta.",
-  },
-  {
-    icon: <PauseCircle {...ICON} />,
-    title: "Changes with your approval",
-    body: "Pause or resume, raise or lower a budget. Each change is a card you approve, showing projected spend against your monthly cap. Nothing changes until you say yes.",
-  },
-  {
-    icon: <Copy {...ICON} />,
-    title: "Duplicate what wins",
-    body: "When an ad keeps turning into paying customers, Marketing proposes a copy to scale it, as another approval.",
-  },
-  {
-    icon: <Rocket {...ICON} />,
-    title: "New ads start paused",
-    body: "A new ad is created paused. Putting it live is a second approval, so spend never starts on its own.",
-  },
-  {
-    icon: <Gauge {...ICON} />,
-    title: "Winning-ad report",
-    body: "Creatives ranked by cost per paying customer rather than clicks, each with its sample size, and tired ads flagged before they waste budget.",
-  },
-];
+const amount = (value: number | null, currency: string | null) =>
+  value === null || !currency ? null : `${currency} ${value.toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export default async function AdsPage() {
   const viewer = await requireOsRoute("/growth/ads");
   const canConnect = viewer.surface.persona === "founder";
-  // Founders only: OASIS's own organic performance lives in the founders
-  // portal behind its own gate; the link is drawn only when that gate opens.
   const founder = viewer.oasis ? await resolveFounder() : null;
-
+  const [connection, report, library] = await Promise.all([
+    loadWorkspaceConnectorStatus(viewer.surface.tenantId, "meta"),
+    loadAdsReport(viewer.surface.tenantId),
+    // The existing preview and asset actions belong to the founders library.
+    founder ? loadLibraryPage(viewer.surface.tenantId, { channel: "paid-meta", pageSize: 12 }).catch(() => {
+      console.error("[marketing.ads] creative previews unavailable", { tenantId: viewer.surface.tenantId });
+      return null;
+    }) : Promise.resolve(null),
+  ]);
+  const reportStatus: KpiStatus = report.error ? "error" : report.observations > 0 ? "live" : "no_data";
+  const metrics = [
+    { label: "Recorded spend 7d", value: amount(report.spend, report.currency), missing: "Currency or spend not recorded" },
+    { label: "Cost per click 7d", value: amount(report.costPerClick, report.currency), missing: "Spend and clicks needed" },
+    { label: "Recorded clicks 7d", value: report.clicks, missing: "Clicks not recorded" },
+    { label: report.conversionKind === "leads" ? "Recorded leads 7d" : "Reported conversions 7d", value: report.conversions, missing: "Conversions not recorded" },
+  ];
   return (
-    <PageFrame
-      title="Ads"
-      subtitle="Meta ads, run by your Marketing department once your ad account is connected."
-      actions={
-        canConnect ? (
-          <Link href={META_CONNECT_HREF} prefetch={false} className="btn-primary">
-            Connect Meta Ads Manager
-          </Link>
-        ) : undefined
-      }
-    >
+    <PageFrame title="Ads" subtitle="Meta connection status, delivery reports and creative previews."
+      actions={canConnect ? <Link href={META_CONNECT_HREF} prefetch={false} className="btn-primary">Manage Meta connection</Link> : undefined}>
       <div className="space-y-6">
+        <Card title="Meta Ads connection">
+          <StatusLine status={connection ?? { kind: "unknown", label: "Status unavailable" }} />
+          {connection?.detail && <p className="mt-2 text-[13px] leading-5 text-fg-muted">{connection.detail}</p>}
+          <p className="mt-2 text-[13px] leading-5 text-fg-muted">
+            Connecting verifies account access. It does not start ads or prove that delivery metrics have synced.
+          </p>
+          {!canConnect && <p className="mt-2 text-[13px] text-fg-muted">A workspace owner or admin manages the connection.</p>}
+        </Card>
         <section aria-label="Ad numbers" className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {TILES.map((label) => (
-            <KpiTile
-              key={label}
-              label={label}
-              value={null}
-              status="not_connected"
-              connectHref={canConnect ? META_CONNECT_HREF : undefined}
-              hint="Meta Ads"
-            />
-          ))}
+          {metrics.map((metric) => <KpiTile key={metric.label} label={metric.label} value={metric.value}
+            status={reportStatus === "live" && metric.value === null ? "no_data" : reportStatus}
+            emptyText={report.observations ? metric.missing : "No delivery metrics received"}
+            hint={`${report.from} to ${report.through} (${report.reportingTimezone ?? "source reporting dates"})${report.stale ? " · Stored report is stale" : ""}`} />)}
         </section>
-        {!canConnect && (
-          <p className="text-[13px] text-fg-muted">Connecting an ad account is done by a workspace owner or admin.</p>
-        )}
-
-        <Card title="What Marketing does once Meta is connected" noPadding>
-          <ul className="divide-y divide-hairline">
-            {ONCE_CONNECTED.map((item) => (
-              <li key={item.title} className="flex gap-3 px-4 py-3">
-                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline text-fg-muted">
-                  {item.icon}
-                </span>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-fg">{item.title}</p>
-                  <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">{item.body}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
+        <Card title="Delivery evidence">
+          {report.error ? <p role="status" className="text-sm text-status-warm">Stored ad results could not be read. Refresh to retry; missing results are not zero spend.</p>
+            : report.observations === 0 ? <p className="text-sm text-fg-muted">No Meta delivery reports have arrived for this period. Creative files below are preparation, not evidence of active campaigns or ad spend.</p>
+              : <p className="text-sm text-fg-muted">{report.observations.toLocaleString("en-CA")} daily observations across {report.measuredAssets.toLocaleString("en-CA")} creatives.
+                {report.lastCapturedAt ? ` Last received ${report.lastCapturedAt}.` : " Capture time was not recorded."}
+                {report.stale ? " These stored results are not current." : ""}
+                {report.conversionKind === "conversions" ? " Conversions keep the source's meaning; they are not labelled as leads or paying customers without that evidence." : ""}
+              </p>}
+          <p className="mt-2 text-[13px] leading-5 text-fg-muted">Import delivery reads Meta&apos;s reporting API for creatives linked to an actual ad ID. Campaign creation, budget changes and the retired ads automation remain separate.</p>
+          {viewer.navInput.isOperator && <div className="mt-3"><ImportMetaDelivery /></div>}
         </Card>
-
-        <Card title="How connecting works">
-          <ol className="list-decimal space-y-2 pl-5 text-[13px] leading-5 text-fg-muted marker:text-fg-dim">
-            <li>
-              While Meta reviews the OASIS app, OASIS connects your ad account through partner access: in Meta Business
-              Settings, under Partners, you add OASIS and share the ad account and your Page.
-            </li>
-            <li>
-              Once the review is approved, you connect directly with your Facebook login in one step, and can remove
-              OASIS as a partner.
-            </li>
-            <li>Either way, OASIS only reads your ads and proposes changes. Every change and every new ad waits for your approval.</li>
-          </ol>
+        <Card title="Meta creative inventory" noPadding>
+          {report.creatives.length === 0 ? <p className="p-4 text-sm text-fg-muted">{report.error ? "Creative inventory is unavailable." : "No Meta creatives saved yet."}</p>
+            : <div className="overflow-x-auto"><table className="w-full text-left text-[13px]">
+              <thead className="border-b border-hairline text-fg-muted"><tr><th scope="col" className="px-4 py-2 font-medium">Creative</th><th scope="col" className="px-4 py-2 font-medium">Campaign label</th><th scope="col" className="px-4 py-2 font-medium">Creative status</th></tr></thead>
+              <tbody className="divide-y divide-hairline">{report.creatives.map((creative) => <tr key={creative.id}>
+                <td className="px-4 py-2 text-fg">{founder ? <Link href={`/founders/marketing/asset/${encodeURIComponent(creative.id)}`} prefetch={false} className="hover:underline">{creative.title}</Link> : creative.title}</td>
+                <td className="px-4 py-2 text-fg-muted">{creative.campaign || "Not assigned"}</td><td className="px-4 py-2 text-fg-muted">{creative.status.replaceAll("_", " ")}</td>
+              </tr>)}</tbody>
+            </table></div>}
+          <p className="px-4 py-3 text-xs text-fg-dim">{report.creativesCapped ? "Showing the 100 most recently updated creatives. " : ""}Creative status describes the library review, not Meta campaign delivery.</p>
         </Card>
-
-        {founder && (
-          <Card title="OASIS's own marketing">
-            <p className="text-[13px] leading-5 text-fg-muted">
-              Organic performance of OASIS&rsquo;s published posts, collected from Zernio. It covers organic reach only;
-              paid campaigns are not in it.{" "}
-              <Link href="/founders/marketing/performance" prefetch={false} className="text-accent hover:underline">
-                Open content performance
-              </Link>
-            </p>
-          </Card>
-        )}
+        {founder && !library && <p role="status" className="text-sm text-status-warm">Creative previews could not be loaded. Refresh to retry.</p>}
+        {library && library.tiles.length > 0 && <section aria-label="Meta creative previews" className="space-y-3">
+          <h2 className="text-sm font-semibold text-fg">Creative previews</h2>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{library.tiles.map(({ asset, ...media }) => <AssetTile key={asset.id}
+            id={asset.id} title={asset.title} brandName={asset.brand_name} channel={asset.channel} status={asset.status}
+            publishedAt={asset.published_at} hook={asset.hook} aspect={asset.aspect} durationS={asset.duration_s}
+            format={asset.format} platforms={asset.platforms} assetType={asset.asset_type} {...media} returnTo="/growth/ads" />)}</div>
+        </section>}
+        {founder && <p className="text-sm text-fg-muted">Organic post performance is separate. <Link href="/founders/marketing/performance" prefetch={false} className="text-accent hover:underline">Open content performance</Link></p>}
       </div>
     </PageFrame>
   );

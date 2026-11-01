@@ -70,6 +70,7 @@ async function main() {
   ]) await apply(db, f);
   const autoOpen = await import("../lib/ai-audit/auto-open");
   const store = await import("../lib/ai-audit/store");
+  const meetingLinks = await import("../lib/ai-audit/meeting-links");
   const tick = await import("../lib/ai-audit/tick");
   // The client's website, served by a fake web: the brief reads it, never the real internet.
   const SITE = "<html><head><title>Fixture</title></head><body><p>We fix things in Montreal.</p></body></html>";
@@ -225,6 +226,83 @@ async function main() {
     await db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)", args: [lead(41), OASIS, "{not json"] });
     await addMeeting(41, 51);
     await autoOpen.upcomingFounderMeetings(db, OASIS, NOW);
+  });
+
+  await check("targeted reconciliation touches only requested leads and an empty list does nothing", async () => {
+    await addLead(50, "founder_meeting_booked");
+    await addMeeting(50, 55);
+    await addLead(51, "founder_meeting_booked");
+    await addMeeting(51, 56);
+    assert.deepEqual(await autoOpen.autoOpenForBookedMeetings(db, { tenantId: OASIS, now: NOW, leadIds: [] }), { opened: 0, linked: 0 });
+    const rep = await autoOpen.autoOpenForBookedMeetings(db, { tenantId: OASIS, now: NOW, leadIds: [lead(50)] });
+    assert.deepEqual(rep, { opened: 1, linked: 1 });
+    assert.equal(await openFor(51), null);
+  });
+
+  await check("cancel detaches the meeting but preserves the audit and rebooking reuses it", async () => {
+    const before = (await openFor(50))!;
+    const input = { tenantId: OASIS, leadId: lead(50), appointmentId: appt(50), now: NOW };
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, input), 0, "an active meeting cannot be detached");
+    await db.execute({ sql: "UPDATE call_appointments SET status='cancelled', workflow_status='cancelled', calendar_status='cancelled' WHERE id=?", args: [appt(50)] });
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, { ...input, tenantId: "other-tenant" }), 0);
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, { ...input, leadId: lead(51) }), 0);
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, input), 1);
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, input), 0, "retry is idempotent");
+    const detached = (await openFor(50))!;
+    assert.equal(detached.id, before.id);
+    assert.equal(detached.stage, before.stage);
+    assert.equal(detached.closed_at, null);
+    assert.equal(detached.appointment_id, null);
+    assert.equal(detached.meet_room_id, null);
+    assert.equal(detached.row_version, before.row_version + 1);
+    await db.execute({
+      sql: `INSERT INTO call_appointments (id,tenant_id,lead_id,entity_type,scheduled_for,status,workflow_status,calendar_status,meet_room_id)
+            VALUES (?,?,?,'lead',?,'scheduled','active','verified',?)`,
+      args: [appt(52), OASIS, lead(50), at(57), room(52)],
+    });
+    assert.deepEqual(await autoOpen.autoOpenForBookedMeetings(db, { tenantId: OASIS, now: NOW, leadIds: [lead(50)] }), { opened: 0, linked: 1 });
+    const relinked = (await openFor(50))!;
+    assert.equal(relinked.id, before.id);
+    assert.equal(relinked.appointment_id, appt(52));
+    assert.equal(relinked.meet_room_id, room(52));
+    assert.equal(await meetingLinks.unlinkCancelledAuditMeeting(db, input), 0, "late old cancellation cannot clear the new booking");
+    const events = await db.execute({ sql: "SELECT COUNT(*) AS n FROM ai_audit_events WHERE engagement_id=? AND event='meeting_unlinked'", args: [before.id] });
+    assert.equal(Number(events.rows[0].n), 1);
+  });
+
+  await check("detach and its history are one transaction; a failed history insert leaves links intact for repair", async () => {
+    await autoOpen.autoOpenForBookedMeetings(db, { tenantId: OASIS, now: NOW, leadIds: [lead(51)] });
+    const before = (await openFor(51))!;
+    await db.execute({ sql: "UPDATE call_appointments SET status='cancelled', workflow_status='cancelled', calendar_status='cancelled' WHERE id=?", args: [appt(51)] });
+    await db.execute("CREATE TRIGGER reject_unlink BEFORE INSERT ON ai_audit_events WHEN NEW.event='meeting_unlinked' BEGIN SELECT RAISE(ABORT, 'fixture_event_write_failure'); END");
+    await assert.rejects(meetingLinks.unlinkCancelledAuditMeeting(db, { tenantId: OASIS, leadId: lead(51), appointmentId: appt(51), now: NOW }), /fixture_event_write_failure/);
+    assert.equal((await openFor(51))?.appointment_id, appt(51));
+    assert.equal((await openFor(51))?.row_version, before.row_version);
+    await db.execute("DROP TRIGGER reject_unlink");
+    await meetingLinks.repairCancelledAuditMeetingLinks(db, OASIS, NOW);
+    assert.equal((await openFor(51))?.appointment_id, null);
+  });
+
+  await check("a meeting cancelled after the scan cannot be linked by the old scan result", async () => {
+    await addLead(53, "founder_meeting_booked");
+    await addMeeting(53, 60);
+    const raced = new Proxy(db, {
+      get(target, key) {
+        if (key === "execute") return async (statement: Parameters<Client["execute"]>[0]) => {
+          const result = await target.execute(statement);
+          const sql = typeof statement === "string" ? statement : statement.sql;
+          if (sql.startsWith("SELECT a.id, a.lead_id")) await db.execute({
+            sql: "UPDATE call_appointments SET status='cancelled', workflow_status='cancelled', calendar_status='cancelled' WHERE id=?", args: [appt(53)],
+          });
+          return result;
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const rep = await autoOpen.autoOpenForBookedMeetings(raced, { tenantId: OASIS, now: NOW, leadIds: [lead(53)] });
+    assert.equal(rep.linked, 0);
+    assert.equal((await openFor(53))?.appointment_id, null);
   });
 
   await check("the tick's auto-open runs before the engagement list, so a new audit is in the same run's work", async () => {

@@ -30,6 +30,7 @@ import type { BusinessType } from "@/lib/ai-audit/rules";
 import { CHECK_TITLES, type CheckKey, type SiteCheck } from "@/lib/ai-audit/site-checks";
 import type { SiteReport } from "@/lib/ai-audit/site-fetch";
 import type { SiteTarget } from "@/lib/ai-audit/site-url";
+import type { PageSpeedResult } from "@/lib/ai-audit/pagespeed";
 
 export const BRIEF_SCHEMA = "ai_audit_brief/v1" as const;
 
@@ -62,6 +63,8 @@ export type PreCallBrief = {
   weight: Array<{ question_id: string; why: string }>;
   /** What could not be checked or is missing, so nobody fills it in by guessing. */
   gaps: string[];
+  /** Public website measurements only; older briefs remain readable. */
+  diagnostics?: { checks: SiteCheck[]; pagespeed: PageSpeedResult | null };
 };
 
 const QUESTION_IDS = new Set(DISCOVERY_QUESTIONS.map((q) => q.id));

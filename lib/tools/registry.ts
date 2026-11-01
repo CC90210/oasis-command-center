@@ -29,7 +29,7 @@ import {
 import { MAX_LEASE_HOLD_SECONDS, MEET_TRANSCRIBE_MAX_HOLD_SECONDS } from "@/lib/tools/limits";
 import { TRAINS_LEGACY, isTrains, trainsOptions } from "@/lib/training/trains";
 
-export type ToolKey = "video_download" | "learn_from_link" | "repurpose_post";
+export type ToolKey = "video_download" | "learn_from_link" | "repurpose_post" | "video_remix" | "hook_rewriter" | "broll_matcher";
 
 export type ToolField = {
   name: string;
@@ -291,7 +291,57 @@ const repurposePost: ToolDef = {
 };
 
 /** Every tool, in the order the grid shows them. */
-export const TOOL_REGISTRY: readonly ToolDef[] = [repurposePost, learnFromLink, videoDownload];
+const transcriptFields: ToolField[] = [
+  { name: "transcript", label: "Transcript (or paste a video link below)", kind: "textarea", required: false, maxLength: 30000 },
+  { name: "url", label: "Video link", kind: "url", required: false, maxLength: MAX_URL_LENGTH },
+];
+
+function validateContentSource(input: unknown): ToolValidation {
+  const f = fieldsOf(input);
+  if (!f) return { ok: false, field: "transcript", code: "required" };
+  const transcript = text(f.transcript);
+  if (transcript) {
+    if (transcript.length < 20) return { ok: false, field: "transcript", code: "too_short" };
+    if (transcript.length > 30000) return { ok: false, field: "transcript", code: "too_long" };
+    if (hasControlCharacters(transcript)) return { ok: false, field: "transcript", code: "invalid_characters" };
+    return { ok: true, value: { transcript }, dedupeKey: null };
+  }
+  const checked = videoDownload.validate(input);
+  return checked.ok ? { ...checked, dedupeKey: null } : checked;
+}
+
+const videoRemix: ToolDef = {
+  key: "video_remix", title: "AI video remixer", runLabel: "Create three cuts",
+  description: "Turn a video link into three ranked vertical cuts with burned captions. Results stay in your downloads for review.",
+  runsOn: "runner", needsAiAccount: false, produces: "library_asset",
+  fields: videoDownload.fields,
+  validate(input) {
+    const checked = videoDownload.validate(input);
+    return checked.ok ? { ...checked, dedupeKey: `video_remix:${checked.value.url}` } : checked;
+  },
+};
+const hookRewriter: ToolDef = {
+  key: "hook_rewriter", title: "Viral hook & script rewriter", runLabel: "Write five hooks",
+  description: "Create five platform-specific hooks, scripts and captions from your transcript or video, using question-led sales or founder storytelling.",
+  runsOn: "runner", needsAiAccount: false, produces: "text",
+  fields: [...transcriptFields, { name: "framework", label: "Writing approach", kind: "select", required: true,
+    defaultValue: "nepq", alwaysSend: true, options: [{ value: "nepq", label: "Question-led sales (NEPQ)" }, { value: "ceo_log", label: "CEO log" }, { value: "sobriety", label: "Sobriety reflection" }] }],
+  validate(input) {
+    const checked = validateContentSource(input);
+    if (!checked.ok) return checked;
+    const framework = text(fieldsOf(input)?.framework) || "nepq";
+    if (!["nepq", "ceo_log", "sobriety"].includes(framework)) return { ok: false, field: "framework", code: "invalid_value" };
+    return { ...checked, value: { ...checked.value, framework } };
+  },
+};
+const brollMatcher: ToolDef = {
+  key: "broll_matcher", title: "AI B-roll matcher", runLabel: "Find visual matches",
+  description: "Match your transcript to the runner's indexed visual library, with source and licence links for review.",
+  runsOn: "runner", needsAiAccount: false, produces: "text", fields: transcriptFields,
+  validate: validateContentSource,
+};
+
+export const TOOL_REGISTRY: readonly ToolDef[] = [repurposePost, learnFromLink, videoDownload, videoRemix, hookRewriter, brollMatcher];
 
 export function toolByKey(k: unknown): ToolDef | null {
   return typeof k === "string" ? (TOOL_REGISTRY.find((t) => t.key === k) ?? null) : null;
@@ -349,5 +399,7 @@ export function runnerToolKeys(): RunnerToolKey[] {
 
 /** A runner tool's heartbeat stages and hold limit. */
 export function runnerRules(k: RunnerToolKey): RunnerRules {
+  if (k === "video_remix") return { stages: ["downloading", "transcribing", "rendering", "uploading"], maxHoldSeconds: 4 * 60 * 60 };
+  if (k === "hook_rewriter" || k === "broll_matcher") return { stages: ["downloading", "transcribing", "thinking", "matching"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS };
   return isSystemRunnerTool(k) ? SYSTEM_RUNNER_TOOLS[k] : DOWNLOAD_RULES;
 }

@@ -55,6 +55,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "@/lib/clipboard";
+import { parseContentResult } from "@/lib/tools/content-results";
 import { CORPUS_LABEL_COPY, type CorpusLabel } from "@/lib/founders/ingest-core";
 import { inputRefusalLine, toolByKey } from "@/lib/tools/registry";
 import { setupHref } from "@/lib/setup-links";
@@ -744,6 +745,30 @@ export function RunHistory({
 export function RunResult({ job, tool, assetHrefPrefix, assetDownloadPrefix = "" }: { job: JobView; tool: Pick<CatalogTool, "key" | "runsOn">; assetHrefPrefix: string; assetDownloadPrefix?: string }) {
   const r = job.result as Record<string, unknown> | null;
   switch (tool.key) {
+    case "hook_rewriter": {
+      const checked = parseContentResult("hook_rewriter", r);
+      return checked && "hooks" in checked ? <div className="space-y-3">{checked.hooks.map((h, i) => <article key={i} className="rounded-lg border border-bg-border p-3 space-y-2">
+        <p className="text-xs uppercase text-fg-muted">{h.platform}</p><p className="font-semibold">{h.hook}</p>
+        <p className="whitespace-pre-wrap text-sm">{h.script}</p><p className="whitespace-pre-wrap text-sm text-fg-muted">{h.caption}</p>
+        <CopyTextButton text={`${h.hook}\n\n${h.script}\n\n${h.caption}`} />
+      </article>)}</div> : null;
+    }
+    case "broll_matcher": {
+      const checked = parseContentResult("broll_matcher", r);
+      return checked && "matches" in checked ? <div className="space-y-3">
+        {checked.matches.length === 0 && <p className="text-sm text-fg-muted">No matches in the indexed visual library.</p>}
+        {checked.matches.map((m, i) => <article key={i} className="rounded-lg border border-bg-border p-3">
+          <p className="text-xs text-fg-muted">{m.keyword}</p><a className="text-accent underline" href={m.url} target="_blank" rel="noreferrer">{m.title}</a>
+          <p className="text-xs text-fg-muted">{m.license}</p>
+        </article>)}<p className="text-xs text-fg-muted">{checked.note}</p></div> : null;
+    }
+    case "video_remix": {
+      const clips = Array.isArray(r?.clips) ? r.clips as Array<{ asset_id: string; title: string }> : [];
+      return <div className="space-y-2">{clips.filter(c => /^[0-9a-f-]{36}$/.test(c.asset_id)).map(c => <div key={c.asset_id} className="flex flex-wrap items-center gap-2">
+        <span className="text-sm">{c.title}</span>{assetDownloadPrefix && <a className={`btn-primary inline-flex items-center ${TAP}`} href={`${assetDownloadPrefix}${c.asset_id}/download`}>Download</a>}
+        <a className={`btn-secondary inline-flex items-center ${TAP}`} href={`${assetHrefPrefix}${c.asset_id}`}>Open cut</a>
+      </div>)}</div>;
+    }
     case "repurpose_post":
       return r ? <RepurposeResult r={r} /> : null;
     case "learn_from_link":

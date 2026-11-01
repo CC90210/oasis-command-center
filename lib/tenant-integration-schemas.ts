@@ -331,7 +331,7 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     description: "The workspace's team bot: one bot made in BotFather and the one chat it writes to. Test asks Telegram for both.",
     fields: [
       { key: "bot_token", label: "Bot Token", sensitive: true, hint: "BotFather sends it when you create the bot. It looks like 123456789:AAE... (numbers, a colon, then letters)." },
-      { key: "chat_id", label: "Destination Chat ID", sensitive: false, hint: "The numeric user, group, or channel ID that receives workspace notifications (often starts with -100 for channels)." },
+      { key: "chat_id", label: "Destination Chat ID", sensitive: false, hint: "For your own chat: open @userinfobot in Telegram, tap Start, and copy the numeric Id. Then open your workspace bot and tap Start so it may message you. Group/channel IDs are different and often start with -100; do not paste a personal ID for a group." },
     ],
   },
   // Per-user OAuth integration. Migration 076 added the

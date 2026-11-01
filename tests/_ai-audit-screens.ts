@@ -142,7 +142,7 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     ];
     scenarios.push({ id: "workspace:presentation-brief", screen: "workspace", props: { view: briefed, isOwner: true } });
     expect.set("workspace:presentation-brief", {
-      has: ["Presentation brief", "Call: Mon, Nov 2", "Join the call room", "Live-call notes", "What the checks found", "What to offer"],
+      has: ["Presentation brief", "Call: Mon, Nov 2", "Join the call room", "Live-call notes", "Key diagnostic signals", "Recommended architecture"],
     });
     // A room left open from an earlier booking starts sooner; the room linked to this engagement still wins.
     const twoRooms = json(briefed);

@@ -4,7 +4,7 @@
  * by the stage their lead is in on the Pipeline, then every engagement: its
  * Pipeline stage and queue, the audit's step, any flag (stalled, failed, needs
  * you) and the next thing to do. Founders of OASIS's own workspaces only. An
- * engagement starts from the lead's page ("Start AI audit").
+ * engagement opens automatically after a founder audit meeting is booked.
  *
  * ONE PIPELINE (CC, 2026-10-28). The board used to draw the audit's 13 steps
  * as numbered stages of their own, beside the Pipeline's 14: two pipelines for
@@ -12,7 +12,7 @@
  * (lib/ai-audit/pipeline-view.ts), and their numbers are the Pipeline's own,
  * read with the Pipeline page's query (lib/ai-audit/pipeline-deals.ts): every
  * deal counts, with or without an audit, and a founder meeting with no audit
- * yet is listed with its Start button.
+ * yet is listed while automatic preparation catches up.
  *
  * Not /ai-audit: that address is the public campaign link to the Free AI Audit
  * offer page (a permanent redirect in next.config.js), so the board placed
@@ -195,7 +195,7 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
         <div className="rounded-xl border border-hairline bg-bg-panel p-6 text-sm text-fg-muted">
           <p className="font-medium text-fg">{showClosed ? "No audits yet." : "No open audits."}</p>
           <ol className="mt-2 list-decimal space-y-1 pl-5">
-            <li>When the discovery call is booked, open the lead in the pipeline and choose Start AI audit. The pre-call brief builds by itself.</li>
+            <li>Booking a discovery call opens its audit automatically. Website checks prepare the presentation brief before the call.</li>
             <li>
               Hold the call in Oasis Meet: its transcript attaches by itself once everyone agreed to the recording. A call held before the audit was started, or anywhere else, is attached or pasted on the
               engagement&apos;s Call and transcripts tab.

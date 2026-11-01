@@ -46,6 +46,8 @@
  * but OASIS's own, so a download cannot be posted from OASIS's accounts.
  */
 import "server-only";
+import { isContentTool, contentUploadPaths } from "./content-results";
+import { handleContentUpload, handleContentComplete, sweepRetiredContentUploads } from "./content-runner";
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
@@ -229,6 +231,8 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   await upsertRunner(deps.db, { tenantIds: ident.tenantIds, runnerKey: ident.runnerKey, label: label.trim(), tools, version, now: deps.now });
   const swept = await sweepToolJobs(deps.db, ident.tenantIds, deps.now);
   await removeUnusedUploads(deps.storage, swept.orphanUploads, "claim.sweep");
+  try { await sweepRetiredContentUploads(deps, ident.tenantIds); }
+  catch (err) { console.error("[tools.claim] retired content cleanup will retry", err instanceof Error ? err.message : String(err)); }
   // A runner that serves meetings also keeps the relay moving: overdue
   // recordings expire, ended ones nobody handed over are handed over, and the
   // next batch of relay copies the PC already has is deleted. Logged, never the
@@ -258,7 +262,9 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     toolsJson(200, {
       ok: true,
       poll_after_seconds: 0,
-      job: { job_id: job.id, lease_id: leaseId, tool_key: job.toolKey, attempt: job.attempt, input, limits: { ...limits, ...extra }, created_at: job.createdAt },
+      job: { job_id: job.id, lease_id: leaseId, tool_key: job.toolKey, attempt: job.attempt, input, limits: { ...limits, ...extra }, created_at: job.createdAt,
+        ...((job.toolKey === "video_download" || isContentTool(job.toolKey)) ? { auth_context: { tenant_id: job.tenantId, created_by: job.createdBy } } : {}),
+      },
     });
 
   if (isSystemRunnerTool(job.toolKey)) {
@@ -337,6 +343,10 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
   }
   // Only what the tool needs: the link and its platform. Never the workspace.
+  if (isContentTool(job.toolKey)) return answer(job.input, {
+    max_hold_seconds: runnerRules(job.toolKey).maxHoldSeconds,
+    run_timeout_seconds: job.toolKey === "video_remix" ? runnerRules(job.toolKey).maxHoldSeconds - 900 : RUN_TIMEOUT_SECONDS,
+  });
   return answer({ url: job.input.url, platform: job.input.platform });
 }
 
@@ -398,6 +408,7 @@ export async function handleToolsUploadUrl(req: Request, deps: RunnerDeps): Prom
   const b = auth.body;
   const ref = leaseRef(auth.producer, b);
   if ("field" in ref) return invalid(ref.field);
+  if (b.files !== undefined) return handleContentUpload(ref, b, deps);
   const fileName = shortText(b.file_name, 255);
   if (!fileName) return invalid("file_name");
   const size = b.size_bytes;
@@ -581,6 +592,10 @@ export async function handleToolsComplete(req: Request, deps: RunnerDeps): Promi
   if (!auth.ok) return auth.response;
   const b = auth.body;
   // A system job's report names its tool; a download's never has (its shape is below, unchanged).
+  if (isContentTool(b.tool_key)) {
+    const ref = leaseRef(auth.producer, b);
+    return "field" in ref ? invalid(ref.field) : handleContentComplete(ref, b.tool_key, b, deps);
+  }
   if (b.tool_key !== undefined) {
     if (!isSystemRunnerTool(b.tool_key)) return invalid("tool_key");
     return completeSystemJob(auth.producer, b, b.tool_key, deps);
@@ -995,7 +1010,7 @@ export async function handleToolsFail(req: Request, deps: RunnerDeps): Promise<R
   const rs = await deps.db.execute({
     sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = ?, error_message = ?, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})
-          RETURNING tenant_id, upload_path`,
+          RETURNING tenant_id, upload_path, result_json`,
     args: [code, toolErrorLine(code, "runner"), at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
   });
   const row = rs.rows[0];
@@ -1007,7 +1022,10 @@ export async function handleToolsFail(req: Request, deps: RunnerDeps): Promise<R
     return leaseLost();
   }
   const path = row.upload_path === null || row.upload_path === undefined ? null : String(row.upload_path);
-  if (path) await removeUnusedUploads(deps.storage, [{ tenantId: String(row.tenant_id), path }], "fail");
+  let result: unknown = null;
+  try { result = JSON.parse(String(row.result_json ?? "null")); } catch { /* Non-JSON old rows have only upload_path. */ }
+  const paths = [...new Set([...(path ? [path] : []), ...contentUploadPaths(result)])];
+  await removeUnusedUploads(deps.storage, paths.map(p => ({ tenantId: String(row.tenant_id), path: p })), "fail");
   return toolsJson(200, { ok: true, duplicate: false });
 }
 
