@@ -17,11 +17,16 @@ export const FOUNDER_MEETING_TRANSITION_HOLD_MINUTES = 15;
  * lead who ticked the SMS box. The day-before text is held to the lead's
  * daytime by the dispatcher; every step inside the hour goes out, because the
  * lead chose that time.
+ *
+ * Every lead gets an email at 60, 30 and 15 minutes (CC, 2026-11-01). Texts
+ * can be skipped (no SMS consent, an unreachable number, and automated texts
+ * are held until Quo STOP intake exists), so a text-only step reached nobody:
+ * the T-30 reminder was lost on every call until this change.
  */
 export const FOUNDER_REMINDER_SCHEDULE = [
   { minutes: 1440, kind: "reminder_1440", channels: ["email", "sms"] },
-  { minutes: 60, kind: "reminder_60", channels: ["email"] },
-  { minutes: 30, kind: "reminder_30", channels: ["sms"] },
+  { minutes: 60, kind: "reminder_60", channels: ["email", "sms"] },
+  { minutes: 30, kind: "reminder_30", channels: ["email", "sms"] },
   { minutes: 15, kind: "reminder_15", channels: ["email", "sms"] },
   { minutes: 5, kind: "reminder_5", channels: ["sms"] },
 ] as const;
