@@ -144,6 +144,15 @@ export async function checkAuditScreens(db: Client, tenantId: string, ownerUserI
     expect.set("workspace:presentation-brief", {
       has: ["Presentation brief", "Call: Mon, Nov 2", "Join the call room", "Live-call notes", "What the checks found", "What to offer"],
     });
+    // A room left open from an earlier booking starts sooner; the room linked to this engagement still wins.
+    const twoRooms = json(briefed);
+    twoRooms.meetRooms = [
+      { ...briefed.meetRooms[0], id: "room-left-over", path: "/meet/zzz-zzzz-zzz", startsAt: "2026-10-20T15:00:00.000Z" },
+      briefed.meetRooms[0],
+    ];
+    twoRooms.engagement = { ...twoRooms.engagement, meet_room_id: "room-booked" };
+    scenarios.push({ id: "workspace:presentation-brief-linked-room", screen: "workspace", props: { view: twoRooms, isOwner: true } });
+    expect.set("workspace:presentation-brief-linked-room", { has: ["Call: Mon, Nov 2"], hasNot: [/Call: Tue, Oct 20/] });
     const roomless = json(first as NonNullable<typeof first>);
     roomless.meetRooms = [];
     scenarios.push({ id: "workspace:presentation-brief-no-room", screen: "workspace", props: { view: roomless, isOwner: true } });

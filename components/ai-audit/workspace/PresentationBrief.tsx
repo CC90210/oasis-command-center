@@ -29,9 +29,15 @@ function when(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("en-CA", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-/** The room to join: of the rooms not ended, the one that starts first. Null when none is open. */
-export function roomToJoin(rooms: EngagementView["meetRooms"]): EngagementView["meetRooms"][number] | null {
+/**
+ * The room to join: the room booked with this engagement's meeting while it is open; otherwise, of the
+ * lead's rooms not ended, the one that starts first (CodeRabbit on #789: a room left from an earlier
+ * booking must not stand in for the one linked here). Null when none is open.
+ */
+export function roomToJoin(rooms: EngagementView["meetRooms"], linkedRoomId: string | null): EngagementView["meetRooms"][number] | null {
   const live = rooms.filter((r) => !r.endedAt && r.status !== "ended");
+  const linked = linkedRoomId ? live.find((r) => r.id === linkedRoomId) : undefined;
+  if (linked) return linked;
   if (!live.length) return null;
   return [...live].sort((a, b) => (a.startsAt ?? a.createdAt).localeCompare(b.startsAt ?? b.createdAt))[0];
 }
@@ -44,7 +50,7 @@ export function PresentationBrief({ view, onOpenResearch }: { view: EngagementVi
   const problems = b?.hypotheses ?? [];
   const siteFacts = (b?.facts ?? []).filter((f) => f.source.kind === "site");
   const opportunities = view.audit?.doc?.sections.opportunities.items ?? [];
-  const room = roomToJoin(view.meetRooms);
+  const room = roomToJoin(view.meetRooms, e.meet_room_id);
 
   return (
     <section aria-label="Presentation brief" className="grid gap-4 rounded-xl border border-accent/40 bg-bg-panel p-4 text-sm">

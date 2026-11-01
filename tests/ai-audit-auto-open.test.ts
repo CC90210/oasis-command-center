@@ -189,6 +189,27 @@ async function main() {
     assert.equal(e?.meet_room_id, null);
   });
 
+  await check("meetings with nothing left to do never use up the limit: an eleventh meeting is still reached (CodeRabbit on #789)", async () => {
+    // Ten Lost leads with meetings sooner than the one that needs an audit.
+    for (let n = 20; n < 20 + autoOpen.AUTO_OPEN_LIMIT; n += 1) {
+      await addLead(n, "lost");
+      await addMeeting(n, 1 + (n - 20) / 10);
+    }
+    await addLead(40, "founder_meeting_booked");
+    await addMeeting(40, 50);
+    const pending = await autoOpen.upcomingFounderMeetings(db, OASIS, NOW);
+    assert.deepEqual(pending.map((m) => m.lead_id), [lead(40)], "only the meeting with work left is listed");
+    const rep = await tick.runAiAuditTick(db, { tenantIds: [OASIS], now: () => NOW, deps: tickDeps() });
+    assert.equal(rep.auditsOpened, 1);
+    assert.equal((await openFor(40))?.appointment_id, appt(40));
+  });
+
+  await check("a lead row with broken JSON does not stop the query", async () => {
+    await db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)", args: [lead(41), OASIS, "{not json"] });
+    await addMeeting(41, 51);
+    await autoOpen.upcomingFounderMeetings(db, OASIS, NOW);
+  });
+
   await check("the tick's auto-open runs before the engagement list, so a new audit is in the same run's work", async () => {
     const src = readFileSync(join(process.cwd(), "lib", "ai-audit", "tick.ts"), "utf8");
     assert.ok(src.indexOf('guard("auto_open"') > 0 && src.indexOf('guard("auto_open"') < src.indexOf('guard("list"'));
