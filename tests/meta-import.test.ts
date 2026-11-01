@@ -30,6 +30,7 @@ async function main() {
   let currency = "CAD";
   let timezone = "America/Toronto";
   let mode = "normal";
+  let reportedAdId = adId;
   const fake: typeof fetch = async (input, init) => {
     calls++;
     const url = new URL(String(input));
@@ -42,7 +43,7 @@ async function main() {
     if (!url.pathname.endsWith("/insights")) return Response.json({ id: `act_${accountId}`, currency, timezone_name: timezone });
     assert.equal(url.searchParams.get("time_increment"), "1");
     const range = JSON.parse(url.searchParams.get("time_range")!);
-    const row = { account_id: accountId, account_currency: currency, ad_id: adId, date_start: range.until, date_stop: range.until,
+    const row = { account_id: accountId, account_currency: currency, ad_id: reportedAdId, date_start: range.until, date_stop: range.until,
       impressions: "100", reach: "90", clicks: "5", spend: amount, actions: [{ action_type: "lead", value: "2" }, { action_type: "offsite_conversion.fb_pixel_lead", value: "2" }] };
     if (mode === "missing") return Response.json({ data: [{ ...row, clicks: undefined, spend: undefined, actions: undefined }] });
     if (mode === "invalid_currency") return Response.json({ data: [{ ...row, account_currency: "USD" }] });
@@ -102,6 +103,20 @@ async function main() {
     assert.deepEqual(await run(), { ok: false, error: "report_context_conflict" });
     const report = await loadAdsReport(OASIS, { db, now: now.getTime() }); assert.equal(report.conversionKind, "leads");
     await db.execute({ sql: "UPDATE marketing_asset SET meta=json_set(meta,'$.conversion_event','lead') WHERE tenant_id=? AND id='a'", args: [OASIS] });
+  });
+  await check("relinking an ad cannot mix old and new delivery history or adopt unprovenanced rows", async () => {
+    const before = JSON.stringify(await rows());
+    const storedMeta = String((await db.execute({ sql: "SELECT meta FROM marketing_asset WHERE tenant_id=? AND id='a'", args: [OASIS] })).rows[0].meta);
+    assert.equal(JSON.parse(storedMeta).ads_imported_ad_id, adId);
+    reportedAdId = "22222222222";
+    await db.execute({ sql: "UPDATE marketing_asset SET external_id=? WHERE tenant_id=? AND id='a'", args: [reportedAdId, OASIS] });
+    assert.deepEqual(await run(new Date(now.getTime() + 120_000)), { ok: false, error: "report_context_conflict" });
+    assert.equal(JSON.stringify(await rows()), before);
+    reportedAdId = adId;
+    await db.execute({ sql: "UPDATE marketing_asset SET external_id=?,meta=json_remove(meta,'$.ads_imported_ad_id') WHERE tenant_id=? AND id='a'", args: [adId, OASIS] });
+    assert.deepEqual(await run(), { ok: false, error: "report_context_conflict" });
+    assert.equal(JSON.stringify(await rows()), before);
+    await db.execute({ sql: "UPDATE marketing_asset SET meta=? WHERE tenant_id=? AND id='a'", args: [storedMeta, OASIS] });
   });
   await check("missing optional metrics stay unknown; empty delivery does not create zero rows", async () => {
     mode = "missing"; assert.ok((await run(new Date(now.getTime() + 120_000))).ok);

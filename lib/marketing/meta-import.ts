@@ -172,9 +172,12 @@ export async function importMetaDelivery(tenantId: string, deps: Deps = {}): Pro
           const existing = await tx.execute({ sql: "SELECT 1 FROM marketing_metric_daily WHERE tenant_id = ? AND asset_id = ? AND source IN ('meta','meta_ads','meta-api') LIMIT 1", args: [tenantId, asset.id] });
           if (existing.rows.length && (!meta.currency || !meta.ads_reporting_timezone || !meta.meta_ad_account_id)) return fail("report_context_conflict");
           if (existing.rows.length && meta.ads_conversion_event !== conversionEvent) return fail("report_context_conflict");
+          // The asset is the history key. A changed ad mapping must not blend
+          // different ads across days, including history without provenance.
+          if (existing.rows.length && meta.ads_imported_ad_id !== asset.adId) return fail("report_context_conflict");
           const updated = await tx.execute({
             sql: "UPDATE marketing_asset SET meta = ? WHERE tenant_id = ? AND id = ? AND channel = 'paid-meta' AND external_id IS ? AND meta = ?",
-            args: [JSON.stringify({ ...meta, currency, ads_reporting_timezone: timezone, meta_ad_account_id: accountId, ads_conversion_event: conversionEvent }), tenantId, asset.id, asset.externalId, asset.rawMeta],
+            args: [JSON.stringify({ ...meta, currency, ads_reporting_timezone: timezone, meta_ad_account_id: accountId, ads_conversion_event: conversionEvent, ads_imported_ad_id: asset.adId }), tenantId, asset.id, asset.externalId, asset.rawMeta],
           });
           if (updated.rowsAffected !== 1) return fail("mapping_changed");
         }
