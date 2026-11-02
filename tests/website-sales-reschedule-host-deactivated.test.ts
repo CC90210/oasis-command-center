@@ -251,15 +251,15 @@ async function main() {
   });
 
   await check("an unreadable host standing: retryable 503 meeting_host_check_failed, nothing moves", async () => {
-    // memberStanding selects deactivated_at; the session, tenant and lead reads
-    // the rest of the route needs do not.
-    await seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at TO deactivated_at_unreadable");
+    // memberStanding selects deactivation_reason; keep deactivated_at intact
+    // so the real canonical session check still runs before the host failure.
+    await seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivation_reason TO deactivation_reason_unreadable");
     try {
       const res = await reschedule(LEAD_READ_ERROR);
       assert.equal(res.status, 503, JSON.stringify(res.body));
       assert.equal(res.body.error, "meeting_host_check_failed");
     } finally {
-      await seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at_unreadable TO deactivated_at");
+      await seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivation_reason_unreadable TO deactivation_reason");
     }
     await assertNothingMoved(LEAD_READ_ERROR, APPT_READ_ERROR);
   });
