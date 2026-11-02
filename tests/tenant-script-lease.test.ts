@@ -92,12 +92,14 @@ async function main() {
   await db.execute("UPDATE tenant_cron_jobs SET action_payload='{not json' WHERE id='malformed'");
   assert.deepEqual(await claimTenantScript(db, executor, "malformed", now), { ok: false, error: "job_payload_invalid" });
   // A job's own zone wins over the Toronto default (bravo__211's tz column).
-  await add("vancouver", "0 9 * * *");
-  await db.execute("UPDATE tenant_cron_jobs SET tz='America/Vancouver' WHERE id='vancouver'");
-  assert.equal((await claimTenantScript(db, executor, "vancouver", new Date("2026-11-02T14:00:10Z"))).claimed, false,
-    "09:00 Toronto is 06:00 in Vancouver: not due");
-  assert.equal((await claimTenantScript(db, executor, "vancouver", new Date("2026-11-02T17:00:10Z"))).claimed, true,
-    "09:00 Vancouver is due");
+  // Tokyo has no daylight-saving rules, so the expectation cannot depend on the
+  // runtime's tz database version (Node 22 and 24 disagree about Vancouver).
+  await add("tokyo", "0 9 * * *");
+  await db.execute("UPDATE tenant_cron_jobs SET tz='Asia/Tokyo' WHERE id='tokyo'");
+  assert.equal((await claimTenantScript(db, executor, "tokyo", new Date("2026-11-02T14:00:10Z"))).claimed, false,
+    "09:00 Toronto is 23:00 in Tokyo: not due");
+  assert.equal((await claimTenantScript(db, executor, "tokyo", new Date("2026-11-03T00:00:10Z"))).claimed, true,
+    "09:00 Tokyo is due");
   await add("bad-zone");
   await db.execute("UPDATE tenant_cron_jobs SET tz='Not/AZone' WHERE id='bad-zone'");
   assert.deepEqual(await claimTenantScript(db, executor, "bad-zone", now), { ok: false, error: "job_timezone_invalid" });
