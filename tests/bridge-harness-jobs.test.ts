@@ -715,7 +715,7 @@ async function main() {
         body: JSON.stringify({ agent: "bravo", messages: [{ role: "user", content: "must not queue" }] }),
       }));
       assert.equal(response.status, 403);
-      assert.equal(((await response.json()) as { error?: string }).error, "seat_inactive");
+      assert.equal(((await response.json()) as { error?: string }).error, "no_profile", "canonical resolution excludes removed profiles before the later live-seat check");
       const after = Number((await db.execute("SELECT count(*) AS n FROM bridge_harness_jobs")).rows[0].n);
       assert.equal(after, before);
     } finally {

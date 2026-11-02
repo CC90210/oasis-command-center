@@ -378,6 +378,37 @@ async function main() {
     assert.equal(Number((await db.execute("SELECT count(*) AS n FROM user_profiles")).rows[0].n), 22);
   });
 
+  await check("legacy fallback never reads a matching-email profile linked to another account", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-collision', 'collision@test')`);
+    await db.execute({ sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner) VALUES ('p-other-account', 'auth-someone-else', 'collision@test', ?, 'owner', 1)`, args: [TENANT_A] });
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-collision", email: "collision@test" }), { profile: null, error: null });
+    assert.equal((await liveSeat(TENANT_A, "auth-collision")).live, false);
+  });
+
+  await check("legacy live-seat fallback is active, unlinked, authenticated and tenant-specific", async () => {
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-unlinked', 'unlinked@test')`);
+    await db.execute({ sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role, is_owner) VALUES ('p-unlinked', 'unlinked@test', ?, 'owner', 1)`, args: [TENANT_B] });
+    const own = await liveSeat(TENANT_B, "auth-unlinked");
+    assert.ok(own.live);
+    if (own.live) assert.equal(own.profile.id, "p-unlinked");
+    assert.equal((await liveSeat(TENANT_A, "auth-unlinked")).live, false, "another workspace's matching email confers no access");
+    await db.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02' WHERE id = 'p-unlinked'");
+    assert.equal((await liveSeat(TENANT_B, "auth-unlinked")).live, false);
+    assert.equal((await db.execute("SELECT auth_user_id FROM user_profiles WHERE id = 'p-unlinked'")).rows[0].auth_user_id, null);
+  });
+
+  await check("auth-linked history in any workspace forbids unlinked fallback everywhere", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-historical', 'historical@test')`);
+    await db.batch([
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, deactivated_at) VALUES ('p-history-other-tenant', 'auth-historical', 'historical@test', ?, ?)`, args: [TENANT_A, stamp] },
+      { sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role, is_owner) VALUES ('p-history-unlinked', 'historical@test', ?, 'owner', 1)`, args: [TENANT_B] },
+    ], "write");
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-historical", email: "historical@test" }), { profile: null, error: null });
+    assert.equal((await liveSeat(TENANT_B, "auth-historical")).live, false);
+  });
+
   if (failures > 0) {
     console.log(`seat-liveness: ${failures} failure(s)`);
     process.exit(1);

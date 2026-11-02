@@ -101,6 +101,7 @@ const resolveActiveProfileCached = cache(
       .from("user_profiles")
       .select("*")
       .eq("email", email)
+      .is("auth_user_id", null)
       .is("deactivated_at", null)
       .limit(20);
     if (byEmail.error) return { profile: null, error: byEmail.error.message };

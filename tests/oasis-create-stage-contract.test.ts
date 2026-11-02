@@ -1241,9 +1241,11 @@ async function main() {
   login(OPENER, "opener@oasis.test");
   const n1 = await leadCount();
   const qaOutsideRoster = await postQuickAdd({ business_name: "Rep Outside Co", email: "outside@quick.test", stage: "assigned", state: "ON" });
-  assert.equal(qaOutsideRoster.status, 403, "quick-add accepted a deactivated rep");
-  assert.equal(qaOutsideRoster.body.error, "target_not_on_sales_roster");
-  assertReadable(qaOutsideRoster.body, "quick-add deactivated rep outside roster");
+  // Canonical session resolution now excludes removed seats before this
+  // route can reach its assignment-roster gate. The existing auth response
+  // is 401; it must still create no lead or return workspace data.
+  assert.equal(qaOutsideRoster.status, 401, "quick-add must refuse a removed seat at session resolution");
+  assert.deepEqual(qaOutsideRoster.body, { ok: false, error: "unauthorized" });
   assert.equal(await leadCount(), n1);
   await seed.execute({
     sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE auth_user_id = ?",

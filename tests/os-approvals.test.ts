@@ -1974,6 +1974,77 @@ async function main() {
     });
   });
 
+  await check("fresh approval identity uses the verified auth email after an account email change", async () => {
+    const currentEmail = "current-owner@fixture.test";
+    await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [currentEmail, USERS.cc.id] });
+    try {
+      // The old signed-cookie email and the profile email are both stale.
+      // Authentication re-reads the current address; the fresh seat must keep it.
+      await login("cc");
+      const { resolveApprovalSession } = await import("../lib/os/approvals/session");
+      const session = await resolveApprovalSession();
+      assert.ok(session.ok);
+      if (session.ok) assert.equal(session.email, currentEmail, "copies/signatures must not revert to the old profile address");
+    } finally {
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+    }
+  });
+
+  for (const dryRun of [true, false]) {
+    await check(`actual approve route copies current auth email, never the stale profile (${dryRun ? "dry run" : "mocked SMTP"})`, async () => {
+      const currentEmail = "verified-owner@fixture.test";
+      const values = { LIVE_SEND_EMAIL: "1", BRAVO_FORCE_DRY_RUN: dryRun ? "1" : "0", OASIS_MAIL_FROM: "team@oasisai.work", OASIS_MAIL_APP_PASSWORD: "synthetic-mailbox-password" };
+      const saved = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+      Object.assign(process.env, values);
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [currentEmail, USERS.cc.id] });
+      try {
+        await login("cc");
+        const a = await create({ payload: { to: "synthetic-recipient@fixture.test", subject: "Email identity fixture", body: "Synthetic fixture only." } });
+        const before = smtp.length;
+        const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+        assert.equal(response.status, 200);
+        const result = ((await response.json()) as Body).approval!;
+        assert.equal(result.status, "executed", JSON.stringify(result.execution_result));
+        if (dryRun) {
+          assert.equal(result.execution_result?.outcome, "dry_run");
+          assert.deepEqual(result.execution_result?.would_send?.cc, [currentEmail]);
+          assert.equal(smtp.length, before);
+        } else {
+          assert.equal(result.execution_result?.outcome, "sent");
+          assert.equal(smtp.length, before + 1);
+          assert.equal(smtp[smtp.length - 1].mail.cc, currentEmail, "SMTP normalizes copies to a string containing only the verified address");
+        }
+      } finally {
+        await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  }
+
+  await check("actual approve route preserves an active unlinked migration owner with no auth-linked history", async () => {
+    await raw.execute("UPDATE user_profiles SET auth_user_id = NULL WHERE id = 'p-cc'");
+    const saved = process.env.BRAVO_FORCE_DRY_RUN;
+    process.env.BRAVO_FORCE_DRY_RUN = "1";
+    try {
+      await login("cc");
+      const a = await create();
+      const before = smtp.length;
+      const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+      assert.equal(response.status, 200);
+      const result = ((await response.json()) as Body).approval!;
+      assert.equal(result.execution_result?.outcome, "dry_run");
+      assert.equal(smtp.length, before);
+      assert.equal((await raw.execute("SELECT auth_user_id FROM user_profiles WHERE id = 'p-cc'")).rows[0].auth_user_id, null, "a read must not link or mutate the migration profile");
+    } finally {
+      await raw.execute({ sql: "UPDATE user_profiles SET auth_user_id = ? WHERE id = 'p-cc'", args: [USERS.cc.id] });
+      if (saved === undefined) delete process.env.BRAVO_FORCE_DRY_RUN;
+      else process.env.BRAVO_FORCE_DRY_RUN = saved;
+    }
+  });
+
   console.log(`os-approvals: ${passed} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);
 }
