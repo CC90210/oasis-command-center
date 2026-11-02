@@ -113,6 +113,7 @@ export type ReconcileSummary = {
   candidates: number;
   postsRead: number;
   readFailures: number;
+  deliveryFailures: number;
   updated: number;
   contended: number;
 };
@@ -136,7 +137,7 @@ export async function reconcileMavenPublishes(input: {
     return Object.keys(open).length ? [{ intent, result: structuredClone(intent.result), open }] : [];
   });
   const ids = [...new Set(candidates.flatMap((candidate) => Object.values(candidate.open)))].sort();
-  if (!ids.length) return { candidates: 0, postsRead: 0, readFailures: 0, updated: 0, contended: 0 };
+  if (!ids.length) return { candidates: 0, postsRead: 0, readFailures: 0, deliveryFailures: 0, updated: 0, contended: 0 };
   const take = Math.min(MAX_POSTS, ids.length);
   const start = (Math.floor(now.getTime() / 60_000) * take) % ids.length;
   const selected = Array.from({ length: take }, (_, index) => ids[(start + index) % ids.length]);
@@ -151,6 +152,7 @@ export async function reconcileMavenPublishes(input: {
   }
 
   let updated = 0;
+  let deliveryFailures = 0;
   let contended = 0;
   for (const candidate of candidates) {
     const beforeOk = new Set(Object.entries(candidate.result)
@@ -191,13 +193,17 @@ export async function reconcileMavenPublishes(input: {
       firstPublishedAt: firstPublishedAt(candidate.result, now.toISOString()),
       at: now.toISOString(),
     });
-    if (verdict === "updated") updated += 1;
+    if (verdict === "updated") {
+      updated += 1;
+      if (refused.length > 0 || !anyOk || (expired && live.length === 0)) deliveryFailures += 1;
+    }
     else contended += 1;
   }
   return {
     candidates: candidates.length,
     postsRead: [...posts.values()].filter(Boolean).length,
     readFailures: [...posts.values()].filter((post) => post === null).length,
+    deliveryFailures,
     updated,
     contended,
   };

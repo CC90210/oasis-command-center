@@ -193,9 +193,13 @@ async function retryOrFail(db: Db, row: NotificationRow, reason: string) {
 type SenderPass = {
   standings: Map<string, MemberStanding>;
   withheld: NotificationRow[];
-  /** Quo STOP-intake readiness per tenant for this pass, a rejection included:
-   *  one check is five provider reads, so it is never repeated per SMS row. */
-  quoIntake: Map<string, Promise<{ ready: boolean; reason: string }>>;
+  /** Reuse each sender snapshot's readiness (including rejected checks).
+   * Credentials can rotate between rows, so tenant alone is not a proof. */
+  quoIntake: Map<string, {
+    apiKey: string;
+    fromNumber: string | null;
+    promise: Promise<{ ready: boolean; reason: string }>;
+  }>;
 };
 
 function quoIntakeForPass(
@@ -203,13 +207,12 @@ function quoIntakeForPass(
   tenantId: string,
   quo: NonNullable<Awaited<ReturnType<typeof quoCredentialsOrNull>>>,
 ): Promise<{ ready: boolean; reason: string }> {
-  let intake = pass.quoIntake.get(tenantId);
-  if (!intake) {
-    intake = quoStopIntakeReadiness(tenantId, quo);
-    // Cached as the promise, so a rejected check is cached too and the next
-    // row of this tenant takes the same outage path without new provider reads.
-    pass.quoIntake.set(tenantId, intake);
+  const cached = pass.quoIntake.get(tenantId);
+  if (cached && cached.apiKey === quo.apiKey && cached.fromNumber === quo.fromNumber) {
+    return cached.promise;
   }
+  const intake = quoStopIntakeReadiness(tenantId, quo);
+  pass.quoIntake.set(tenantId, { apiKey: quo.apiKey, fromNumber: quo.fromNumber, promise: intake });
   return intake;
 }
 

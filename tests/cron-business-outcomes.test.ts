@@ -11,6 +11,7 @@ let paused = false;
 let throws = false;
 let failures = 1;
 let retryPending = 0, creditHalted = false, guardBlocked = 0;
+let preflightRetry = false;
 const calls = { drips: 0, automations: 0 };
 const mock = (path: string, exports: object) => {
   const id = require.resolve(path);
@@ -31,7 +32,7 @@ mock("../lib/automations/guided-dispatcher", {
   dispatchGuidedAutomations: async () => {
     calls.automations++;
     if (throws) throw new Error("fixture_executor_failure");
-    return { started: ["fixture-run"], failed: failures ? ["fixture-failed-run"] : [], alreadyClaimed: [] };
+    return { started: ["fixture-run"], failed: failures ? ["fixture-failed-run"] : [], alreadyClaimed: [], retrying: preflightRetry ? ["fixture-preflight"] : [] };
   },
 });
 
@@ -82,6 +83,14 @@ async function main() {
         assert.equal(res.status, 500); assert.equal((await res.json()).ok, false);
       }
     } finally { throws = false; console.error = original; }
+  });
+  await check("unavailable preflight dependencies remain failed ticks while the slot retries next minute", async () => {
+    failures = 0; preflightRetry = true;
+    const response = await routes.automations.GET(request(paths.automations));
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.ok, false); assert.deepEqual(body.retrying, ["fixture-preflight"]);
+    preflightRetry = false;
   });
   await check("retryable failed attempts and provider credit stops remain visible without immediate scheduler replay", async () => {
     failures = 0; retryPending = 1;

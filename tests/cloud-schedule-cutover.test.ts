@@ -11,7 +11,8 @@ async function main() {
   await db.executeMultiple(`CREATE TABLE cron_jobs (id TEXT PRIMARY KEY,tenant_id TEXT,name TEXT,
     schedule TEXT,is_active INTEGER,owner_machine TEXT,last_result TEXT,action_type TEXT,action_config TEXT);
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY,tenant_id TEXT,owner_user_id TEXT,schedule TEXT,
-    action_type TEXT,action_payload TEXT,enabled INTEGER,last_run_at TEXT,last_run_status TEXT,run_count INTEGER,agent_key TEXT);`);
+    action_type TEXT,action_payload TEXT,enabled INTEGER,last_run_at TEXT,last_run_status TEXT,run_count INTEGER,agent_key TEXT,
+    last_scheduled_for TEXT);`);
   for (const [index, name] of CLOUD_NAMES.entries()) {
     await db.execute({ sql: `INSERT INTO cron_jobs VALUES (?,?,?,'* * * * *',1,NULL,'ERROR: preserve me','script_run','{}')`,
       args: [String(index), scope.tenantId, name] });
@@ -19,7 +20,7 @@ async function main() {
   await db.execute({ sql: `INSERT INTO cron_jobs VALUES
     ('foreign','other',?,'* * * * *',1,NULL,'foreign receipt','script_run','{}'),
     ('disabled',?,'Retired','* * * * *',0,NULL,'disabled error','script_run','{}')`, args: [CLOUD_NAMES[0], scope.tenantId] });
-  await db.execute({ sql: `INSERT INTO tenant_cron_jobs VALUES (?, ?, ?, '*/15 * * * *','script_run',?,1,'2026-11-01T12:00:00Z','error',7,'atlas')`,
+  await db.execute({ sql: `INSERT INTO tenant_cron_jobs VALUES (?, ?, ?, '*/15 * * * *','script_run',?,1,'2026-11-01T12:00:00Z','error',7,'atlas','2026-10-01T00:00:00Z')`,
     args: [ATLAS_JOB, scope.tenantId, scope.userId, JSON.stringify({script: "tools/financial_handoff_consumer.py",args:["once","--limit","5"]})] });
   const logs: unknown[] = [];
   const original = console.log;
@@ -72,18 +73,23 @@ async function main() {
     await db.execute("UPDATE cron_jobs SET owner_machine='oasis-daemon-1' WHERE id='0'");
     await migrateCloudSchedules("--hold-atlas", db);
     assert.equal((await db.execute("SELECT enabled FROM tenant_cron_jobs")).rows[0].enabled, 0);
+    assert.equal((await db.execute("SELECT last_scheduled_for FROM tenant_cron_jobs")).rows[0].last_scheduled_for, "2026-10-01T00:00:00Z");
     for (const edit of ["schedule='* * * * *'", "action_type='snapshot_run'", "agent_key='maven'"]) {
       await assert.rejects(migrateCloudSchedules("--activate-atlas", race("execute", () => db.execute(
         `UPDATE tenant_cron_jobs SET ${edit}`))));
       assert.equal((await db.execute("SELECT enabled FROM tenant_cron_jobs")).rows[0].enabled, 0);
       await db.execute("UPDATE tenant_cron_jobs SET schedule='*/15 * * * *', action_type='script_run',agent_key='atlas'");
     }
+    const activationStarted = Date.now();
     await migrateCloudSchedules("--activate-atlas", db);
     const atlas = (await db.execute("SELECT * FROM tenant_cron_jobs")).rows[0];
     assert.equal(atlas.enabled, 1);
     assert.equal(atlas.schedule, "*/15 * * * *");
     assert.equal(atlas.run_count, 7);
     assert.equal(atlas.last_run_status, "error");
+    assert.ok(Date.parse(String(atlas.last_scheduled_for)) >= activationStarted,
+      "reactivation fences missed occurrences during the hold");
+    assert.ok(Date.parse(String(atlas.last_scheduled_for)) <= Date.now());
     assert.deepEqual(JSON.parse(String(atlas.action_payload)).args, ["once","--limit","1","--max-seconds","240","--summary-json"]);
     await migrateCloudSchedules("--apply-lease-schema", db);
     assert.equal((await db.execute("SELECT count(*) n FROM tenant_cron_execution_leases")).rows[0].n, 0);

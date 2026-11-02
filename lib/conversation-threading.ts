@@ -14,7 +14,7 @@
 export function normalizePhoneE164(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const digits = raw.replace(/\D+/g, "");
-  if (raw.trim().startsWith("+") && digits.length >= 8 && digits.length <= 15) {
+  if (raw.trim().startsWith("+") && digits.length >= 7 && digits.length <= 15) {
     return `+${digits}`;
   }
   if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;

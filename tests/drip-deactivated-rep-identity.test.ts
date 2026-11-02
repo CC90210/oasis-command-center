@@ -58,6 +58,9 @@ function stubModule(path: string, exports: Record<string, unknown>) {
 
 let standingReads = 0;
 let guardReadFailure = "";
+let rescheduleWriteFails = false;
+let beforeReschedule: (() => Promise<void>) | null = null;
+let tcpaWindowOpen = true;
 
 /** Installed before the drip modules load, so they bind to these. */
 async function installStubs() {
@@ -69,8 +72,17 @@ async function installStubs() {
       return new Proxy(db, { get(target, property) {
         if (property !== "from") return Reflect.get(target, property);
         return (table: string) => {
-          const state = { shopped: false, accelerated: false, head: false, hourly: "" };
+          const state = { shopped: false, accelerated: false, head: false, hourly: "", reschedule: false };
           const wrap = (query: object): object => new Proxy(query, { get(builder, method) {
+            if (method === "then" && state.reschedule) {
+              return (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => (async () => {
+                if (rescheduleWriteFails) return { data: null, error: { message: "fixture_reschedule_write_failed" } };
+                const race = beforeReschedule;
+                beforeReschedule = null;
+                if (race) await race();
+                return await builder;
+              })().then(resolve, reject);
+            }
             if (method === "then" && state.head && state.hourly && guardReadFailure.startsWith(`hourly_${state.hourly}`)) {
               const result = guardReadFailure.endsWith("_missing")
                 ? { data: null, error: null, count: null }
@@ -83,6 +95,8 @@ async function installStubs() {
             const value = Reflect.get(builder, method);
             if (typeof value !== "function") return value;
             return (...args: unknown[]) => {
+              const update = args[0] as { status?: string; scheduled_for?: string } | undefined;
+              if (table === "drip_runs" && method === "update" && update?.status === "scheduled" && update.scheduled_for) state.reschedule = true;
               if (table === "lead_interactions" && method === "ilike" && args[0] === "agent_source") state.shopped = true;
               if (table === "drip_sequences" && method === "select" && args[0] === "id, trigger_filter") state.accelerated = true;
               if (table === "drip_runs" && method === "select" && (args[1] as { head?: boolean } | undefined)?.head) state.head = true;
@@ -104,7 +118,7 @@ async function installStubs() {
     ...realTcpa,
     checkTcpaWindow: (phone: string | null | undefined, at?: Date) => ({
       ...realTcpa.checkTcpaWindow(phone, at),
-      withinWindow: true,
+      withinWindow: tcpaWindowOpen,
     }),
   });
 
@@ -471,6 +485,51 @@ async function main() {
       assert.equal((await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n, before);
     }
     guardReadFailure = ""; delete process.env.ACCELERATED_ENROLL_LIVE;
+  });
+
+  await check("failed guard and quiet-hours reschedule writes report failure without spending attempts or claiming success", async () => {
+    const before = (await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n;
+    rescheduleWriteFails = true;
+    try {
+      for (const guard of ["shopped", ""]) {
+        guardReadFailure = guard; tcpaWindowOpen = false;
+        await seed.execute({ sql: "UPDATE drip_runs SET status='scheduled',attempts=0,scheduled_for='2026-09-01T00:00:00Z',last_error=NULL WHERE sequence_id=?", args: [LATE_SEQ] });
+        const failed = await captureWarn(() => runDispatchDrips());
+        assert.equal(failed.result.failed, 1, JSON.stringify(failed.result));
+        assert.equal(failed.result.rescheduled, 0); assert.equal(failed.result.guardBlocked, 0);
+        assert.equal(failed.result.retryPending, 0); assert.equal(failed.result.sent, 0);
+        const row = (await seed.execute({ sql: "SELECT status,attempts,last_error FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+        assert.equal(row.status, "sending", "failed writes leave state for bounded stale-claim recovery");
+        assert.equal(row.attempts, 0); assert.equal(row.last_error, null);
+        assert.equal((await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n, before);
+      }
+    } finally { rescheduleWriteFails = false; guardReadFailure = ""; tcpaWindowOpen = true; }
+  });
+
+  await check("reschedule compares tenant, sending state and the exact claimed occurrence before changing a row", async () => {
+    const races = [
+      { column: "tenant_id", value: OTHER_TENANT },
+      { column: "status", value: "cancelled" },
+      { column: "claimed_at", value: "2099-01-01T00:00:00.000Z" },
+    ];
+    guardReadFailure = "shopped";
+    try {
+      for (const race of races) {
+        await seed.execute({ sql: "UPDATE drip_runs SET tenant_id=?,status='scheduled',attempts=0,scheduled_for='2026-09-01T00:00:00Z',last_error=NULL WHERE sequence_id=?", args: [TENANT, LATE_SEQ] });
+        beforeReschedule = async () => {
+          await seed.execute({ sql: `UPDATE drip_runs SET ${race.column}=? WHERE sequence_id=?`, args: [race.value, LATE_SEQ] });
+        };
+        const result = await captureWarn(() => runDispatchDrips());
+        assert.equal(beforeReschedule, null, "race ran at the real update boundary");
+        assert.equal(result.result.failed, 1); assert.equal(result.result.rescheduled, 0);
+        const row = (await seed.execute({ sql: "SELECT tenant_id,status,claimed_at,last_error,attempts FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+        assert.equal(row[race.column], race.value, "the late worker cannot overwrite the newer state");
+        assert.equal(row.last_error, null); assert.equal(row.attempts, 0);
+      }
+    } finally {
+      guardReadFailure = ""; beforeReschedule = null;
+      await seed.execute({ sql: "UPDATE drip_runs SET tenant_id=?,status='scheduled',claimed_at=NULL WHERE sequence_id=?", args: [TENANT, LATE_SEQ] });
+    }
   });
 
   await check("hourly usage read errors and missing counts block before claiming or sending", async () => {

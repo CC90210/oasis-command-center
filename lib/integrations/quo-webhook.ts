@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Client } from "@libsql/client";
-import { getTenantIntegrationBundle, readTenantCredentialStrict } from "@/lib/tenant-integration-store";
+import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
 import { encryptField } from "@/lib/field-encryption";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 import { applyInboundSmsStopInTransaction, isStopCommand } from "@/lib/sms-opt-out";
@@ -11,7 +11,8 @@ export const QUO_WEBHOOK_VERSION = "2026-03-30";
 const EVENT = "quo_sms_inbound";
 const STATE_SERVICE = "quo_webhook_state"; // Internal proof, never a manually editable integration.
 const MAX_BYTES = 64 * 1024;
-const E164 = /^\+[1-9]\d{9,14}$/;
+// Match sendQuoSms: every supported destination must also be able to opt out.
+const E164 = /^\+[1-9]\d{6,14}$/;
 const opaque = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200 && !/[\s\x00-\x1f]/.test(v);
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -35,14 +36,14 @@ function signingBytes(key: string): Buffer | null {
 }
 export async function loadQuoWebhookConfig(tenantId: string): Promise<QuoWebhookConfig | null> {
   if (!tenantId || isRetiredTenant(tenantId)) return null;
-  const keys = ["webhook_key", "webhook_org_id", "webhook_phone_number_id", "webhook_id"] as const;
+  // Read the explicit sender and key with the same error-aware contract as
+  // the webhook fields. A failed second read after sender resolution must
+  // hold reminders for retry, never pretend configuration is absent.
+  const keys = ["webhook_key", "webhook_org_id", "webhook_phone_number_id", "webhook_id", "api_key", "from_number"] as const;
   const reads = await Promise.all(keys.map(key => readTenantCredentialStrict(tenantId, "quo", key)));
   if (reads.some(r => !r.ok && r.reason !== "missing")) throw new Error("quo_webhook_credentials_unavailable");
   if (reads.some(r => !r.ok)) return null;
-  const [signingKey, orgId, phoneNumberId, webhookId] = reads.map(r => r.ok ? r.value : "");
-  const bundle = await getTenantIntegrationBundle(tenantId, "quo");
-  const apiKey = bundle.api_key?.trim();
-  const fromNumber = bundle.from_number?.trim();
+  const [signingKey, orgId, phoneNumberId, webhookId, apiKey, fromNumber] = reads.map(r => r.ok ? r.value.trim() : "");
   if (!apiKey || !fromNumber || !E164.test(fromNumber) || !signingBytes(signingKey) ||
       !opaque(orgId) || !opaque(phoneNumberId) || !/^\d{1,100}$/.test(webhookId)) return null;
   return { tenantId, apiKey, fromNumber, signingKey, orgId, phoneNumberId, webhookId };
@@ -103,8 +104,17 @@ export async function handleQuoInbound(req: Request, tenantId: string, deps: {
         !opaque(resource.id) || resource.direction !== "incoming" || text === null ||
         context.orgId !== config.orgId || context.phoneNumberId !== config.phoneNumberId ||
         !Array.isArray(recipients) || recipients.length < 1 || recipients.length > 25 ||
-        !recipients.includes(config.fromNumber) || typeof context.senderIdentifier !== "string" ||
-        !E164.test(context.senderIdentifier)) return json(422, { ok: false, error: "event_binding_mismatch" });
+        !recipients.every(opaque) || !opaque(context.senderIdentifier)) return json(422, { ok: false, error: "event_binding_mismatch" });
+    // Quo documents raw non-phone identifiers for internal/direct flows.
+    // ACK these authenticated account/resource deliveries without pretending
+    // they prove phone STOP handling or adding an invalid phone suppression.
+    // An explicitly different recipient phone is still a binding mismatch.
+    if (!recipients.includes(config.fromNumber) && recipients.some(value => E164.test(value))) {
+      return json(422, { ok: false, error: "event_binding_mismatch" });
+    }
+    if (!E164.test(context.senderIdentifier) || !recipients.includes(config.fromNumber)) {
+      return json(200, { ok: true, ignored: "non_phone_participant" });
+    }
     const stop = isStopCommand(text);
     const binding = quoWebhookBinding(config);
     const bodyHash = hash(raw);

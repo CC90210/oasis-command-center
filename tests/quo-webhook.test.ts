@@ -96,12 +96,49 @@ async function main() {
         (e: ReturnType<typeof event>) => { e.data.context.orgId = "ORother"; },
         (e: ReturnType<typeof event>) => { e.data.context.phoneNumberId = "PNother"; },
         (e: ReturnType<typeof event>) => { e.data.context.recipientIdentifiers = ["+14165550999"]; },
-        (e: ReturnType<typeof event>) => { e.data.context.senderIdentifier = "internal-user"; },
+        (e: ReturnType<typeof event>) => { e.data.context.senderIdentifier = ""; },
         (e: ReturnType<typeof event>) => { e.data.resource.direction = "outgoing"; },
       ]) { const value = event(); mutate(value); assert.equal((await handle(request(value))).status, 422); }
       await save({ api_key: "other-key", from_number: config.fromNumber, webhook_key: `whsec_${Buffer.alloc(32, 22).toString("base64")}`, webhook_org_id: config.orgId, webhook_phone_number_id: config.phoneNumberId, webhook_id: config.webhookId }, other);
       assert.equal((await handle(request(), other)).status, 401);
       assert.equal(await count("sunbiz_phone_suppressions"), 0);
+    });
+    await check("signed account-bound non-phone participants are acknowledged without suppression or readiness proof", async () => {
+      const before = await count("agent_events");
+      for (const [sender, recipients] of [
+        ["USinternal", [config.fromNumber]],
+        [from, ["USrecipient"]],
+        ["USinternal", ["USrecipient"]],
+      ] as const) {
+        const value = event(); value.data.context.senderIdentifier = sender;
+        value.data.context.recipientIdentifiers = [...recipients];
+        const response = await handle(request(value, `ignored-${sender}-${recipients[0]}`));
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { ok: true, ignored: "non_phone_participant" });
+      }
+      assert.equal(await count("agent_events"), before);
+      assert.equal(await count("sunbiz_phone_suppressions"), 0);
+      assert.equal((await webhook.quoWebhookReadiness(tenant, origin, false)).reason, "awaiting_signed_delivery");
+      for (const mutate of [
+        (e: ReturnType<typeof event>) => { e.data.context.orgId = "ORother"; },
+        (e: ReturnType<typeof event>) => { e.data.context.phoneNumberId = "PNother"; },
+        (e: ReturnType<typeof event>) => { e.data.context.recipientIdentifiers = ["+14165550999"]; },
+      ]) {
+        const value = event(); value.data.context.senderIdentifier = "USinternal"; mutate(value);
+        assert.equal((await handle(request(value))).status, 422, "ignored participants still require the signed account and recipient binding");
+      }
+      const unsigned = request(event()); unsigned.headers.delete("webhook-signature");
+      assert.equal((await handle(unsigned)).status, 401);
+    });
+    await check("second sender-credential read failures after successful sender resolution remain unavailable, never missing", async () => {
+      const { getQuoCredentials } = await import("../lib/integrations/quo");
+      for (const field of ["api_key", "from_number"]) {
+        const sender = await getQuoCredentials(tenant);
+        assert.equal(sender.apiKey, config.apiKey); assert.equal(sender.fromNumber, config.fromNumber);
+        await db.execute({ sql: "UPDATE tenant_integration_credentials SET encrypted_value='not-valid-ciphertext' WHERE tenant_id=? AND service='quo' AND field_key=?", args: [tenant, field] });
+        await assert.rejects(webhook.quoWebhookReadiness(tenant, origin, true, sender), /quo_webhook_credentials_unavailable/);
+        await save({ [field]: field === "api_key" ? config.apiKey : config.fromNumber });
+      }
     });
     await check("a picture message and a group thread to this number are accepted, never 422", async () => {
       // A 422 makes Quo mark the delivery failed, and any failed delivery blocks
@@ -119,6 +156,30 @@ async function main() {
       await db.execute("DELETE FROM tenant_integration_credentials WHERE service <> 'quo'");
       const bad = event(); (bad.data.resource as { text?: unknown }).text = 42;
       assert.equal((await handle(request(bad, "delivery-bad-text"))).status, 422, "a non-text body is still refused");
+    });
+    await check("short international STOPs cancel pending reminders and block every supported resend", async () => {
+      const { sendQuoSms } = await import("../lib/integrations/quo");
+      for (const phone of ["+299551234", "+1234567"]) {
+        for (const who of [tenant, other]) await db.execute({
+          sql: "INSERT INTO website_sales_meeting_notifications VALUES (?,?, 'sms',?,'pending',NULL,NULL,NULL)",
+          args: [`short-${who}-${phone}`, who, phone],
+        });
+        const value = event("STOP"); value.data.context.senderIdentifier = phone;
+        const response = await handle(request(value, `short-${phone}`));
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).ignored, undefined, "supported phones are never treated as internal identifiers");
+        const suppressed = await db.execute({ sql: "SELECT reason FROM sunbiz_phone_suppressions WHERE tenant_id=? AND phone_last10=?", args: [tenant, phone.slice(1)] });
+        assert.equal(suppressed.rows[0]?.reason, "OPT_OUT");
+        const rows = await db.execute({ sql: "SELECT status FROM website_sales_meeting_notifications WHERE recipient=? ORDER BY tenant_id", args: [phone] });
+        assert.deepEqual(rows.rows.map(row => row.status), ["cancelled", "pending"]);
+        const result = await sendQuoSms({ tenantId: tenant, apiKey: config.apiKey, fromNumber: config.fromNumber }, { to: phone, text: "Must never leave" });
+        assert.equal(result.ok, false); if (!result.ok) assert.equal(result.code, "recipient_opted_out");
+      }
+      assert.equal(providerCalls, 0, "short-number STOPs and blocked sends never reach the provider");
+      await db.execute("DELETE FROM website_sales_meeting_notifications");
+      await db.execute("DELETE FROM sunbiz_phone_suppressions");
+      await db.execute("DELETE FROM agent_events");
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE service <> 'quo'");
     });
     await check("signed STOP atomically suppresses, cancels this tenant only, and blocks resend", async () => {
       for (const who of [tenant, other]) await db.execute({ sql: "INSERT INTO website_sales_meeting_notifications VALUES (?,?, 'sms',?,'pending',NULL,NULL,NULL)", args: [who,who,from] });

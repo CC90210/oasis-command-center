@@ -14,7 +14,7 @@ async function main() {
     id TEXT PRIMARY KEY, tenant_id TEXT, owner_user_id TEXT, enabled INTEGER,
     action_type TEXT, action_payload TEXT, agent_key TEXT, schedule TEXT,
     last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
-    run_count INTEGER DEFAULT 0, updated_at TEXT, tz TEXT);`);
+    run_count INTEGER DEFAULT 0, updated_at TEXT, tz TEXT, last_scheduled_for TEXT);`);
   await db.executeMultiple(readFileSync("database/turso/bravo__252_tenant_cron_execution_leases.sql", "utf8"));
   const add = async (id: string, schedule = "* * * * *", owner = executor.userId as string) => {
     await db.execute({ sql: `INSERT INTO tenant_cron_jobs
@@ -103,6 +103,29 @@ async function main() {
   await add("bad-zone");
   await db.execute("UPDATE tenant_cron_jobs SET tz='Not/AZone' WHERE id='bad-zone'");
   assert.deepEqual(await claimTenantScript(db, executor, "bad-zone", now), { ok: false, error: "job_timezone_invalid" });
+  await add("just-enabled", "*/15 * * * *");
+  await db.execute("UPDATE tenant_cron_jobs SET last_scheduled_for='2026-11-01T14:02:00Z' WHERE id='just-enabled'");
+  assert.equal((await claimTenantScript(db, executor, "just-enabled", new Date("2026-11-01T14:02:10Z"))).claimed, false);
+  assert.equal((await claimTenantScript(db, executor, "just-enabled", new Date("2026-11-01T14:15:10Z"))).claimed, true);
+  await add("activation-race");
+  let activated = false;
+  const activationRace = new Proxy(db, { get(target, property) {
+    if (property === "execute") return async (statement: Parameters<typeof db.execute>[0]) => {
+      if (!activated && typeof statement === "object" && statement.sql.startsWith("INSERT INTO tenant_cron_execution_leases")) {
+        activated = true;
+        await other.execute("UPDATE tenant_cron_jobs SET last_scheduled_for='2026-11-01T20:00:05Z' WHERE id='activation-race'");
+      }
+      return target.execute(statement);
+    };
+    const member = Reflect.get(target, property);
+    return typeof member === "function" ? member.bind(target) : member;
+  } });
+  assert.equal((await claimTenantScript(activationRace, executor, "activation-race", now)).claimed, false);
+  await add("reactivated");
+  const beforeActivation = await claimTenantScript(db, executor, "reactivated", now);
+  await other.execute("UPDATE tenant_cron_jobs SET last_scheduled_for='2026-11-01T20:00:05Z' WHERE id='reactivated'");
+  assert.equal(await heartbeatTenantScript(db, executor, "reactivated", beforeActivation.lease_token!, now), false);
+  assert.equal((await completeTenantScript(db, executor, { ...input, jobId: "reactivated", token: beforeActivation.lease_token! }, now)).ok, false);
   db.close(); other.close();
   console.log("tenant-script-lease: concurrent claim, ownership, fencing, idempotent receipt, rollback and Toronto DST checks passed");
 }

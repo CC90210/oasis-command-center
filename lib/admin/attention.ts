@@ -239,15 +239,18 @@ export function describeBackground(
   const down = workers.filter((w) => w.state === "down" || w.state === "stale");
   const localDown = down.filter((w) => !w.service.startsWith("vps.")).length;
   const remoteDown = down.length - localDown;
-  // The computer's workers are optional since the 2026-11-01 cloud cutover:
-  // schedules, chat and the bots run on the daemon VPS, so a computer that is
-  // off is the expected state and needs nothing from you.
+  // Atlas and Maven remain required locally until their verified cutovers
+  // retire these registry rows. Optional local chat/heartbeat/activity can
+  // stop with the computer; the bots cannot silently disappear with them.
+  const requiredLocalDown = down.filter((w) =>
+    w.service === "pm2.atlas-telegram" || w.service === "pm2.maven-telegram").length;
   const offline = pc !== null && pc.state === "offline";
   // A blind computer reporter makes only ITS workers unknown. The VPS reports
   // over its own signed heartbeat, so a VPS outage is never hidden by it.
+  const knownDown = remoteDown + (offline ? requiredLocalDown : 0);
   const workersDown = blind
-    ? (remoteDown > 0 ? remoteDown : null)
-    : remoteDown + (offline ? 0 : localDown);
+    ? (knownDown > 0 ? knownDown : null)
+    : remoteDown + (offline ? requiredLocalDown : localDown);
   return { workers, reporter, workersDown };
 }
 

@@ -196,7 +196,7 @@ async function main() {
     assert.deepEqual(forAdon, { workers: [], reporter: null, workersDown: 0 }, "not the agents owner's question to ask — zero known problems, never 'unknown'");
   });
 
-  await check("describeBackground: an offline computer raises no alarm, and a blind one never hides the VPS", () => {
+  await check("describeBackground: an offline computer still exposes required local bots, and a blind one never hides the VPS", () => {
     const longAgo = new Date(now.getTime() - 30 * 60_000).toISOString();
     const workerRows = new Map(
       [...LOCAL_OASIS_WORKERS.map((w) => w.service), "fleet_watchdog"].map((service) => [
@@ -215,8 +215,14 @@ async function main() {
       "local tiles still say they stopped reporting");
     assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
       "the offline computer cannot invent a status for an unreported cloud service");
-    assert.equal(result.workersDown, 0,
-      "the computer being off is the expected state since the cloud cutover: nothing needs CC");
+    assert.equal(result.workersDown, 2,
+      "Atlas and Maven still depend on this computer until their actual cloud cutovers; optional local workers do not count");
+    const optionalOnly = new Map(workerRows);
+    for (const service of ["pm2.atlas-telegram", "pm2.maven-telegram"]) {
+      optionalOnly.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(optionalOnly, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
+      "stale optional local chat, heartbeat and activity workers do not invent an outage");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.
     const blindRows = new Map(workerRows);
