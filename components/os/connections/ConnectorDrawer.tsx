@@ -38,6 +38,7 @@ import { OAuthConnectionPanel } from "@/components/os/connections/OAuthConnectio
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
 import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
 import { QuoWebhooksPanel } from "@/components/os/connections/QuoWebhooksPanel";
+import { QuoSetupPanel } from "@/components/os/connections/QuoSetupPanel";
 import { RequestConnector } from "@/components/os/connections/RequestConnector";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
@@ -291,11 +292,14 @@ export function ConnectorDrawer({
           )}
 
           {savedKeys && (
-            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onKeysChanged} status={status} />
+            <ServiceKeysForm key={def.slug} service={savedKeys.service} appName={def.name} canManage onChanged={onKeysChanged} status={status} version={keysRevision} />
           )}
 
           {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={keysRevision} />}
-          {savedKeys?.service === "quo" && <QuoWebhooksPanel key={def.slug} version={keysRevision} />}
+          {savedKeys?.service === "quo" && <>
+            <QuoSetupPanel key={`${def.slug}-setup`} onChanged={onKeysChanged} />
+            <QuoWebhooksPanel key={def.slug} version={keysRevision} />
+          </>}
 
           {status?.paths && status.paths.length > 0 && (
             // This workspace's own way in, with its state here (resolved on the

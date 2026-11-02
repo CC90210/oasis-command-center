@@ -98,6 +98,7 @@ export function ServiceKeysForm({
   canManage,
   onChanged,
   status,
+  version,
 }: {
   service: string;
   appName: string;
@@ -105,6 +106,7 @@ export function ServiceKeysForm({
   onChanged: () => void;
   /** The card's own status (the drawer shows it above this form): the only verdict on these keys. */
   status: ConnectorStatus | null;
+  version?: number;
 }) {
   const schema = findTenantManuallyEditableIntegrationSchema(service);
   const [rows, setRows] = useState<Row[] | null>(null);
@@ -113,6 +115,7 @@ export function ServiceKeysForm({
   const [busy, setBusy] = useState<Busy>(null);
   const [notice, setNotice] = useState<NoticeValue>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [showWebhookFields, setShowWebhookFields] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -133,7 +136,7 @@ export function ServiceKeysForm({
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, version]);
 
   if (!schema) return null;
   // A card this workspace cannot connect ("Not available on this workspace yet":
@@ -279,7 +282,10 @@ export function ServiceKeysForm({
             if (busy === null && dirty) void save();
           }}
         >
-          {schema.fields.map((f) => {
+          {service === "quo" && <button type="button" className="text-xs text-fg-muted underline" onClick={() => setShowWebhookFields(value => !value)}>
+            {showWebhookFields ? "Hide advanced incoming-text fields" : "Advanced: manage an existing incoming-text connection"}
+          </button>}
+          {schema.fields.filter(f => service !== "quo" || showWebhookFields || !f.key.startsWith("webhook_")).map((f) => {
             const r = row(f.key);
             const id = `${service}-${f.key}`;
             return (
