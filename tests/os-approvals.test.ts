@@ -878,11 +878,11 @@ async function main() {
   });
 
   // ── 7. Unknown kinds fail loudly ───────────────────────────────────────
-  await check("no executor: an approved send_sms is FAILED 'no executor for send_sms' and nothing is sent", async () => {
-    const a = await create({ actionKind: "send_sms", title: "Text Lee", payload: { to: "+15145550100", body: "On my way" } });
+  await check("no executor: an approved book_meeting is FAILED 'no executor for book_meeting' and nothing is sent", async () => {
+    const a = await create({ actionKind: "book_meeting", title: "Meeting with Lee", payload: { to: "+15145550100", body: "On my way" } });
     const [view] = await buildApprovalViews(raw, S.cc, [a], { tenantSlug: "oasis-ai-cc", now: new Date(), deps: fakeDeps() });
     assert.equal(view.executable, false, "the card warns before anyone approves");
-    assert.match(view.readiness_note!, /Nothing in this app can carry out a text message/);
+    assert.match(view.readiness_note!, /Nothing in this app can carry out a meeting/);
     await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date());
     const before = sent.length;
     const quiet = console.error;
@@ -891,7 +891,7 @@ async function main() {
       const x = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
       assert.ok(x.ok);
       assert.equal(x.approval.status, "failed");
-      assert.match((x.approval.execution_result as { message: string }).message, /^no executor for send_sms/);
+      assert.match((x.approval.execution_result as { message: string }).message, /^no executor for book_meeting/);
     } finally {
       console.error = quiet;
     }
@@ -902,7 +902,7 @@ async function main() {
     // same OASIS mailbox as send_email after re-checking every hash (tests/ai-audit-flow.test.ts).
     // follow_up_ai_audit (phase 5): a stalled audit's follow-up, the same link again, owner only.
     // welcome_ai_audit (2026-10-27): a paying client's welcome email, under the audit's own switch, owner only.
-    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["authorize_ai_audit", "deliver_ai_audit", "follow_up_ai_audit", "publish_post", "reply_ticket", "send_email", "send_slack_message", "welcome_ai_audit"], "only kinds with a sanctioned send path");
+    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["authorize_ai_audit", "deliver_ai_audit", "follow_up_ai_audit", "publish_post", "reply_ticket", "send_email", "send_slack_message", "send_sms", "welcome_ai_audit"], "only kinds with a sanctioned send path");
   });
 
   await check("readiness: an email from a client workspace has no sender here and fails loudly when approved", async () => {

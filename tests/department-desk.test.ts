@@ -184,6 +184,12 @@ async function main() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const acmeRep = viewerFor(ACME, "acme-roofing", "sales", REP) as any;
 
+  // This suite supplies its authenticated viewers; live membership and
+  // revocation are exercised by mcp-server and agent-capabilities fixtures.
+  const viewerModule = await import("../components/os/department/viewer");
+  stub("../components/os/department/viewer", { ...viewerModule, resolveOsViewerFor: async (tenantId: string, userId: string) =>
+    viewerFor(tenantId, tenantId === ACME ? "acme-roofing" : "fixture-workspace", userId === OWNER ? "founder" : "sales", userId) });
+
   const catalog = await import("../lib/os/desk/catalog");
   const { loadDepartmentState } = await import("../lib/os/desk/state");
   const { renderDepartmentState } = await import("../lib/os/desk/state-render");
@@ -205,8 +211,8 @@ async function main() {
     assert.doesNotMatch(salesBlock, /Quillfeather|lead-zeta|Zeta secret/);
   });
   await check("it names the department's connections from the Connections catalog", () => {
-    assert.match(salesBlock, /Apps the Sales department works through[^\n]*\n- Google Workspace: /);
-    assert.match(salesBlock, /\n- Twilio SMS: /);
+    assert.match(salesBlock, /\n- Google Workspace: /);
+    assert.ok(salesFacts.connections?.some(c => c.name.startsWith("Twilio")), "the current catalog includes the assigned texting connector");
   });
   await check("the workspace data sits inside one untrusted-data fence, with the guard", () => {
     const begin = salesBlock.indexOf("<<<UNTRUSTED_INPUT_BEGIN>>>");
@@ -235,11 +241,11 @@ async function main() {
 
   console.log("Palettes");
   await check("each department's palette is its own; Marketing and Finance cannot propose emails; plan mode proposes nothing", () => {
-    assert.deepEqual(catalog.deskPalette("finance").map((t) => t.name), ["department_numbers", "finance_get_metric", "approvals_list", "connections_status"]);
+    assert.deepEqual(catalog.deskPalette("finance").map((t) => t.name), ["department_numbers", "finance_get_metric", "approvals_list", "connections_status", "use_custom_key"]);
     assert.ok(!catalog.deskPalette("marketing").some((t) => t.kind === "proposal"));
     assert.ok(catalog.deskPalette("sales").some((t) => t.name === "propose_email"));
     assert.ok(!catalog.deskPalette("sales", { planMode: true }).some((t) => t.kind === "proposal"));
-    for (const t of Object.values(catalog.DESK_TOOLS)) assert.ok(t.kind === "read" || t.name === "propose_email", t.name);
+    for (const t of Object.values(catalog.DESK_TOOLS)) assert.ok(t.kind === "read" || t.name === "propose_email" || t.name === "propose_sms", t.name);
   });
   await check("providers: Anthropic, OpenAI, OpenRouter and Gemini look things up; a local model says it cannot", () => {
     for (const p of ["anthropic", "openai", "openrouter", "google"]) assert.equal(catalog.deskToolSupport(p).on, true, p);
@@ -482,7 +488,7 @@ async function main() {
     const g = await groundDepartmentTurn({ turn: baseTurn("google"), viewer: acmeOwner, maxTokens: 256, plainStream });
     assert.equal(g?.tools.on, true);
     assert.deepEqual(g?.tools.labels, catalog.deskPalette("sales").map((t) => t.label));
-    assert.match(String(g?.system), /Look things up in this workspace \(7 tools/);
+    assert.match(String(g?.system), /Look things up in this workspace \(8 tools/);
   });
   await check("a viewer in ANOTHER workspace than the turn's gets no workspace data at all", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

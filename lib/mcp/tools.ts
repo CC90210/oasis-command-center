@@ -187,6 +187,8 @@ const OUTSIDE_TEXT: ReadonlySet<string> = new Set<DeskToolName>([
   "projects_list",
   "calendar_upcoming",
   "approvals_list",
+  "connections_status",
+  "use_custom_key",
 ]);
 
 const PLAIN: Record<string, string> = {

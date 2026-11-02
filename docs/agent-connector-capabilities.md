@@ -1,0 +1,17 @@
+# Agent connections and approved texts
+
+Department chat, including the subscription CLI MCP transport, uses `connections_status` to discover freshly saved apps and custom keys. API chat dispatches those same tools through the department boundary. Discovery returns names, connection status, allowed websites and tool names; it never decrypts a credential value. A saved key or a passing connection test is not a promise that a send is ready.
+
+Every call resolves the current tenant member again. Removed seats, banned users, downgraded roles, department restrictions and revoked connection assignments apply at execution. A renamed department lead is resolved from the workspace manifest, not its display name. Enabled custom agents with no department may use only grants marked **All agents**; they cannot borrow a department or propose texts. Explicit tool palettes remain restrictive.
+
+Custom-key use remains the existing server broker: one HTTPS GET to the exact website the owner assigned, public-address checks, no redirects, no model-supplied credential and secret redaction on the response. A department grant delegates reads permitted by that API key on that website; it does not invent external record-level restrictions. Unsupported provider writes are not inferred from having a key. `get_credential` and `add_credential` are retired for all tenants, including resumed turns. Credentials are managed in Settings.
+
+`propose_sms` creates a typed approval containing the exact E.164 recipient and message. Chief of Staff, Sales and Client Success may prepare it when the member may act and Quo is assigned to that department. Members must select an accessible lead whose stored phone matches; owners and admins may use a direct number. Automation email policy does not authorize SMS proposals.
+
+Approval uses the existing payload hash and atomic `approved -> executing` claim. The executor rechecks the approving member, tenant, department, lead and connector grant, then loads that tenant's Quo account and verifies signed incoming STOP readiness. The existing Quo adapter enforces live-send/provider switches and durable recipient suppression. There is one provider attempt and no automatic resend after ambiguity. The durable approval and Business Ledger record the result. A Quo message ID means provider acceptance; the approval card does not claim recipient delivery.
+
+## Verification
+
+`npm run test:connections` includes `tests/agent-capabilities.test.ts`. Its isolated SQLite workspace fixture covers 16 checks: new keys and revocations, foreign tenants, unreadable grants, MCP/API parity, removed seats and real profile role changes, exact payload validation, member recipient restrictions, send-once approval races, STOP backlog, ambiguous responses, and legitimate or disabled custom agents. The provider-shaped canary runs the real Quo adapter against fake HTTP only, verifies the exact provider request and stored receipt, then proves a durable STOP blocks another request.
+
+Existing desk, MCP, approval, custom-key SSRF/redaction, Quo, client-sandbox, computer-claim and deactivation fixtures remain in their existing CI suites. No production credential values, provider mutation or outbound text are used by the new fixture. Deployment and a read-only subscription runtime smoke remain release validation; the historical text shown in the reported screenshot is not a send authorization.

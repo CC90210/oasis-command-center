@@ -42,6 +42,7 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   // a card in front of the team on the member's behalf: a write, and a
   // read_only member makes none.
   "propose_email",
+  "propose_sms",
 ]);
 
 /**

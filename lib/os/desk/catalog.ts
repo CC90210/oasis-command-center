@@ -13,10 +13,10 @@
  * shared by the prompt, the dispatcher and the tests, so the list the model is
  * told about, the list it is offered and the list that runs are one list.
  *
- * READS, AND ONE KIND OF PROPOSAL. Every tool here reads the session's own
+ * READS AND APPROVAL PROPOSALS. Every tool here reads the session's own
  * workspace through the readers its pages already use, with the viewer's own
- * scope. The only write is propose_email, which creates an approval card in
- * Needs you and sends nothing (lib/cloud-tool-runner.ts toolProposeEmail).
+ * scope. Email and SMS proposals create approval cards in Needs you and
+ * send nothing (./proposals.ts).
  * Nothing in a palette sends, changes a record or spends money.
  *
  * No agent persona name and no internal table or vendor name appears in a
@@ -38,6 +38,8 @@ export type DeskToolName =
   | "finance_get_metric"
   | "calendar_upcoming"
   | "connections_status"
+  | "use_custom_key"
+  | "propose_sms"
   | "propose_email";
 
 export type DeskTool = {
@@ -189,9 +191,21 @@ export const DESK_TOOLS: Readonly<Record<DeskToolName, DeskTool>> = {
     label: "Connections",
     summary: "Check which apps this department works through are connected, and what each one gives it",
     description:
-      "List the apps this department works through (as Settings > Connections shows them): whether each is connected, needs attention or is not connected, what it reads and what it does. Use it to answer 'what are you connected to'.",
+      "Discover this person's current workspace connections and custom API keys assigned to this department. Returns names, allowed websites and available tools, never credentials. Call before using an integration or claiming it is missing; newly connected apps and keys appear immediately. Connected does not mean every action is ready.",
     input_schema: OBJECT(),
     kind: "read",
+  },
+  use_custom_key: {
+    name: "use_custom_key", label: "Read a connected API", summary: "Read an authorized API using a server-held custom key",
+    description: "Use a custom key discovered by connections_status without seeing its value. The server makes one HTTPS GET to the key's saved website, with no redirects. Only keys assigned to this department may be used. Never request credentials in chat. This cannot write, send or perform an arbitrary API action.",
+    input_schema: OBJECT({ name: { type: "string" }, url: { type: "string" }, auth: { type: "string", enum: ["bearer", "header"] }, header_name: { type: "string" } }, ["name", "url"]),
+    kind: "read",
+  },
+  propose_sms: {
+    name: "propose_sms", label: "Text for approval", summary: "Prepare a Quo text for approval in Needs you",
+    description: "Prepare one text message for a person to approve in Needs you. Approval sends through this workspace's connected Quo account after sending, sender and STOP checks pass. This tool sends nothing. Use the exact requested text; never say it was sent until an execution receipt says so. Members must name a lead they may work and use its stored phone. Owners/admins may specify a direct number. Do not ask for the API key.",
+    input_schema: OBJECT({ to: { type: "string", description: "Recipient in international E.164 format, such as +14165550100." }, body: { type: "string", description: "Exact text, 1–1600 characters." }, lead_id: { type: "string", description: "Required for members; the lead's stored phone must match." } }, ["to", "body"]),
+    kind: "proposal",
   },
   propose_email: {
     name: "propose_email",
@@ -247,6 +261,8 @@ export const DEPARTMENT_PALETTES: Readonly<Record<DepartmentKey, readonly DeskTo
     "routines_status",
     "calendar_upcoming",
     "connections_status",
+    "use_custom_key",
+    "propose_sms",
     "propose_email",
   ],
   sales: [
@@ -257,9 +273,11 @@ export const DEPARTMENT_PALETTES: Readonly<Record<DepartmentKey, readonly DeskTo
     "approvals_list",
     "calendar_upcoming",
     "connections_status",
+    "use_custom_key",
+    "propose_sms",
     "propose_email",
   ],
-  marketing: ["department_numbers", "approvals_list", "connections_status"],
+  marketing: ["department_numbers", "approvals_list", "connections_status", "use_custom_key"],
   client_success: [
     "department_numbers",
     "tickets_list",
@@ -269,10 +287,12 @@ export const DEPARTMENT_PALETTES: Readonly<Record<DepartmentKey, readonly DeskTo
     "approvals_list",
     "calendar_upcoming",
     "connections_status",
+    "use_custom_key",
+    "propose_sms",
     "propose_email",
   ],
-  finance: ["department_numbers", "finance_get_metric", "approvals_list", "connections_status"],
-  operations: ["department_numbers", "routines_status", "connections_status", "approvals_list"],
+  finance: ["department_numbers", "finance_get_metric", "approvals_list", "connections_status", "use_custom_key"],
+  operations: ["department_numbers", "routines_status", "connections_status", "use_custom_key", "approvals_list"],
 };
 
 /**

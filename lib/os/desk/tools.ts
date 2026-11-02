@@ -42,18 +42,20 @@ import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { listCalendars, listEvents } from "@/lib/calendar/store";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { loadThreadMessages } from "@/lib/lead-interactions-queries";
-import { stripModelSuppliedTenant, type InjectedToolset, type ToolResultBlock } from "@/lib/cloud-tool-runner";
+import { stripModelSuppliedTenant, toolUseCustomKey, type InjectedToolset, type ToolResultBlock } from "@/lib/cloud-tool-runner";
+import { currentCapabilityViewer, loadAgentCapabilities } from "@/lib/os/agent-capabilities";
 import {
   deskApprovals,
   mayProposeFrom,
   proposeAutomationEmail,
   proposeDeskEmail,
+  proposeDeskSms,
   ProposalRefused,
   type AutomationProposalPolicy,
 } from "./proposals";
 import { AUTOMATION_DEPARTMENT_NUMBERS, DESK_TOOLS, deskPalette, type DeskTool, type DeskToolName } from "./catalog";
 import { followUpsFrom, leadLine, openLead, pipelineScope, readPipeline, searchLeads } from "./reads";
-import { deskDeliveryViewer, loadDeskConnections } from "./state";
+import { deskDeliveryViewer } from "./state";
 
 export const RESULT_MAX_CHARS = 12_000;
 
@@ -118,11 +120,13 @@ export function deskToolAvailability(name: DeskToolName, viewer: OsViewer): Desk
       // The Finance page's own two locks (numbers.ts financeNumbers).
       return viewer.oasis && viewer.surface.capabilities.canSeeCompanyFinancials ? { ok: true } : { ok: false, reason: "company_money_not_available_to_you" };
     case "propose_email":
+    case "propose_sms":
       return mayProposeFrom(viewer) ? { ok: true } : { ok: false, reason: "read_only_member_cannot_propose" };
     case "department_numbers":
     case "approvals_list":
     case "calendar_upcoming":
     case "connections_status":
+    case "use_custom_key":
       return { ok: true };
     default: {
       const unknown: never = name;
@@ -348,10 +352,24 @@ async function run(name: DeskToolName, input: Record<string, unknown>, ctx: Desk
       }, `${occ.length} in ${days} days`);
     }
     case "connections_status": {
-      const list = await loadDeskConnections(v, ctx.dept, nowMs);
-      return result(name, {
-        apps: list.map((c) => ({ app: c.name, status: c.status ?? "visible to owners and admins only", connected: c.status === null ? "unknown" : c.connected, reads: c.reads, does: c.does })),
-      }, `${list.length} apps`);
+      const capabilities = await loadAgentCapabilities(v, ctx.dept, nowMs);
+      return result(name, capabilities, `${capabilities.apps.length} apps, ${capabilities.custom_keys.length} custom keys`);
+    }
+    case "use_custom_key": {
+      const fresh = await currentCapabilityViewer(v, ctx.dept);
+      const out = await toolUseCustomKey(input, {
+        tenantId: fresh.surface.tenantId, userId: fresh.surface.userId, authUserId: fresh.authUserId || fresh.surface.userId,
+        agentKey: ctx.agentSlug, departmentKey: ctx.dept.key, isAdmin: fresh.surface.persona === "founder",
+      });
+      if (!("status" in out)) return refused(name, `${out.refused}: ${out.hint || "custom_key_unavailable"}`);
+      return result(name, out, `HTTP ${out.status}`);
+    }
+    case "propose_sms": {
+      // SMS is interactive only. Email automation policy cannot authorize texts.
+      if (ctx.only !== undefined) return refused(name, "sms_not_available_to_automations");
+      const fresh = await currentCapabilityViewer(v, ctx.dept);
+      const out = await proposeDeskSms(fresh, ctx.dept, ctx.agentSlug, input, new Date(nowMs));
+      return result(name, out, "waiting in Needs you");
     }
     case "propose_email": {
       // One approvals card under THIS department, owned by the person asking;
@@ -385,7 +403,7 @@ export function deskToolset(ctx: DeskToolContext): InjectedToolset & { palette: 
   const allowed = new Set<string>(departmentPalette.map((t) => t.name));
   // An automation's allowlist narrows the department's palette; a proposal
   // needs the automation's proposal rules as well (fail closed without them).
-  const automation = ctx.only ? new Set<string>(ctx.only.filter((n) => DESK_TOOLS[n]?.kind !== "proposal" || !!ctx.proposal)) : null;
+  const automation = ctx.only ? new Set<string>(ctx.only.filter((n) => n !== "propose_sms" && (DESK_TOOLS[n]?.kind !== "proposal" || !!ctx.proposal))) : null;
   // An automation is told what runs for it: department_numbers reads its own
   // page only (run(): automationDepartment), so it is offered that version.
   const palette = automation

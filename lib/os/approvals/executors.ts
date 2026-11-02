@@ -4,7 +4,7 @@
  *
  * THE REGISTRY IS THE WHOLE LIST. An action_kind with no entry here has no
  * executor, and approving it records a loud failure ("no executor for
- * send_sms") — never a success, never a silent no-op. A kind joins this list
+ * book_meeting") — never a success, never a silent no-op. A kind joins this list
  * only when it has a real, gated send path:
  *
  *   send_email    lib/integrations/oasis-shared-gmail-send.ts, the OASIS
@@ -16,6 +16,9 @@
  *                 client workspace has no in-app sender yet and is told so.
  *                 Dry-run first: lib/integrations/send-mode.ts isDryRun("email")
  *                 (LIVE_SEND_EMAIL / DASHBOARD_LIVE_SEND / BRAVO_FORCE_DRY_RUN).
+ *   send_sms      ./sms.ts: the workspace's Quo connection, current approver
+ *                 and lead access, signed STOP intake, live-send and recipient
+ *                 suppression checks. One provider attempt; no automatic retry.
  *   publish_post  records INTENT in marketing_publish_intent, exactly as the
  *                 founders marketing Post panel does
  *                 (app/api/founders/marketing/assets/[id]/publish/route.ts):
@@ -51,6 +54,7 @@
  * with a fake mailbox and a temp database; production passes nothing.
  */
 import "server-only";
+import { sendSmsExecutor, type SmsExecutorDeps } from "./sms";
 import { createHash } from "node:crypto";
 import type { Client, ResultSet } from "@libsql/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -102,6 +106,7 @@ export type ExecutorTenant = { id: string; slug: string | null };
 export type SendEmailArgs = Parameters<typeof sendOasisSharedGmail>[0];
 
 export type ExecutorDeps = {
+  sms?: Partial<SmsExecutorDeps>;
   isDryRun: (channel?: string) => boolean;
   sendEmail: (args: SendEmailArgs) => Promise<OasisSharedSendResult>;
   /**
@@ -750,6 +755,7 @@ async function mirrorReply(
 // ---------------------------------------------------------------------------
 
 export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> = {
+  send_sms: sendSmsExecutor,
   send_email: sendEmail,
   publish_post: publishPost,
   send_slack_message: sendSlackMessage,

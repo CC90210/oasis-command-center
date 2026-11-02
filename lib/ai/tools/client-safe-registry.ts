@@ -9,8 +9,7 @@
  *   - the bridge-routed tools (`defer: true`: bash, write_file, run_script,
  *     send_email, stripe, supabase …), which execute on the operator's paired
  *     machine with that machine's credentials;
- *   - get_credential, which hands a decrypted vault secret to the model, and
- *     add_credential, which writes one;
+ *   - formerly get_credential / add_credential, now retired for every tenant;
  *   - read_brain_doc / search_memory, which read OASIS's CEO-Agent brain repo;
  *   - http_post, an unauthenticated outbound write to any public URL.
  * The only thing between a client tenant and those tools was "is the bridge
@@ -94,6 +93,7 @@ export const CLIENT_SAFE_TOOLS: ReadonlyMap<string, ClientSafeToolClass> = new M
   ["list_open_leads", "read"],
   ["list_lead_documents", "read"],
   ["integration_status", "read"],
+  ["connections_status", "read"],
   // read: public web only, behind the runner's assertSafeUrl + DNS-aware
   // assertResolvedIpIsPublic SSRF guard, auth-shaped headers stripped.
   ["web_fetch", "read"],
@@ -103,7 +103,7 @@ export const CLIENT_SAFE_TOOLS: ReadonlyMap<string, ClientSafeToolClass> = new M
   // read: a GET with one of the workspace's own custom keys, attached by the
   // server and sent only to the one website its owner set; the model never
   // sees the key (lib/cloud-tool-runner.ts toolUseCustomKey, CC 2026-10-27).
-  // get_credential, which hands the value to the model, stays OASIS-only.
+  // Raw credential tools are retired for OASIS and client workspaces alike.
   ["use_custom_key", "read"],
   // draft: writes that stay inside the tenant's own workspace.
   ["create_record", "draft"],
@@ -113,6 +113,7 @@ export const CLIENT_SAFE_TOOLS: ReadonlyMap<string, ClientSafeToolClass> = new M
   // draft: the approval-gated wrapper for an outward action. It creates an
   // approvals row and NEVER sends (lib/cloud-tool-runner.ts toolProposeEmail).
   ["propose_email", "draft"],
+  ["propose_sms", "draft"],
 ]);
 
 /** True when `name` may be offered to, and dispatched for, a client tenant. */

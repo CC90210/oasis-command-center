@@ -262,7 +262,7 @@ export function capabilityLines(f: DeskStateFacts, tools: DeskToolsInfo): string
   if (connected.length > 0) {
     const canPropose = tools.on && tools.tools.some((t) => t.kind === "proposal");
     lines.push(
-      `Connected apps: ${connected.join(", ")}. You cannot send messages, emails or posts through them from this chat yourself; ${canPropose ? "you can only propose drafts for approval" : "you cannot propose drafts in this chat either"}.`,
+      `Connected apps: ${connected.join(", ")}. ${canPropose ? "Use the available proposal tools when asked to send. The person confirms the exact draft in Needs you; approved actions execute on the server. Never say a draft was sent." : "This turn permits reads only."} Connection status is not proof that a send is ready. Call connections_status for fresh assigned apps, custom keys and available tools; never ask for or reveal secret values.`,
     );
   }
   const departmentProposes = (DEPARTMENT_PALETTES[f.department.key as DepartmentKey] ?? []).some((n) => DESK_TOOLS[n].kind === "proposal");
@@ -273,7 +273,7 @@ export function capabilityLines(f: DeskStateFacts, tools: DeskToolsInfo): string
         : "You cannot propose drafts in this chat: this person's role is read-only, or the channel is in plan mode.",
     );
   }
-  lines.push("You cannot send anything, change or delete a record, move money or run a routine from this chat.");
+  lines.push("Use only the tools listed for this turn. An SMS or email proposal sends nothing until a person approves it in Needs you. Custom-key access makes an authorized API read on the server; a stored key alone does not create a new send or write tool. Never invent missing capabilities or expose credentials.");
   return lines;
 }
 

@@ -54,6 +54,10 @@ export function describeOutcome(a: OutcomeInput, fmt: (iso: string) => string, n
     }
     case "executed": {
       const r = a.execution_result;
+      if (r?.outcome === "sent" && r.provider === "quo") return {
+        tone: "ok", text: `Accepted by Quo${at(a.executed_at)}`,
+        detail: "Quo accepted the text. This is not a delivery confirmation.",
+      };
       if (r?.outcome === "sent") return { tone: "ok", text: `Sent ✓${at(a.executed_at)}`, detail: by ? `Approved${by}` : null };
       if (r?.outcome === "dry_run") {
         return {

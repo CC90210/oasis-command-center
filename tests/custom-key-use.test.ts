@@ -64,6 +64,17 @@ async function standInForSession() {
   require.cache[v] = {
     id: v, filename: v, path: dirname(v), loaded: true, children: [], paths: [],
     exports: {
+      resolveOsViewerFor: async (tenantId: string, userId: string) => {
+        const { capabilitiesFor } = await import("../lib/role-surfaces");
+        const { resolveOsModules } = await import("../lib/os/modules");
+        const capabilities = capabilitiesFor("founder", "client-c");
+        return {
+          ok: true, oasis: false, provisioned: true, authUserId: userId, email: null,
+          manifest: { agents: [{ slug: "client-chief", display_name: "Chief", enabled: true, departments: ["chief_of_staff"] }] },
+          surface: { ok: true, persona: "founder", capabilities, tenantId, tenantSlug: "client-c", userId, teamRole: "owner", degraded: false },
+          navInput: { persona: "founder", capabilities, isOperator: false, tenantSlug: "client-c", isOasisTenant: false, modules: resolveOsModules({ tenantSlug: "client-c", provisioned: true }), provisioned: true, founders: null },
+        };
+      },
       resolveOsViewer: async () => ({
         ok: true, oasis: false, manifest: null,
         surface: { ok: true, persona: "founder", tenantId: CLIENT, tenantSlug: "client-c", userId: "u-owner", teamRole: "owner", degraded: false },
@@ -309,10 +320,10 @@ async function main() {
     assert.ok(palettes.SAFE_TENANT_TOOL_PALETTE.includes("use_custom_key"));
     assert.equal(accessStore.assignmentsApply(CLIENT, "custom"), true);
     assert.equal(accessStore.assignmentsApply(OASIS, "custom"), true);
-    const via = await runner.executeTool("use_custom_key", { name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://evil.example.com/" }, ctx(CLIENT));
+    const via = await runner.executeTool("use_custom_key", { name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://evil.example.com/" }, ctx(CLIENT, "client-chief"));
     assert.doesNotMatch(via.content, /outside the client-safe|not_client_safe/i, "dispatched for a client workspace");
     assert.match(via.content, /wrong_website/);
-    assert.match(via.summary, /did not use HUBSPOT_PRIVATE_APP_TOKEN: wrong_website/);
+    assert.match(via.summary, /use_custom_key failed: wrong_website/);
   });
 
   await check("the website route: owner only, a saved key only, checked; the key list shows it; removing the key clears it", async () => {

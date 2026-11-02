@@ -49,6 +49,8 @@ export const PLAN_MODE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "http_get",
   // Integration status — read-only
   "integration_status",
+  "connections_status",
+  "use_custom_key",
   // The agent's own approval cards and their reviewer notes — read-only.
   // (propose_email is a write and stays out of plan mode.)
   "list_proposals",
