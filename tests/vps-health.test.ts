@@ -1,11 +1,11 @@
 /**
- * tests/vps-health.test.ts - the daemon VPS reports its two always-on workers (2026-10-31, CC: "so
+ * tests/vps-health.test.ts - the daemon VPS reports its registered workers (2026-10-31, CC: "so
  * BackgroundWorkersPanel shows live green health for the VPS workers").
  *
  * Pinned:
  *   1. auth: no secret is 503; a missing, wrong or stale signature is 401; an oversized body is 413;
  *      none of them reads or writes anything;
- *   2. the body: only the two VPS services, a known status, a sane host, no duplicates (422 names
+ *   2. the body: only registered VPS services, a known status, a sane host, no duplicates (422 names
  *      the field);
  *   3. the write: one integrations_health row per (owner profile, service), updated in place, the
  *      error kept only when not healthy; the owner's profiles come from workspace_agents_owner;
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
     assert.equal((await rows()).length, 0, "nothing written");
   });
 
-  await check("body: only the two VPS services, a known status, a sane host, no duplicates", async () => {
+  await check("body: only registered VPS services, a known status, a sane host, no duplicates", async () => {
     assert.deepEqual(await call(signed("{nope")), { status: 422, body: { ok: false, error: "invalid_json" } });
     const field = async (body: unknown) => (await call(signed(body))).body.field;
     assert.equal(await field({ ...heartbeat, host: "bad host!" }), "host");
@@ -152,6 +152,50 @@ async function main(): Promise<void> {
     assert.equal(bridge.last_ping_at, NOW.toISOString(), "a service not in this report keeps its last reading (it goes stale)");
   });
 
+  await check("new daemons: no fabricated rows; mixed live states persist and omitted daemons do not get freshened", async () => {
+    assert.equal((await rows()).some((r) => r.service === "vps.oasis-content-tools-runner"), false);
+    assert.equal((await rows()).some((r) => r.service === "vps.oasis-workspace-scheduler"), false);
+    assert.equal((await rows()).some((r) => r.service === "vps.atlas-telegram"), false);
+    assert.equal((await rows()).some((r) => r.service === "vps.maven-telegram"), false);
+    const report = {
+      host: heartbeat.host,
+      services: [
+        ...heartbeat.services,
+        { service: "vps.oasis-scheduler", status: "healthy", detail: "active/running; restarts=0" },
+        { service: "vps.oasis-headless-bridge", status: "degraded", detail: "activating/auto-restart; restarts=2" },
+        { service: "vps.oasis-content-tools-runner", status: "down", detail: "inactive/dead; restarts=0" },
+        { service: "vps.oasis-workspace-scheduler", status: "down", detail: "inactive/dead; awaiting cutover" },
+        { service: "vps.atlas-telegram", status: "down", detail: "inactive/dead; awaiting bot setup" },
+        { service: "vps.maven-telegram", status: "down", detail: "inactive/dead; awaiting bot setup" },
+      ],
+    };
+    assert.deepEqual(await call(signed(report)), { status: 200, body: { ok: true, recorded: 8 } });
+    const stored = await rows();
+    assert.equal(stored.length, 8);
+    for (const service of report.services) {
+      const actual = stored.find((r) => r.service === service.service)!;
+      assert.equal(actual.status, service.status);
+      assert.equal(actual.last_ping_at, NOW.toISOString());
+      assert.equal(actual.profile_id, "p-cc");
+      assert.equal(actual.tenant_id, OASIS);
+      assert.equal(JSON.parse(String(actual.metadata)).detail, service.detail);
+    }
+    const later = new Date(NOW.getTime() + 6 * 60_000);
+    const contentRunning = { host: heartbeat.host, services: [{ service: "vps.oasis-content-tools-runner", status: "healthy", detail: "active/running; restarts=0" }] };
+    assert.equal((await call(signed(contentRunning, Math.floor(later.getTime() / 1000)), { now: () => later })).status, 200);
+    const updated = await rows();
+    const content = updated.find((r) => r.service === "vps.oasis-content-tools-runner")!;
+    assert.equal(content.status, "healthy", "only a new report changes a stopped daemon to healthy");
+    assert.equal(content.last_error, null);
+    assert.equal(content.last_ping_at, later.toISOString());
+    assert.equal(updated.find((r) => r.service === "vps.oasis-headless-bridge")!.last_ping_at, NOW.toISOString(), "omitted daemon keeps its old timestamp");
+    for (const service of ["vps.atlas-telegram", "vps.maven-telegram"]) {
+      const bot = updated.find((r) => r.service === service)!;
+      assert.equal(bot.status, "down", "another worker's heartbeat cannot make a bot ready");
+      assert.equal(bot.last_ping_at, NOW.toISOString(), "omitted bot keeps its old timestamp");
+    }
+  });
+
   await check("owner: the agents owner's profiles; a missing or failed owner lookup is 503", async () => {
     await db.execute({ sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id, set_by, set_at) VALUES (?, 'auth-cc', 'auth-cc', ?)", args: [OASIS, NOW.toISOString()] });
     await db.execute({ sql: "INSERT INTO user_profiles (id, auth_user_id, tenant_id) VALUES ('p-cc-real', 'auth-cc', ?), ('p-other', 'auth-other', ?), ('p-cc-elsewhere', 'auth-cc', 'other-tenant')", args: [OASIS, OASIS] });
@@ -165,6 +209,35 @@ async function main(): Promise<void> {
     } finally {
       console.error = original;
     }
+  });
+
+  await check("oneshot: running is pending, not success; other daemon keys reject it; completion clears the phase", async () => {
+    const { reportedWorkerStatus } = await import("../lib/automations/worker-status");
+    const pending = { host: heartbeat.host, services: [{ service: "vps.oasis-inbox-sweep", status: "running", detail: "sweep running; result pending" }] };
+    const { VPS_ONESHOT_SERVICES } = await import("../lib/automations/worker-status");
+    for (const service of vps.VPS_HEALTH_SERVICES.filter((s) => !VPS_ONESHOT_SERVICES.has(s))) {
+      assert.equal((await call(signed({ ...pending, services: [{ ...pending.services[0], service }] }))).status, 422);
+    }
+    // The audit PDF and Meet transcription runners are bounded passes too: a long
+    // transcription is pending work, never green and never an outage.
+    for (const service of ["vps.oasis-ai-audit-runner", "vps.oasis-meet-runner"]) {
+      assert.equal((await call(signed({ ...pending, services: [{ service, status: "running", detail: "pass running" }] }))).status, 200);
+      const row = (await rows()).find((r) => r.service === service)!;
+      assert.equal(reportedWorkerStatus(service, row.status, JSON.parse(String(row.metadata))), "pending");
+    }
+    assert.equal((await call(signed(pending))).status, 200);
+    let stored = (await rows()).find((r) => r.service === "vps.oasis-inbox-sweep")!;
+    assert.equal(stored.status, "unknown");
+    assert.equal(stored.last_error, null, "work in progress is not a new error");
+    assert.equal(stored.last_ping_at, NOW.toISOString());
+    const metadata = JSON.parse(String(stored.metadata));
+    assert.equal(metadata.phase, "running");
+    assert.equal(reportedWorkerStatus(String(stored.service), stored.status, metadata), "pending", "the UI cannot paint this green");
+    assert.equal((await call(signed({ ...pending, services: [{ service: "vps.oasis-inbox-sweep", status: "degraded", detail: "last sweep failed" }] }))).status, 200);
+    stored = (await rows()).find((r) => r.service === "vps.oasis-inbox-sweep")!;
+    assert.equal(stored.status, "degraded");
+    assert.equal(stored.last_error, "last sweep failed");
+    assert.equal(JSON.parse(String(stored.metadata)).phase, undefined, "completion replaces the transient phase with the real result");
   });
 
   await check("contract: the endpoint's services are exactly the panel's VPS rows; the route only delegates", () => {

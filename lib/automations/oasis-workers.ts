@@ -51,16 +51,20 @@ export const OASIS_WORKERS: OasisWorker[] = [
     // First on purpose (CC 2026-10-31): the bridge is what makes "this
     // computer" part of OASIS at all.
     service: "pm2.claude-bridge",
-    label: "Local chat bridge",
-    purpose: "Connects this computer to the Command Center (localhost:9100): dashboard agent chats and agent tools that need this computer run through it.",
+    label: "Local chat bridge (optional)",
+    purpose: "Connects tools and chats that specifically use this computer. Cloud chats and server schedules work independently while this computer is off.",
   },
   {
-    // Still the only runner of the active cron_jobs rows (Daily Bravo Brief,
-    // Maven syncs, health checks) until they move to Cloudflare. It runs every
-    // ACTIVE row; the risky rows are switched off in cron_jobs, not filtered here.
+    // Verified stopped on 2026-11-01 after the daemon VPS took over. Offering
+    // Start here would let two hosts run the same unpinned Empire schedules.
     service: "pm2.bravo-scheduler",
-    label: "Empire scheduler",
-    purpose: "Runs this computer's scheduled jobs (Daily Bravo Brief, Maven syncs, health checks) every minute, until each moves to Cloudflare.",
+    label: "Empire scheduler (computer copy)",
+    purpose: "Preserved computer copy of the scheduler now running on the daemon VPS.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — scheduled jobs run on the daemon VPS; this computer's copy stays off to prevent duplicate runs.",
   },
   {
     // The setter. Absent from this list until 2026-08-21, which meant its
@@ -76,7 +80,7 @@ export const OASIS_WORKERS: OasisWorker[] = [
     control_mode: "none",
     status_source: "none",
     manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — the always-on setter is moving to the daemon VPS; this computer's copy stays off.",
+    not_expected_here: "Retired by plan — this computer's copy stays off. Zernio has paused the account for billing (payment required), so Instagram DMs cannot be read; the setter is ready on the daemon VPS and starts once billing is restored.",
   },
   {
     // Retired 2026-10-30: the VPS long-poll bridge (oasis-telegram-bridge) is
@@ -95,13 +99,13 @@ export const OASIS_WORKERS: OasisWorker[] = [
     // The reporter for every tile on this board: without its heartbeat the
     // computer reads offline and Telegram/agent turns cannot reach it.
     service: "pm2.claude-bridge-ping",
-    label: "Bridge heartbeat",
-    purpose: "Tells the Command Center every minute that this computer is online, reports these worker statuses, and runs workspace schedules.",
+    label: "Computer heartbeat (optional)",
+    purpose: "Reports this computer's presence and local workers while it is on. The server runs workspace schedules through its separate cloud scheduler.",
   },
   {
     service: "pm2.event-router",
-    label: "Event router",
-    purpose: "Read-only: keeps a copy of every agent event in this computer's activity log.",
+    label: "Local activity log (optional)",
+    purpose: "Keeps a read-only copy of agent events on this computer. Server schedules do not depend on this local log.",
   },
   // Removed 2026-06-06 — three stale workers that aren't actually
   // running on CC's local machine for the OASIS personal Command Center:
@@ -137,26 +141,26 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — Cloudflare reports sender health; the local monitor stays off.",
   },
   {
-    // CC's only Atlas bot: no VPS copy exists yet.
+    // Keep local status/controls until its actual cloud cutover is verified.
     service: "pm2.atlas-telegram",
     label: "Atlas CFO Telegram",
     purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
   },
   {
-    // CC's only Maven bot: no VPS copy exists yet.
+    // Keep local status/controls until its actual cloud cutover is verified.
     service: "pm2.maven-telegram",
     label: "Maven CMO Telegram",
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
   },
   {
     // Live since 2026-10-31: the VPS's reporter (oasis-vps-health.timer, every
-    // minute) posts these two rows to /api/internal/vps-health
+    // minute) posts the registered VPS rows to /api/internal/vps-health
     // (lib/automations/vps-health.ts), which writes integrations_health under
     // the agents owner's profile, where this panel reads. Never controllable
     // from here.
     service: "vps.oasis-telegram-bridge",
     label: "Telegram bridge (daemon VPS)",
-    purpose: "Long-polls the Bravo Telegram bot around the clock and hands each message from CC to the Command Center, which answers through this computer.",
+    purpose: "Long-polls the Bravo Telegram bot around the clock and hands each message from CC to the Command Center's selected AI runtime.",
     runtime: "remote",
     control_mode: "none",
     status_source: "integrations_health",
@@ -166,6 +170,78 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "vps.oasis-inbox-sweep",
     label: "Inbox sweep (daemon VPS)",
     purpose: "Every 5 minutes: classifies new mail and alerts CC on Telegram about hot replies. A failed run alerts CC on Telegram.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-scheduler",
+    label: "Empire scheduler (daemon VPS)",
+    purpose: "Runs enabled Empire schedules on the server while your computer is off. Each job's result is shown in the schedule list.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-headless-bridge",
+    label: "Cloud chat runner (daemon VPS)",
+    purpose: "Runs queued agent chats on the server using its connected AI account, without this computer.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-content-tools-runner",
+    label: "Content tools runner (daemon VPS)",
+    purpose: "Processes queued video remixes, hook rewrites and B-roll searches for review. It does not publish content.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-workspace-scheduler",
+    label: "Workspace scheduler (daemon VPS)",
+    purpose: "Runs reviewed workspace scripts under exclusive server grants, including the Atlas inbox consumer. Its own heartbeat reports whether this service is running.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-ai-audit-runner",
+    label: "Free AI Audit PDF runner (daemon VPS)",
+    purpose: "Prints each approved audit to its branded Letter PDF so final review never waits for your Mac. It contacts no client.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-meet-runner",
+    label: "Meeting transcripts (daemon VPS)",
+    purpose: "Transcribes recorded Oasis Meet calls on the server, so transcripts arrive while your computers are off. Delete meeting reaches its copy too.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.atlas-telegram",
+    label: "Atlas CFO Telegram (daemon VPS)",
+    purpose: "Atlas's cloud Telegram service. Requires verified bot setup and the local bot to stop before activation; its own heartbeat reports whether it is running.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.maven-telegram",
+    label: "Maven CMO Telegram (daemon VPS)",
+    purpose: "Maven's cloud Telegram service. Requires verified bot setup and the local bot to stop before activation; its own heartbeat reports whether it is running.",
     runtime: "remote",
     control_mode: "none",
     status_source: "integrations_health",

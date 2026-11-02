@@ -23,6 +23,32 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { checkTcpaWindow } from "../lib/tcpa-window";
 
+// A verified missing Canadian prefix must resolve on both sides of DST.
+for (const [instant, hour, within] of [
+  ["2026-10-31T11:59:00Z", 7, false], ["2026-10-31T12:00:00Z", 8, true],
+  ["2026-11-01T12:59:00Z", 7, false], ["2026-11-01T13:00:00Z", 8, true],
+  ["2026-11-02T02:00:00Z", 21, false],
+] as const) {
+  const result = checkTcpaWindow("+19055550123", new Date(instant));
+  assert.equal(result.usedFallback, false); assert.equal(result.hour, hour); assert.equal(result.withinWindow, within);
+}
+assert.equal(checkTcpaWindow("+99955550123").usedFallback, true);
+
+// ── Atlantic Canada is Atlantic time, and no area code has two zones ──────
+// 506 (New Brunswick) sat under Eastern, so its quiet hours ran an hour late:
+// 20:30 Eastern read as inside the window while it was 21:30 in Moncton. 902
+// was listed under both zones and only came out right because the map builder
+// visited Atlantic last.
+for (const areaCode of ["506", "902", "782"]) {
+  assert.equal(checkTcpaWindow(`+1${areaCode}5550123`).timeZone, "America/Halifax", `${areaCode} is Atlantic time`);
+}
+{
+  const src = readFileSync(new URL("../lib/tcpa-window.ts", import.meta.url), "utf8");
+  const listed = [...src.matchAll(/"(\d{3})"/g)].map((m) => m[1]);
+  const twice = listed.filter((code, index) => listed.indexOf(code) !== index);
+  assert.deepEqual(twice, [], `area codes listed in more than one zone: ${twice.join(", ")}`);
+}
+
 // ── US TERRITORIES MUST RESOLVE, not fall through to the safe hour ────────
 // The 18:00 UTC anchor was justified as "inside 8am-9pm for every US zone",
 // and that reasoning quietly meant every US STATE. It breaks in both

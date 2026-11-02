@@ -66,10 +66,21 @@ const quoSends: Array<{ to: string; text: string; from: string | null }> = [];
 let quoResult: Record<string, unknown> | null = null;
 let quoSenderResult: Record<string, unknown> | null = null;
 let stopIntake = true;
+let intakeReason = "configuration_missing";
+let intakeOutage: string | false = false;
+let intakeCalls = 0;
+type QuoSnapshot = { apiKey: string; fromNumber: string | null };
+let credentialSnapshots: QuoSnapshot[] = [];
+let intakeSnapshotReady: ((snapshot: QuoSnapshot) => boolean) | null = null;
 stubModule(require.resolve("../lib/integrations/quo"), {
-  quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
+  quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, ...(credentialSnapshots.shift() ?? { apiKey: "test", fromNumber: null }) }),
   quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
-  quoStopIntakeConnected: () => stopIntake,
+  quoStopIntakeReadiness: (_tenant: string, snapshot: QuoSnapshot) => {
+    intakeCalls++;
+    if (intakeOutage) return Promise.reject(new Error(intakeOutage));
+    const ready = intakeSnapshotReady ? intakeSnapshotReady(snapshot) : stopIntake;
+    return { ready, reason: ready ? "ready" : intakeReason };
+  },
   sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
     quoSends.push({ ...input, from: creds.fromNumber });
     return quoResult ?? { ok: true, id: `QU${quoSends.length}`, status: "queued" };
@@ -236,7 +247,9 @@ async function main() {
           headers: { authorization: `Bearer ${process.env.CRON_SECRET}`, "x-vercel-cron": "1" },
         }),
       );
-      return (await res.json()) as { sent?: number; failed?: number };
+      const body = (await res.json()) as { sent?: number; failed?: number };
+      assert.equal(res.status, body.failed ? 409 : 200, "persisted reminder failures must not trigger an immediate scheduler retry");
+      return body;
     } finally {
       console.error = originalError;
     }
@@ -357,10 +370,88 @@ async function main() {
   await check("without STOP intake on the Quo number, reminders are not texted", async () => {
     const row = await rowOf("lead-sms-nostop");
     assert.equal(row.status, "skipped");
-    assert.equal(row.last_error, "quo_stop_intake_not_connected");
+    assert.equal(row.last_error, "quo_stop_intake:configuration_missing");
     assert.equal(quoSends.length, beforeNoStop);
   });
   stopIntake = true;
+
+  await check("temporary incoming delivery backlog defers without attempts; recovery sends once and expired reminders stay unsent", async () => {
+    stopIntake = false; intakeReason = "provider_delivery_backlog";
+    await appointment("appt-backlog", 15);
+    await appointment("appt-backlog-expired", 15);
+    await queue("sms-backlog", "appt-backlog", "reminder_15", 15, "sms", PHONE);
+    await queue("sms-backlog-expired", "appt-backlog-expired", "reminder_15", 15, "sms", PHONE);
+    const before = quoSends.length;
+    await dispatch();
+    for (const id of ["sms-backlog", "sms-backlog-expired"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.equal(row.last_error, "quo_stop_intake:provider_delivery_backlog");
+      assert.ok(Date.parse(String(row.due_at)) > Date.now());
+    }
+    assert.equal(quoSends.length, before);
+    stopIntake = true; intakeReason = "configuration_missing";
+    await seed.execute("UPDATE website_sales_meeting_notifications SET due_at='2026-01-01T00:00:00Z' WHERE id IN ('sms-backlog','sms-backlog-expired')");
+    await seed.execute("UPDATE call_appointments SET scheduled_for='2026-01-01T00:00:00Z' WHERE id='appt-backlog-expired'");
+    await dispatch();
+    assert.equal((await rowOf("sms-backlog")).status, "sent");
+    assert.equal(Number((await rowOf("sms-backlog")).attempts), 1);
+    assert.equal((await rowOf("sms-backlog-expired")).status, "skipped");
+    assert.equal(quoSends.length, before + 1);
+    await dispatch(); assert.equal(quoSends.length, before + 1);
+  });
+
+  await check("a Quo provider outage holds every text without attempts and checks the tenant once per pass", async () => {
+    intakeOutage = "quo_webhook_provider_unavailable"; intakeCalls = 0;
+    await appointment("appt-outage-a", 15);
+    await appointment("appt-outage-b", 15);
+    await queue("sms-outage-a", "appt-outage-a", "reminder_15", 15, "sms", PHONE);
+    await queue("sms-outage-b", "appt-outage-b", "reminder_15", 15, "sms", PHONE);
+    const before = quoSends.length;
+    await dispatch();
+    for (const id of ["sms-outage-a", "sms-outage-b"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.equal(row.last_error, "quo_stop_intake_unavailable:quo_webhook_provider_unavailable");
+    }
+    assert.equal(intakeCalls, 1, "one readiness check per tenant per pass, its rejection cached");
+    assert.equal(quoSends.length, before);
+    // A timeout or network error is an outage too: no attempt is spent on it.
+    intakeOutage = "The operation was aborted due to timeout";
+    await seed.execute("UPDATE website_sales_meeting_notifications SET due_at='2026-01-01T00:00:00Z' WHERE id IN ('sms-outage-a','sms-outage-b')");
+    await dispatch();
+    for (const id of ["sms-outage-a", "sms-outage-b"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.match(String(row.last_error), /^quo_stop_intake_unavailable:/);
+    }
+    assert.equal(quoSends.length, before);
+    intakeOutage = false;
+    // Out of the way of the passes below, which count texts.
+    await seed.execute("UPDATE website_sales_meeting_notifications SET status='skipped' WHERE id IN ('sms-outage-a','sms-outage-b')");
+  });
+
+  await check("readiness is rechecked for each changed API key or sender snapshot in the same pass", async () => {
+    const first = { apiKey: "fixture-key-one", fromNumber: "+14165550111" };
+    const changedKey = { ...first, apiKey: "fixture-key-two" };
+    const changedSender = { ...changedKey, fromNumber: "+14165550112" };
+    credentialSnapshots = [first, first, changedKey, changedSender];
+    intakeSnapshotReady = (snapshot) => snapshot.apiKey === first.apiKey && snapshot.fromNumber === first.fromNumber;
+    intakeCalls = 0;
+    const before = quoSends.length;
+    try {
+      for (let index = 0; index < 4; index++) {
+        await appointment(`appt-rotation-${index}`, 15);
+        await queue(`sms-rotation-${index}`, `appt-rotation-${index}`, "reminder_15", 15, "sms", PHONE);
+      }
+      await dispatch();
+      assert.equal(intakeCalls, 3, "unchanged credentials share proof; changing either binding invalidates it");
+      assert.equal(quoSends.length, before + 2, "the new unverified sender and key cannot reuse the earlier readiness");
+      for (let index = 0; index < 4; index++) {
+        assert.equal((await rowOf(`sms-rotation-${index}`)).status, index < 2 ? "sent" : "skipped");
+      }
+    } finally { credentialSnapshots = []; intakeSnapshotReady = null; }
+  });
 
   // Pass 2e: the sending number cannot be looked up: nothing was sent, so it retries.
   quoSenderResult = { ok: false, code: "quo_unreachable", reason: "Quo did not answer." };

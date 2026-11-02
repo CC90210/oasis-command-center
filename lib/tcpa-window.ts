@@ -84,7 +84,9 @@ const ZONE_AREA_CODES: Record<string, string[]> = {
   ],
   [ALASKA]: ["907"],
   [HAWAII]: ["808"],
-  [ATLANTIC]: ["902", "782"],
+  // 506 is New Brunswick, on Atlantic time; it sat under Eastern, which put
+  // quiet hours an hour late for those numbers.
+  [ATLANTIC]: ["902", "782", "506"],
   [NEWFOUNDLAND]: ["709"],
   // Canada, spread across Eastern/Central/Mountain/Pacific like the US.
   // Kept as separate entries appended into the maps below rather than a
@@ -92,10 +94,14 @@ const ZONE_AREA_CODES: Record<string, string[]> = {
 };
 
 // Canadian area codes, folded into the same zone buckets above.
+// 506 and 902 are Atlantic (above). Listing them here too made the result
+// depend on which zone the map builder happened to visit last.
 ZONE_AREA_CODES[EASTERN].push(
-  "226", "249", "289", "343", "365", "416", "437", "438", "450", "506", "514",
-  "519", "579", "581", "613", "647", "705", "819", "873", "902",
+  "226", "249", "289", "343", "365", "416", "437", "438", "450", "514",
+  "519", "579", "581", "613", "647", "705", "819", "873", "905",
 );
+// 905: southern Ontario, same Eastern rules as existing 289/365 overlays.
+// https://www.cnac.ca/data/COCodeStatus_NPA905.htm ; https://www.ontario.ca/laws/statute/90t09
 ZONE_AREA_CODES[CENTRAL].push("204", "431", "807");
 ZONE_AREA_CODES[MOUNTAIN].push("403", "587", "780", "825");
 ZONE_AREA_CODES[PACIFIC].push("236", "250", "604", "672", "778");

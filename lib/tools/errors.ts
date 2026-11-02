@@ -43,6 +43,8 @@ export const RUNNER_ERROR_LINES: Readonly<Record<string, string>> = {
   unsupported_tool: RUNNER_FAILED,
   extractor_error: RUNNER_FAILED,
   runner_error: RUNNER_FAILED,
+  writer_output_invalid: "The writer returned invalid drafts. Run it again.",
+  writer_unavailable: "The subscription writer is unavailable. Check Claude sign-in on the selected computer.",
   unknown: RUNNER_FAILED,
   // Oasis Meet's runner (BEA scripts/meet/runner.py). Its jobs are never on a
   // Tools card; the meeting's own panel words them (lib/meet/recording.ts).

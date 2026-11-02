@@ -51,9 +51,8 @@ export const DEPLOY_CHECKS: DripCheck[] = [
     id: "alerting.delivery_failures",
     severity: "critical",
     rule: { kind: "must_be_zero" },
-    // Both lanes. A delivery failure is about the alerting system itself, and
-    // whichever audience CAN still be reached is the one that must hear it.
-    lane: ["operator", "sunbiz-ops"],
+    // Estate alerts belong to CC. The external SunBiz audience is retired.
+    lane: "operator",
     observe: async (db, _tenantId, endMs) => {
       try {
         const r = await db
@@ -83,7 +82,7 @@ export const DEPLOY_CHECKS: DripCheck[] = [
     // on the platform, not the one whose tenant happened to be graded. It had
     // been inheriting the runner's sunbiz-ops default, so an OASIS-only
     // regression would have paged the client's ops channel and nobody else.
-    lane: ["operator", "sunbiz-ops"],
+    lane: "operator",
     rule: { kind: "must_be_zero" },
     // Env is read at OBSERVE time, not module load, so tests can vary it and
     // a long-lived process cannot capture a stale value.

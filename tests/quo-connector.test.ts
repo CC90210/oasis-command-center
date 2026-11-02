@@ -253,7 +253,9 @@ async function main() {
     const schema = schemas.findTenantManuallyEditableIntegrationSchema("quo");
     assert.ok(schema, "an owner can save Quo keys");
     assert.equal(schema!.label, "Quo");
-    assert.deepEqual(schema!.fields.map((f) => f.key), ["api_key", "from_number"]);
+    assert.deepEqual(schema!.fields.map((f) => f.key), ["api_key", "from_number", "webhook_key", "webhook_id", "webhook_org_id", "webhook_phone_number_id"]);
+    assert.ok(schema!.fields.slice(2).every(f => f.optional), "webhook fields do not break manual replies");
+    assert.equal(schema!.fields.find(f => f.key === "webhook_key")!.sensitive, true);
     const [apiKey, from] = schema!.fields;
     assert.equal(apiKey.sensitive, true, "the key is a password field");
     assert.equal(from.sensitive, false);
@@ -267,6 +269,11 @@ async function main() {
     }
     assert.equal(schemas.validateIntegrationValue(apiKey, OASIS_KEY), null);
     assert.ok(schemas.validateIntegrationValue(apiKey, "has a space in it"), "a key with a space is refused");
+    // Quo webhook IDs are plain numbers and can be short; the form accepts what
+    // the loader accepts (/^\d{1,100}$/), CodeRabbit #791.
+    const webhookId = schema!.fields.find(f => f.key === "webhook_id")!;
+    for (const ok of ["123", "1234", "98765432101"]) assert.equal(schemas.validateIntegrationValue(webhookId, ok), null, `${ok} is accepted`);
+    for (const bad of ["abc", "12 34", "WH123", ""]) assert.ok(schemas.validateIntegrationValue(webhookId, bad), `${bad} is refused`);
     const src = readFileSync(join(__dirname, "..", "lib/tenant-integration-schemas.ts"), "utf8");
     for (const cited of ["quo.com/docs/mdx/api-reference/authentication", "quo.com/docs/mdx/api-reference/messages/send-a-text-message"]) {
       assert.ok(src.includes(cited), `the schema cites ${cited}`);

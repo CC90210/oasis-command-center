@@ -28,7 +28,8 @@ export type IntegrationFieldDef = {
     | "plaid_environment"
     | "discord_webhook_url"
     | "teams_webhook_url"
-    | "meta_ad_account_id";
+    | "meta_ad_account_id"
+    | "quo_webhook_id";
   /** twilio_sid: the two letters this SID starts with (AC account, SK API key, MG messaging service). */
   sidPrefix?: "AC" | "SK" | "MG";
   /** Not needed for the app to work (a label that says "(optional)" counts too). */
@@ -144,6 +145,10 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
     fields: [
       { key: "api_key", label: "API key", sensitive: true, validation: "single_line_token", hint: "In Quo: Settings > API > Generate API key. Only a workspace owner or admin can create one." },
       { key: "from_number", label: "From number (optional)", sensitive: false, validation: "phone_e164", placeholder: "+14165551212", hint: "The Quo number your texts leave from, in E.164 form like +14165551212. Leave it blank when your Quo workspace has one number: OASIS uses that one." },
+      { key: "webhook_key", label: "Webhook signing key (for automated texts)", sensitive: true, optional: true, validation: "single_line_token", hint: "Save the whsec_ key from your Quo webhook. Automated texts also require an explicit From number and a verified incoming delivery." },
+      { key: "webhook_id", label: "Webhook ID", sensitive: false, optional: true, validation: "quo_webhook_id", hint: "The numeric ID of the enabled message.received webhook, version 2026-03-30." },
+      { key: "webhook_org_id", label: "Quo organization ID", sensitive: false, optional: true, validation: "single_line_token", hint: "The orgId on that webhook. It must match the signed incoming event." },
+      { key: "webhook_phone_number_id", label: "Quo phone number ID", sensitive: false, optional: true, validation: "single_line_token", hint: "The PN... ID for your From number. Configure this as the webhook's only resource ID." },
     ],
     getKey: { href: "https://www.quo.com/docs/mdx/api-reference/authentication", label: "Quo's guide to API keys" },
   },
@@ -446,6 +451,11 @@ export function validateIntegrationValue(
         : "That is not a Teams Workflows webhook URL. Copy the whole address Workflows shows after you save the flow (it ends with a long sig=... part).";
     case "meta_ad_account_id":
       return /^(act_)?\d{5,20}$/.test(value.trim()) ? null : "Use the ad account's number, like act_1234567890.";
+    case "quo_webhook_id":
+      // Same rule as the loader (lib/integrations/quo-webhook.ts): Quo's IDs are
+      // plain numbers and can be short ("123"), which single_line_token's
+      // 8-character minimum refused.
+      return /^\d{1,100}$/.test(value.trim()) ? null : "Use the webhook's numeric ID, like 123.";
     case "public_hostname":
       return isPublicHostname(value) ? null : "Use the server's public name (like smtp.example.com), not an IP address or an internal name.";
     case "smtp_port":

@@ -7,7 +7,7 @@ import { getTursoClient } from "@/lib/turso";
 import { bookingMeetRoomDeps } from "@/lib/booking/meet-room";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
-import { quoCredentialsOrNull, quoSender, quoStopIntakeConnected, sendQuoSms } from "@/lib/integrations/quo";
+import { quoCredentialsOrNull, quoSender, quoStopIntakeReadiness, sendQuoSms } from "@/lib/integrations/quo";
 import { smsConsentStillGiven } from "@/lib/booking/sms-consent";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -193,7 +193,28 @@ async function retryOrFail(db: Db, row: NotificationRow, reason: string) {
 type SenderPass = {
   standings: Map<string, MemberStanding>;
   withheld: NotificationRow[];
+  /** Reuse each sender snapshot's readiness (including rejected checks).
+   * Credentials can rotate between rows, so tenant alone is not a proof. */
+  quoIntake: Map<string, {
+    apiKey: string;
+    fromNumber: string | null;
+    promise: Promise<{ ready: boolean; reason: string }>;
+  }>;
 };
+
+function quoIntakeForPass(
+  pass: SenderPass,
+  tenantId: string,
+  quo: NonNullable<Awaited<ReturnType<typeof quoCredentialsOrNull>>>,
+): Promise<{ ready: boolean; reason: string }> {
+  const cached = pass.quoIntake.get(tenantId);
+  if (cached && cached.apiKey === quo.apiKey && cached.fromNumber === quo.fromNumber) {
+    return cached.promise;
+  }
+  const intake = quoStopIntakeReadiness(tenantId, quo);
+  pass.quoIntake.set(tenantId, { apiKey: quo.apiKey, fromNumber: quo.fromNumber, promise: intake });
+  return intake;
+}
 
 /**
  * Whether an EMAIL row's sender may still send as themselves -- mirrors
@@ -818,17 +839,36 @@ async function processRow(
       }
       // OASIS texts through Quo since 2026-10-26 (Twilio broke). Its own
       // switches and the workspace's STOP list are re-checked in sendQuoSms.
-      // A STOP texted back to the Quo number is not read by OASIS yet
-      // (lib/integrations/quo.ts), and an automated text must honour one. So
-      // reminders are texted only once that intake is connected; until then
-      // the email carries them (Codex review of #774).
-      if (!quoStopIntakeConnected()) {
-        await mark(db, row, "skipped", { error: "quo_stop_intake_not_connected" });
-        return "skipped";
-      }
+      // A signed inbound receipt and current provider configuration must
+      // prove this workspace's STOP intake before automated reminders send.
       const quo = await quoCredentialsOrNull(row.tenant_id);
       if (!quo) {
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
+        return "skipped";
+      }
+      let intake: { ready: boolean; reason: string };
+      try {
+        intake = await quoIntakeForPass(senderPass, row.tenant_id, quo);
+      } catch (error) {
+        // Nothing was sent, and a check that could not run (a Quo outage or
+        // timeout, a network error, an unreadable proof or bundle) proves
+        // nothing about STOP either way. Hold without spending a send attempt,
+        // exactly like a delivery backlog: the next tick rechecks its meeting
+        // and expiry rules first, so an unrecovered check ends with the meeting.
+        const reason = (error instanceof Error ? error.message || error.name : String(error)).slice(0, 120);
+        console.error("[founder-meeting-reminders] Quo STOP intake check unavailable", { id: row.id, tenant: row.tenant_id, reason });
+        await deferRow(db, row, new Date(Date.now() + 60_000).toISOString(), `quo_stop_intake_unavailable:${reason}`);
+        return "held";
+      }
+      if (!intake.ready) {
+        if (intake.reason === "provider_delivery_backlog") {
+          // In-flight incoming messages may contain STOP. Send nothing until
+          // they settle; keep this reminder pending without burning a send
+          // attempt. Next tick rechecks its existing meeting/expiry rules first.
+          await deferRow(db, row, new Date(Date.now() + 60_000).toISOString(), "quo_stop_intake:provider_delivery_backlog");
+          return "held";
+        }
+        await mark(db, row, "skipped", { error: `quo_stop_intake:${intake.reason}` });
         return "skipped";
       }
       if (isDryRun("quo")) {
@@ -1197,7 +1237,7 @@ async function handle(req: NextRequest) {
   let sent = 0;
   let skipped = 0;
   let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0) + watch.errors.length;
-  const senderPass: SenderPass = { standings: new Map(), withheld: [] };
+  const senderPass: SenderPass = { standings: new Map(), withheld: [], quoIntake: new Map() };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
     const claimed = await db.from("website_sales_meeting_notifications")
@@ -1279,7 +1319,9 @@ async function handle(req: NextRequest) {
     sent,
     skipped,
     failed: failures,
-  }, { status: failures ? 503 : 200 });
+  // Reminder attempts and retry schedules are already persisted. Preserve this
+  // outcome instead of letting the scheduler retry immediately and report no work.
+  }, { status: failures ? 409 : 200 });
 }
 
 export async function GET(req: NextRequest) {

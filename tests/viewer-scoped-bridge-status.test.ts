@@ -196,7 +196,7 @@ async function main() {
     assert.deepEqual(forAdon, { workers: [], reporter: null, workersDown: 0 }, "not the agents owner's question to ask — zero known problems, never 'unknown'");
   });
 
-  await check("describeBackground: an offline computer is one problem, not one alarm per local worker", () => {
+  await check("describeBackground: an offline computer still exposes required local bots, and a blind one never hides the VPS", () => {
     const longAgo = new Date(now.getTime() - 30 * 60_000).toISOString();
     const workerRows = new Map(
       [...LOCAL_OASIS_WORKERS.map((w) => w.service), "fleet_watchdog"].map((service) => [
@@ -206,9 +206,33 @@ async function main() {
     );
     const offlinePc = [{ label: "CCPC (Windows)", lastSeenAt: longAgo, state: "offline" as const }];
     const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
-    assert.ok(LOCAL_OASIS_WORKERS.length >= 6, "the six workers that still run here are watched");
-    assert.ok(result.workers?.every((w) => w.state === "stale"), "each tile still says it stopped reporting");
-    assert.equal(result.workersDown, 1, "the computer being off is the one thing needing CC");
+    assert.ok(!LOCAL_OASIS_WORKERS.some(w => w.service === "pm2.bravo-scheduler"),
+      "the retired local scheduler must not create a Windows dependency");
+    assert.ok(["pm2.atlas-telegram", "pm2.maven-telegram"].every(service =>
+      LOCAL_OASIS_WORKERS.some(w => w.service === service)),
+      "the bots remain watched locally until their cloud cutover is verified");
+    assert.ok(result.workers?.filter(w => !w.service.startsWith("vps.")).every(w => w.state === "stale"),
+      "local tiles still say they stopped reporting");
+    assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
+      "the offline computer cannot invent a status for an unreported cloud service");
+    assert.equal(result.workersDown, 2,
+      "Atlas and Maven still depend on this computer until their actual cloud cutovers; optional local workers do not count");
+    const optionalOnly = new Map(workerRows);
+    for (const service of ["pm2.atlas-telegram", "pm2.maven-telegram"]) {
+      optionalOnly.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(optionalOnly, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
+      "stale optional local chat, heartbeat and activity workers do not invent an outage");
+    // A computer reporter that cannot read its process table voids only its own
+    // count; a stale VPS service is still reported.
+    const blindRows = new Map(workerRows);
+    blindRows.set("fleet_watchdog", { service: "fleet_watchdog", status: "down", last_ping_at: now.toISOString(),
+      metadata: { error: "process table unreadable" } });
+    blindRows.set("vps.oasis-scheduler", { service: "vps.oasis-scheduler", status: "down", last_ping_at: now.toISOString(), metadata: {} });
+    const onlinePc = [{ label: "CCPC (Windows)", lastSeenAt: now.toISOString(), state: "online" as const }];
+    const blind = describeBackground(blindRows, onlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
+    assert.equal(blind.reporter?.state, "failing");
+    assert.equal(blind.workersDown, 1, "the VPS outage stays visible while the computer's reporter is blind");
     assert.ok(
       LOCAL_OASIS_WORKERS.every((w) => (w.runtime ?? "local") === "local" && w.service.startsWith("pm2.")),
       "remote (VPS) rows never enter the local alarm list",

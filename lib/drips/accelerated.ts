@@ -10,8 +10,8 @@
  * on NO track at all. The window between flag-set and first chase enrollment
  * (~one cron tick) intentionally keeps stage drips running for the same reason.
  *
- * Fail-open by design: if the lookup errors, we DON'T suppress — the safe
- * failure is a possible one-off overlap text, never a silently-stranded lead.
+ * A failed lookup stops the current attempt. Unknown overlap is not permission
+ * to send a second track; callers record a visible failure and may retry.
  */
 
 import "server-only";
@@ -47,6 +47,7 @@ export async function hasActiveAcceleratedRun(
       .select("id, trigger_filter")
       .eq("tenant_id", tenantId)
       .eq("enabled", true);
+    if (seqRes.error) throw new Error("drip_accelerated_lookup_unavailable");
     const chaseIds = ((seqRes.data || []) as Array<{ id: string; trigger_filter: unknown }>)
       .filter((s) => {
         const tf = s.trigger_filter as { entity?: unknown; field?: unknown; to?: unknown } | null;
@@ -62,8 +63,9 @@ export async function hasActiveAcceleratedRun(
       .in("sequence_id", chaseIds)
       .in("status", ["scheduled", "sending"])
       .limit(1);
+    if (runs.error) throw new Error("drip_accelerated_lookup_unavailable");
     return ((runs.data || []) as Array<{ id: string }>).length > 0;
   } catch {
-    return false; // fail-open: keep the stage drip rather than strand the lead
+    throw new Error("drip_accelerated_lookup_unavailable");
   }
 }

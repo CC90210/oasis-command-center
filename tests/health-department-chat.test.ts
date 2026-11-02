@@ -179,7 +179,7 @@ async function main() {
     // One piece throwing must not drop the others' summaries: each is guarded, and the route still answers 500.
     for (const piece of ["calendar", "estate"]) assert.match(route, new RegExp(`guard\\(\\s*"${piece}"`), `${piece} is not guarded`);
     assert.doesNotMatch(route, /apex-health-monitor|fleet_heartbeat/, "retired APEX health must not keep the route red");
-    assert.match(route, /status: failedPieces\.length \? 500 : 200/);
+    assert.match(route, /status: durableBusinessFailed \? 409 : failedPieces\.length \? 500 : businessFailed \? 409 : 200/);
   });
 
   await check("warn_above_zero: 0 is ok, a count is DEGRADED (never failing), an unreadable value is check_broken", () => {

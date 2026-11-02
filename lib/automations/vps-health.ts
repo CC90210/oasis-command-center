@@ -10,11 +10,11 @@
  * text (CC's choice: no new credential), in x-oasis-vps-timestamp / x-oasis-vps-signature, inside a
  * 300 s window, checked timing-safe before anything is parsed or read (the tool runner's scheme,
  * lib/tools/runner-auth.ts). CRON_SECRET alone opens no cron route: those also need the Worker's
- * attest (lib/cron-auth.ts), so the VPS holding it can only report these two rows.
+ * attest (lib/cron-auth.ts), so the VPS holding it can only report the allowlisted rows.
  *
  * WRITE. One integrations_health row per service under the OASIS agents owner's profile(s): the rows
  * the Automations panel reads for its viewer (app/api/automations/background-workers/route.ts). Only
- * the two VPS services are accepted. A reporter that goes quiet reads as "stopped reporting" after
+ * the registered VPS services are accepted. A reporter that goes quiet reads as "stopped reporting" after
  * the panel's 5-minute freshness rule (DAEMON_HEALTH_STALE_MS).
  */
 import "server-only";
@@ -24,10 +24,24 @@ import { readBodyCapped } from "@/lib/ledger/ingest";
 import { readAgentsOwner } from "@/lib/agents-owner";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
 
-export const VPS_HEALTH_SERVICES = ["vps.oasis-telegram-bridge", "vps.oasis-inbox-sweep"] as const;
+export const VPS_HEALTH_SERVICES = [
+  "vps.oasis-telegram-bridge",
+  "vps.oasis-inbox-sweep",
+  "vps.oasis-scheduler",
+  "vps.oasis-headless-bridge",
+  "vps.oasis-content-tools-runner",
+  "vps.oasis-workspace-scheduler",
+  "vps.atlas-telegram",
+  "vps.maven-telegram",
+  // Timer-driven one-pass runners (2026-11-02): the Free AI Audit PDF runner and
+  // the Meet transcription runner, moved off CC's Mac/PC so jobs run while both are off.
+  "vps.oasis-ai-audit-runner",
+  "vps.oasis-meet-runner",
+] as const;
 export type VpsHealthService = (typeof VPS_HEALTH_SERVICES)[number];
-export const VPS_HEALTH_STATUSES = ["healthy", "degraded", "down"] as const;
+export const VPS_HEALTH_STATUSES = ["healthy", "degraded", "down", "running"] as const;
 export type VpsHealthStatus = (typeof VPS_HEALTH_STATUSES)[number];
 
 export const HEADER_VPS_TIMESTAMP = "x-oasis-vps-timestamp";
@@ -65,6 +79,9 @@ export function parseVpsHeartbeat(body: unknown): { ok: true; value: VpsHeartbea
     if (typeof status !== "string" || !(VPS_HEALTH_STATUSES as readonly string[]).includes(status)) {
       return { ok: false, field: "status" };
     }
+    // Only a bounded oneshot pass has a pending result. An always-on
+    // process must report its actual supervisor health, not this transient state.
+    if (status === "running" && !VPS_ONESHOT_SERVICES.has(service)) return { ok: false, field: "status" };
     if (detail !== undefined && typeof detail !== "string") return { ok: false, field: "detail" };
     seen.add(service);
     out.push({
@@ -104,10 +121,10 @@ export async function recordVpsHeartbeat(
         input.tenantId,
         profileId,
         s.service,
-        s.status,
+        s.status === "running" ? "unknown" : s.status,
         at,
-        s.status === "healthy" ? null : s.detail || s.status,
-        JSON.stringify({ via: "vps-heartbeat", host: input.heartbeat.host, detail: s.detail, runtime: "remote" }),
+        s.status === "healthy" || s.status === "running" ? null : s.detail || s.status,
+        JSON.stringify({ via: "vps-heartbeat", host: input.heartbeat.host, detail: s.detail, runtime: "remote", ...(s.status === "running" ? { phase: "running" } : {}) }),
         at,
       ],
     })),

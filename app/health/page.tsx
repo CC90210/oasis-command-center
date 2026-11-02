@@ -302,6 +302,7 @@ function workerTone(w: WorkerHealth): "engaged" | "warm" | "accent" | "neutral" 
 
 const WORKER_TAG: Record<WorkerHealth["state"], string> = {
   running: "Running",
+  pending: "Running — awaiting result",
   stopped_by_you: "Stopped by you",
   trouble: "Having trouble",
   down: "Down",
@@ -314,14 +315,14 @@ function BackgroundCard({ system, now }: { system: SystemHealth; now: number }) 
   return (
     <Card
       title="Background work"
-      subtitle="The processes on your computer and the schedules that keep OASIS running while you're away."
+      subtitle="The processes on your computer, the daemon VPS, and the schedules that keep OASIS running while you're away."
     >
       <div className="space-y-4">
         {reporter && (reporter.state === "failing" || reporter.state === "silent") && (
           <p className="text-sm text-status-warm">
             {reporter.state === "failing"
-              ? "Your computer is checking in but says it can't read its own process list, so the states below may be out of date."
-              : "Your computer is checking in but stopped sending its process list, so the states below may be out of date."}
+              ? "Your computer is checking in but says it can't read its own process list, so its local worker states may be out of date."
+              : "Your computer is checking in but stopped sending its process list, so its local worker states may be out of date."}
           </p>
         )}
         {system.workers === null ? (

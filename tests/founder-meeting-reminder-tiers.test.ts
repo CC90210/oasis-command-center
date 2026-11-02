@@ -131,8 +131,7 @@ assert(reminderTierStillValid(5, 1, "sms"));
 assert(!reminderTierStillValid(5, 0, "sms"));
 assert(reminderTierStillValid(10, 1, "email"), "an old T-10 row still goes out until the call starts");
 assert(!reminderTierStillValid(10, 0, "sms"));
-// Automated texts stay off until an authenticated Quo STOP intake exists (Codex review of #774).
-assert.equal(quoStopIntakeConnected(), false);
+// A tenant-bound authenticated Quo STOP intake is required for automated texts.
 assert.equal(reminderWindowText(1440), "about 24 hours");
 assert.equal(reminderWindowText(58), "1 hour");
 assert.equal(reminderWindowText(5), "5 minutes");
@@ -245,6 +244,7 @@ assert(oasisClamped.endsWith(SMS_STOP_FOOTER), "Oasis link clamping keeps protec
 
 
 async function main() {
+assert.equal(await quoStopIntakeConnected(), false);
 const db = createClient({ url: ":memory:" });
 await db.execute("PRAGMA foreign_keys = ON");
 await db.executeMultiple(`
