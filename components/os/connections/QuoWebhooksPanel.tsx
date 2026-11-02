@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 type Status = { configured: boolean; ready: boolean; reason: string; inbound_url: string; receivedAt: string | null };
 const messages: Record<string, string> = {
-  configuration_missing: "Save the webhook fields and an explicit From number above to connect STOP replies.",
+  configuration_missing: "Use incoming text setup above to choose your sender and connect STOP replies.",
   awaiting_signed_delivery: "Waiting for a signed incoming message from the configured Quo number.",
   needs_provider_check: "An incoming delivery was verified. Check Quo's current webhook settings before automated texts can send.",
   provider_configuration_mismatch: "The Quo webhook must be enabled, use this address, and receive messages only for the configured number.",
@@ -39,7 +39,7 @@ export function QuoWebhooksPanel({ version }: { version?: number }) {
     <p className="font-medium">Incoming STOP replies</p>
     <p className="text-fg-muted">{error ? "The connection could not be checked. Automated texts stay blocked until it can be verified." : status ? messages[status.reason] ?? "Connection status is unknown." : "Reading connection status…"}</p>
     {status && <p className="break-all text-xs text-fg-muted">Webhook address: {status.inbound_url}</p>}
-    <p className="text-xs text-fg-muted">In Quo, use message.received, API version 2026-03-30, and only your configured phone number. Save its signing key above, then receive a signed message or use Quo&apos;s webhook test delivery. Repeat this after rotating the signing key. This check sends no text.</p>
-    <button type="button" disabled={busy || !status?.configured} onClick={check} className="rounded border border-bg-border px-3 py-1.5 disabled:opacity-50">{busy ? "Checking…" : "Check STOP connection"}</button>
+    <p className="text-xs text-fg-muted">After setup, text the chosen Quo number from your own phone and check incoming delivery here. Automated texts require a verified incoming message for that exact account and number. Repeat validation after changing the signing key. This check sends no text.</p>
+    <button type="button" disabled={busy || !status?.configured} onClick={check} className="rounded border border-bg-border px-3 py-1.5 disabled:opacity-50">{busy ? "Checking…" : "Check incoming delivery"}</button>
   </section>;
 }
