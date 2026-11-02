@@ -83,10 +83,11 @@ export async function migrateCloudSchedules(mode = "--preview", client = getTurs
     if (Number(atlas.enabled) !== (activate ? 0 : 1)) throw new Error("Unexpected Atlas switch; cutover refused");
     const nextPayload = activate ? JSON.stringify({ ...payload,
       args: safeArgs }) : String(atlas.action_payload);
-    const result = await client.execute({ sql: `UPDATE tenant_cron_jobs SET enabled=?, action_payload=?
+    const result = await client.execute({ sql: `UPDATE tenant_cron_jobs SET enabled=?, action_payload=?,
+      last_scheduled_for=CASE WHEN ?=1 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE last_scheduled_for END
       WHERE tenant_id=? AND id=? AND owner_user_id=? AND enabled=? AND action_payload=?
         AND schedule=? AND action_type=? AND agent_key=? RETURNING id`,
-    args: [activate ? 1 : 0, nextPayload, scope.tenantId, ATLAS_JOB, scope.userId,
+    args: [activate ? 1 : 0, nextPayload, activate ? 1 : 0, scope.tenantId, ATLAS_JOB, scope.userId,
       activate ? 0 : 1, String(atlas.action_payload), atlas.schedule, atlas.action_type, atlas.agent_key] });
     if (result.rows.length !== 1) throw new Error("Atlas changed during cutover; no update applied");
     console.log(JSON.stringify({ mode, changed: 1, schedule_preserved: true, history_preserved: true }));

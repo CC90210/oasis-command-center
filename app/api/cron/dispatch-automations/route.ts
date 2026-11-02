@@ -16,7 +16,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (!tursoConfigured()) return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   try {
     const summary = await dispatchGuidedAutomations({ db: getTursoClient() });
-    const failed = summary.failed.length > 0;
+    const failed = summary.failed.length > 0 || summary.retrying.length > 0;
     // The dispatcher owns run/slot state and any retry on the next tick.
     // An immediate scheduler retry can hide this failure behind no-work success.
     return NextResponse.json({ ...summary, ok: !failed }, { status: failed ? 409 : 200 });

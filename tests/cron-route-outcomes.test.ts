@@ -9,6 +9,8 @@ const mock = (path: string, exports: object) => {
 };
 let paused = false, configured = true, failed = true, throws = false, enabled = true, ready = true;
 let reconciliationThrows = false, readFailures = 0, brokenChecks = 0, fallbackErrors = false;
+let confirmedRefusal = false;
+const { reconcileMavenPublishes: realReconcile } = require("../lib/marketing/maven-publish-reconcile");
 const calls: Record<string, number> = {};
 function entered(key: string) { calls[key] = (calls[key] ?? 0) + 1; if (throws) throw new Error("fixture_failure"); }
 mock("../lib/automations/cron-switches", { cronPauseGate: async () => paused ? NextResponse.json({ ok: true, mode: "paused" }) : null });
@@ -24,7 +26,19 @@ mock("../lib/supabase-server", { getServiceSupabase: () => ({
 }) });
 mock("../lib/marketing/maven-publish-contract", { mavenPublishEnabled: () => enabled, mavenPublishLiveReadiness: () => ({ ready, reason: ready ? "ready" : "not_configured" }) });
 mock("../lib/marketing/maven-publish-cloud", { CloudLatePublisher: class {}, TursoMavenPublishStore: class {}, mavenPublishQueueBinding: async () => ({ send: async () => undefined }) });
-mock("../lib/marketing/maven-publish-reconcile", { reconcileMavenPublishes: async () => { if (reconciliationThrows) throw new Error("fixture_reconcile_failed"); return { readFailures }; } });
+mock("../lib/marketing/maven-publish-reconcile", { reconcileMavenPublishes: async () => {
+  if (reconciliationThrows) throw new Error("fixture_reconcile_failed");
+  if (confirmedRefusal) return realReconcile({
+    now: new Date("2026-11-01T12:00:00Z"),
+    store: {
+      listReconcileCandidates: async () => [{ id: "fixture", tenant_id: "fixture", finished_at: "2026-11-01T11:30:00Z",
+        result: { instagram: { ok: true, post_id: "fixture-post" } } }],
+      saveReconciliation: async (write: { state: string }) => { assert.equal(write.state, "failed"); return "updated"; },
+    },
+    reader: { fetchPost: async () => ({ _id: "fixture-post", platforms: [{ platform: "instagram", status: "failed", errorMessage: "fixture refusal" }] }) },
+  });
+  return { readFailures, deliveryFailures: 0 };
+} });
 mock("../lib/marketing/maven-publish-queue", { runMavenPublishProducer: async ({ dryRun }: { dryRun: boolean }) => {
   entered("maven"); return { mode: dryRun ? "dry" : "live", queued: 0, reaped: { failed: failed && !dryRun ? 1 : 0, requeued: 0 } };
 } });
@@ -86,6 +100,13 @@ async function main() {
       for (const key of ["maven", "fallback"]) { const item = cases.find(item => item.key === key)!; assert.equal((await item.route.GET(request(item.path))).status, 503); }
       configured = true; assert.equal((await maven.route.GET(request(`${maven.path}?dry=1`))).status, 200);
       failed = false; readFailures = 1; assert.equal((await maven.route.GET(request(maven.path))).status, 409); readFailures = 0;
+      confirmedRefusal = true;
+      const refused = await maven.route.GET(request(maven.path));
+      assert.equal(refused.status, 409);
+      const refusedBody = await refused.json();
+      assert.equal(refusedBody.ok, false); assert.equal(refusedBody.reconciliation.deliveryFailures, 1);
+      assert.equal(refusedBody.reconciliation.readFailures, 0);
+      confirmedRefusal = false;
       reconciliationThrows = true; assert.equal((await maven.route.GET(request(maven.path))).status, 409); reconciliationThrows = false;
       brokenChecks = 1; const health = cases.find(item => item.key === "health")!;
       assert.equal((await health.route.GET(request(health.path))).status, 409); brokenChecks = 0; failed = true;

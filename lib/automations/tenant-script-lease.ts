@@ -27,7 +27,8 @@ const JOB_SCOPE = `tenant_id = ? AND id = ? AND owner_user_id = ?
 const SAME_SPEC = `action_type = tenant_cron_execution_leases.job_action_type
   AND agent_key = tenant_cron_execution_leases.job_agent_key
   AND schedule = tenant_cron_execution_leases.job_schedule
-  AND action_payload = tenant_cron_execution_leases.job_payload`;
+  AND action_payload = tenant_cron_execution_leases.job_payload
+  AND (last_scheduled_for IS NULL OR julianday(last_scheduled_for) < julianday(tenant_cron_execution_leases.occurrence_at))`;
 function scope(executor: ScriptExecutor, jobId: string): string[] {
   if (!isOasisScriptExecutor(executor)) throw new Error("executor_not_authorized_for_tenant");
   return [executor.tenantId, jobId, executor.userId!];
@@ -38,7 +39,7 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
   jobId: string, now = new Date()) {
   const args = scope(executor, jobId);
   const lookup = await client.execute({
-    sql: `SELECT id, schedule, action_type, action_payload, agent_key, last_run_at, tz
+    sql: `SELECT id, schedule, action_type, action_payload, agent_key, last_run_at, last_scheduled_for, tz
       FROM tenant_cron_jobs WHERE ${JOB_SCOPE}`, args,
   });
   const row = lookup.rows[0];
@@ -65,8 +66,10 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
   }
   // Two missed polling minutes can catch up once. Never replay hours after a
   // restart, and never drift when the Linux server is configured in UTC.
+  const activation = row.last_scheduled_for == null ? null : Date.parse(String(row.last_scheduled_for));
+  if (activation !== null && !Number.isFinite(activation)) return { ok: false, error: "job_activation_invalid" };
   const due = nextRuns(String(row.schedule), zone,
-    now.getTime() - 180_000, 4).filter((date) => date <= now).at(-1);
+    now.getTime() - 180_000, 4).filter((date) => date <= now && (activation === null || date.getTime() > activation)).at(-1);
   if (!due) return { ok: true, claimed: false };
   const nowIso = now.toISOString();
   const occurrence = due.toISOString();
@@ -81,7 +84,9 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL WHERE EXISTS
         (SELECT 1 FROM tenant_cron_jobs WHERE ${JOB_SCOPE}
           AND schedule = ? AND action_payload = ? AND action_type = ? AND agent_key = ?
-          AND (last_run_at IS NULL OR julianday(last_run_at) < julianday(?)))
+          AND (last_run_at IS NULL OR julianday(last_run_at) < julianday(?))
+          AND (last_scheduled_for IS NULL OR julianday(last_scheduled_for) < julianday(?))
+          AND tz IS ?)
       ON CONFLICT(tenant_id, job_id) DO UPDATE SET
         pairing_id=excluded.pairing_id, owner_user_id=excluded.owner_user_id,
         lease_token=excluded.lease_token, occurrence_at=excluded.occurrence_at,
@@ -95,7 +100,7 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
     args: [executor.tenantId, jobId, executor.pairingId, executor.userId!, token,
       occurrence, until, String(row.action_type), String(row.agent_key), String(row.schedule),
       String(row.action_payload), ...args, String(row.schedule), String(row.action_payload),
-      String(row.action_type), String(row.agent_key), occurrence, nowIso],
+      String(row.action_type), String(row.agent_key), occurrence, occurrence, row.tz, nowIso],
   });
   if (!grant.rows.length) return { ok: true, claimed: false };
   return { ok: true, claimed: true, lease_token: token, lease_until: until,
