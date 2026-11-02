@@ -88,6 +88,8 @@ const vpsServices = [
   "vps.oasis-headless-bridge",
   "vps.oasis-content-tools-runner",
   "vps.oasis-workspace-scheduler",
+  "vps.oasis-ai-audit-runner",
+  "vps.oasis-meet-runner",
   "vps.atlas-telegram",
   "vps.maven-telegram",
 ] as const;
@@ -123,6 +125,8 @@ assert.deepEqual(
     "vps.oasis-headless-bridge",
     "vps.oasis-content-tools-runner",
     "vps.oasis-workspace-scheduler",
+    "vps.oasis-ai-audit-runner",
+    "vps.oasis-meet-runner",
     "vps.atlas-telegram",
     "vps.maven-telegram",
     "skool_engine",

@@ -24,6 +24,7 @@ import { readBodyCapped } from "@/lib/ledger/ingest";
 import { readAgentsOwner } from "@/lib/agents-owner";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
 
 export const VPS_HEALTH_SERVICES = [
   "vps.oasis-telegram-bridge",
@@ -34,6 +35,10 @@ export const VPS_HEALTH_SERVICES = [
   "vps.oasis-workspace-scheduler",
   "vps.atlas-telegram",
   "vps.maven-telegram",
+  // Timer-driven one-pass runners (2026-11-02): the Free AI Audit PDF runner and
+  // the Meet transcription runner, moved off CC's Mac/PC so jobs run while both are off.
+  "vps.oasis-ai-audit-runner",
+  "vps.oasis-meet-runner",
 ] as const;
 export type VpsHealthService = (typeof VPS_HEALTH_SERVICES)[number];
 export const VPS_HEALTH_STATUSES = ["healthy", "degraded", "down", "running"] as const;
@@ -74,9 +79,9 @@ export function parseVpsHeartbeat(body: unknown): { ok: true; value: VpsHeartbea
     if (typeof status !== "string" || !(VPS_HEALTH_STATUSES as readonly string[]).includes(status)) {
       return { ok: false, field: "status" };
     }
-    // Only the bounded oneshot sweep has a pending result. An always-on
+    // Only a bounded oneshot pass has a pending result. An always-on
     // process must report its actual supervisor health, not this transient state.
-    if (status === "running" && service !== "vps.oasis-inbox-sweep") return { ok: false, field: "status" };
+    if (status === "running" && !VPS_ONESHOT_SERVICES.has(service)) return { ok: false, field: "status" };
     if (detail !== undefined && typeof detail !== "string") return { ok: false, field: "detail" };
     seen.add(service);
     out.push({

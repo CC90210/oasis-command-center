@@ -214,8 +214,16 @@ async function main(): Promise<void> {
   await check("oneshot: running is pending, not success; other daemon keys reject it; completion clears the phase", async () => {
     const { reportedWorkerStatus } = await import("../lib/automations/worker-status");
     const pending = { host: heartbeat.host, services: [{ service: "vps.oasis-inbox-sweep", status: "running", detail: "sweep running; result pending" }] };
-    for (const service of vps.VPS_HEALTH_SERVICES.filter((s) => s !== "vps.oasis-inbox-sweep")) {
+    const { VPS_ONESHOT_SERVICES } = await import("../lib/automations/worker-status");
+    for (const service of vps.VPS_HEALTH_SERVICES.filter((s) => !VPS_ONESHOT_SERVICES.has(s))) {
       assert.equal((await call(signed({ ...pending, services: [{ ...pending.services[0], service }] }))).status, 422);
+    }
+    // The audit PDF and Meet transcription runners are bounded passes too: a long
+    // transcription is pending work, never green and never an outage.
+    for (const service of ["vps.oasis-ai-audit-runner", "vps.oasis-meet-runner"]) {
+      assert.equal((await call(signed({ ...pending, services: [{ service, status: "running", detail: "pass running" }] }))).status, 200);
+      const row = (await rows()).find((r) => r.service === service)!;
+      assert.equal(reportedWorkerStatus(service, row.status, JSON.parse(String(row.metadata))), "pending");
     }
     assert.equal((await call(signed(pending))).status, 200);
     let stored = (await rows()).find((r) => r.service === "vps.oasis-inbox-sweep")!;

@@ -80,7 +80,7 @@ export const OASIS_WORKERS: OasisWorker[] = [
     control_mode: "none",
     status_source: "none",
     manageable_via_pm2: false,
-    not_expected_here: "Retired by plan — the always-on setter is moving to the daemon VPS; this computer's copy stays off.",
+    not_expected_here: "Retired by plan — this computer's copy stays off. Zernio has paused the account for billing (payment required), so Instagram DMs cannot be read; the setter is ready on the daemon VPS and starts once billing is restored.",
   },
   {
     // Retired 2026-10-30: the VPS long-poll bridge (oasis-telegram-bridge) is
@@ -206,6 +206,24 @@ export const OASIS_WORKERS: OasisWorker[] = [
     service: "vps.oasis-workspace-scheduler",
     label: "Workspace scheduler (daemon VPS)",
     purpose: "Runs reviewed workspace scripts under exclusive server grants, including the Atlas inbox consumer. Its own heartbeat reports whether this service is running.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-ai-audit-runner",
+    label: "Free AI Audit PDF runner (daemon VPS)",
+    purpose: "Prints each approved audit to its branded Letter PDF so final review never waits for your Mac. It contacts no client.",
+    runtime: "remote",
+    control_mode: "none",
+    status_source: "integrations_health",
+    manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-meet-runner",
+    label: "Meeting transcripts (daemon VPS)",
+    purpose: "Transcribes recorded Oasis Meet calls on the server, so transcripts arrive while your computers are off. Delete meeting reaches its copy too.",
     runtime: "remote",
     control_mode: "none",
     status_source: "integrations_health",
