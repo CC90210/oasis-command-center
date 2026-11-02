@@ -54,7 +54,7 @@
  * with a fake mailbox and a temp database; production passes nothing.
  */
 import "server-only";
-import { sendSmsExecutor, type SmsExecutorDeps } from "./sms";
+import type { SmsExecutorDeps } from "./sms";
 import { createHash } from "node:crypto";
 import type { Client, ResultSet } from "@libsql/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -755,7 +755,12 @@ async function mirrorReply(
 // ---------------------------------------------------------------------------
 
 export const EXECUTORS: Readonly<Partial<Record<ApprovalActionKind, Executor>>> = {
-  send_sms: sendSmsExecutor,
+  // Resolve the live-viewer dependencies only for SMS. Merely loading the
+  // approval registry must remain safe for server-only ledger/worker callers.
+  send_sms: {
+    readiness: () => null,
+    run: async (ctx) => (await import("./sms")).sendSmsExecutor.run(ctx),
+  },
   send_email: sendEmail,
   publish_post: publishPost,
   send_slack_message: sendSlackMessage,
