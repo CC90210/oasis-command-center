@@ -243,11 +243,15 @@ export function describeBackground(
   // moved to the daemon VPS (2026-11-02): a computer that is off is the
   // expected state, so its stale tiles are not an outage.
   const offline = pc !== null && pc.state === "offline";
+  // A cloud worker that never reported has no usable status: with nothing
+  // known to be down, that is "can't tell", never an all-clear 0.
+  const unreportedRemote = workers.filter((w) => w.service.startsWith("vps.") && w.state === "no_report").length;
   // A blind computer reporter makes only ITS workers unknown. The VPS reports
   // over its own signed heartbeat, so a VPS outage is never hidden by it.
+  const known = remoteDown + (offline ? 0 : localDown);
   const workersDown = blind
     ? (remoteDown > 0 ? remoteDown : null)
-    : remoteDown + (offline ? 0 : localDown);
+    : known > 0 ? known : (unreportedRemote > 0 ? null : 0);
   return { workers, reporter, workersDown };
 }
 

@@ -34,7 +34,7 @@ import { getActiveProfile } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { readAgentsOwner } from "@/lib/agents-owner";
-import { SUPERVISOR_DISABLED } from "@/lib/automations/worker-status";
+import { SUPERVISOR_DISABLED, VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
 
 /** An agent is Running when one of its processes checked in within 5 minutes (the daemon window). */
 export const FLEET_FRESHNESS_MS = 5 * 60 * 1000;
@@ -117,7 +117,7 @@ export function fleetSignals(
     const t = p.last_ping_at ? Date.parse(p.last_ping_at) : NaN;
     const at = Number.isFinite(t) ? t : 0;
     if (latest.has(p.service) && at <= (latest.get(p.service)?.at ?? 0)) continue;
-    latest.set(p.service, { at, up: processIsUp(p.status, p.metadata), down: p.status === "down" });
+    latest.set(p.service, { at, up: processIsUp(p.service, p.status, p.metadata), down: processIsDown(p.service, p.status) });
   }
   const out = new Map<string, FleetSignal>();
   for (const name of agents) {
@@ -154,16 +154,35 @@ export function fleetSignals(
  */
 export function fleetLiveness(signal: FleetSignal | null | undefined, computer: FleetComputer | null | undefined, now: number): Liveness {
   if (!signal || (signal.processCount === 0 && !signal.lastTaskAt)) return "grey";
+  // A fresh failure wins over another healthy unit or a recent tick: Bravo has
+  // several VPS units, and one healthy unit must not hide a dead scheduler.
+  if (signal.downCount > 0) return "red";
   const tick = signal.lastTaskAt ? Date.parse(signal.lastTaskAt) : NaN;
   if (signal.live || (Number.isFinite(tick) && now - tick < TICK_FRESH_MS)) return "green";
   const seen = computer?.lastSeenAt ? Date.parse(computer.lastSeenAt) : NaN;
   const silent = Boolean(computer) && (!Number.isFinite(seen) || now - seen >= COMPUTER_SILENT_MS);
-  if (signal.downCount > 0 || silent) return "red";
+  if (silent) return "red";
   return "amber";
 }
 
-/** A row reports a process that is up: not "down", and not stopped by the operator. */
-function processIsUp(status: string | null | undefined, metadata: unknown): boolean {
+/**
+ * A row says its process is failing. A VPS unit reports "degraded" while it is
+ * activating or in auto-restart (lib/automations/vps-health.ts), which is a
+ * failing service, not a running one.
+ */
+function processIsDown(service: string, status: string | null | undefined): boolean {
+  return status === "down" || (service.startsWith("vps.") && status === "degraded");
+}
+
+/**
+ * A row reports a process that is up. A VPS unit is up only when its reporter
+ * says "healthy"; its bounded oneshot timers (inbox sweep, audit PDF, Meet)
+ * report a timer and a last result, not a running process, so they never make
+ * an agent alive on their own. A computer row is up unless it says down or the
+ * operator stopped it.
+ */
+function processIsUp(service: string, status: string | null | undefined, metadata: unknown): boolean {
+  if (service.startsWith("vps.")) return status === "healthy" && !VPS_ONESHOT_SERVICES.has(service);
   if (status === "down") return false;
   let meta: unknown = metadata;
   if (typeof meta === "string") {

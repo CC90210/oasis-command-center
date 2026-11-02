@@ -95,6 +95,7 @@ async function main() {
   await createSchema();
   const { getTenantBridgeStatus, getBridgeOnline, getOnlineBridgeComputerLabels } = await import("../lib/queries");
   const { loadMachines, describeBackground, LOCAL_OASIS_WORKERS } = await import("../lib/admin/attention");
+  const { OASIS_WORKERS } = await import("../lib/automations/oasis-workers");
   const { loadSystemHealth } = await import("../lib/admin/system-health");
   const cliStatus = await import("../lib/bridge-cli-status");
   const { appStatusLines } = await import("../components/settings/YourComputersCard");
@@ -215,7 +216,13 @@ async function main() {
       "local tiles still say they stopped reporting");
     assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
       "the offline computer cannot invent a status for an unreported cloud service");
-    assert.equal(result.workersDown, 0,
+    assert.equal(result.workersDown, null,
+      "with the computer off and no VPS report at all, the count is unknown, never an all-clear 0 (CodeRabbit #797)");
+    const reported = new Map(workerRows);
+    for (const w of OASIS_WORKERS.filter((x) => x.runtime === "remote")) {
+      reported.set(w.service, { service: w.service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(reported, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
       "every remaining computer worker is optional: stale local chat, heartbeat and activity tiles are not an outage");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.

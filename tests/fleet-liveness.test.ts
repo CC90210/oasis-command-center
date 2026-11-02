@@ -175,6 +175,31 @@ async function main(): Promise<void> {
     assert.deepEqual(fleet.processPrefixesFor("atlas"), ["pm2.atlas-", "vps.atlas-"]);
   });
 
+  await check("a fresh VPS failure wins; restart loops and idle timers are not running processes (CodeRabbit #797)", () => {
+    const pc = { label: "CCPC (Windows)", lastSeenAt: ago(1 * MIN) };
+    const mixed = fleet.fleetSignals(["bravo"], [{ agent_name: "bravo", last_tick_at: ago(1 * MIN), tick_count: 3 }], [
+      { service: "vps.oasis-telegram-bridge", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-scheduler", last_ping_at: ago(1 * MIN), status: "down", metadata: "{}" },
+    ], NOW);
+    assert.equal(fleet.fleetLiveness(mixed.get("bravo"), pc, NOW), "red",
+      "one healthy unit and a fresh tick do not hide a dead scheduler");
+    const restarting = fleet.fleetSignals(["atlas"], [], [
+      { service: "vps.atlas-telegram", last_ping_at: ago(1 * MIN), status: "degraded", metadata: "{}" },
+    ], NOW).get("atlas")!;
+    assert.deepEqual([restarting.live, restarting.downCount], [false, 1], "activating/auto-restart is failing, not running");
+    const timersOnly = fleet.fleetSignals(["bravo"], [], [
+      { service: "vps.oasis-inbox-sweep", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-meet-runner", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+    ], NOW).get("bravo")!;
+    assert.deepEqual([timersOnly.live, timersOnly.runningCount, timersOnly.processCount], [false, 0, 2],
+      "a oneshot timer's last good result is not a running process");
+    const operatorStopped = fleet.fleetSignals(["maven"], [], [
+      { service: "pm2.maven-telegram", last_ping_at: ago(1 * MIN), status: "degraded", metadata: JSON.stringify({ pm2_status: "disabled by operator" }) },
+    ], NOW).get("maven")!;
+    assert.deepEqual([operatorStopped.live, operatorStopped.downCount], [false, 0],
+      "a computer row the operator stopped is neither running nor a failure");
+  });
+
   await check("parseAgentTicks accepts only well-formed house-agent ticks", () => {
     const good = { agent: "Bravo", last_tick_at: ago(1 * MIN), tick_count: 96, health: "green" };
     assert.deepEqual(ticks.parseAgentTicks(undefined, NOW), []);
