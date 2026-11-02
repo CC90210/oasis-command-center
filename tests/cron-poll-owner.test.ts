@@ -91,7 +91,7 @@ async function main() {
       action_payload TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
       last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
       run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
-      created_at TEXT NOT NULL, updated_at TEXT
+      created_at TEXT NOT NULL, updated_at TEXT, tz TEXT
     );
     -- O3a: the poll also requires the pairing owner's live seat (lib/os/seat.ts).
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, tenant_id TEXT, email TEXT,

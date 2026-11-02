@@ -93,13 +93,19 @@ export async function handleQuoInbound(req: Request, tenantId: string, deps: {
     try { event = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw))); }
     catch { return json(400, { ok: false, error: "invalid_payload" }); }
     const data = object(event.data); const context = object(data.context); const resource = object(data.resource);
+    // A picture message carries no text, and a group thread lists every member.
+    // Both are real deliveries to this number: answering them 422 made Quo mark
+    // them failed, and any failed delivery blocks automated texts at readiness.
+    // Only a delivery that is not for this account and number is refused.
+    const text = typeof resource.text === "string" ? resource.text : resource.text == null ? "" : null;
+    const recipients = context.recipientIdentifiers;
     if (event.apiVersion !== QUO_WEBHOOK_VERSION || event.type !== "message.received" || !opaque(event.id) ||
-        !opaque(resource.id) || resource.direction !== "incoming" || typeof resource.text !== "string" ||
+        !opaque(resource.id) || resource.direction !== "incoming" || text === null ||
         context.orgId !== config.orgId || context.phoneNumberId !== config.phoneNumberId ||
-        !Array.isArray(context.recipientIdentifiers) || context.recipientIdentifiers.length !== 1 ||
-        context.recipientIdentifiers[0] !== config.fromNumber || typeof context.senderIdentifier !== "string" ||
+        !Array.isArray(recipients) || recipients.length < 1 || recipients.length > 25 ||
+        !recipients.includes(config.fromNumber) || typeof context.senderIdentifier !== "string" ||
         !E164.test(context.senderIdentifier)) return json(422, { ok: false, error: "event_binding_mismatch" });
-    const stop = isStopCommand(resource.text);
+    const stop = isStopCommand(text);
     const binding = quoWebhookBinding(config);
     const bodyHash = hash(raw);
     const key = `quo:${hash(JSON.stringify([tenantId, config.webhookId, req.headers.get("webhook-id")]))}`;
@@ -130,8 +136,10 @@ export async function handleQuoInbound(req: Request, tenantId: string, deps: {
       return json(200, { ok: true });
     } catch (error) { await tx.rollback().catch(() => undefined); throw error; }
     finally { tx.close(); }
-  } catch {
-    // No untrusted payload, headers, provider response, phone or secret in logs/results.
+  } catch (error) {
+    // No untrusted payload, headers, provider response, phone or secret in logs/results:
+    // the error class alone tells a database outage from a proof or schema fault.
+    console.error("[quo-webhook] intake failed", { tenantId, error: error instanceof Error ? error.name : typeof error });
     return json(503, { ok: false, error: "quo_intake_unavailable" });
   }
 }

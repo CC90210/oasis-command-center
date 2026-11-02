@@ -103,6 +103,23 @@ async function main() {
       assert.equal((await handle(request(), other)).status, 401);
       assert.equal(await count("sunbiz_phone_suppressions"), 0);
     });
+    await check("a picture message and a group thread to this number are accepted, never 422", async () => {
+      // A 422 makes Quo mark the delivery failed, and any failed delivery blocks
+      // automated texts at readiness. Both of these are real deliveries to this number.
+      const mms = event(); delete (mms.data.resource as { text?: string }).text;
+      const mmsResponse = await handle(request(mms, "delivery-mms"));
+      assert.equal(mmsResponse.status, 200, "a text-less picture message is a delivery, not a mismatch");
+      const group = event("STOP"); group.data.context.recipientIdentifiers = ["+14165550999", config.fromNumber];
+      const groupResponse = await handle(request(group, "delivery-group"));
+      assert.equal(groupResponse.status, 200, "a group thread including this number is a delivery");
+      assert.equal(await count("sunbiz_phone_suppressions"), 1, "a STOP in a group thread still suppresses the sender");
+      // Clean up so the checks below see the ledger they expect.
+      await db.execute("DELETE FROM sunbiz_phone_suppressions");
+      await db.execute("DELETE FROM agent_events");
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE service <> 'quo'");
+      const bad = event(); (bad.data.resource as { text?: unknown }).text = 42;
+      assert.equal((await handle(request(bad, "delivery-bad-text"))).status, 422, "a non-text body is still refused");
+    });
     await check("signed STOP atomically suppresses, cancels this tenant only, and blocks resend", async () => {
       for (const who of [tenant, other]) await db.execute({ sql: "INSERT INTO website_sales_meeting_notifications VALUES (?,?, 'sms',?,'pending',NULL,NULL,NULL)", args: [who,who,from] });
       assert.equal((await handle(request())).status, 200);

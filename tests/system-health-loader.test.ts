@@ -481,7 +481,8 @@ async function main() {
       rows.set(service, { service, status: "down", last_ping_at: ago(10 * S), metadata: {} });
     }
     const background = at.describeBackground(rows, [{ label: "CCPC", state: "offline", lastSeenAt: ago(2 * H) }], NOW);
-    assert.equal(background.workersDown, 3, "one stale local worker plus two independent remote outages");
+    assert.equal(background.workersDown, 2,
+      "a powered-off computer needs nothing (its workers are optional since the cloud cutover); the two VPS outages still count");
     assert.deepEqual(at.describeBackground(rows, [], NOW, { authUserId: "other-owner", isAgentsOwner: false }).workers, []);
     assert.deepEqual(at.describeBackground(rows, [], NOW, undefined, CLIENT).workers, [], "OASIS inventory stays out of other workspaces");
   });

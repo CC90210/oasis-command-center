@@ -30,7 +30,7 @@ import { resolvePairingFromBearer, isDaemonScope, pairingCanClaim } from "@/lib/
 import { liveSeat } from "@/lib/os/seat";
 import { getTursoClient } from "@/lib/turso";
 import { OASIS_SCRIPT_EXECUTOR, isOasisScriptExecutor, claimTenantScript,
-  heartbeatTenantScript, completeTenantScript } from "@/lib/automations/tenant-script-lease";
+  heartbeatTenantScript, completeTenantScript, CLOUD_CLAIMABLE_ACTION_TYPES } from "@/lib/automations/tenant-script-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -197,7 +197,11 @@ export async function GET(req: NextRequest) {
     return bad(409, "owner_mismatch");
   }
   await stampLastPollOk(db, bridge.pairingId);
-  const jobs = owned.map(({ owner_user_id: _ownerUserId, ...job }) => job);
+  // The cloud executor can claim only what the lease scope runs
+  // (CLOUD_CLAIMABLE_ACTION_TYPES): listing a webhook_post row it can never
+  // claim reported a served job that would never run or update.
+  const served = cloud ? owned.filter((row) => CLOUD_CLAIMABLE_ACTION_TYPES.has(String(row.action_type))) : owned;
+  const jobs = served.map(({ owner_user_id: _ownerUserId, ...job }) => job);
   return NextResponse.json({ ok: true, jobs, polled_at: new Date().toISOString(),
     ...(cloud ? { claim_protocol: 2, timezone: OASIS_SCRIPT_EXECUTOR.timezone } : {}) });
 }

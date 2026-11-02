@@ -239,14 +239,16 @@ export function describeBackground(
   const down = workers.filter((w) => w.state === "down" || w.state === "stale");
   const localDown = down.filter((w) => !w.service.startsWith("vps.")).length;
   const remoteDown = down.length - localDown;
-  // An offline computer is ONE thing needing you, not one alarm per worker it
-  // runs (2026-10-31: six local workers would otherwise page six times).
+  // The computer's workers are optional since the 2026-11-01 cloud cutover:
+  // schedules, chat and the bots run on the daemon VPS, so a computer that is
+  // off is the expected state and needs nothing from you.
   const offline = pc !== null && pc.state === "offline";
-  return {
-    workers,
-    reporter,
-    workersDown: blind ? null : remoteDown + (offline ? Math.min(localDown, 1) : localDown),
-  };
+  // A blind computer reporter makes only ITS workers unknown. The VPS reports
+  // over its own signed heartbeat, so a VPS outage is never hidden by it.
+  const workersDown = blind
+    ? (remoteDown > 0 ? remoteDown : null)
+    : remoteDown + (offline ? 0 : localDown);
+  return { workers, reporter, workersDown };
 }
 
 // ── Cron failures ─────────────────────────────────────────────────────────

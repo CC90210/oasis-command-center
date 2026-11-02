@@ -67,14 +67,14 @@ let quoResult: Record<string, unknown> | null = null;
 let quoSenderResult: Record<string, unknown> | null = null;
 let stopIntake = true;
 let intakeReason = "configuration_missing";
-let intakeOutage = false;
+let intakeOutage: string | false = false;
 let intakeCalls = 0;
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
   quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
   quoStopIntakeReadiness: () => {
     intakeCalls++;
-    if (intakeOutage) return Promise.reject(new Error("quo_webhook_provider_unavailable"));
+    if (intakeOutage) return Promise.reject(new Error(intakeOutage));
     return { ready: stopIntake, reason: stopIntake ? "ready" : intakeReason };
   },
   sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
@@ -398,7 +398,7 @@ async function main() {
   });
 
   await check("a Quo provider outage holds every text without attempts and checks the tenant once per pass", async () => {
-    intakeOutage = true; intakeCalls = 0;
+    intakeOutage = "quo_webhook_provider_unavailable"; intakeCalls = 0;
     await appointment("appt-outage-a", 15);
     await appointment("appt-outage-b", 15);
     await queue("sms-outage-a", "appt-outage-a", "reminder_15", 15, "sms", PHONE);
@@ -408,9 +408,19 @@ async function main() {
     for (const id of ["sms-outage-a", "sms-outage-b"]) {
       const row = await rowOf(id);
       assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
-      assert.equal(row.last_error, "quo_stop_intake:quo_webhook_provider_unavailable");
+      assert.equal(row.last_error, "quo_stop_intake_unavailable:quo_webhook_provider_unavailable");
     }
     assert.equal(intakeCalls, 1, "one readiness check per tenant per pass, its rejection cached");
+    assert.equal(quoSends.length, before);
+    // A timeout or network error is an outage too: no attempt is spent on it.
+    intakeOutage = "The operation was aborted due to timeout";
+    await seed.execute("UPDATE website_sales_meeting_notifications SET due_at='2026-01-01T00:00:00Z' WHERE id IN ('sms-outage-a','sms-outage-b')");
+    await dispatch();
+    for (const id of ["sms-outage-a", "sms-outage-b"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.match(String(row.last_error), /^quo_stop_intake_unavailable:/);
+    }
     assert.equal(quoSends.length, before);
     intakeOutage = false;
     // Out of the way of the passes below, which count texts.

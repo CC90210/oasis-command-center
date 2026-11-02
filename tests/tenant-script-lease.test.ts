@@ -14,7 +14,7 @@ async function main() {
     id TEXT PRIMARY KEY, tenant_id TEXT, owner_user_id TEXT, enabled INTEGER,
     action_type TEXT, action_payload TEXT, agent_key TEXT, schedule TEXT,
     last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
-    run_count INTEGER DEFAULT 0, updated_at TEXT);`);
+    run_count INTEGER DEFAULT 0, updated_at TEXT, tz TEXT);`);
   await db.executeMultiple(readFileSync("database/turso/bravo__252_tenant_cron_execution_leases.sql", "utf8"));
   const add = async (id: string, schedule = "* * * * *", owner = executor.userId as string) => {
     await db.execute({ sql: `INSERT INTO tenant_cron_jobs
@@ -91,6 +91,16 @@ async function main() {
   await add("malformed");
   await db.execute("UPDATE tenant_cron_jobs SET action_payload='{not json' WHERE id='malformed'");
   assert.deepEqual(await claimTenantScript(db, executor, "malformed", now), { ok: false, error: "job_payload_invalid" });
+  // A job's own zone wins over the Toronto default (bravo__211's tz column).
+  await add("vancouver", "0 9 * * *");
+  await db.execute("UPDATE tenant_cron_jobs SET tz='America/Vancouver' WHERE id='vancouver'");
+  assert.equal((await claimTenantScript(db, executor, "vancouver", new Date("2026-11-02T14:00:10Z"))).claimed, false,
+    "09:00 Toronto is 06:00 in Vancouver: not due");
+  assert.equal((await claimTenantScript(db, executor, "vancouver", new Date("2026-11-02T17:00:10Z"))).claimed, true,
+    "09:00 Vancouver is due");
+  await add("bad-zone");
+  await db.execute("UPDATE tenant_cron_jobs SET tz='Not/AZone' WHERE id='bad-zone'");
+  assert.deepEqual(await claimTenantScript(db, executor, "bad-zone", now), { ok: false, error: "job_timezone_invalid" });
   db.close(); other.close();
   console.log("tenant-script-lease: concurrent claim, ownership, fencing, idempotent receipt, rollback and Toronto DST checks passed");
 }

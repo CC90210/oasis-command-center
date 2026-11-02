@@ -198,9 +198,6 @@ type SenderPass = {
   quoIntake: Map<string, Promise<{ ready: boolean; reason: string }>>;
 };
 
-/** A Quo or proof-store outage proves nothing about STOP either way. */
-const QUO_INTAKE_OUTAGES = new Set(["quo_webhook_provider_unavailable", "quo_webhook_proof_unavailable"]);
-
 function quoIntakeForPass(
   pass: SenderPass,
   tenantId: string,
@@ -850,12 +847,14 @@ async function processRow(
       try {
         intake = await quoIntakeForPass(senderPass, row.tenant_id, quo);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        if (!QUO_INTAKE_OUTAGES.has(reason)) throw error;
-        // Hold without spending a send attempt, exactly like a delivery
-        // backlog: the next tick rechecks its meeting and expiry rules first.
+        // Nothing was sent, and a check that could not run (a Quo outage or
+        // timeout, a network error, an unreadable proof or bundle) proves
+        // nothing about STOP either way. Hold without spending a send attempt,
+        // exactly like a delivery backlog: the next tick rechecks its meeting
+        // and expiry rules first, so an unrecovered check ends with the meeting.
+        const reason = (error instanceof Error ? error.message || error.name : String(error)).slice(0, 120);
         console.error("[founder-meeting-reminders] Quo STOP intake check unavailable", { id: row.id, tenant: row.tenant_id, reason });
-        await deferRow(db, row, new Date(Date.now() + 60_000).toISOString(), `quo_stop_intake:${reason}`);
+        await deferRow(db, row, new Date(Date.now() + 60_000).toISOString(), `quo_stop_intake_unavailable:${reason}`);
         return "held";
       }
       if (!intake.ready) {

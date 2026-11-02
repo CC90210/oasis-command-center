@@ -20,6 +20,8 @@ export function isOasisScriptExecutor(executor: ScriptExecutor): boolean {
     && executor.userId === OASIS_SCRIPT_EXECUTOR.userId;
 }
 
+/** The action types the cloud executor's lease can claim; the poll lists only these to it. */
+export const CLOUD_CLAIMABLE_ACTION_TYPES: ReadonlySet<string> = new Set(["script_run", "snapshot_run"]);
 const JOB_SCOPE = `tenant_id = ? AND id = ? AND owner_user_id = ?
   AND enabled = 1 AND action_type IN ('script_run', 'snapshot_run')`;
 const SAME_SPEC = `action_type = tenant_cron_execution_leases.job_action_type
@@ -36,7 +38,7 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
   jobId: string, now = new Date()) {
   const args = scope(executor, jobId);
   const lookup = await client.execute({
-    sql: `SELECT id, schedule, action_type, action_payload, agent_key, last_run_at
+    sql: `SELECT id, schedule, action_type, action_payload, agent_key, last_run_at, tz
       FROM tenant_cron_jobs WHERE ${JOB_SCOPE}`, args,
   });
   const row = lookup.rows[0];
@@ -52,9 +54,18 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
   if (!actionPayload || typeof actionPayload !== "object" || Array.isArray(actionPayload)) {
     return { ok: false, error: "job_payload_invalid" };
   }
+  // The schedule is read in the job's own zone (tenant_cron_jobs.tz, bravo__211:
+  // the owner's IANA zone) and in the workspace's Toronto calendar when unset.
+  // An unreadable zone is the job's fault, refused like a bad payload.
+  const zone = typeof row.tz === "string" && row.tz.trim() ? row.tz.trim() : OASIS_SCRIPT_EXECUTOR.timezone;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+  } catch {
+    return { ok: false, error: "job_timezone_invalid" };
+  }
   // Two missed polling minutes can catch up once. Never replay hours after a
   // restart, and never drift when the Linux server is configured in UTC.
-  const due = nextRuns(String(row.schedule), OASIS_SCRIPT_EXECUTOR.timezone,
+  const due = nextRuns(String(row.schedule), zone,
     now.getTime() - 180_000, 4).filter((date) => date <= now).at(-1);
   if (!due) return { ok: true, claimed: false };
   const nowIso = now.toISOString();
