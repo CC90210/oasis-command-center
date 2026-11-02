@@ -249,9 +249,21 @@ export type DispatchDripsResult = {
   retryPending: number;
   failed: number;
   cancelled: number;
+  /** Rows put back unsent because a guard read was unavailable (no attempt spent). */
+  guardBlocked: number;
   /** True when the run stopped early because TextTorrent credits ran out. */
   creditHalted: boolean;
 };
+
+/** Guard reads whose outage proves nothing about the lead: the row is re-checked
+ *  later without spending a delivery attempt (CodeRabbit #791). Three transient
+ *  read failures used to mark a never-sent step permanently failed. */
+const GUARD_READ_UNAVAILABLE = new Set([
+  "drip_rep_standing_unavailable",
+  "drip_shopped_lookup_unavailable",
+  "drip_accelerated_lookup_unavailable",
+]);
+const GUARD_RETRY_MS = 5 * 60_000;
 
 /** Per-row outcome, tallied in-process by the main loop (no post-hoc DB
  *  query needed — every code path below returns exactly one of these). */
@@ -2085,7 +2097,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const empty = (): DispatchDripsResult => ({
     ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
     dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
-    creditHalted: false,
+    guardBlocked: 0, creditHalted: false,
   });
 
   // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
@@ -2214,6 +2226,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let retryPending = 0;
   let failed = 0;
   let cancelled = 0;
+  let guardBlocked = 0;
   // Email volume budget, computed once for the whole run (2 aggregate queries +
   // one batched per-lead query) so per-row gating costs nothing. Only loaded
   // when real sends are enabled: a dry run moves no bytes, so there is no
@@ -2299,10 +2312,21 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     try {
       outcome = await processRow(db, row, leadMap, seqMap, run);
     } catch (err) {
-      console.error("[dispatch-drips] unhandled row error", row.id, err);
-      outcome = await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(
-        () => "failed" as const,
-      );
+      const message = err instanceof Error ? err.message : "unhandled_error";
+      if (GUARD_READ_UNAVAILABLE.has(message)) {
+        // Nothing was sent: re-check after the outage without spending an
+        // attempt. guardBlocked keeps the tick red so the stall stays visible.
+        console.error("[dispatch-drips] guard read unavailable; rescheduled", row.id, message);
+        outcome = await markRescheduled(db, row, new Date(Date.now() + GUARD_RETRY_MS).toISOString(), message).catch(
+          () => "failed" as const,
+        );
+        if (outcome === "rescheduled") guardBlocked++;
+      } else {
+        console.error("[dispatch-drips] unhandled row error", row.id, err);
+        outcome = await markRetryOrFail(db, row, message).catch(
+          () => "failed" as const,
+        );
+      }
     }
     processed++;
     if (outcome === "sent") sent++;
@@ -2328,6 +2352,6 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
 
   return {
     ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun,
-    rescheduled, retryPending, failed, cancelled, creditHalted: run.creditExhausted,
+    rescheduled, retryPending, failed, cancelled, guardBlocked, creditHalted: run.creditExhausted,
   };
 }

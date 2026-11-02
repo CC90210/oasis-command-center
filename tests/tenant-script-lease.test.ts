@@ -87,6 +87,10 @@ async function main() {
   await db.execute("UPDATE tenant_cron_jobs SET action_payload='{\"args\":[]}' WHERE id='changed-after-claim'");
   assert.equal(await heartbeatTenantScript(db, executor, "changed-after-claim", beforeEdit.lease_token!, now), false);
   assert.equal((await completeTenantScript(db, executor, { ...input, jobId: "changed-after-claim", token: beforeEdit.lease_token! }, now)).ok, false);
+  // Malformed payload text is the job's fault: a refusal, never a store outage (CodeRabbit #791).
+  await add("malformed");
+  await db.execute("UPDATE tenant_cron_jobs SET action_payload='{not json' WHERE id='malformed'");
+  assert.deepEqual(await claimTenantScript(db, executor, "malformed", now), { ok: false, error: "job_payload_invalid" });
   db.close(); other.close();
   console.log("tenant-script-lease: concurrent claim, ownership, fencing, idempotent receipt, rollback and Toronto DST checks passed");
 }

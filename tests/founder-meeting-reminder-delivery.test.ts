@@ -67,10 +67,16 @@ let quoResult: Record<string, unknown> | null = null;
 let quoSenderResult: Record<string, unknown> | null = null;
 let stopIntake = true;
 let intakeReason = "configuration_missing";
+let intakeOutage = false;
+let intakeCalls = 0;
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
   quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
-  quoStopIntakeReadiness: () => ({ ready: stopIntake, reason: stopIntake ? "ready" : intakeReason }),
+  quoStopIntakeReadiness: () => {
+    intakeCalls++;
+    if (intakeOutage) return Promise.reject(new Error("quo_webhook_provider_unavailable"));
+    return { ready: stopIntake, reason: stopIntake ? "ready" : intakeReason };
+  },
   sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
     quoSends.push({ ...input, from: creds.fromNumber });
     return quoResult ?? { ok: true, id: `QU${quoSends.length}`, status: "queued" };
@@ -389,6 +395,26 @@ async function main() {
     assert.equal((await rowOf("sms-backlog-expired")).status, "skipped");
     assert.equal(quoSends.length, before + 1);
     await dispatch(); assert.equal(quoSends.length, before + 1);
+  });
+
+  await check("a Quo provider outage holds every text without attempts and checks the tenant once per pass", async () => {
+    intakeOutage = true; intakeCalls = 0;
+    await appointment("appt-outage-a", 15);
+    await appointment("appt-outage-b", 15);
+    await queue("sms-outage-a", "appt-outage-a", "reminder_15", 15, "sms", PHONE);
+    await queue("sms-outage-b", "appt-outage-b", "reminder_15", 15, "sms", PHONE);
+    const before = quoSends.length;
+    await dispatch();
+    for (const id of ["sms-outage-a", "sms-outage-b"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "pending"); assert.equal(Number(row.attempts), 0);
+      assert.equal(row.last_error, "quo_stop_intake:quo_webhook_provider_unavailable");
+    }
+    assert.equal(intakeCalls, 1, "one readiness check per tenant per pass, its rejection cached");
+    assert.equal(quoSends.length, before);
+    intakeOutage = false;
+    // Out of the way of the passes below, which count texts.
+    await seed.execute("UPDATE website_sales_meeting_notifications SET status='skipped' WHERE id IN ('sms-outage-a','sms-outage-b')");
   });
 
   // Pass 2e: the sending number cannot be looked up: nothing was sent, so it retries.

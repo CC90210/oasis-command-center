@@ -41,7 +41,14 @@ export async function claimTenantScript(client: Client, executor: ScriptExecutor
   });
   const row = lookup.rows[0];
   if (!row) return { ok: false, error: "job_not_enabled_or_owned" };
-  const actionPayload = JSON.parse(String(row.action_payload));
+  // Malformed text is the job's fault, not a store outage: a throw here would
+  // reach the route as 503 and the cloud runner would retry it every poll.
+  let actionPayload: unknown;
+  try {
+    actionPayload = JSON.parse(String(row.action_payload));
+  } catch {
+    return { ok: false, error: "job_payload_invalid" };
+  }
   if (!actionPayload || typeof actionPayload !== "object" || Array.isArray(actionPayload)) {
     return { ok: false, error: "job_payload_invalid" };
   }

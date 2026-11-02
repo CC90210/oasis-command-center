@@ -10,7 +10,7 @@ for (const key of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN"]) de
 let paused = false;
 let throws = false;
 let failures = 1;
-let retryPending = 0, creditHalted = false;
+let retryPending = 0, creditHalted = false, guardBlocked = 0;
 const calls = { drips: 0, automations: 0 };
 const mock = (path: string, exports: object) => {
   const id = require.resolve(path);
@@ -24,7 +24,7 @@ mock("../lib/drips/executor", {
   runDispatchDrips: async () => {
     calls.drips++;
     if (throws) throw new Error("fixture_executor_failure");
-    return { ok: true, sent: 2, failed: failures, retryPending, creditHalted };
+    return { ok: true, sent: 2, failed: failures, retryPending, creditHalted, guardBlocked };
   },
 });
 mock("../lib/automations/guided-dispatcher", {
@@ -89,6 +89,10 @@ async function main() {
     retryPending = 0; creditHalted = true;
     assert.equal((await routes.drips.GET(request(paths.drips))).status, 409);
     creditHalted = false;
+    // A guard read outage put rows back without spending attempts; the tick is still red.
+    guardBlocked = 1;
+    assert.equal((await routes.drips.GET(request(paths.drips))).status, 409);
+    guardBlocked = 0;
   });
   await check("real scheduler records each durable failure once without retrying or hiding it", async () => {
     const worker = (await import("../workers/oasis-cc-cron/src/index")).default;

@@ -434,11 +434,16 @@ async function main() {
 
   await check("read error: no message is emitted using an unverified rep identity", async () => {
     assert.equal(blip.result.dryRun, 0, JSON.stringify(blip.result));
-    assert.equal(blip.result.retryPending, 1);
+    // An unavailable guard read sent nothing: rescheduled without spending an
+    // attempt, and counted as guardBlocked so the tick still reports red.
+    assert.equal(blip.result.retryPending, 0);
+    assert.equal(blip.result.guardBlocked, 1);
     const rows = await sent(L_JORDAN_OLD, "sms");
     assert.ok(rows.every(row => row.meta.sequence_id !== LATE_SEQ));
-    const retry = (await seed.execute({ sql: "SELECT status,last_error FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+    const retry = (await seed.execute({ sql: "SELECT status,last_error,attempts,scheduled_for FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
     assert.equal(retry.status, "scheduled"); assert.equal(retry.last_error, "drip_rep_standing_unavailable");
+    assert.equal(Number(retry.attempts || 0), 0, "no delivery attempt is spent on a read outage");
+    assert.ok(Date.parse(String(retry.scheduled_for)) > Date.now(), "re-checked after the outage, not this tick");
   });
 
   await check("read error: the failure is logged under the drips tag", () => {
@@ -458,9 +463,11 @@ async function main() {
       guardReadFailure = guard;
       await seed.execute({ sql: "UPDATE drip_runs SET status='scheduled',attempts=0,scheduled_for='2026-09-01T00:00:00Z' WHERE sequence_id=?", args: [LATE_SEQ] });
       const blocked = await captureWarn(() => runDispatchDrips());
-      assert.equal(blocked.result.dryRun, 0); assert.equal(blocked.result.sent, 0); assert.equal(blocked.result.retryPending, 1);
-      const row = (await seed.execute({ sql: "SELECT last_error FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
+      assert.equal(blocked.result.dryRun, 0); assert.equal(blocked.result.sent, 0);
+      assert.equal(blocked.result.retryPending, 0); assert.equal(blocked.result.guardBlocked, 1);
+      const row = (await seed.execute({ sql: "SELECT last_error,attempts FROM drip_runs WHERE sequence_id=?", args: [LATE_SEQ] })).rows[0];
       assert.equal(row.last_error, `drip_${guard}_lookup_unavailable`);
+      assert.equal(Number(row.attempts), 0, "no delivery attempt is spent on a read outage");
       assert.equal((await seed.execute("SELECT COUNT(*) AS n FROM lead_interactions")).rows[0].n, before);
     }
     guardReadFailure = ""; delete process.env.ACCELERATED_ENROLL_LIVE;

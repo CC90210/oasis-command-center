@@ -18,8 +18,12 @@ export async function migrateCloudSchedules(mode = "--preview", client = getTurs
   const fleetQuery = { sql: `SELECT id,name,schedule,is_active,owner_machine,action_type,action_config FROM cron_jobs
     WHERE tenant_id=? AND is_active=1 ORDER BY name`, args: [scope.tenantId] };
   const jobs = await client.execute(fleetQuery);
-  if (jobs.rows.length !== CLOUD_NAMES.length || new Set(jobs.rows.map(job => job.name)).size !== CLOUD_NAMES.length
-      || jobs.rows.some((job) => !CLOUD_NAMES.includes(String(job.name)))) {
+  const fleetMatches = jobs.rows.length === CLOUD_NAMES.length
+    && new Set(jobs.rows.map(job => job.name)).size === CLOUD_NAMES.length
+    && jobs.rows.every((job) => CLOUD_NAMES.includes(String(job.name)));
+  // Preview still prints the inventory the operator has to review; every
+  // mutating mode refuses a fleet that differs from the reviewed one.
+  if (!fleetMatches && mode !== "--preview") {
     throw new Error("Active Empire fleet changed; review the inventory before cutover");
   }
   const atlas = (await client.execute({ sql: `SELECT id,tenant_id,owner_user_id,schedule,action_type,agent_key,
@@ -30,7 +34,8 @@ export async function migrateCloudSchedules(mode = "--preview", client = getTurs
       WHERE tenant_id=? AND auth_user_id=?`, args: [scope.tenantId, scope.userId] });
     const pairing = await client.execute({ sql: `SELECT id,tenant_id,user_id,label,scope,claim_enabled_at,revoked_at
       FROM bridge_pairings WHERE tenant_id=? AND id=?`, args: [scope.tenantId, scope.pairingId] });
-    console.log(JSON.stringify({ mode, empire: jobs.rows, atlas, identity: identity.rows, pairing: pairing.rows }, null, 2));
+    console.log(JSON.stringify({ mode, fleet_matches_expected: fleetMatches, empire: jobs.rows, atlas,
+      identity: identity.rows, pairing: pairing.rows }, null, 2));
     return;
   }
   if (!atlas || atlas.owner_user_id !== scope.userId || atlas.action_type !== "script_run"

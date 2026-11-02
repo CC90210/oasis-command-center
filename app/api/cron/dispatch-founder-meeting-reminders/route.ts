@@ -193,7 +193,28 @@ async function retryOrFail(db: Db, row: NotificationRow, reason: string) {
 type SenderPass = {
   standings: Map<string, MemberStanding>;
   withheld: NotificationRow[];
+  /** Quo STOP-intake readiness per tenant for this pass, a rejection included:
+   *  one check is five provider reads, so it is never repeated per SMS row. */
+  quoIntake: Map<string, Promise<{ ready: boolean; reason: string }>>;
 };
+
+/** A Quo or proof-store outage proves nothing about STOP either way. */
+const QUO_INTAKE_OUTAGES = new Set(["quo_webhook_provider_unavailable", "quo_webhook_proof_unavailable"]);
+
+function quoIntakeForPass(
+  pass: SenderPass,
+  tenantId: string,
+  quo: NonNullable<Awaited<ReturnType<typeof quoCredentialsOrNull>>>,
+): Promise<{ ready: boolean; reason: string }> {
+  let intake = pass.quoIntake.get(tenantId);
+  if (!intake) {
+    intake = quoStopIntakeReadiness(tenantId, quo);
+    // Cached as the promise, so a rejected check is cached too and the next
+    // row of this tenant takes the same outage path without new provider reads.
+    pass.quoIntake.set(tenantId, intake);
+  }
+  return intake;
+}
 
 /**
  * Whether an EMAIL row's sender may still send as themselves -- mirrors
@@ -825,7 +846,18 @@ async function processRow(
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
         return "skipped";
       }
-      const intake = await quoStopIntakeReadiness(row.tenant_id, quo);
+      let intake: { ready: boolean; reason: string };
+      try {
+        intake = await quoIntakeForPass(senderPass, row.tenant_id, quo);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (!QUO_INTAKE_OUTAGES.has(reason)) throw error;
+        // Hold without spending a send attempt, exactly like a delivery
+        // backlog: the next tick rechecks its meeting and expiry rules first.
+        console.error("[founder-meeting-reminders] Quo STOP intake check unavailable", { id: row.id, tenant: row.tenant_id, reason });
+        await deferRow(db, row, new Date(Date.now() + 60_000).toISOString(), `quo_stop_intake:${reason}`);
+        return "held";
+      }
       if (!intake.ready) {
         if (intake.reason === "provider_delivery_backlog") {
           // In-flight incoming messages may contain STOP. Send nothing until
@@ -1203,7 +1235,7 @@ async function handle(req: NextRequest) {
   let sent = 0;
   let skipped = 0;
   let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0) + watch.errors.length;
-  const senderPass: SenderPass = { standings: new Map(), withheld: [] };
+  const senderPass: SenderPass = { standings: new Map(), withheld: [], quoIntake: new Map() };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
     const claimed = await db.from("website_sales_meeting_notifications")

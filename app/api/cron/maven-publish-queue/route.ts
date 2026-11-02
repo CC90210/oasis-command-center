@@ -42,7 +42,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         const provider = new CloudLatePublisher();
         reconciliation = await reconcileMavenPublishes({ store, reader: provider, now: new Date() });
       } catch (error) {
-        reconcileError = error instanceof Error ? error.message : String(error);
+        // The cron driver prints this body to the Actions log: a stable code
+        // only. The raw provider error stays in the server log below.
+        reconcileError = "reconciliation_failed";
         console.error("[cron.maven-publish-queue] reconciliation skipped", error instanceof Error ? error.stack : String(error));
       }
     }

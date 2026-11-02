@@ -34,7 +34,9 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await runDispatchDrips();
-    const failed = result.failed > 0 || result.retryPending > 0 || result.creditHalted;
+    // A guard read that was unavailable sent nothing and spent no attempt, but
+    // the tick still did not do its work: report it red, never green.
+    const failed = result.failed > 0 || result.retryPending > 0 || result.guardBlocked > 0 || result.creditHalted;
     // The executor already stored the outcome and owns any later retry.
     // A non-retryable failure preserves this tick instead of immediately
     // dispatching again and replacing it with a green no-work result.

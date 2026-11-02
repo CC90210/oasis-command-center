@@ -25,6 +25,21 @@ async function main() {
   const original = console.log;
   console.log = (...values) => logs.push(values);
   try {
+    // Preview prints the inventory even when the fleet differs (CodeRabbit #791);
+    // every mutating mode still refuses that fleet.
+    await db.executeMultiple(`CREATE TABLE user_profiles (id TEXT,tenant_id TEXT,auth_user_id TEXT,team_role TEXT,is_owner INTEGER);
+      CREATE TABLE bridge_pairings (id TEXT,tenant_id TEXT,user_id TEXT,label TEXT,scope TEXT,claim_enabled_at TEXT,revoked_at TEXT);`);
+    await db.execute({ sql: "INSERT INTO cron_jobs VALUES ('extra-active',?,'Extra active','* * * * *',1,NULL,'','script_run','{}')",
+      args: [scope.tenantId] });
+    await migrateCloudSchedules("--preview", db);
+    const preview = JSON.parse(String((logs.at(-1) as unknown[])[0]));
+    assert.equal(preview.fleet_matches_expected, false);
+    assert.equal(preview.empire.length, CLOUD_NAMES.length + 1);
+    await assert.rejects(migrateCloudSchedules("--pin-empire", db));
+    assert.equal((await db.execute("SELECT count(*) n FROM cron_jobs WHERE owner_machine IS NOT NULL")).rows[0].n, 0);
+    await db.execute("DELETE FROM cron_jobs WHERE id='extra-active'");
+    await migrateCloudSchedules("--preview", db);
+    assert.equal(JSON.parse(String((logs.at(-1) as unknown[])[0])).fleet_matches_expected, true);
     // A changed owner rolls back earlier rows in the same batch.
     await db.execute("UPDATE cron_jobs SET owner_machine='another-host' WHERE id='9'");
     await assert.rejects(migrateCloudSchedules("--pin-empire", db));

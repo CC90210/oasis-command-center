@@ -242,7 +242,13 @@ export async function POST(req: NextRequest) {
         error: typeof body.error === "string" ? body.error : null,
       });
       return NextResponse.json(result, { status: result.ok ? 200 : 409 });
-    } catch {
+    } catch (error) {
+      // The operator needs to tell a missing bravo__252 table from a Turso
+      // outage or a completion race; the caller still gets no provider detail.
+      console.error("[api/cron-jobs/poll POST] lease store failed", {
+        tenantId: bridge.tenantId, jobId, operation: body.operation,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // A missing migration or database failure cannot authorize execution or
       // manufacture a completed run. No raw provider details reach the caller.
       return bad(503, "script_execution_store_unavailable");
