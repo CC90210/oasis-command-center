@@ -36,10 +36,11 @@ async function main() {
     const url = new URL(String(input));
     assert.equal(url.origin, "https://graph.facebook.com");
     assert.equal(init?.method, "GET");
-    assert.equal(init?.redirect, "error");
+    assert.equal(init?.redirect, "manual");
     assert.equal(new Headers(init?.headers).get("Authorization"), `Bearer ${token}`);
     assert.ok(!url.toString().includes(token));
     if (mode === "outage") throw new Error(`synthetic failure with ${token}`);
+    if (mode.startsWith("redirect_")) return new Response(null, { status: Number(mode.slice(9)), headers: { Location: "https://attacker.invalid/steal" } });
     if (!url.pathname.endsWith("/insights")) return Response.json({ id: `act_${accountId}`, currency, timezone_name: timezone });
     assert.equal(url.searchParams.get("time_increment"), "1");
     const range = JSON.parse(url.searchParams.get("time_range")!);
@@ -90,6 +91,17 @@ async function main() {
     for (const setting of ["outage", "page_failure", "invalid_currency", "duplicate"]) {
       mode = setting; const result = await run(); assert.equal(result.ok, false);
       assert.ok(!JSON.stringify(result).includes(token)); assert.equal(JSON.stringify(await rows()), saved);
+    }
+    mode = "normal";
+  });
+  await check("redirects are refused without a second request or changed observations", async () => {
+    const before = await rows();
+    for (const status of [301, 302, 303, 307, 308]) {
+      mode = `redirect_${status}`;
+      const beforeCalls = calls;
+      assert.deepEqual(await run(), { ok: false, error: "provider_rejected" });
+      assert.equal(calls, beforeCalls + 1);
+      assert.deepEqual(await rows(), before);
     }
     mode = "normal";
   });
