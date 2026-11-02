@@ -110,10 +110,12 @@ export async function importMetaDelivery(tenantId: string, deps: Deps = {}): Pro
       try {
         response = await (deps.fetch ?? fetch)(`https://graph.facebook.com/${META_GRAPH_VERSION}/${path}?${params}`, {
           method: "GET", headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-          signal: ctrl.signal, redirect: "error", cache: "no-store",
+          // Workers rejects redirect:error before sending. manual preserves the
+          // no-redirect policy; every non-2xx answer is refused below.
+          signal: ctrl.signal, redirect: "manual", cache: "no-store",
         });
       } catch { return fail("provider_unavailable"); }
-      if (!response.ok) return fail("provider_rejected");
+      if (!response.ok) { await response.body?.cancel(); return fail("provider_rejected"); }
       let body: Record<string, unknown>;
       try { body = await bodyOf(response); }
       catch (error) { if (error instanceof ImportFailure) throw error; return fail("provider_unavailable"); }
