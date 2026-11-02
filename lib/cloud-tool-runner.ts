@@ -51,7 +51,9 @@ import {
   type ApprovalScope,
 } from "./os/approvals/rules";
 import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
-import { agentMayUse, judgeAccess, readAgentAccessOverrides } from "./os/agent-access-store";
+import { agentMayUse, departmentMayUse, judgeAccess, readAgentAccessOverrides } from "./os/agent-access-store";
+import type { DepartmentKey } from "./os/types";
+import { DESK_TOOLS } from "./os/desk/catalog";
 import { APP_TOOLS, appForTool, refusalSentence } from "./os/agent-access";
 import { looksLikeSecret } from "./os/custom-keys";
 import { keyHostFor } from "./os/custom-key-hosts";
@@ -87,7 +89,6 @@ import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
 import { PROFILE_CUSTOM_FIELD_KEYS } from "./profile-custom-fields";
 import {
   getTenantIntegrationValue,
-  setTenantIntegrationValue,
   VAULT_CUSTOM_SERVICE,
   VAULT_KEY_PATTERN,
 } from "./tenant-integration-store";
@@ -136,11 +137,13 @@ export type ToolContext = {
   tenantId: string;
   userId: string;
   agentKey: string;
+  /** Set only by the authenticated desk, never from tool input or a persona name. */
+  departmentKey?: DepartmentKey | null;
   /** Required to call runAction (it uses auth_user_id for profile-bound writes). */
   authUserId: string;
   /**
    * True if the caller is owner/admin of the tenant (canManageTenant).
-   * Gates admin-only tools like get_credential — non-admin members
+   * Gates admin-only workspace actions — non-admin members
    * cannot pull decrypted vault secrets via chat even though they have
    * chat access. Resolved server-side in app/api/chat/route.ts before
    * the tool loop starts.
@@ -195,6 +198,8 @@ type ToolDef = {
  * useful tools first.
  */
 export const TOOL_DEFINITIONS: ToolDef[] = [
+  DESK_TOOLS.connections_status,
+  DESK_TOOLS.propose_sms,
   {
     name: "read_brain_doc",
     description:
@@ -225,42 +230,6 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         limit: { type: "number", description: "Optional max snippets to return. Default 8, max 20." },
       },
       required: ["query"],
-    },
-  },
-  {
-    name: "add_credential",
-    description:
-      "Save a new credential to the vault (admin only — same gate as Settings > Connections > Custom keys). Use this when the operator gives you a secret in chat that future chats will need (an API key they just generated, a webhook URL for a new integration, etc.). After saving, tell the operator what KEY name you saved it as so they can find it under Settings if they need to edit or delete. NEVER call this for the operator's PERSONAL transient secrets (one-time tokens, OTP codes, passwords); only evergreen workflow credentials.",
-    input_schema: {
-      type: "object",
-      properties: {
-        name: {
-          type: "string",
-          description:
-            "Credential KEY in UPPER_SNAKE_CASE (e.g., 'STRIPE_WEBHOOK_SECRET'). Pick a name that future-you would guess on the first try.",
-        },
-        value: {
-          type: "string",
-          description: "The secret value the operator gave you. Stored encrypted at rest.",
-        },
-      },
-      required: ["name", "value"],
-    },
-  },
-  {
-    name: "get_credential",
-    description:
-      "Retrieve a secret credential (API key, webhook URL, access token) the operator saved in Settings > Connections > Custom keys. Use this BEFORE asking the operator for a credential they may have already stored. The value is returned but you should NEVER echo it back to the operator in chat — pass it directly to the action that needs it (e.g., http_post Authorization header) and tell the operator what you did, not what the value was. If the credential doesn't exist, you'll get {found:false} — at that point, tell the operator the credential is missing and which exact KEY name to add under Settings > Connections > Custom keys.",
-    input_schema: {
-      type: "object",
-      properties: {
-        name: {
-          type: "string",
-          description:
-            "The credential key, UPPER_SNAKE_CASE (e.g., 'STRIPE_WEBHOOK_SECRET', 'CALENDLY_API_KEY'). Matches the key the operator typed in Settings.",
-        },
-      },
-      required: ["name"],
     },
   },
   {
@@ -956,10 +925,15 @@ export async function executeTool(
     console.error("[cloud-tool-runner] refused a tool call with no session tenant", { tool: name });
     return refusedToolResult(name, "tool_context_missing_tenant");
   }
+  // Retired tools are refused before inspecting inputs or building a summary:
+  // a user may have pasted a credential into the old name/value fields.
+  if (name === "get_credential" || name === "add_credential") {
+    return refusedToolResult(name, name === "get_credential" ? "secret_values_not_available" : "settings_required");
+  }
   // Dispatch-time sandbox (docs/os-revamp/03 F2, §d.4). The loop only OFFERS a
   // client tenant the client-safe registry, but the offer is not the boundary:
   // a replayed or malformed tool_use, a future provider adapter, or a new
-  // caller of executeTool must still be unable to run get_credential, http_post
+  // caller of executeTool must still be unable to run http_post
   // or any other OASIS-only tool for a client tenant.
   if (!isOasisInternalTenant(ctx.tenantId) && !isClientSafeTool(name)) {
     console.error("[cloud-tool-runner] refused a tool outside the client-safe registry", {
@@ -999,6 +973,44 @@ export async function executeTool(
   }
 }
 
+/** Generic API chat shares the department dispatcher used by subscription MCP. */
+async function dispatchDepartmentTool(name: string, input: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
+  const [{ resolveOsViewerFor }, { OS_DEPARTMENTS }, { deskToolset }, { departmentChannelFor, workspaceBindings, bindingIsOn }] = await Promise.all([
+    import("@/components/os/department/viewer"), import("@/lib/os/departments"), import("@/lib/os/desk/tools"), import("@/components/os/department/config"),
+  ]);
+  const viewer = await resolveOsViewerFor(ctx.tenantId, ctx.authUserId || ctx.userId);
+  if (!viewer.ok || viewer.surface.tenantId !== ctx.tenantId || viewer.surface.userId !== (ctx.authUserId || ctx.userId)) throw new Error("capability_access_unavailable");
+  // The tenant's roster owns renamed/custom department leads. Never infer
+  // privileged Chief-of-Staff access from an unknown model-supplied slug.
+  const dept = OS_DEPARTMENTS.find(d => {
+    if (ctx.departmentKey && d.key !== ctx.departmentKey) return false;
+    const lead = departmentChannelFor(d.key, { oasis: viewer.oasis, manifest: viewer.manifest });
+    return lead.kind === "agent" && lead.agentSlug === ctx.agentKey;
+  });
+  if (!dept) {
+    // A real custom teammate with no department keeps only explicit "All
+    // agents" key grants. Never borrow Chief of Staff's department or SMS.
+    const binding = workspaceBindings({ oasis: viewer.oasis, manifest: viewer.manifest }).find(a => a.slug === ctx.agentKey);
+    if (!binding || !bindingIsOn(binding) || binding.departments?.length || ctx.departmentKey) throw new Error("agent_has_no_department_capabilities");
+    if (name === "connections_status") {
+      const { loadAgentCapabilities } = await import("@/lib/os/agent-capabilities");
+      return loadAgentCapabilities(viewer, null);
+    }
+    if (name === "use_custom_key") {
+      const out = await toolUseCustomKey(input, { ...ctx, departmentKey: null, isAdmin: viewer.surface.persona === "founder" });
+      if (!("status" in out)) throw new Error(out.refused);
+      return out;
+    }
+    throw new Error("agent_has_no_department_capabilities");
+  }
+  const result = await deskToolset({ viewer, dept, agentSlug: ctx.agentKey }).execute(name, input);
+  if (result.is_error) {
+    const error = JSON.parse(result.content) as { error?: string };
+    throw new Error(error.error || "capability_unavailable");
+  }
+  return JSON.parse(result.content);
+}
+
 async function dispatch(
   name: string,
   input: Record<string, unknown>,
@@ -1014,11 +1026,13 @@ async function dispatch(
     case "save_known_fact":
       return await toolSaveKnownFact(input, ctx);
     case "get_credential":
-      return await toolGetCredential(input, ctx);
+      return { ok: false, refused: "secret_values_not_available", hint: "Credential values never reach the model. Use connections_status, then the server-held-key tool it lists." };
     case "add_credential":
-      return await toolAddCredential(input, ctx);
+      return { ok: false, refused: "settings_required", hint: "Save credentials securely in Settings > Connections. Never send their values in chat." };
+    case "connections_status":
+    case "propose_sms":
     case "use_custom_key":
-      return await toolUseCustomKey(input, ctx);
+      return await dispatchDepartmentTool(name, input, ctx);
     case "web_fetch":
       return await toolHttpGet(input);
     case "list_records":
@@ -1394,124 +1408,6 @@ function credentialNameForLog(raw: string): string {
   return VAULT_KEY_PATTERN.test(upper) ? upper : "(not a credential name)";
 }
 
-async function toolGetCredential(input: Record<string, unknown>, ctx: ToolContext) {
-  const raw = typeof input.name === "string" ? input.name.trim() : "";
-  // A secret given as the name is refused, and never logged or echoed (as in add_credential).
-  const secretName = looksLikeSecret(raw);
-  const targetForAudit = credentialNameForLog(raw);
-  // ADMIN-ONLY (Codex P1 finding, 2026-05-24). The Settings UI for the
-  // vault is gated on canManageTenant; the tool must enforce the same
-  // gate or a non-admin member (loan_officer, processor, etc.) could
-  // extract decrypted secrets via the chat surface. The model is told
-  // not to echo credentials, but that's a soft control — the only hard
-  // one is refusing to return the value in the first place.
-  if (!ctx.isAdmin) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "forbidden",
-    });
-    return {
-      found: false,
-      forbidden: true,
-      hint:
-        "Credential vault is admin-only. Ask the tenant owner or an admin to retrieve this credential, or to add you to the admin role under Settings → Team.",
-    };
-  }
-  if (!raw) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "name_required",
-    });
-    throw new Error("name_required");
-  }
-  if (secretName) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "credential_name_looks_like_a_secret",
-    });
-    throw new Error("credential_name_looks_like_a_secret: ask for a credential by its NAME, like ACME_API_KEY");
-  }
-  // Same regex as the upload route — refuses anything that wouldn't
-  // round-trip with the stored field_key.
-  if (!VAULT_KEY_PATTERN.test(raw.toUpperCase())) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "invalid_credential_name_format",
-    });
-    throw new Error("invalid_credential_name_format");
-  }
-  // The agents the owner picked for this key (lib/os/agent-access.ts); with
-  // nothing saved, every agent, as before.
-  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.agentKey);
-  if (!access.allowed) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "forbidden",
-      errorMessage: `agent_access: ${access.code}`,
-    });
-    return {
-      found: false,
-      forbidden: true,
-      name: raw.toUpperCase(),
-      hint: refusalSentence(access.code, raw.toUpperCase(), access.access, "Settings > Connections > Custom keys"),
-    };
-  }
-  const fieldKey = raw.toLowerCase();
-  const value = await getTenantIntegrationValue(
-    ctx.tenantId,
-    VAULT_CUSTOM_SERVICE,
-    fieldKey,
-  );
-  if (value === null) {
-    auditCredentialAccess({
-      action: "get_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "not_found",
-    });
-    return {
-      found: false,
-      name: raw.toUpperCase(),
-      hint:
-        "Credential not in vault. Tell the operator to add it under Settings > Connections > Custom keys using this exact KEY name.",
-    };
-  }
-  auditCredentialAccess({
-    action: "get_credential",
-    tenantId: ctx.tenantId,
-    userId: ctx.userId,
-    agentKey: ctx.agentKey,
-    target: targetForAudit,
-    result: "ok",
-  });
-  return { found: true, name: raw.toUpperCase(), value };
-}
-
 /** The run length of a key the scrubber hides wherever it appears: long enough to be the key, short enough that a fragment of it never survives. */
 export const SECRET_WINDOW = 12;
 
@@ -1609,7 +1505,7 @@ const KEY_HEADER_REFUSED = new Set(["host", "connection", "content-length", "coo
  * GET request, only to the host the owner set for that key
  * (lib/os/custom-key-hosts.ts), and the model never sees it. In order:
  *   - the name is a key name, not a secret pasted as one;
- *   - the owner assigned this key to this agent (agentMayUse, as get_credential);
+ *   - the owner assigned this key to the authenticated department;
  *   - the key exists and has a website set;
  *   - the URL is https on exactly that host, passes assertSafeUrl, and resolves
  *     to a public address (fetchWithCap); a redirect is never followed, so the
@@ -1634,7 +1530,9 @@ export async function toolUseCustomKey(
     return { ok: false, refused: "invalid_name", hint: "Give the key by its NAME as saved in Settings, like ACME_API_KEY, never its value." };
   }
   const name = raw.toUpperCase();
-  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.agentKey);
+  const access = ctx.departmentKey !== undefined
+    ? await departmentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.departmentKey)
+    : await agentMayUse(ctx.tenantId, { kind: "custom", key: raw }, ctx.agentKey);
   if (!access.allowed) {
     audit("forbidden", `agent_access: ${access.code}`);
     return { ok: false, refused: "not_assigned", name, hint: refusalSentence(access.code, name, access.access, "Settings > Connections > Custom keys") };
@@ -1705,130 +1603,6 @@ export async function toolUseCustomKey(
     body: scrubbed.length > cap ? hide(scrubbed.slice(0, cap)) : scrubbed,
     truncated: r.truncated || scrubbed.length > cap,
     ...(r.location ? { redirect_not_followed: true } : {}),
-  };
-}
-
-/**
- * Admin-only mirror of toolGetCredential. Lets an admin tell the
- * agent in chat "save this as STRIPE_WEBHOOK_SECRET" and have the
- * agent persist it without the admin navigating to Settings.
- *
- * Same gate as get_credential (ctx.isAdmin); same regex for KEY
- * validation; same audit log. Reuses setTenantIntegrationValue from
- * the integration store so encryption + upsert semantics are
- * identical to what the Settings UI / API route do.
- */
-async function toolAddCredential(input: Record<string, unknown>, ctx: ToolContext) {
-  const rawName = typeof input.name === "string" ? input.name.trim() : "";
-  const rawValue = typeof input.value === "string" ? input.value : "";
-  // A secret given as the name is never stored or logged as one: names are kept in the clear
-  // (lib/os/custom-keys.ts looksLikeSecret; the vault and its route refuse the same).
-  const secretName = looksLikeSecret(rawName);
-  const targetForAudit = credentialNameForLog(rawName);
-  if (!ctx.isAdmin) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "forbidden",
-    });
-    return {
-      ok: false,
-      forbidden: true,
-      hint:
-        "Adding credentials is admin-only. Ask the tenant owner or an admin to save this credential.",
-    };
-  }
-  if (!rawName) throw new Error("name_required");
-  if (!rawValue) throw new Error("value_required");
-  const upperName = rawName.toUpperCase();
-  if (secretName) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "credential_name_looks_like_a_secret",
-    });
-    throw new Error("credential_name_looks_like_a_secret: put the secret in `value` and give it a NAME like ACME_API_KEY");
-  }
-  if (!VAULT_KEY_PATTERN.test(upperName)) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "invalid_credential_name_format",
-    });
-    throw new Error("invalid_credential_name_format");
-  }
-  const access = await agentMayUse(ctx.tenantId, { kind: "custom", key: upperName }, ctx.agentKey);
-  if (!access.allowed) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "forbidden",
-      errorMessage: `agent_access: ${access.code}`,
-    });
-    return {
-      ok: false,
-      forbidden: true,
-      name: upperName,
-      hint: refusalSentence(access.code, upperName, access.access, "Settings > Connections > Custom keys"),
-    };
-  }
-  if (rawValue.length > 8192) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "invalid",
-      errorMessage: "value_too_long",
-    });
-    throw new Error("value_too_long_max_8192");
-  }
-  const r = await setTenantIntegrationValue({
-    tenantId: ctx.tenantId,
-    service: VAULT_CUSTOM_SERVICE,
-    fieldKey: upperName.toLowerCase(),
-    value: rawValue,
-    createdBy: null,
-  });
-  if (!r.ok) {
-    auditCredentialAccess({
-      action: "add_credential",
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentKey: ctx.agentKey,
-      target: targetForAudit,
-      result: "error",
-      errorMessage: r.error,
-    });
-    throw new Error(r.error);
-  }
-  auditCredentialAccess({
-    action: "add_credential",
-    tenantId: ctx.tenantId,
-    userId: ctx.userId,
-    agentKey: ctx.agentKey,
-    target: targetForAudit,
-    result: "ok",
-  });
-  return {
-    ok: true,
-    name: upperName,
-    hint: "Saved to the vault. Future chats can retrieve this via get_credential.",
   };
 }
 

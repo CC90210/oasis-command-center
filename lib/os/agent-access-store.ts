@@ -22,6 +22,7 @@ import "server-only";
 import { decryptField } from "@/lib/field-encryption";
 import { isClientSafeTool, isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
+import type { DepartmentKey } from "@/lib/os/types";
 import {
   APP_TOOLS,
   CUSTOM_DEFAULT_ACCESS,
@@ -104,11 +105,20 @@ export type AccessVerdict = { allowed: true } | { allowed: false; code: RefusalC
 
 /** May the agent `agentKey` use the target? Anything unknown is "no", with the reason as a code. */
 export function judgeAccess(overrides: AccessOverrides, target: AccessTarget, agentKey: string | null | undefined): AccessVerdict {
+  return judgeDepartmentAccess(overrides, target, departmentForAgent(agentKey));
+}
+
+/** A department authenticated by the desk/MCP server, never a model argument or persona name. */
+export function judgeDepartmentAccess(overrides: AccessOverrides, target: AccessTarget, department: DepartmentKey | null): AccessVerdict {
   if (!overrides.ok) return { allowed: false, code: "read_failed", access: null };
   const { access } = effectiveAccess(overrides, target);
   if (access === null) return { allowed: false, code: "unreadable", access: null };
-  if (accessAllows(access, departmentForAgent(agentKey))) return { allowed: true };
+  if (accessAllows(access, department)) return { allowed: true };
   return { allowed: false, code: "not_given", access };
+}
+
+export async function departmentMayUse(tenantId: string, target: AccessTarget, department: DepartmentKey | null): Promise<AccessVerdict> {
+  return judgeDepartmentAccess(await readAgentAccessOverrides(tenantId), target, department);
 }
 
 export async function agentMayUse(tenantId: string, target: AccessTarget, agentKey: string | null | undefined): Promise<AccessVerdict> {
@@ -117,8 +127,8 @@ export async function agentMayUse(tenantId: string, target: AccessTarget, agentK
 
 /**
  * Do this workspace's agents use what an owner assigns? Custom keys reach an
- * agent through get_credential (OASIS) and use_custom_key (every workspace,
- * CC 2026-10-27), apps through their tools (APP_TOOLS). Outside OASIS only the
+ * agent through use_custom_key (every workspace), never as raw values;
+ * apps through their tools and the approved SMS executor. Outside OASIS only the
  * client-safe tools run (lib/ai/tools/client-safe-registry.ts), so an
  * assignment is offered only where a client-safe tool honours it (final review
  * of OCC #748). The pages show the picker only where it is true.
@@ -126,8 +136,8 @@ export async function agentMayUse(tenantId: string, target: AccessTarget, agentK
 export function assignmentsApply(tenantId: string, what: "custom" | "apps"): boolean {
   if (isOasisInternalTenant(tenantId)) return true;
   return what === "custom"
-    ? isClientSafeTool("get_credential") || isClientSafeTool("use_custom_key")
-    : Object.keys(APP_TOOLS).some((tool) => isClientSafeTool(tool));
+    ? isClientSafeTool("use_custom_key")
+    : isClientSafeTool("propose_sms") || Object.keys(APP_TOOLS).some((tool) => isClientSafeTool(tool));
 }
 
 /** Save the owner's choice. Saving the default itself clears the row, so a later change to the default applies. */

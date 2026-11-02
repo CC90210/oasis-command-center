@@ -648,19 +648,19 @@ async function main() {
 
     // Not offered to client workspaces: only OASIS's own send through Quo, and no
     // Conversations picker offers it, so a client that has not connected is told so.
-    assert.equal(def!.clientsUnavailable, true);
-    assert.deepEqual([status([], false).kind, status([], false).label], ["coming_soon", "Not available on this workspace yet"]);
+    assert.equal(def!.clientsUnavailable, false);
+    assert.equal(status([], false).kind, "not_connected");
     assert.equal(status([row()], false).kind, "configured", "a client that already saved a key still sees its own key's state");
 
     // The card says what is true about STOP: the list is checked, replies to Quo are not read.
     const does = def!.does.join(" ");
     assert.match(does, /checks the workspace's STOP list before each text/);
-    assert.match(does, /Replies to your Quo number, STOP included, are not read by OASIS yet/);
+    assert.match(does, /Approved agent texts require a verified incoming webhook/);
     assert.doesNotMatch(does, /never to someone who replied STOP/);
     assert.doesNotMatch(`${does} ${def!.reads.join(" ")}`, /waiting on registration/);
   });
 
-  await check("a client's Quo drawer says it is not available and draws no key form; OASIS's own draws the form", () => {
+  await check("every workspace's Quo drawer offers its own connection form", () => {
     const def = connectors.connectorBySlug("quo")!;
     const client = connectors.resolveConnectorStatus(def, { keyRows: [], connections: [], oasisWorkspace: false } as never, Date.now());
     const oasis = connectors.resolveConnectorStatus(def, { keyRows: [], connections: [], oasisWorkspace: true } as never, Date.now());
@@ -683,8 +683,8 @@ async function main() {
     const markup = (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
     const words = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;|&#39;/g, "'").replace(/\s+/g, " ");
     const clientText = words(markup.client);
-    assert.match(clientText, /Not available on this workspace yet/);
-    assert.doesNotMatch(clientText, /Connect Quo|Quo's guide to API keys/, "a client is offered no key form");
+    assert.doesNotMatch(clientText, /Not available on this workspace yet/);
+    assert.match(clientText, /Connect Quo|Quo's guide to API keys/, "a client can connect its own key");
     assert.match(words(markup.oasis), /Connect Quo/, "OASIS's own workspace gets the key form");
   });
 

@@ -182,7 +182,7 @@ export function appForTool(tool: string): string | null {
 
 /** What an app's agent tools do, in a few words, for its card; null when no agent tool uses the app. */
 const APP_TOOL_WORDS: Readonly<Record<string, string>> = {
-  quo: "texting a lead from your computer",
+  quo: "preparing a text for approval and sending the approved text through Quo",
   kixie: "Kixie calls and texts",
   texttorrent: "TextTorrent texts and lists",
 };

@@ -144,7 +144,7 @@ async function main() {
     assert.match(rules.refusalSentence("read_failed", "FOO", null, "x"), /^Could not check which agents may use FOO right now\./);
     assert.equal(rules.appForTool("send_sms"), "quo");
     assert.equal(rules.appForTool("constructor"), null, "only the table's own keys");
-    assert.equal(rules.agentToolsOf("quo"), "texting a lead from your computer");
+    assert.equal(rules.agentToolsOf("quo"), "preparing a text for approval and sending the approved text through Quo");
     assert.equal(rules.agentToolsOf("slack"), null);
   });
 
@@ -172,13 +172,12 @@ async function main() {
     await store.saveAgentAccess({ tenantId: OASIS, target: { kind: "custom", key: "FIN_SECRET" }, access: ["finance"] });
     await setTenantIntegrationValue({ tenantId: OASIS, service: VAULT_CUSTOM_SERVICE, fieldKey: "fin_secret", value: "finance-value" });
     const refused = JSON.parse((await runner.executeTool("get_credential", { name: "FIN_SECRET" }, ctx("maven"))).content);
-    assert.deepEqual([refused.found, refused.forbidden], [false, true]);
-    assert.equal(refused.hint, "FIN_SECRET is set for Finance. An owner can give this agent access in Settings > Connections > Custom keys.");
+    assert.equal(refused.error, "secret_values_not_available");
     const overwrite = JSON.parse((await runner.executeTool("add_credential", { name: "FIN_SECRET", value: "marketing-value" }, ctx("maven"))).content);
-    assert.deepEqual([overwrite.ok, overwrite.forbidden], [false, true], "Marketing cannot replace Finance's key");
+    assert.equal(overwrite.error, "settings_required", "chat cannot replace Finance's key");
     const given = JSON.parse((await runner.executeTool("get_credential", { name: "FIN_SECRET" }, ctx("atlas"))).content);
-    assert.equal(given.found, true);
-    assert.equal(given.value, "finance-value", "the value Finance set is still the value");
+    assert.equal(given.error, "secret_values_not_available", "even the assigned agent never receives a value");
+    assert.equal(await (await import("../lib/tenant-integration-store")).getTenantIntegrationValue(OASIS, VAULT_CUSTOM_SERVICE, "fin_secret"), "finance-value", "the value Finance set is unchanged");
   });
 
   await check("the Anthropic loop: send_sms is not offered to an agent Quo was not given, and is to one it was", async () => {
@@ -297,7 +296,7 @@ async function main() {
     assert.equal((await (await customRoute.POST(json({ key: "ROT_KEY", value: "v2" }))).json()).ok, true);
     const listed = (await (await customRoute.GET()).json()).entries.find((e: { key: string }) => e.key === "ROT_KEY");
     assert.deepEqual([listed.agents, listed.agents_saved], [["finance"], true], "a new value without agents keeps the agents");
-    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "ROT_KEY" }, ctx("maven"))).content).forbidden, true);
+    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "ROT_KEY" }, ctx("maven"))).content).error, "secret_values_not_available");
     const del = await customRoute.DELETE(json({ key: "ROT_KEY" }, "DELETE"));
     assert.deepEqual(await del.json(), { ok: true });
     assert.ok(!(await accessRows()).includes("custom:rot_key"), "the choice goes with the key");
@@ -422,7 +421,7 @@ async function main() {
     const listed = (await (await customRoute.GET()).json()).entries as Array<{ key: string; agents: unknown }>;
     assert.deepEqual(listed.find((e) => e.key === "P_ONE")?.agents, ["sales"], "its own agents win");
     assert.deepEqual(listed.find((e) => e.key === "P_TWO")?.agents, ["finance"], "the request's agents otherwise");
-    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "P_ONE" }, ctx("atlas"))).content).forbidden, true);
+    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "P_ONE" }, ctx("atlas"))).content).error, "secret_values_not_available");
     for (const key of ["P_ONE", "P_TWO"]) await customRoute.DELETE(json({ key }, "DELETE"));
   });
 
@@ -492,8 +491,8 @@ async function main() {
     } finally {
       Object.assign(console, real);
     }
-    assert.match(added, /credential_name_looks_like_a_secret/);
-    assert.ok(seen.some((l) => l.includes("(a secret without a name)")), "the refusal is audited");
+    assert.match(added, /settings_required/);
+    assert.equal(seen.length, 0, "the retired tool never inspects or logs the secret");
     assert.ok(!(added + seen.join("\n")).toLowerCase().includes(bare.slice(0, 8).toLowerCase()), "not in the answer or the audit");
     // Nor is an owner's agent choice saved under one.
     const hexSecret = ["a3f9c2e1b4d5a6f7", "e8d9c0b1a2f3e4d5", "c6b7a8f9"].join("");
@@ -519,10 +518,10 @@ async function main() {
     } finally {
       Object.assign(console, real);
     }
-    assert.match(got.content, /credential_name_looks_like_a_secret/);
+    assert.match(got.content, /secret_values_not_available/);
     assert.ok(!(JSON.stringify(got) + seen.join("\n")).toLowerCase().includes(token.slice(0, 8).toLowerCase()), "not in the answer, the chip or the audit");
     // An ordinary name that starts like a key is still a name (final review of #748).
-    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "hf_token" }, ctx("bravo"))).content).found, false);
+    assert.equal(JSON.parse((await runner.executeTool("get_credential", { name: "hf_token" }, ctx("bravo"))).content).error, "secret_values_not_available");
     // Text that is no name at all (a header pasted whole) is not logged either (CodeRabbit on #750).
     const header = ["Bear", "er ", "eyJhbGciOi", "JIUzI1NiJ9"].join("");
     const seen2: string[] = [];
@@ -534,7 +533,7 @@ async function main() {
       Object.assign(console, real);
     }
     assert.ok(!(JSON.stringify(got2) + seen2.join("\n")).toUpperCase().includes("EYJHBGCIOI"), "no part of it in the audit, the chip or the answer");
-    assert.ok(seen2.some((l) => l.includes("(not a credential name)")), "the audit line names it as no name");
+    assert.equal(seen2.length, 0, "the retired tool never inspects or logs input");
   });
 
   await check("a client workspace: custom keys are assignable (use_custom_key, CC 2026-10-27); app tools still are not, and it is told so", async () => {
@@ -546,7 +545,7 @@ async function main() {
     try {
       const theirs = await (await customRoute.GET()).json();
       const theirApps = await (await agentsRoute.GET()).json();
-      assert.deepEqual([theirs.assignable, theirApps.assignable], [true, false], "a client's agents use a key through use_custom_key; no app tool is client-safe");
+      assert.deepEqual([theirs.assignable, theirApps.assignable], [true, true], "clients assign custom reads and approval-gated Quo texts");
     } finally {
       session = OWNER;
     }

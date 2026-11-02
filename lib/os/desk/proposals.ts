@@ -24,7 +24,9 @@ import "server-only";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadPendingApprovals } from "@/components/os/approvals/load";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
-import { canonicalJson, departmentLabel, validateSendEmailPayload } from "@/lib/os/approvals/rules";
+import { canonicalJson, departmentLabel, validateSendEmailPayload, validateSendSmsPayload } from "@/lib/os/approvals/rules";
+import { assertSmsAccess } from "./sms-access";
+import { getQuoCredentials } from "@/lib/integrations/quo";
 import { createApproval, getApprovalInTenant, payloadHashOf } from "@/lib/os/approvals/store";
 import type { OsDepartment } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
@@ -63,6 +65,28 @@ export class ProposalRefused extends Error {
     super(code);
     this.name = "ProposalRefused";
   }
+}
+
+/** One exact, human-approved text. The existing approval claim owns all later execution. */
+export async function proposeDeskSms(viewer: OsViewer, dept: OsDepartment, agentSlug: string, input: Record<string, unknown>, now = new Date()) {
+  if (!mayProposeFrom(viewer)) throw new ProposalRefused("proposer_may_not_act");
+  const payload = validateSendSmsPayload(input);
+  if (!payload.ok) throw new ProposalRefused(payload.error);
+  try { await assertSmsAccess(viewer, dept, payload.value); }
+  catch (err) { throw new ProposalRefused(err instanceof Error ? err.message : "sms_access_unavailable"); }
+  // Prove the tenant's own credential exists; never return it or guess a fallback account.
+  try { await getQuoCredentials(viewer.surface.tenantId); }
+  catch { throw new ProposalRefused("quo_credentials_unavailable"); }
+  if (!tursoConfigured()) throw new ProposalRefused("approvals_unavailable");
+  const hash = payloadHashOf(canonicalJson(payload.value));
+  const made = await createApproval(getTursoClient(), {
+    tenantId: viewer.surface.tenantId, departmentKey: dept.key, requestedBy: { type: "agent", id: agentSlug },
+    actionKind: "send_sms", title: `Text to ${payload.value.to}`, targetRef: payload.value.lead_id ? `lead:${payload.value.lead_id}` : null,
+    payload: payload.value, idempotencyKey: deskProposalKey(deskActor(viewer), agentSlug, now.toISOString().slice(0, 10), null, hash),
+  }, now);
+  if (!made.ok) throw new ProposalRefused(made.error);
+  return { ok: true, sent: false, approval_id: made.approval.id, status: made.approval.status,
+    note: made.approval.status === "pending" ? "Text prepared in Needs you. Approve the exact draft there to send it through Quo; current sending checks still apply." : "This exact text already has an approval today. Check its recorded outcome before creating another." };
 }
 
 export async function proposeDeskEmail(

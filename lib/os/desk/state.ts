@@ -17,6 +17,7 @@
  */
 
 import "server-only";
+import { loadAgentCapabilities } from "@/lib/os/agent-capabilities";
 import type { OsDepartment } from "@/lib/os/departments";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { OsViewer } from "@/components/os/department/viewer";
@@ -26,14 +27,6 @@ import { loadDepartmentNumbers } from "@/components/os/department/numbers";
 import { loadTenantRoutines, type Read } from "@/components/os/department/routines";
 import type { RoutineRow } from "@/components/os/department/routine-rules";
 import { deskApprovals } from "./proposals";
-import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
-import {
-  CONNECTOR_CATALOG,
-  connectionSetUp,
-  connectorBySlug,
-  resolveConnectorStatus,
-  type ConnectorDef,
-} from "@/lib/os/connectors";
 import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listTickets } from "@/lib/delivery/store";
@@ -64,41 +57,16 @@ export function deskDeliveryViewer(viewer: OsViewer) {
   return desk.ok ? desk : resolveDeliveryViewer(input);
 }
 
-/** Owners and admins see each app's status, as on the department page. */
-export function seesConnectionStatus(viewer: OsViewer): boolean {
-  return viewer.surface.persona === "founder";
-}
-
 /**
- * The apps a department works through: the department page's own chips, plus,
- * for Chief of Staff and Operations (which watch every app), every app the
- * workspace has set up. AI models are the AI account, not a department app.
+ * Fresh connection metadata and assigned custom keys, scoped to this member
+ * and department. The same discovery reader backs the connections_status tool.
  */
 export async function loadDeskConnections(viewer: OsViewer, dept: OsDepartment, nowMs: number): Promise<DeskConnection[]> {
-  const chips = departmentProfile(dept.key).connections;
-  const defs = new Map<string, { def: ConnectorDef; name: string }>();
-  for (const chip of chips) {
-    const def = connectorBySlug(chip.connector);
-    if (def && !defs.has(def.slug)) defs.set(def.slug, { def, name: chip.label });
-  }
-  const watchesAll = dept.key === "chief_of_staff" || dept.key === "operations";
-  if (!seesConnectionStatus(viewer)) {
-    return [...defs.values()].map(({ def, name }) => ({ name, status: null, connected: false, reads: def.reads, does: def.does }));
-  }
-  const facts = await loadConnectorFacts({ tenantId: viewer.surface.tenantId, userId: viewer.surface.userId, personal: false });
-  const out: DeskConnection[] = [];
-  const add = (def: ConnectorDef, name: string) => {
-    const status = resolveConnectorStatus(def, facts, nowMs);
-    out.push({ name, status: status.label, connected: status.kind === "connected", reads: def.reads, does: def.does });
-  };
-  for (const { def, name } of defs.values()) add(def, name);
-  if (watchesAll) {
-    for (const def of CONNECTOR_CATALOG) {
-      if (defs.has(def.slug) || def.category === "ai_models" || !def.live) continue;
-      if (connectionSetUp(resolveConnectorStatus(def, facts, nowMs))) add(def, def.name);
-    }
-  }
-  return out;
+  const capabilities = await loadAgentCapabilities(viewer, dept, nowMs);
+  return [
+    ...capabilities.apps.map(app => ({ name: app.name, status: app.status, connected: app.connected, reads: app.reads, does: app.does })),
+    ...capabilities.custom_keys.map(key => ({ name: key.name, status: key.status === "available" ? "Available for API reads" : "Website required", connected: key.status === "available", reads: key.website ? [`Authorized API reads at https://${key.website} using use_custom_key; the key stays on the server.`] : [], does: ["No writes or messages through this custom key."] })),
+  ];
 }
 
 export async function loadOpenTickets(viewer: OsViewer, nowMs: number) {

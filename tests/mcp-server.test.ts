@@ -357,7 +357,7 @@ async function main() {
   await check("a department's palette is its own: Marketing offers no proposal and no pipeline tool", async () => {
     const r = await rpc(await mint({ dept: "marketing", prof: "propose" }), "tools/list");
     assert.equal(r.status, 200);
-    assert.deepEqual(toolNames(r), ["department_numbers", "approvals_list", "connections_status"]);
+    assert.deepEqual(toolNames(r), ["department_numbers", "approvals_list", "connections_status", "use_custom_key"]);
   });
   await check("a read-only member is never offered a proposal, whatever the bearer's profile says", async () => {
     const r = await rpc(await mint({ uid: VIEWER, dept: "sales", prof: "propose" }), "tools/list");

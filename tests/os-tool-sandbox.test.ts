@@ -175,7 +175,8 @@ async function main() {
     }
     // Anti-vacuity: the catalog really does contain the tools this guards against.
     for (const n of ["bash", "write_file", "run_script", "send_email", "load_skill"]) assert.ok(DEFER_NAMES.has(n), n);
-    for (const n of ["get_credential", "add_credential", "http_post"]) assert.ok(ALL_NAMES.includes(n), n);
+    assert.ok(ALL_NAMES.includes("http_post"));
+    for (const n of ["get_credential", "add_credential"]) assert.ok(!ALL_NAMES.includes(n), "raw-secret tools are removed for every tenant");
   });
 
   await check("the OASIS tenant ids are exactly the brand map's OASIS rows, matched by exact id", () => {
@@ -244,7 +245,7 @@ async function main() {
       assert.deepEqual([...everything].sort(), [...registry.CLIENT_SAFE_TOOLS.keys()].sort());
       // The safe default loses exactly its bridge and credential tools.
       const safe = names(resolveActiveTools({ tenantId, ...BRIDGE_STATES[0], toolPalette: SAFE_TENANT_TOOL_PALETTE }));
-      for (const gone of ["send_email", "send_sms", "get_credential", "add_credential"]) {
+      for (const gone of ["send_email", "send_sms"]) {
         assert.ok(SAFE_TENANT_TOOL_PALETTE.includes(gone), `anti-vacuity: ${gone} is in the safe default`);
         assert.ok(!safe.includes(gone), `${gone} survived for a client`);
       }
@@ -304,7 +305,7 @@ async function main() {
       for (const name of ["get_credential", "add_credential", "http_post", "read_brain_doc", "search_memory", "bash", "write_file", "kixie_send_sms", "delete_record"]) {
         const r = await runner.executeTool(name, { name: "STRIPE_SECRET_KEY", value: "x", url: "https://example.test" }, clientCtx);
         assert.equal(r.is_error, true, name);
-        assert.deepEqual(JSON.parse(r.content), { error: "tool_not_available_in_this_workspace", tool: name });
+        assert.deepEqual(JSON.parse(r.content), { error: name === "get_credential" ? "secret_values_not_available" : name === "add_credential" ? "settings_required" : "tool_not_available_in_this_workspace", tool: name });
       }
       const noTenant = await runner.executeTool("list_records", { entity: "lead" }, { ...clientCtx, tenantId: "" });
       assert.deepEqual(JSON.parse(noTenant.content), { error: "tool_context_missing_tenant", tool: "list_records" });
@@ -397,7 +398,7 @@ async function main() {
     for (const n of FORBIDDEN) assert.ok(!client.includes(`- ${n} —`), `client prompt describes ${n}`);
     assert.ok(client.includes("- list_records —"));
     for (const block of [runner.cloudToolsPromptBlockV2({ bridgeOnline: true, tenantId: OASIS }), runner.cloudToolsPromptBlockV2({ bridgeOnline: true })]) {
-      assert.ok(block.includes("- bash —") && block.includes("- get_credential —"), "OASIS prompt block changed");
+      assert.ok(block.includes("- bash —") && !block.includes("- get_credential —"), "OASIS retains its tools without raw credential exposure");
     }
   });
 

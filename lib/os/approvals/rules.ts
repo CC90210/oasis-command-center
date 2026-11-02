@@ -262,6 +262,20 @@ export type SendEmailPayload = {
   lead_id?: string;
 };
 
+export type SendSmsPayload = { provider: "quo"; to: string; body: string; lead_id?: string };
+
+export function validateSendSmsPayload(raw: unknown): Valid<SendSmsPayload> {
+  if (!plainObject(raw)) return { ok: false, error: "payload_invalid" };
+  if (raw.provider !== undefined && raw.provider !== "quo") return { ok: false, error: "sms_provider_invalid" };
+  const to = typeof raw.to === "string" ? raw.to.trim() : "";
+  if (!/^\+[1-9]\d{6,14}$/.test(to)) return { ok: false, error: "sms_recipient_invalid", field: "to" };
+  const body = typeof raw.body === "string" ? raw.body.replace(/\r\n/g, "\n").trim() : "";
+  if (!body || body.length > 1600 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(body)) return { ok: false, error: "sms_body_invalid", field: "body" };
+  const lead = raw.lead_id;
+  if (lead !== undefined && (typeof lead !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(lead))) return { ok: false, error: "lead_id_invalid" };
+  return { ok: true, value: { provider: "quo", to, body, ...(lead ? { lead_id: lead } : {}) } };
+}
+
 export type PublishPostPayload = {
   asset_id: string;
   /**
@@ -520,6 +534,8 @@ export function validateReplyTicketPayload(raw: unknown): Valid<ReplyTicketPaylo
 
 export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<Record<string, unknown>> {
   switch (kind) {
+    case "send_sms":
+      return validateSendSmsPayload(raw) as Valid<Record<string, unknown>>;
     case "send_email":
       return validateSendEmailPayload(raw) as Valid<Record<string, unknown>>;
     case "send_slack_message":
@@ -543,7 +559,7 @@ export function validatePayload(kind: ApprovalActionKind, raw: unknown): Valid<R
 
 /** The one-paragraph preview the card shows before anyone expands the payload. */
 export function previewFor(kind: ApprovalActionKind, payload: Record<string, unknown>): string {
-  if (kind === "send_email" || kind === "reply_ticket") {
+  if (kind === "send_email" || kind === "send_sms" || kind === "reply_ticket") {
     const body = typeof payload.body === "string" ? payload.body : "";
     return body.length > 280 ? `${body.slice(0, 279).trimEnd()}…` : body;
   }
@@ -793,7 +809,7 @@ export function scopeSeesNothing(scope: ApprovalScope): boolean {
  * word for what happened; the card renders it and never infers success.
  */
 export type ExecutionResult =
-  | { outcome: "sent"; provider: string; message_id?: string | null; from?: string | null; comment_id?: string | null }
+  | { outcome: "sent"; provider: string; message_id?: string | null; from?: string | null; comment_id?: string | null; provider_status?: string }
   | { outcome: "dry_run"; provider: string; would_send?: Record<string, unknown> }
   | { outcome: "queued"; provider: string; intent_id?: string | null; platforms?: string[] }
   // An authorization: nothing left the business; an internal gate opened (Gate 1).

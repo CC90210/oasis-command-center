@@ -37,6 +37,7 @@ export const SAFE_TENANT_TOOL_PALETTE: string[] = [
   "list_open_leads",
   "import_leads_from_attachment",
   "integration_status",
+  "connections_status",
   // HTTP — fetchWithCap enforces an SSRF block list. Public reads only.
   "http_get",
   // Bridge sends — already routed through send_gateway (CASL/TCPA enforced).
@@ -48,10 +49,9 @@ export const SAFE_TENANT_TOOL_PALETTE: string[] = [
   // For a client workspace this is the ONLY email tool that survives the
   // client-safe registry, so its agents can only ever propose.
   "propose_email",
+  "propose_sms",
   "list_proposals",
   // Custom credentials vault — admin-gated inside each tool (ctx.isAdmin).
-  "get_credential",
-  "add_credential",
   // A custom key used without being seen: GET only, to its one website.
   "use_custom_key",
 ];
