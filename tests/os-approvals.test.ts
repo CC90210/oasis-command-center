@@ -2045,6 +2045,48 @@ async function main() {
     }
   });
 
+  for (const dryRun of [true, false]) {
+    await check(`executor ignores a caller's stale approver email (${dryRun ? "dry run" : "fake provider"})`, async () => {
+      const a = await create();
+      assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+      const before = sent.length;
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: "obsolete-caller@fixture.test" } }, fakeDeps({ isDryRun: () => dryRun }));
+      assert.ok(r.ok);
+      if (r.ok && dryRun) assert.deepEqual(r.approval.execution_result?.would_send?.cc, [USERS.cc.email]);
+      if (!dryRun) {
+        assert.equal(sent.length, before + 1);
+        assert.deepEqual(sent[sent.length - 1].cc, [USERS.cc.email]);
+        assert.equal(sent[sent.length - 1].signer?.email, USERS.cc.email);
+      }
+    });
+  }
+
+  await check("a server email resume copies the verified recorded decider without caller identity data", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
+    assert.ok(r.ok);
+    assert.deepEqual(sent[sent.length - 1].cc, [USERS.cc.email]);
+    assert.equal(sent[sent.length - 1].signer?.email, USERS.cc.email);
+  });
+
+  await check("an approver email change during recipient checks refuses the send instead of copying the old address", async () => {
+    const a = await create({ payload: { to: "synthetic-recipient@fixture.test", cc: ["copy@fixture.test"], subject: "Mid-check email change", body: "Synthetic fixture only." } });
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps({ emailSuppression: async () => {
+        await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: ["changed-during-check@fixture.test", USERS.cc.id] });
+        return { suppressed: false, checkFailed: false };
+      } }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_changed");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+    }
+  });
+
   console.log(`os-approvals: ${passed} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);
 }

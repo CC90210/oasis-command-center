@@ -260,13 +260,15 @@ export function emailFailureMessage(reason: string, error: string): string {
   }
 }
 
-async function emailApproverRefusal(ctx: ExecutorContext): Promise<ExecutorOutcome | null> {
+async function currentEmailApprover(ctx: ExecutorContext): Promise<
+  { ok: true; email: string } | { ok: false; refusal: ExecutorOutcome }
+> {
   // A server resume has no request actor, but still has the recorded decider.
   const approverId = ctx.approver?.userId ?? ctx.approval.decided_by;
   const fresh = approverId ? await resolveOsViewerFor(ctx.tenant.id, approverId) : null;
-  return fresh?.ok && mayDecideApproval(approvalScopeFromViewer(fresh), ctx.approval.department_key)
-    ? null
-    : failed("approver_unavailable", "The approver no longer has permission in this workspace, or their access could not be verified. Nothing was sent.", EMAIL_PROVIDER);
+  return fresh?.ok && fresh.email && mayDecideApproval(approvalScopeFromViewer(fresh), ctx.approval.department_key)
+    ? { ok: true, email: fresh.email }
+    : { ok: false, refusal: failed("approver_unavailable", "The approver no longer has permission in this workspace, or their access could not be verified. Nothing was sent.", EMAIL_PROVIDER) };
 }
 
 const sendEmail: Executor = {
@@ -277,15 +279,17 @@ const sendEmail: Executor = {
     const v = validateSendEmailPayload(ctx.payload);
     if (!v.ok) return failed("payload_invalid", `The stored email is not valid (${v.error}).`);
     const { to, subject, body } = v.value;
+    const identity = await currentEmailApprover(ctx);
+    if (!identity.ok) return identity.refusal;
     // The approver is copied, always: from a shared mailbox, nobody's own Sent
     // folder holds the message, and a person with no copy cannot tell a send
     // from a failure (oasis-shared-gmail-send.ts, the 2026-09-08 incident).
-    const approverEmail = (ctx.approver?.email || "").trim().toLowerCase() || null;
-    const cc = [...new Set([...(v.value.cc ?? []), ...(approverEmail ? [approverEmail] : [])])].filter((c) => c !== to);
+    // Every caller, including Slack and a server resume, uses the verified
+    // account address. A cached caller/profile email must never become a copy.
+    const approverEmail = identity.email;
+    const cc = [...new Set([...(v.value.cc ?? []), approverEmail])].filter((c) => c !== to);
 
     if (ctx.deps.isDryRun("email")) {
-      const refusal = await emailApproverRefusal(ctx);
-      if (refusal) return refusal;
       return {
         ok: true,
         result: { outcome: "dry_run", provider: EMAIL_PROVIDER, would_send: { to, cc, subject } },
@@ -325,8 +329,11 @@ const sendEmail: Executor = {
     // recorded decider on a server resume) must still hold this department's
     // permission in THIS workspace immediately before the external effect.
     // The session can remain valid because they belong to another workspace.
-    const refusal = await emailApproverRefusal(ctx);
-    if (refusal) return refusal;
+    const fresh = await currentEmailApprover(ctx);
+    if (!fresh.ok) return fresh.refusal;
+    if (fresh.email !== approverEmail) {
+      return failed("approver_changed", "The approver's account email changed while this email was being checked. Nothing was sent; review a new draft.", EMAIL_PROVIDER);
+    }
     const sent = await ctx.deps.sendEmail({
       tenantId: ctx.tenant.id,
       to,
