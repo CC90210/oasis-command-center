@@ -85,7 +85,8 @@ export async function checkPhoneOptOut(
   const norm = normalizePhoneE164(phone ?? "");
   if (!tenantId || !norm) return { optedOut: false, checkFailed: false };
   const last10 = norm.replace(/\D/g, "").slice(-10);
-  if (last10.length < 10) return { optedOut: false, checkFailed: false };
+  // International E.164 destinations can have fewer than ten digits. STOP
+  // storage uses the same suffix for them; never skip that durable lookup.
   try {
     const db = getServiceSupabase();
     const durable = await db.from("sunbiz_phone_suppressions").select("phone_last10")

@@ -11,7 +11,8 @@ export const QUO_WEBHOOK_VERSION = "2026-03-30";
 const EVENT = "quo_sms_inbound";
 const STATE_SERVICE = "quo_webhook_state"; // Internal proof, never a manually editable integration.
 const MAX_BYTES = 64 * 1024;
-const E164 = /^\+[1-9]\d{9,14}$/;
+// Match sendQuoSms: every supported destination must also be able to opt out.
+const E164 = /^\+[1-9]\d{6,14}$/;
 const opaque = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200 && !/[\s\x00-\x1f]/.test(v);
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");

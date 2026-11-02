@@ -157,6 +157,30 @@ async function main() {
       const bad = event(); (bad.data.resource as { text?: unknown }).text = 42;
       assert.equal((await handle(request(bad, "delivery-bad-text"))).status, 422, "a non-text body is still refused");
     });
+    await check("short international STOPs cancel pending reminders and block every supported resend", async () => {
+      const { sendQuoSms } = await import("../lib/integrations/quo");
+      for (const phone of ["+299551234", "+1234567"]) {
+        for (const who of [tenant, other]) await db.execute({
+          sql: "INSERT INTO website_sales_meeting_notifications VALUES (?,?, 'sms',?,'pending',NULL,NULL,NULL)",
+          args: [`short-${who}-${phone}`, who, phone],
+        });
+        const value = event("STOP"); value.data.context.senderIdentifier = phone;
+        const response = await handle(request(value, `short-${phone}`));
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).ignored, undefined, "supported phones are never treated as internal identifiers");
+        const suppressed = await db.execute({ sql: "SELECT reason FROM sunbiz_phone_suppressions WHERE tenant_id=? AND phone_last10=?", args: [tenant, phone.slice(1)] });
+        assert.equal(suppressed.rows[0]?.reason, "OPT_OUT");
+        const rows = await db.execute({ sql: "SELECT status FROM website_sales_meeting_notifications WHERE recipient=? ORDER BY tenant_id", args: [phone] });
+        assert.deepEqual(rows.rows.map(row => row.status), ["cancelled", "pending"]);
+        const result = await sendQuoSms({ tenantId: tenant, apiKey: config.apiKey, fromNumber: config.fromNumber }, { to: phone, text: "Must never leave" });
+        assert.equal(result.ok, false); if (!result.ok) assert.equal(result.code, "recipient_opted_out");
+      }
+      assert.equal(providerCalls, 0, "short-number STOPs and blocked sends never reach the provider");
+      await db.execute("DELETE FROM website_sales_meeting_notifications");
+      await db.execute("DELETE FROM sunbiz_phone_suppressions");
+      await db.execute("DELETE FROM agent_events");
+      await db.execute("DELETE FROM tenant_integration_credentials WHERE service <> 'quo'");
+    });
     await check("signed STOP atomically suppresses, cancels this tenant only, and blocks resend", async () => {
       for (const who of [tenant, other]) await db.execute({ sql: "INSERT INTO website_sales_meeting_notifications VALUES (?,?, 'sms',?,'pending',NULL,NULL,NULL)", args: [who,who,from] });
       assert.equal((await handle(request())).status, 200);
