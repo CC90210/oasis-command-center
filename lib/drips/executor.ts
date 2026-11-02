@@ -233,6 +233,7 @@ type ClaimedRow = {
   step_index: number;
   channel: "sms" | "email";
   attempts: number;
+  claimed_at: string;
 };
 
 type LeadData = Record<string, unknown>;
@@ -678,19 +679,36 @@ export async function handleGuardBlock(
   return markRescheduled(db, row, retryAt, `blast_safety_check_failed(${where}) - retrying`);
 }
 
-/** Not a failure — the recipient's local clock is outside the TCPA SMS
- *  window. Releases the claim back to 'scheduled' at the next in-window
- *  instant, WITHOUT bumping attempts (this isn't a retry budget spend). */
+class RescheduleWriteError extends Error {
+  constructor(message: "drip_reschedule_write_failed" | "drip_reschedule_claim_lost") {
+    super(message);
+  }
+}
+
+/** Release this exact claim for a later safe send or guard recheck without
+ * spending a delivery attempt. A failed write never claims success. */
 async function markRescheduled(
   db: Db,
   row: ClaimedRow,
   newScheduledForIso: string,
   reason: string,
 ): Promise<StepOutcome> {
-  await db
-    .from("drip_runs")
-    .update({ status: "scheduled", scheduled_for: newScheduledForIso, last_error: reason.slice(0, 500) })
-    .eq("id", row.id);
+  if (!row.claimed_at) throw new RescheduleWriteError("drip_reschedule_claim_lost");
+  try {
+    const result = await db
+      .from("drip_runs")
+      .update({ status: "scheduled", scheduled_for: newScheduledForIso, last_error: reason.slice(0, 500) })
+      .eq("id", row.id)
+      .eq("tenant_id", row.tenant_id)
+      .eq("status", "sending")
+      .eq("claimed_at", row.claimed_at)
+      .select("id");
+    if (result.error) throw new RescheduleWriteError("drip_reschedule_write_failed");
+    if (result.data?.length !== 1) throw new RescheduleWriteError("drip_reschedule_claim_lost");
+  } catch (error) {
+    if (error instanceof RescheduleWriteError) throw error;
+    throw new RescheduleWriteError("drip_reschedule_write_failed");
+  }
   return "rescheduled";
 }
 
@@ -2158,7 +2176,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     .update({ status: "sending", claimed_at: new Date().toISOString() })
     .in("id", dueIds)
     .eq("status", "scheduled")
-    .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts");
+    .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts, claimed_at");
   if (claimRes.error) return empty();
   const claimed = (claimRes.data || []) as ClaimedRow[];
   if (claimed.length === 0) return empty();
@@ -2313,7 +2331,12 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       outcome = await processRow(db, row, leadMap, seqMap, run);
     } catch (err) {
       const message = err instanceof Error ? err.message : "unhandled_error";
-      if (GUARD_READ_UNAVAILABLE.has(message)) {
+      if (err instanceof RescheduleWriteError) {
+        // A failed write is not a delivery attempt. A lost claim is no longer
+        // ours to retry or fail in storage; leave it to its owner/recovery.
+        console.error("[dispatch-drips] reschedule failed", { id: row.id, tenantId: row.tenant_id, error: message });
+        outcome = "failed";
+      } else if (GUARD_READ_UNAVAILABLE.has(message)) {
         // Nothing was sent: re-check after the outage without spending an
         // attempt. guardBlocked keeps the tick red so the stall stays visible.
         console.error("[dispatch-drips] guard read unavailable; rescheduled", row.id, message);

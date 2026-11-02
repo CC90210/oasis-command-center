@@ -69,13 +69,17 @@ let stopIntake = true;
 let intakeReason = "configuration_missing";
 let intakeOutage: string | false = false;
 let intakeCalls = 0;
+type QuoSnapshot = { apiKey: string; fromNumber: string | null };
+let credentialSnapshots: QuoSnapshot[] = [];
+let intakeSnapshotReady: ((snapshot: QuoSnapshot) => boolean) | null = null;
 stubModule(require.resolve("../lib/integrations/quo"), {
-  quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: null }),
+  quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, ...(credentialSnapshots.shift() ?? { apiKey: "test", fromNumber: null }) }),
   quoSender: async () => quoSenderResult ?? { ok: true, number: "+13653603976", source: "workspace" },
-  quoStopIntakeReadiness: () => {
+  quoStopIntakeReadiness: (_tenant: string, snapshot: QuoSnapshot) => {
     intakeCalls++;
     if (intakeOutage) return Promise.reject(new Error(intakeOutage));
-    return { ready: stopIntake, reason: stopIntake ? "ready" : intakeReason };
+    const ready = intakeSnapshotReady ? intakeSnapshotReady(snapshot) : stopIntake;
+    return { ready, reason: ready ? "ready" : intakeReason };
   },
   sendQuoSms: async (creds: { fromNumber: string | null }, input: { to: string; text: string }) => {
     quoSends.push({ ...input, from: creds.fromNumber });
@@ -425,6 +429,28 @@ async function main() {
     intakeOutage = false;
     // Out of the way of the passes below, which count texts.
     await seed.execute("UPDATE website_sales_meeting_notifications SET status='skipped' WHERE id IN ('sms-outage-a','sms-outage-b')");
+  });
+
+  await check("readiness is rechecked for each changed API key or sender snapshot in the same pass", async () => {
+    const first = { apiKey: "fixture-key-one", fromNumber: "+14165550111" };
+    const changedKey = { ...first, apiKey: "fixture-key-two" };
+    const changedSender = { ...changedKey, fromNumber: "+14165550112" };
+    credentialSnapshots = [first, first, changedKey, changedSender];
+    intakeSnapshotReady = (snapshot) => snapshot.apiKey === first.apiKey && snapshot.fromNumber === first.fromNumber;
+    intakeCalls = 0;
+    const before = quoSends.length;
+    try {
+      for (let index = 0; index < 4; index++) {
+        await appointment(`appt-rotation-${index}`, 15);
+        await queue(`sms-rotation-${index}`, `appt-rotation-${index}`, "reminder_15", 15, "sms", PHONE);
+      }
+      await dispatch();
+      assert.equal(intakeCalls, 3, "unchanged credentials share proof; changing either binding invalidates it");
+      assert.equal(quoSends.length, before + 2, "the new unverified sender and key cannot reuse the earlier readiness");
+      for (let index = 0; index < 4; index++) {
+        assert.equal((await rowOf(`sms-rotation-${index}`)).status, index < 2 ? "sent" : "skipped");
+      }
+    } finally { credentialSnapshots = []; intakeSnapshotReady = null; }
   });
 
   // Pass 2e: the sending number cannot be looked up: nothing was sent, so it retries.

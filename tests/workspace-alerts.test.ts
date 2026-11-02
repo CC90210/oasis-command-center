@@ -445,7 +445,7 @@ async function main() {
     );
     CREATE TABLE form_submit_failures (id TEXT NOT NULL PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), source TEXT NOT NULL, tenant_slug TEXT, form_slug TEXT, step_index INTEGER, error_message TEXT, error_stack TEXT, payload TEXT, user_agent TEXT, recovered_at TEXT, recovered_note TEXT);
     CREATE TABLE drip_runs (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, sequence_id TEXT, step_index INTEGER,
-      status TEXT, attempts INTEGER DEFAULT 0, last_error TEXT, scheduled_for TEXT, sent_at TEXT,
+      status TEXT, attempts INTEGER DEFAULT 0, last_error TEXT, scheduled_for TEXT, sent_at TEXT, claimed_at TEXT,
       from_identity TEXT, provider_message_id TEXT);
     CREATE TABLE call_appointments (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL,
@@ -1482,14 +1482,15 @@ async function main() {
     const { handleGuardBlock } = await import("../lib/drips/executor");
     const { getServiceSupabase } = await import("../lib/supabase-server");
     const db = getServiceSupabase();
+    const claimedAt = new Date().toISOString();
     const claimed = (i: number) => ({
       id: `run-${i}`, tenant_id: CLIENT_A, lead_id: `lead-run-${i}`, sequence_id: "seq-guard",
-      sequence_name: "Spring promo", step_index: 0, channel: "sms" as const, attempts: 0,
+      sequence_name: "Spring promo", step_index: 0, channel: "sms" as const, attempts: 0, claimed_at: claimedAt,
     });
     for (let i = 0; i < 6; i += 1) {
       await seed.execute({
-        sql: "INSERT INTO drip_runs (id, tenant_id, lead_id, sequence_id, step_index, status) VALUES (?, ?, ?, 'seq-guard', 0, 'sending')",
-        args: [`run-${i}`, CLIENT_A, `lead-run-${i}`],
+        sql: "INSERT INTO drip_runs (id, tenant_id, lead_id, sequence_id, step_index, status, claimed_at) VALUES (?, ?, ?, 'seq-guard', 0, 'sending', ?)",
+        args: [`run-${i}`, CLIENT_A, `lead-run-${i}`, claimedAt],
       });
     }
     calls.length = 0;
