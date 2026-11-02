@@ -11,7 +11,9 @@
  *
  * WHAT "ALIVE" IS MADE OF, only facts the dashboard holds:
  *   - process check-ins: integrations_health rows pm2.<agent>-*, pushed by the
- *     bridge every minute (a process "Running" within 5 minutes);
+ *     bridge every minute, and the agent's daemon-VPS units (vps.<agent>-*,
+ *     Bravo's vps.oasis-*), pushed by the signed VPS reporter every minute (a
+ *     process "Running" within 5 minutes);
  *   - the agent's own heartbeat: agent_state_snapshot, written forward-only by
  *     the agents owner's computer (lib/bridge/fleet-ticks.ts) with its name,
  *     time, count and health ONLY. What an agent is working on stays on the Mac
@@ -45,7 +47,7 @@ export type FleetSignal = {
   name: string;
   /** Running: at least one of the agent's processes checked in within FLEET_FRESHNESS_MS. */
   live: boolean;
-  /** The agent's processes that have ever reported (pm2.<agent>-*), how many are fresh, and how many fresh rows say down. */
+  /** The agent's processes that have ever reported (processPrefixesFor), how many are fresh, and how many fresh rows say down. */
   processCount: number;
   runningCount: number;
   downCount: number;
@@ -67,6 +69,23 @@ export type Liveness = "grey" | "green" | "amber" | "red";
 /** The process-ping prefix for an agent: bravo -> "pm2.bravo-". */
 export function processPrefixFor(agent: string): string {
   return `pm2.${agent}-`;
+}
+
+/**
+ * Every health-row prefix that belongs to an agent: its computer processes and,
+ * since the 2026-11-02 cloud cutover, its daemon-VPS units (signed reporter,
+ * lib/automations/vps-health.ts). Atlas and Maven poll from vps.atlas-telegram /
+ * vps.maven-telegram; Bravo's services are the vps.oasis-* units. Reading only
+ * pm2.* showed the moved bots as quiet, and every agent red once the computer
+ * was off, while all of them were running.
+ */
+export function processPrefixesFor(agent: string): string[] {
+  return [processPrefixFor(agent), agent === "bravo" ? "vps.oasis-" : `vps.${agent}-`];
+}
+
+/** A row the fleet reads at all: a computer process or a daemon-VPS unit. */
+function isFleetService(service: string): boolean {
+  return service.startsWith("pm2.") || service.startsWith("vps.");
 }
 
 export type Fleet = {
@@ -102,8 +121,10 @@ export function fleetSignals(
   }
   const out = new Map<string, FleetSignal>();
   for (const name of agents) {
-    const prefix = processPrefixFor(name);
-    const procs = [...latest.entries()].filter(([service]) => service.startsWith(prefix)).map(([, v]) => v);
+    const prefixes = processPrefixesFor(name);
+    const procs = [...latest.entries()]
+      .filter(([service]) => prefixes.some((prefix) => service.startsWith(prefix)))
+      .map(([, v]) => v);
     const fresh = (p: { at: number }) => p.at > 0 && now - p.at < FLEET_FRESHNESS_MS;
     const running = procs.filter((p) => p.up && fresh(p)).length;
     const down = procs.filter((p) => p.down && fresh(p)).length;
@@ -229,8 +250,10 @@ export async function loadFleet(): Promise<Fleet> {
   const db = getServiceSupabase();
   const [states, pings, lastJobs] = await Promise.all([
     db.from("agent_state_snapshot").select("agent_name, tick_count, last_tick_at, reported_by_pairing_id").in("agent_name", agents),
+    // One tenant's health rows are a few dozen; filter to pm2.* and vps.* below
+    // rather than rely on an OR filter the data layer may not translate.
     tenantId
-      ? db.from("integrations_health").select("service, last_ping_at, status, metadata").eq("tenant_id", tenantId).like("service", "pm2.%")
+      ? db.from("integrations_health").select("service, last_ping_at, status, metadata").eq("tenant_id", tenantId)
       : Promise.resolve({ data: [], error: null }),
     tenantId
       ? readLastJobs(tenantId, agents).catch((err: unknown) => {
@@ -255,7 +278,8 @@ export async function loadFleet(): Promise<Fleet> {
       ? fleetSignals(
           agents,
           stateRows,
-          (pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>,
+          ((pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>)
+            .filter((row) => isFleetService(String(row.service ?? ""))),
           Date.now(),
         )
       : new Map(),

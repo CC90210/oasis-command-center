@@ -208,21 +208,15 @@ async function main() {
     const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
     assert.ok(!LOCAL_OASIS_WORKERS.some(w => w.service === "pm2.bravo-scheduler"),
       "the retired local scheduler must not create a Windows dependency");
-    assert.ok(["pm2.atlas-telegram", "pm2.maven-telegram"].every(service =>
+    assert.ok(!["pm2.atlas-telegram", "pm2.maven-telegram"].some(service =>
       LOCAL_OASIS_WORKERS.some(w => w.service === service)),
-      "the bots remain watched locally until their cloud cutover is verified");
+      "the bots poll from the VPS since 2026-11-02; their computer copies are retired, not watched");
     assert.ok(result.workers?.filter(w => !w.service.startsWith("vps.")).every(w => w.state === "stale"),
       "local tiles still say they stopped reporting");
     assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
       "the offline computer cannot invent a status for an unreported cloud service");
-    assert.equal(result.workersDown, 2,
-      "Atlas and Maven still depend on this computer until their actual cloud cutovers; optional local workers do not count");
-    const optionalOnly = new Map(workerRows);
-    for (const service of ["pm2.atlas-telegram", "pm2.maven-telegram"]) {
-      optionalOnly.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
-    }
-    assert.equal(describeBackground(optionalOnly, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
-      "stale optional local chat, heartbeat and activity workers do not invent an outage");
+    assert.equal(result.workersDown, 0,
+      "every remaining computer worker is optional: stale local chat, heartbeat and activity tiles are not an outage");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.
     const blindRows = new Map(workerRows);

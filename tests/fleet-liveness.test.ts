@@ -153,6 +153,28 @@ async function main(): Promise<void> {
     assert.equal(maven.downCount, 1, "a stale down row is not counted");
   });
 
+  await check("fleetSignals reads each agent's daemon-VPS units, so a powered-off computer is not a dead fleet", () => {
+    // 2026-11-02: Atlas and Maven poll from the VPS; their computer copies are
+    // retired and stopped. Reading only pm2.* made them quiet (red once the
+    // computer went silent) while both were running.
+    const signals = fleet.fleetSignals(["bravo", "atlas", "maven"], [], [
+      { service: "pm2.atlas-telegram", last_ping_at: ago(3 * 60 * MIN), status: "degraded", metadata: "{}" },
+      { service: "vps.atlas-telegram", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.maven-telegram", last_ping_at: ago(1 * MIN), status: "down", metadata: "{}" },
+      { service: "vps.oasis-scheduler", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-telegram-bridge", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+    ], NOW);
+    assert.equal(signals.get("atlas")?.live, true, "Atlas's VPS unit is its running process");
+    assert.equal(signals.get("atlas")?.processCount, 2, "its retired computer row is still counted, as stale");
+    assert.equal(signals.get("maven")?.live, false);
+    assert.equal(signals.get("maven")?.downCount, 1, "a fresh VPS down row still turns the agent red");
+    assert.deepEqual([signals.get("bravo")?.live, signals.get("bravo")?.runningCount], [true, 2],
+      "Bravo's services are the vps.oasis-* units");
+    const silentPc = { label: "CCPC (Windows)", lastSeenAt: ago(3 * 60 * MIN) };
+    assert.equal(fleet.fleetLiveness(signals.get("atlas"), silentPc, NOW), "green", "the computer being off does not redden a cloud agent");
+    assert.deepEqual(fleet.processPrefixesFor("atlas"), ["pm2.atlas-", "vps.atlas-"]);
+  });
+
   await check("parseAgentTicks accepts only well-formed house-agent ticks", () => {
     const good = { agent: "Bravo", last_tick_at: ago(1 * MIN), tick_count: 96, health: "green" };
     assert.deepEqual(ticks.parseAgentTicks(undefined, NOW), []);

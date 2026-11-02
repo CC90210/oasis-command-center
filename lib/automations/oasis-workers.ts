@@ -141,16 +141,29 @@ export const OASIS_WORKERS: OasisWorker[] = [
     not_expected_here: "Retired by plan — Cloudflare reports sender health; the local monitor stays off.",
   },
   {
-    // Keep local status/controls until its actual cloud cutover is verified.
+    // Retired 2026-11-02: atlas-telegram.service on the daemon VPS has polled
+    // since 04:42Z (identity-checked startup) and this computer's copy is
+    // stopped and lifecycle-retired. A Start here would put a second poller on
+    // the same bot token, and Telegram answers both with HTTP 409.
     service: "pm2.atlas-telegram",
     label: "Atlas CFO Telegram",
     purpose: "Bridges Telegram messages to Atlas (CFO Agent) for financial queries and trading alerts.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — Atlas's Telegram bot runs 24/7 on the daemon VPS; a second poller on this computer would collide with it.",
   },
   {
-    // Keep local status/controls until its actual cloud cutover is verified.
+    // Retired 2026-11-02 with the Atlas copy, for the same reason.
     service: "pm2.maven-telegram",
     label: "Maven CMO Telegram",
     purpose: "Bridges Telegram messages to Maven (CMO Agent) for content and marketing operations.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
+    manageable_via_pm2: false,
+    not_expected_here: "Retired by plan — Maven's Telegram bot runs 24/7 on the daemon VPS; a second poller on this computer would collide with it.",
   },
   {
     // Live since 2026-10-31: the VPS's reporter (oasis-vps-health.timer, every
