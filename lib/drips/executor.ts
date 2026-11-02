@@ -694,8 +694,9 @@ async function markRescheduled(
   reason: string,
 ): Promise<StepOutcome> {
   if (!row.claimed_at) throw new RescheduleWriteError("drip_reschedule_claim_lost");
+  let result;
   try {
-    const result = await db
+    result = await db
       .from("drip_runs")
       .update({ status: "scheduled", scheduled_for: newScheduledForIso, last_error: reason.slice(0, 500) })
       .eq("id", row.id)
@@ -703,12 +704,11 @@ async function markRescheduled(
       .eq("status", "sending")
       .eq("claimed_at", row.claimed_at)
       .select("id");
-    if (result.error) throw new RescheduleWriteError("drip_reschedule_write_failed");
-    if (result.data?.length !== 1) throw new RescheduleWriteError("drip_reschedule_claim_lost");
-  } catch (error) {
-    if (error instanceof RescheduleWriteError) throw error;
+  } catch {
     throw new RescheduleWriteError("drip_reschedule_write_failed");
   }
+  if (result.error) throw new RescheduleWriteError("drip_reschedule_write_failed");
+  if (result.data?.length !== 1) throw new RescheduleWriteError("drip_reschedule_claim_lost");
   return "rescheduled";
 }
 
