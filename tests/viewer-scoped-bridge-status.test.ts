@@ -216,14 +216,23 @@ async function main() {
       "local tiles still say they stopped reporting");
     assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
       "the offline computer cannot invent a status for an unreported cloud service");
-    assert.equal(result.workersDown, null,
-      "with the computer off and no VPS report at all, the count is unknown, never an all-clear 0 (CodeRabbit #797)");
-    const reported = new Map(workerRows);
-    for (const w of OASIS_WORKERS.filter((x) => x.runtime === "remote")) {
-      reported.set(w.service, { service: w.service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
-    }
-    assert.equal(describeBackground(reported, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
+    assert.equal(result.workersDown, 0,
       "every remaining computer worker is optional: stale local chat, heartbeat and activity tiles are not an outage");
+    // CodeRabbit #797: the VPS endpoint accepts partial lists. A reporter that
+    // vouched for some units but not the bots cannot produce an all-clear.
+    const remote = OASIS_WORKERS.filter((x) => x.runtime === "remote");
+    const partial = new Map(workerRows);
+    for (const w of remote.filter((x) => !/^vps\.(atlas|maven)-/.test(x.service))) {
+      partial.set(w.service, { service: w.service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(partial, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, null,
+      "unreported cloud bots beside reported units: unknown, not 0");
+    const complete = new Map(partial);
+    for (const service of ["vps.atlas-telegram", "vps.maven-telegram"]) {
+      complete.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(complete, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
+      "a complete healthy VPS report with the computer off is a real all-clear");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.
     const blindRows = new Map(workerRows);
