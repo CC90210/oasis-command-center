@@ -21,6 +21,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/os-approvals.test.ts
  */
+import "./helpers/mock-nodemailer-loader.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { unsubscribeToken } from "../lib/email/unsubscribe-signing";

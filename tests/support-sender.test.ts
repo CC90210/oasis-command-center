@@ -19,6 +19,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/support-sender.test.ts
  */
+import "./helpers/mock-nodemailer-loader.mjs";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
