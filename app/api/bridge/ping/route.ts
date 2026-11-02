@@ -234,6 +234,13 @@ export async function POST(req: NextRequest) {
   let cliInventoryPersistFailed = false;
   for (const [service, report] of Object.entries(services)) {
     if (!service) continue;
+    // vps.* rows belong to the daemon VPS's HMAC-signed reporter
+    // (lib/automations/vps-health.ts) and share the profile_id+service row. A
+    // paired computer writing one would replace or mask a real VPS reading.
+    if (service.startsWith("vps.")) {
+      console.warn("[bridge.ping] refused a reserved vps.* service from a paired computer", { service });
+      continue;
+    }
     const status = (report.status || "unconfigured") as
       | "healthy" | "degraded" | "down" | "unconfigured";
     const reported = report.metadata && typeof report.metadata === "object" && !Array.isArray(report.metadata) ? report.metadata : {};

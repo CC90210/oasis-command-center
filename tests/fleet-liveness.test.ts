@@ -328,6 +328,29 @@ async function main(): Promise<void> {
     assert.equal(none.json.agent_ticks_recorded, 0);
   });
 
+  await check("the ping: a paired computer cannot write a VPS unit's row (CodeRabbit #797)", async () => {
+    const res = await ping(ownerToken, { services: {
+      "vps.oasis-scheduler": { status: "healthy" },
+      "pm2.claude-bridge": { status: "healthy" },
+    } });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const rows = (await db.execute("SELECT service FROM integrations_health WHERE service IN ('vps.oasis-scheduler','pm2.claude-bridge')")).rows
+      .map((r) => r.service);
+    assert.deepEqual(rows, ["pm2.claude-bridge"], "the reserved vps.* namespace is refused; the rest of the heartbeat lands");
+  });
+
+  await check("isFleetRow: only the signed VPS reporter's rows count, and retired computer copies never do", () => {
+    const signed = JSON.stringify({ via: "vps-heartbeat", host: "oasis-daemon-1" });
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: signed }), true);
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: "{}" }), false, "no VPS marker");
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram",
+      metadata: JSON.stringify({ via: "vps-heartbeat", _reported_by: "paired_bridge" }) }), false,
+      "a computer's report that copies the VPS marker is still a computer's report");
+    assert.equal(fleet.isFleetRow({ service: "pm2.atlas-telegram", metadata: "{}" }), false, "retired computer copy");
+    assert.equal(fleet.isFleetRow({ service: "pm2.claude-bridge", metadata: "{}" }), true);
+    assert.equal(fleet.isFleetRow({ service: "vercel", metadata: "{}" }), false);
+  });
+
   console.log(`fleet-liveness: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

@@ -35,6 +35,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { readAgentsOwner } from "@/lib/agents-owner";
 import { SUPERVISOR_DISABLED, VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
+import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
+import { heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
 
 /** An agent is Running when one of its processes checked in within 5 minutes (the daemon window). */
 export const FLEET_FRESHNESS_MS = 5 * 60 * 1000;
@@ -83,9 +85,24 @@ export function processPrefixesFor(agent: string): string[] {
   return [processPrefixFor(agent), agent === "bravo" ? "vps.oasis-" : `vps.${agent}-`];
 }
 
-/** A row the fleet reads at all: a computer process or a daemon-VPS unit. */
-function isFleetService(service: string): boolean {
-  return service.startsWith("pm2.") || service.startsWith("vps.");
+/** Computer copies retired by lifecycle policy: their stale rows say nothing about the agent. */
+const RETIRED_SERVICES: ReadonlySet<string> = new Set(
+  OASIS_WORKERS.filter((w) => w.runtime === "retired").map((w) => w.service),
+);
+
+/**
+ * A row the fleet reads at all: an active computer process, or a daemon-VPS
+ * unit that the signed VPS reporter wrote (via "vps-heartbeat", never a paired
+ * computer's report). A retired computer copy (the Atlas and Maven bots since
+ * 2026-11-02) is skipped, so its stale "down" cannot redden a running cloud bot.
+ * PURE.
+ */
+export function isFleetRow(row: { service: string; metadata?: unknown }): boolean {
+  const service = String(row.service ?? "");
+  if (RETIRED_SERVICES.has(service)) return false;
+  if (service.startsWith("pm2.")) return true;
+  if (!service.startsWith("vps.")) return false;
+  return heartbeatMetadata(row.metadata)?.via === "vps-heartbeat" && !isBridgeReport(row.metadata);
 }
 
 export type Fleet = {
@@ -298,7 +315,7 @@ export async function loadFleet(): Promise<Fleet> {
           agents,
           stateRows,
           ((pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>)
-            .filter((row) => isFleetService(String(row.service ?? ""))),
+            .filter(isFleetRow),
           Date.now(),
         )
       : new Map(),
