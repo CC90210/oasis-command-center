@@ -730,7 +730,7 @@ async function main() {
         session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
       CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
         team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
-        onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT);
+        onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT, deactivated_at TEXT);
       CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, title TEXT NOT NULL, hook TEXT, body TEXT,
         cta TEXT, landing_url TEXT, brand_slug TEXT NOT NULL, brand_name TEXT, track TEXT, channel TEXT, status TEXT NOT NULL,
         format TEXT, aspect TEXT, duration_s REAL, asset_type TEXT, slide_count INTEGER, media_urls TEXT, platforms TEXT,

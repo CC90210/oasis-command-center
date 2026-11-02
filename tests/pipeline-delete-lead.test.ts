@@ -113,7 +113,7 @@ async function main(): Promise<void> {
     CREATE TABLE user_profiles (
       id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
-      onboarding_completed_at TEXT, updated_at TEXT
+      onboarding_completed_at TEXT, updated_at TEXT, deactivated_at TEXT
     );
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (
