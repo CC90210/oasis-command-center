@@ -6,7 +6,8 @@
  *
  * THREE FACTS, all required:
  *   1. a user_profiles row for this auth user, IN THIS WORKSPACE, with
- *      deactivated_at IS NULL;
+ *      deactivated_at IS NULL; a migration-only unlinked row may match the
+ *      verified account email only when no auth-linked history exists anywhere;
  *   2. the auth user itself is not banned or deleted (_supabase_auth_users);
  *   3. when the caller carries a session_version (a token minted with one),
  *      it still matches the current value -- a password change or a
@@ -23,7 +24,9 @@
  * not finish).
  */
 import "server-only";
+import type { Client } from "@libsql/client";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { createTursoPostgrest } from "@/lib/turso-postgrest";
 import { dbBool } from "@/lib/db-bool";
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 
@@ -59,6 +62,7 @@ type ProfileRow = {
 };
 
 type AuthRow = {
+  email?: unknown;
   banned_until?: string | null;
   deleted_at?: string | null;
   session_version?: unknown;
@@ -92,37 +96,45 @@ export async function liveSeat(
   tenantId: string,
   authUserId: string,
   sessionVersion?: number,
+  /** Server callers with an existing SQL handle must check that same database. */
+  sqlClient?: Client,
 ): Promise<SeatLiveness> {
   if (!tenantId || !authUserId) return { live: false, reason: "no_profile" };
   try {
-    const db = getServiceSupabase();
+    const db = sqlClient ? createTursoPostgrest(sqlClient) : getServiceSupabase();
     const profileRead = await db
       .from("user_profiles")
       .select("id, email, team_role, is_owner, admin_access, deactivated_at, onboarding_completed_at, updated_at")
       .eq("auth_user_id", authUserId)
       .eq("tenant_id", tenantId)
+      .is("deactivated_at", null)
       .limit(20);
     if (profileRead.error) throw new Error(profileRead.error.message);
-    const rows = (profileRead.data || []) as ProfileRow[];
-    if (rows.length === 0) return { live: false, reason: "no_profile" };
-    const active = rows.filter((r) => !r.deactivated_at);
-    if (active.length === 0) return { live: false, reason: "deactivated" };
+    let rows = (profileRead.data || []) as ProfileRow[];
+    if (rows.length === 0) {
+      const history = await db.from("user_profiles").select("id").eq("auth_user_id", authUserId).eq("tenant_id", tenantId).limit(1);
+      if (history.error) throw new Error(history.error.message);
+      if (history.data?.length) return { live: false, reason: "deactivated" };
+      // Email fallback is migration compatibility only, never an alternate
+      // identity once this auth user has any linked history in any workspace.
+      const linked = await db.from("user_profiles").select("id").eq("auth_user_id", authUserId).limit(1);
+      if (linked.error) throw new Error(linked.error.message);
+      if (linked.data?.length) return { live: false, reason: "no_profile" };
+    }
     // A duplicate-row tenant (legacy data) uses the SAME canonical pick every
     // other seat resolver uses (lib/active-profile-resolver.ts
     // chooseActiveProfile: onboarded-owner > onboarded > owner > plain,
     // newest updated_at, then id, as the tiebreakers) — not just "any owner
     // row": an unfinished, never-onboarded owner duplicate must never outrank
     // a live, onboarded member row (Codex review, O3a).
-    const row = chooseActiveProfile(active as unknown as ActiveUserProfile[], null);
-
     const authRead = await db
       .from("_supabase_auth_users")
-      .select("id, banned_until, deleted_at, session_version")
+      .select("id, email, banned_until, deleted_at, session_version")
       .eq("id", authUserId)
       .maybeSingle();
     if (authRead.error) throw new Error(authRead.error.message);
     const authRow = authRead.data as AuthRow | null;
-    if (!authRow) return { live: false, reason: "banned_or_deleted" };
+    if (!authRow) return { live: false, reason: rows.length ? "banned_or_deleted" : "no_profile" };
     if (authRow.deleted_at) return { live: false, reason: "banned_or_deleted" };
     if (stillBanned(authRow.banned_until, Date.now())) return { live: false, reason: "banned_or_deleted" };
 
@@ -133,11 +145,28 @@ export async function liveSeat(
       }
     }
 
+    // The normal session resolves with the email re-read from the auth
+    // record. Fresh authorization must use the SAME precedence: otherwise
+    // an old owner duplicate under another email can promote a current
+    // read-only seat. A caller-provided email is never authoritative here.
+    const email = typeof authRow.email === "string" ? authRow.email.trim().toLowerCase() : "";
+    if (!email) return { live: false, reason: "unavailable" };
+    if (rows.length === 0) {
+      const legacy = await db.from("user_profiles")
+        .select("id, email, team_role, is_owner, admin_access, deactivated_at, onboarding_completed_at, updated_at")
+        .eq("tenant_id", tenantId).eq("email", email)
+        .is("auth_user_id", null).is("deactivated_at", null).limit(20);
+      if (legacy.error) throw new Error(legacy.error.message);
+      rows = (legacy.data || []) as ProfileRow[];
+      if (rows.length === 0) return { live: false, reason: "no_profile" };
+    }
+    const row = chooseActiveProfile(rows as unknown as ActiveUserProfile[], email);
+
     return {
       live: true,
       profile: {
         id: row.id,
-        email: row.email ?? null,
+        email,
         teamRole: row.team_role || "read_only",
         isOwner: dbBool(row.is_owner),
         adminAccess: dbBool(row.admin_access),

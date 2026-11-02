@@ -163,7 +163,7 @@ async function main() {
       service TEXT, field_key TEXT, encrypted_value TEXT, created_at TEXT, updated_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, tenant_id TEXT, auth_user_id TEXT, email TEXT, team_role TEXT,
       is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
-    CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, banned_until TEXT, deleted_at TEXT, session_version INTEGER DEFAULT 0);
+    CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, email TEXT NOT NULL, banned_until TEXT, deleted_at TEXT, session_version INTEGER DEFAULT 0);
     CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, label TEXT, revoked_at TEXT, claim_enabled_at TEXT, claim_enabled_by TEXT, paired_via TEXT);
   `);
   // O4's seat/pairing checks (liveSeat, pairingBlocked) read these through
@@ -180,7 +180,7 @@ async function main() {
     });
   }
   for (const userId of [ANN, BEN]) {
-    await db.execute({ sql: `INSERT INTO _supabase_auth_users (id, session_version) VALUES (?, 0)`, args: [userId] });
+    await db.execute({ sql: `INSERT INTO _supabase_auth_users (id, email, session_version) VALUES (?, ?, 0)`, args: [userId, `${userId}@test.oasis`] });
   }
 
   const store = await import("../lib/os/runs/store");

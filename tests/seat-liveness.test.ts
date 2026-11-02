@@ -23,6 +23,9 @@ import { createClient, type Client } from "@libsql/client";
 const dbFile = join(mkdtempSync(join(tmpdir(), "seat-liveness-")), "test.db");
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
+process.env.EMPIRE_AUTH_BACKEND = "turso";
+process.env.AUTH_SESSION_SECRET = "synthetic-seat-liveness-secret-never-used-outside-tests";
+let sessionCookie: string | undefined;
 for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN", "BRAVO_SUPABASE_URL", "BRAVO_SUPABASE_SERVICE_ROLE_KEY"]) {
   delete process.env[k];
 }
@@ -36,7 +39,7 @@ for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "TURSO_AUTH_TOKEN", "BRAV
     children: [],
     paths: [],
     exports: {
-      cookies: async () => ({ get: () => undefined, getAll: () => [], has: () => false, set: () => undefined }),
+      cookies: async () => ({ get: (name: string) => name === "oasis_session" && sessionCookie ? { value: sessionCookie } : undefined, getAll: () => [], has: () => false, set: () => undefined }),
       headers: async () => new Headers(),
       draftMode: async () => ({ isEnabled: false }),
     },
@@ -81,6 +84,7 @@ async function createSchema() {
 }
 
 async function seed() {
+  sessionCookie = undefined;
   for (const t of ["tenants", "_supabase_auth_users", "user_profiles", "tenant_manifests"]) {
     await db.execute(`DELETE FROM ${t}`);
   }
@@ -288,6 +292,121 @@ async function main() {
     });
     const viewer = await resolveOsViewerFor(TENANT_A, "auth-removed");
     assert.deepEqual(viewer, { ok: false, reason: "signed_out" });
+  });
+
+  await check("a valid multi-workspace login never selects its deactivated admin seat", async () => {
+    const { signSession, verifySessionAgainstDb } = await import("../lib/turso-auth");
+    const { resolveSessionContext } = await import("../lib/api-auth");
+    const { resolveApprovalSession } = await import("../lib/os/approvals/session");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-session', 'session@test')`);
+    await db.batch([
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at, deactivated_at) VALUES ('p-removed-admin', 'auth-session', 'session@test', ?, 'admin', 1, ?, '2026-11-02T00:00:00Z', ?)`, args: [TENANT_A, stamp, stamp] },
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, onboarding_completed_at, updated_at) VALUES ('p-active-other', 'auth-session', 'session@test', ?, 'read_only', ?, ?)`, args: [TENANT_B, stamp, stamp] },
+    ], "write");
+    sessionCookie = signSession({ sub: "auth-session", email: "session@test", exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
+    assert.ok(await verifySessionAgainstDb(db, sessionCookie), "another live workspace intentionally keeps the global login valid");
+    const session = await resolveSessionContext();
+    assert.ok(session.ok);
+    if (!session.ok) return;
+    assert.equal(session.tenantId, TENANT_B, "the removed admin seat must never win canonical selection");
+    assert.equal(session.isAdmin, false);
+    const approval = await resolveApprovalSession();
+    assert.ok(approval.ok);
+    if (approval.ok) {
+      assert.equal(approval.scope.tenantId, TENANT_B);
+      assert.equal(approval.scope.canAct, false);
+    }
+    assert.equal(Number((await db.execute("SELECT count(*) AS n FROM user_profiles")).rows[0].n), 2, "historical rows remain intact");
+  });
+
+  await check("removed auth-linked seats cannot revive through a matching-email fallback", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.batch([
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, deactivated_at) VALUES ('p-auth-removed', 'auth-no-active', 'fallback@test', ?, 'admin', ?)`, args: [TENANT_A, stamp] },
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role) VALUES ('p-email-legacy', NULL, 'fallback@test', ?, 'owner')`, args: [TENANT_B] },
+    ], "write");
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-no-active", email: "fallback@test" }), { profile: null, error: null });
+  });
+
+  await check("email-only migration fallback excludes removed rows and retains active ones", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute({ sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role, deactivated_at) VALUES ('p-email-removed', 'legacy@test', ?, 'admin', ?)`, args: [TENANT_A, stamp] });
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-legacy", email: "legacy@test" }), { profile: null, error: null });
+    await db.execute({ sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role) VALUES ('p-email-active', 'legacy@test', ?, 'member')`, args: [TENANT_B] });
+    assert.equal((await resolveActiveProfileForUser({ id: "auth-legacy", email: "legacy@test" })).profile?.id, "p-email-active");
+  });
+
+  await check("a still-valid cookie with zero active seats cannot open approvals", async () => {
+    const { signSession } = await import("../lib/turso-auth");
+    const { resolveSessionContext } = await import("../lib/api-auth");
+    const { resolveApprovalSession } = await import("../lib/os/approvals/session");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-zero', 'zero@test')`);
+    await db.execute({ sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, deactivated_at) VALUES ('p-zero', 'auth-zero', 'zero@test', ?, 'admin', ?)`, args: [TENANT_A, stamp] });
+    sessionCookie = signSession({ sub: "auth-zero", email: "zero@test", exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
+    assert.deepEqual(await resolveSessionContext(), { ok: false, reason: "no_profile" });
+    const result = await resolveApprovalSession();
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.response.status, 401);
+  });
+
+  await check("owner-only approvals ignore removed owners and stale owner duplicates", async () => {
+    const { isWorkspaceOwnerForApprovals } = await import("../lib/os/approvals/session");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-owner', 'owner@test')`);
+    await db.batch([
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, is_owner, deactivated_at) VALUES ('p-owner-removed', 'auth-owner', 'owner@test', ?, 1, ?)`, args: [TENANT_A, stamp] },
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, is_owner, onboarding_completed_at) VALUES ('p-owner-current-member', 'auth-owner', 'owner@test', ?, 0, ?)`, args: [TENANT_A, stamp] },
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, is_owner) VALUES ('p-owner-stale', 'auth-owner', 'owner@test', ?, 1)`, args: [TENANT_A] },
+    ], "write");
+    assert.equal(await isWorkspaceOwnerForApprovals(db, TENANT_A, "auth-owner"), false);
+    assert.equal(await isWorkspaceOwnerForApprovals(db, TENANT_B, "auth-owner"), false);
+    await db.execute("UPDATE user_profiles SET is_owner = 1 WHERE id = 'p-owner-current-member'");
+    assert.equal(await isWorkspaceOwnerForApprovals(db, TENANT_A, "auth-owner"), true);
+  });
+
+  await check("more than twenty removed rows cannot hide a remaining active seat", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-history', 'history@test')`);
+    await db.batch(Array.from({ length: 21 }, (_, i) => ({
+      sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, deactivated_at) VALUES (?, 'auth-history', 'history@test', ?, 'owner', ?)`,
+      args: [`p-history-${i}`, TENANT_A, stamp],
+    })), "write");
+    await db.execute({ sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role) VALUES ('p-history-active', 'auth-history', 'history@test', ?, 'member')`, args: [TENANT_A] });
+    assert.equal((await resolveActiveProfileForUser({ id: "auth-history", email: "history@test" })).profile?.id, "p-history-active");
+    const live = await liveSeat(TENANT_A, "auth-history");
+    assert.ok(live.live);
+    if (live.live) assert.equal(live.profile.id, "p-history-active");
+    assert.equal(Number((await db.execute("SELECT count(*) AS n FROM user_profiles")).rows[0].n), 22);
+  });
+
+  await check("legacy fallback never reads a matching-email profile linked to another account", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-collision', 'collision@test')`);
+    await db.execute({ sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner) VALUES ('p-other-account', 'auth-someone-else', 'collision@test', ?, 'owner', 1)`, args: [TENANT_A] });
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-collision", email: "collision@test" }), { profile: null, error: null });
+    assert.equal((await liveSeat(TENANT_A, "auth-collision")).live, false);
+  });
+
+  await check("legacy live-seat fallback is active, unlinked, authenticated and tenant-specific", async () => {
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-unlinked', 'unlinked@test')`);
+    await db.execute({ sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role, is_owner) VALUES ('p-unlinked', 'unlinked@test', ?, 'owner', 1)`, args: [TENANT_B] });
+    const own = await liveSeat(TENANT_B, "auth-unlinked");
+    assert.ok(own.live);
+    if (own.live) assert.equal(own.profile.id, "p-unlinked");
+    assert.equal((await liveSeat(TENANT_A, "auth-unlinked")).live, false, "another workspace's matching email confers no access");
+    await db.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02' WHERE id = 'p-unlinked'");
+    assert.equal((await liveSeat(TENANT_B, "auth-unlinked")).live, false);
+    assert.equal((await db.execute("SELECT auth_user_id FROM user_profiles WHERE id = 'p-unlinked'")).rows[0].auth_user_id, null);
+  });
+
+  await check("auth-linked history in any workspace forbids unlinked fallback everywhere", async () => {
+    const { resolveActiveProfileForUser } = await import("../lib/active-profile-resolver");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-historical', 'historical@test')`);
+    await db.batch([
+      { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, deactivated_at) VALUES ('p-history-other-tenant', 'auth-historical', 'historical@test', ?, ?)`, args: [TENANT_A, stamp] },
+      { sql: `INSERT INTO user_profiles (id, email, tenant_id, team_role, is_owner) VALUES ('p-history-unlinked', 'historical@test', ?, 'owner', 1)`, args: [TENANT_B] },
+    ], "write");
+    assert.deepEqual(await resolveActiveProfileForUser({ id: "auth-historical", email: "historical@test" }), { profile: null, error: null });
+    assert.equal((await liveSeat(TENANT_B, "auth-historical")).live, false);
   });
 
   if (failures > 0) {

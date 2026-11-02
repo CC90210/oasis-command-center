@@ -27,6 +27,14 @@ import { dirname, join } from "node:path";
 import { createClient, type Client } from "@libsql/client";
 
 const ROOT = join(__dirname, "..");
+const dbFile = join(mkdtempSync(join(tmpdir(), "support-sender-")), "test.db");
+// The executor re-reads the approver's live seat through the normal database
+// factory. Keep that read on the same local fixture as the client lookup.
+process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
+process.env.TURSO_DB_PATH = dbFile;
+delete process.env.TURSO_DATABASE_URL;
+delete process.env.TURSO_DB_URL;
+delete process.env.TURSO_AUTH_TOKEN;
 // Never let a test reach a real mailbox, whatever the developer's shell holds.
 for (const k of [
   "SUPPORT_GMAIL_USER",
@@ -163,7 +171,22 @@ function splitSql(sql: string): string[] {
 
 /** A local libSQL file holding the REAL customers + customer_contacts tables (migration bravo__188). */
 async function customersDb(): Promise<Client> {
-  const db = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "support-sender-")), "test.db")}` });
+  const db = createClient({ url: `file:${dbFile}` });
+  await db.executeMultiple(`
+    CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
+      team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
+      onboarding_completed_at TEXT, updated_at TEXT, deactivated_at TEXT);
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
+    CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT);
+  `);
+  await db.batch([
+    { sql: 'INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)', args: ["u1", REP] },
+    { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, onboarding_completed_at)
+            VALUES ('p1', 'u1', ?, ?, 'admin', '2026-10-01T00:00:00Z')`, args: [REP, OASIS_TENANT] },
+    { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS_TENANT] },
+  ], "write");
   const ddl = splitSql(readFileSync(join(ROOT, "database", "turso", "bravo__188_os_customers.sql"), "utf8")).filter(
     (s) => /^CREATE (UNIQUE )?(TABLE|INDEX) /.test(s) && /\b(EXISTS|ON) customer(s|_contacts)\b/.test(s),
   );
@@ -476,7 +499,7 @@ async function main() {
     const run = (on: Client, to: string, targetRef: string | null, key: string) =>
       EXECUTORS.send_email!.run({
         db: on,
-        approval: { target_ref: targetRef, idempotency_key: key } as never,
+        approval: { target_ref: targetRef, idempotency_key: key, department_key: "sales" } as never,
         payload: { to, subject: "Your launch", body: "Hello." },
         tenant: { id: OASIS_TENANT, slug: "oasis-ai-cc" },
         approver: { userId: "u1", email: REP },
@@ -486,6 +509,7 @@ async function main() {
     assert.equal(client.ok, true, JSON.stringify(client.result));
     assert.equal(last().auth.user, SUPPORT, "a client's email filed against a lead still leaves from support@");
     assert.equal(last().mail.replyTo, SUPPORT);
+    assert.equal(last().mail.cc, REP, "the verified account address receives the approver's copy");
     assert.ok(String(last().mail.text).endsWith(supportFooterFor(CLIENT)));
     const lead = await run(db, "lead@example.test", "lead:l1", "agent:x:2026-10-01:new:h1");
     assert.equal(lead.ok, true, JSON.stringify(lead.result));

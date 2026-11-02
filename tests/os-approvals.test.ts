@@ -1832,6 +1832,261 @@ async function main() {
     }
   });
 
+  await check("an approved email cannot send after its decider loses this seat, even with another active workspace", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute({ sql: "INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner) VALUES ('p-cc-other', ?, ?, ?, 'owner', 1)", args: [USERS.cc.id, USERS.cc.email, CLIENT] });
+    await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+    const before = sent.length;
+    try {
+      // No explicit actor: server resumes must recheck the stored decider too.
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) {
+        assert.equal(r.approval.status, "failed");
+        assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      }
+      assert.equal(sent.length, before);
+      assert.equal((await raw.execute("SELECT deactivated_at FROM user_profiles WHERE id = 'p-cc'")).rows[0].deactivated_at, "2026-11-02T00:00:00Z", "history is not rewritten");
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+      await raw.execute("DELETE FROM user_profiles WHERE id = 'p-cc-other'");
+    }
+  });
+
+  await check("email execution rechecks department permission after a role downgrade", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.rep, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute("UPDATE user_profiles SET team_role = 'read_only' WHERE id = 'p-rep'");
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.rep.id, email: USERS.rep.email } }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET team_role = 'opener' WHERE id = 'p-rep'");
+    }
+  });
+
+  await check("seat removal during the recipient checks is caught before email dispatch", async () => {
+    const a = await create({ payload: { to: "synthetic@recipient.test", cc: ["copy@recipient.test"], subject: "Fixture", body: "Synthetic fixture only." } });
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps({ emailSuppression: async () => {
+        await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+        return { suppressed: false, checkFailed: false };
+      } }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+    }
+  });
+
+  await check("email execution fails closed if the auth record cannot be read", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute('ALTER TABLE "_supabase_auth_users" RENAME TO fixture_auth_unavailable');
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute('ALTER TABLE fixture_auth_unavailable RENAME TO "_supabase_auth_users"');
+    }
+  });
+
+  await check("a removed decider's dry-run resume is refused, not reported as executed", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps({ isDryRun: () => true }));
+      assert.ok(r.ok);
+      if (r.ok) {
+        assert.equal(r.approval.status, "failed");
+        assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      }
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+    }
+  });
+
+  async function withStaleOwnerDuplicate(run: () => Promise<void>) {
+    await raw.execute({
+      sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+            VALUES ('p-reader-stale-owner', ?, 'previous-address@fixture.test', ?, 'owner', 1, '2020-01-01', '2020-01-01')`,
+      args: [USERS.reader.id, OASIS],
+    });
+    try { await run(); } finally { await raw.execute("DELETE FROM user_profiles WHERE id = 'p-reader-stale-owner'"); }
+  }
+
+  await check("POST approve never promotes a current-email read-only seat through an old-email owner duplicate", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      await login("reader");
+      const { resolveSessionContext } = await import("../lib/api-auth");
+      const normal = await resolveSessionContext();
+      assert.ok(normal.ok);
+      if (normal.ok) assert.equal(normal.teamRole, "read_only");
+      const a = await create({ departmentKey: "marketing" });
+      const saved = process.env.BRAVO_FORCE_DRY_RUN;
+      process.env.BRAVO_FORCE_DRY_RUN = "1";
+      const before = smtp.length;
+      try {
+        const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+        assert.equal(response.status, 404, "fresh authorization must agree with the normal read-only session");
+        assert.equal(await statusOf(a.id), "pending");
+        assert.equal(smtp.length, before);
+      } finally {
+        if (saved === undefined) delete process.env.BRAVO_FORCE_DRY_RUN;
+        else process.env.BRAVO_FORCE_DRY_RUN = saved;
+      }
+    });
+  });
+
+  await check("fresh seat and owner-only gate preserve authenticated-email precedence", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      const { liveSeat } = await import("../lib/os/seat");
+      const { isWorkspaceOwnerForApprovals } = await import("../lib/os/approvals/session");
+      const seat = await liveSeat(OASIS, USERS.reader.id);
+      assert.ok(seat.live);
+      if (seat.live) assert.equal(seat.profile.id, "p-reader");
+      assert.equal(await isWorkspaceOwnerForApprovals(raw, OASIS, USERS.reader.id), false);
+    });
+  });
+
+  await check("email execution cannot promote the current-email actor through an old-email owner duplicate", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      const a = await create({ departmentKey: "marketing" });
+      assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+      const before = sent.length;
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.reader.id, email: USERS.reader.email } }, fakeDeps({ isDryRun: () => true }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    });
+  });
+
+  await check("fresh approval identity uses the verified auth email after an account email change", async () => {
+    const currentEmail = "current-owner@fixture.test";
+    await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [currentEmail, USERS.cc.id] });
+    try {
+      // The old signed-cookie email and the profile email are both stale.
+      // Authentication re-reads the current address; the fresh seat must keep it.
+      await login("cc");
+      const { resolveApprovalSession } = await import("../lib/os/approvals/session");
+      const session = await resolveApprovalSession();
+      assert.ok(session.ok);
+      if (session.ok) assert.equal(session.email, currentEmail, "copies/signatures must not revert to the old profile address");
+    } finally {
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+    }
+  });
+
+  for (const dryRun of [true, false]) {
+    await check(`actual approve route copies current auth email, never the stale profile (${dryRun ? "dry run" : "mocked SMTP"})`, async () => {
+      const currentEmail = "verified-owner@fixture.test";
+      const values = { LIVE_SEND_EMAIL: "1", BRAVO_FORCE_DRY_RUN: dryRun ? "1" : "0", OASIS_MAIL_FROM: "team@oasisai.work", OASIS_MAIL_APP_PASSWORD: "synthetic-mailbox-password" };
+      const saved = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+      Object.assign(process.env, values);
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [currentEmail, USERS.cc.id] });
+      try {
+        await login("cc");
+        const a = await create({ payload: { to: "synthetic-recipient@fixture.test", subject: "Email identity fixture", body: "Synthetic fixture only." } });
+        const before = smtp.length;
+        const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+        assert.equal(response.status, 200);
+        const result = ((await response.json()) as Body).approval!;
+        assert.equal(result.status, "executed", JSON.stringify(result.execution_result));
+        if (dryRun) {
+          assert.equal(result.execution_result?.outcome, "dry_run");
+          assert.deepEqual(result.execution_result?.would_send?.cc, [currentEmail]);
+          assert.equal(smtp.length, before);
+        } else {
+          assert.equal(result.execution_result?.outcome, "sent");
+          assert.equal(smtp.length, before + 1);
+          assert.equal(smtp[smtp.length - 1].mail.cc, currentEmail, "SMTP normalizes copies to a string containing only the verified address");
+        }
+      } finally {
+        await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+  }
+
+  await check("actual approve route preserves an active unlinked migration owner with no auth-linked history", async () => {
+    await raw.execute("UPDATE user_profiles SET auth_user_id = NULL WHERE id = 'p-cc'");
+    const saved = process.env.BRAVO_FORCE_DRY_RUN;
+    process.env.BRAVO_FORCE_DRY_RUN = "1";
+    try {
+      await login("cc");
+      const a = await create();
+      const before = smtp.length;
+      const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+      assert.equal(response.status, 200);
+      const result = ((await response.json()) as Body).approval!;
+      assert.equal(result.execution_result?.outcome, "dry_run");
+      assert.equal(smtp.length, before);
+      assert.equal((await raw.execute("SELECT auth_user_id FROM user_profiles WHERE id = 'p-cc'")).rows[0].auth_user_id, null, "a read must not link or mutate the migration profile");
+    } finally {
+      await raw.execute({ sql: "UPDATE user_profiles SET auth_user_id = ? WHERE id = 'p-cc'", args: [USERS.cc.id] });
+      if (saved === undefined) delete process.env.BRAVO_FORCE_DRY_RUN;
+      else process.env.BRAVO_FORCE_DRY_RUN = saved;
+    }
+  });
+
+  for (const dryRun of [true, false]) {
+    await check(`executor ignores a caller's stale approver email (${dryRun ? "dry run" : "fake provider"})`, async () => {
+      const a = await create();
+      assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+      const before = sent.length;
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: "obsolete-caller@fixture.test" } }, fakeDeps({ isDryRun: () => dryRun }));
+      assert.ok(r.ok);
+      if (r.ok && dryRun) assert.deepEqual(r.approval.execution_result?.would_send?.cc, [USERS.cc.email]);
+      if (!dryRun) {
+        assert.equal(sent.length, before + 1);
+        assert.deepEqual(sent[sent.length - 1].cc, [USERS.cc.email]);
+        assert.equal(sent[sent.length - 1].signer?.email, USERS.cc.email);
+      }
+    });
+  }
+
+  await check("a server email resume copies the verified recorded decider without caller identity data", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
+    assert.ok(r.ok);
+    assert.deepEqual(sent[sent.length - 1].cc, [USERS.cc.email]);
+    assert.equal(sent[sent.length - 1].signer?.email, USERS.cc.email);
+  });
+
+  await check("an approver email change during recipient checks refuses the send instead of copying the old address", async () => {
+    const a = await create({ payload: { to: "synthetic-recipient@fixture.test", cc: ["copy@fixture.test"], subject: "Mid-check email change", body: "Synthetic fixture only." } });
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps({ emailSuppression: async () => {
+        await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: ["changed-during-check@fixture.test", USERS.cc.id] });
+        return { suppressed: false, checkFailed: false };
+      } }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_changed");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute({ sql: 'UPDATE "_supabase_auth_users" SET email = ? WHERE id = ?', args: [USERS.cc.email, USERS.cc.id] });
+    }
+  });
+
   console.log(`os-approvals: ${passed} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);
 }

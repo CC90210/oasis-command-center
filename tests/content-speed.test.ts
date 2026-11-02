@@ -240,7 +240,7 @@ async function main() {
       session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
-      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT);
+      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT, deactivated_at TEXT);
     CREATE TABLE post_analytics (
       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, zernio_post_id TEXT NOT NULL,
       platform_post_id TEXT NOT NULL, platform TEXT NOT NULL, account_username TEXT, asset_id TEXT,

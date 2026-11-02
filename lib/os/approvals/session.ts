@@ -14,8 +14,8 @@ import "server-only";
 import { NextResponse } from "next/server";
 import type { Client } from "@libsql/client";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { dbBool } from "@/lib/db-bool";
-import { resolveOsViewer } from "@/components/os/department/viewer";
+import { resolveOsViewer, resolveOsViewerFor } from "@/components/os/department/viewer";
+import { liveSeat } from "@/lib/os/seat";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import type { ApprovalScope, ApprovalStatus } from "@/lib/os/approvals/rules";
 
@@ -34,19 +34,24 @@ export async function resolveApprovalSession(): Promise<ApprovalSession> {
   }
   // The approvals tables live only in Turso.
   if (!tursoConfigured()) return { ok: false, response: approvalError(503, "database_not_configured") };
+  // The page/session view can be request-cached. Decisions need the current
+  // seat and capabilities in that exact workspace, including removals and
+  // role changes since the page opened. Never switch tenants on this recheck.
+  const fresh = await resolveOsViewerFor(viewer.surface.tenantId, viewer.surface.userId);
+  if (!fresh.ok) return { ok: false, response: approvalError(fresh.reason === "degraded" ? 503 : 403, fresh.reason === "degraded" ? "workspace_unresolved" : "forbidden") };
   return {
     ok: true,
-    scope: approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput }),
-    email: viewer.email,
-    tenantSlug: viewer.surface.tenantSlug,
+    scope: approvalScopeFromViewer({ surface: fresh.surface, navInput: fresh.navInput }),
+    email: fresh.email,
+    tenantSlug: fresh.surface.tenantSlug,
     db: getTursoClient(),
   };
 }
 
 /** Is this user the workspace owner (user_profiles.is_owner)? For the owner-only approval kinds. */
 export async function isWorkspaceOwnerForApprovals(db: Client, tenantId: string, userId: string): Promise<boolean> {
-  const row = (await db.execute({ sql: "SELECT is_owner FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? LIMIT 1", args: [tenantId, userId] })).rows[0];
-  return !!row && dbBool(row.is_owner);
+  const seat = await liveSeat(tenantId, userId, undefined, db);
+  return seat.live && seat.profile.isOwner;
 }
 
 const MESSAGES: Record<string, string> = {

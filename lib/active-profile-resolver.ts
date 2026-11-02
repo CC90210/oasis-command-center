@@ -10,6 +10,7 @@ export type ActiveUserProfile = UserProfile & {
   team_role?: string | null;
   is_owner?: boolean | null;
   onboarding_completed_at?: string | null;
+  deactivated_at?: string | null;
 };
 
 export type ActiveProfileResult = {
@@ -61,7 +62,8 @@ export function chooseActiveProfile(
 /**
  * Keyed on the primitives, not on the user object (2026-09-01, latency).
  *
- * This is one — sometimes two — Turso round trips, and it ran once per caller
+ * Normally one Turso round trip; legacy email fallback also checks whether
+ * auth-linked history exists. It used to run once per caller
  * because nothing deduplicated it. React's `cache` memoizes per request and
  * clears between them, so a layout and a page asking the same question now pay
  * for one lookup instead of two.
@@ -78,6 +80,7 @@ const resolveActiveProfileCached = cache(
       .from("user_profiles")
       .select("*")
       .eq("auth_user_id", id)
+      .is("deactivated_at", null)
       .limit(20);
     if (byAuth.error) return { profile: null, error: byAuth.error.message };
 
@@ -87,10 +90,19 @@ const resolveActiveProfileCached = cache(
     }
 
     if (!email) return { profile: null, error: null };
+    // Removal is workspace-scoped: a person with another active seat keeps
+    // their login. Filter before the limit so historical rows cannot hide a
+    // live seat. Any auth-linked history still forbids email fallback: an
+    // all-removed identity must not revive through an old matching-email row.
+    const history = await db.from("user_profiles").select("id").eq("auth_user_id", id).limit(1);
+    if (history.error) return { profile: null, error: history.error.message };
+    if (history.data?.length) return { profile: null, error: null };
     const byEmail = await db
       .from("user_profiles")
       .select("*")
       .eq("email", email)
+      .is("auth_user_id", null)
+      .is("deactivated_at", null)
       .limit(20);
     if (byEmail.error) return { profile: null, error: byEmail.error.message };
     const emailRows = (byEmail.data || []) as ActiveUserProfile[];

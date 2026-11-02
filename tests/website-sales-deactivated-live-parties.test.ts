@@ -362,12 +362,12 @@ async function main() {
     Number((await seed.execute({ sql, args })).rows[0]?.n ?? 0);
   const lastCall = (leadId: string) => calendarCalls.filter((call) => call.leadId === leadId).at(-1);
   const inTwoDays = () => new Date(Date.now() + 2 * 864e5).toISOString();
-  // Make memberStanding's read fail (it selects deactivated_at) without
-  // touching the session, tenant or lead reads the rest of the route needs.
+  // Fail memberStanding's broader roster read while preserving deactivated_at,
+  // which the canonical session resolver now needs to reject removed seats.
   const breakStandingReads = () =>
-    seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at TO deactivated_at_unreadable");
+    seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivation_reason TO deactivation_reason_unreadable");
   const restoreStandingReads = () =>
-    seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivated_at_unreadable TO deactivated_at");
+    seed.execute("ALTER TABLE user_profiles RENAME COLUMN deactivation_reason_unreadable TO deactivation_reason");
 
   const bookFounder = (leadId: string) =>
     patch(leadId, {

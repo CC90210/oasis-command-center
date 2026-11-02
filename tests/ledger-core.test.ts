@@ -27,6 +27,7 @@ import { createClient, type Client } from "@libsql/client";
 const ROOT = process.cwd();
 const dbFile = join(mkdtempSync(join(tmpdir(), "ledger-core-")), "test.db");
 process.env.TURSO_DB_PATH = dbFile;
+process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 delete process.env.TURSO_DATABASE_URL;
 delete process.env.TURSO_DB_URL;
 const BEA_SECRET = "ledger-test-bea-secret-0123456789abcdef";
@@ -113,7 +114,11 @@ async function main() {
   await db.executeMultiple(`
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
-      display_name TEXT, full_name TEXT);
+      display_name TEXT, full_name TEXT, team_role TEXT, is_owner INTEGER DEFAULT 0,
+      admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
+    CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT,
+      session_version INTEGER DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+    CREATE TABLE tenant_manifests (tenant_id TEXT, slug TEXT, manifest TEXT, updated_at TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT, updated_at TEXT NOT NULL);
     -- primary_email and archived_at: the approved-email executor reads them to
@@ -131,6 +136,8 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-webdev', 'OASIS Web')", args: [WEBDEV] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'submissions', 'SunBiz')", args: [SUNBIZ] },
+      { sql: "INSERT INTO \"_supabase_auth_users\" (id, email) VALUES (?, 'owner@fixture.test')", args: [CC_USER] },
+      { sql: "INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at) VALUES ('p-owner', ?, 'owner@fixture.test', ?, 'owner', 1, '2026-01-01')", args: [CC_USER, OASIS] },
       ...[
         ["lead-oasis-1", OASIS],
         ["lead-oasis-2", OASIS],

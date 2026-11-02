@@ -20,7 +20,7 @@ import { getManifest } from "@/lib/manifest/loader";
 import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import type { TenantManifest } from "@/lib/manifest/schema";
 import { capabilitiesFor, isOasisSurfaceTenant, resolvePersona, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
-import { resolveViewerSurface, type ViewerSurface } from "@/lib/role-surfaces-session";
+import type { ViewerSurface } from "@/lib/role-surfaces-session";
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { dbBool } from "@/lib/db-bool";
@@ -58,6 +58,9 @@ export type OsViewerResult =
     };
 
 export async function resolveOsViewer(): Promise<OsViewerResult> {
+  // Cookie/page resolution imports next/navigation. Server-side callers of
+  // resolveOsViewerFor only need the live seat and must not load that layer.
+  const { resolveViewerSurface } = await import("@/lib/role-surfaces-session");
   const surface = await resolveViewerSurface();
   if (!surface.ok) return { ok: false, reason: "signed_out" };
   if (surface.degraded || !surface.tenantSlug) return { ok: false, reason: "degraded" };
