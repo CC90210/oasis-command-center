@@ -1,4 +1,5 @@
 import type { getServiceSupabase } from "@/lib/supabase-server";
+import type { Transaction } from "@libsql/client";
 import { normalizePhoneE164 } from "@/lib/conversation-threading";
 
 /**
@@ -108,6 +109,25 @@ export async function applyInboundSmsStop(db: Db, input: {
     .eq("recipient", normalizedRecipient)
     .in("status", ["pending", "sending"]);
   if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
+}
+
+/** The same STOP effects inside an ingress receipt transaction: no acknowledged partial write. */
+export async function applyInboundSmsStopInTransaction(tx: Transaction, input: {
+  tenantId: string; phone: string; receivedAt: string; source: string;
+}): Promise<void> {
+  const recipient = normalizeInboundSmsPhone(input.phone);
+  await tx.execute({
+    sql: `INSERT INTO sunbiz_phone_suppressions (tenant_id,phone_last10,reason,source,updated_at)
+          VALUES (?,?,'OPT_OUT',?,?) ON CONFLICT(tenant_id,phone_last10)
+          DO UPDATE SET reason=excluded.reason,source=excluded.source,updated_at=excluded.updated_at`,
+    args: [input.tenantId, phoneLast10(recipient), input.source, input.receivedAt],
+  });
+  await tx.execute({
+    sql: `UPDATE website_sales_meeting_notifications SET status='cancelled',claimed_at=NULL,
+          last_error='recipient_opted_out',updated_at=? WHERE tenant_id=? AND channel='sms' AND recipient=?
+          AND status IN ('pending','sending')`,
+    args: [input.receivedAt, input.tenantId, recipient],
+  });
 }
 
 export async function releasePhoneSuppression(db: Db, input: {

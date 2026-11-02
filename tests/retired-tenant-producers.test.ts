@@ -484,8 +484,11 @@ async function main() {
     );
     const { GET } = await import("../app/api/cron/materialize-plans/route");
     const res = await GET(new NextRequest("http://localhost/api/cron/materialize-plans", { headers: cronHeaders }));
-    const body = (await res.json()) as { ok: boolean; results: Array<{ profile_id: string }> };
-    assert.equal(res.status, 200, JSON.stringify(body));
+    const body = (await res.json()) as { ok: boolean; count: number; failed: number; results: Array<{ profile_id: string }> };
+    assert.equal(res.status, 409, JSON.stringify(body));
+    assert.equal(body.ok, false);
+    assert.equal(body.count, 0);
+    assert.equal(body.failed, 1);
     // The OASIS attempt errors here (no daily_plans schema in this fixture);
     // what matters is that it was ATTEMPTED and SunBiz's was not.
     assert.deepEqual(body.results.map((r) => r.profile_id), ["prof-oa"]);

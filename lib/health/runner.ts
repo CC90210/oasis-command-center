@@ -151,6 +151,7 @@ export type RunSummary = {
   alerted: string[];
   recovered: string[];
   worst: string;
+  failedAlerts: number;
 };
 
 /**
@@ -175,7 +176,7 @@ export async function runHealthChecks(
   // (health_check_runs, health_alert_state) lands in tables that are being
   // exported and deleted. Nothing is checked, persisted or paged.
   if (isRetiredTenant(tenantId)) {
-    return { ran: 0, results: [], alerted: [], recovered: [], worst: worstVerdict([]) };
+    return { ran: 0, results: [], alerted: [], recovered: [], worst: worstVerdict([]), failedAlerts: 0 };
   }
   const db = opts.db ?? getServiceSupabase();
   const send = opts.sendTelegramImpl ?? sendTelegram;
@@ -241,7 +242,10 @@ export async function runHealthChecks(
         // alert is how a resolved incident stays open.
         //
         // On a retry run, only the lanes that did not accept it last time.
-        const owed = pendingRecoveryLanes(state.last_signature) ?? lanesFor(check);
+        const currentLanes = lanesFor(check);
+        // A saved retry is not permission to contact an audience removed since
+        // the original alert. Do not re-page audiences that already accepted it.
+        const owed = (pendingRecoveryLanes(state.last_signature) ?? currentLanes).filter(lane => currentLanes.includes(lane));
         const stillOwed: TelegramLane[] = [];
         for (const lane of owed) {
           const r = await send(
@@ -385,7 +389,7 @@ export async function runHealthChecks(
     ran_at: new Date(nowMs).toISOString(),
   }).then(() => undefined, () => undefined);
 
-  return { ran: results.length, results, alerted, recovered, worst: worstVerdict(results) };
+  return { ran: results.length, results, alerted, recovered, worst: worstVerdict(results), failedAlerts: telegramFailures };
 }
 
 /**

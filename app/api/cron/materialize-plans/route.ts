@@ -69,7 +69,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ ok: true, target_date: targetDate, count: results.length, results });
+  const failed = results.filter(result => result.error).length;
+  return NextResponse.json({ ok: failed === 0, target_date: targetDate, count: results.length - failed, failed, results }, { status: failed ? 409 : 200 });
 }
 
 export async function POST(req: NextRequest) {

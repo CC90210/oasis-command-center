@@ -14,7 +14,9 @@ async function handle(req: NextRequest) {
   if (paused) return paused;
   try {
     const result = await runSmsReplyAgentWorker();
-    return NextResponse.json(result, { status: result.failed > 0 ? 503 : 200 });
+    // Dead-letter/attempt state already advanced. Let the next scheduled pass
+    // own retries rather than masking this failure with a second empty run.
+    return NextResponse.json({ ...result, ok: result.failed === 0 }, { status: result.failed > 0 ? 409 : 200 });
   } catch (error) {
     const code = smsAgentSafeErrorCode(error);
     console.error("[sms-reply-agent] worker failed", { code }, error);

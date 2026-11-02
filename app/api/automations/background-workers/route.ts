@@ -21,7 +21,7 @@
  *     workers: Array<{
  *       service: string,             // "pm2.sequence-runner", "skool_engine"
  *       label: string,               // operator-friendly name
- *       status: "healthy" | "degraded" | "down" | "unconfigured" | "archived",
+ *       status: "healthy" | "degraded" | "down" | "pending" | "unconfigured" | "archived",
  *       stale: boolean,               // status row exists but is >5 min old — degraded to "down"
  *       metadata: Record<string, unknown>,
  *       last_ping_at: string | null,
@@ -60,6 +60,7 @@ import type {
 import {
   FLEET_REPORTER_SERVICE,
   describeStatusReporter,
+  reportedWorkerStatus,
   resolveWorkerControlMode,
   selectWorkerInventory,
 } from "@/lib/automations/worker-status";
@@ -275,7 +276,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     // the integrations_health row was never reset). Force these to
     // "down" so the tile honestly says Stopped. CC 2026-06-06:
     // "the Skool daemon is showing a checkmark, but it hasn't stopped."
-    const reportedStatus = (h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured";
+    const reportedStatus = reportedWorkerStatus(w.service, h?.status, h?.metadata);
     // A row the bridge has stopped refreshing is not a reading, it's a relic.
     // Same freshness rule as the daemon-backed cron rows (5 min vs the 60s
     // heartbeat): an unparseable or old last_ping_at degrades the worker to

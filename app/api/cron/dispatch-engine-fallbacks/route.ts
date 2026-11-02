@@ -21,7 +21,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
   try {
     const summary = await dispatchDueEngineFallbacks({ db: getTursoClient() });
-    return NextResponse.json({ ok: true, ...summary });
+    const ok = summary.failed.length === 0 && summary.errors.length === 0;
+    return NextResponse.json({ ...summary, ok }, { status: ok ? 200 : 409 });
   } catch (error) {
     console.error("[cron.dispatch-engine-fallbacks] failed", error instanceof Error ? (error.stack ?? error.message) : String(error));
     return NextResponse.json({ ok: false, error: "engine_fallback_dispatch_failed" }, { status: 500 });

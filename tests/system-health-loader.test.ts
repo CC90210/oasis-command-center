@@ -230,6 +230,9 @@ async function main() {
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w4', 'p-cc', ?, 'fleet_watchdog', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
     // Another workspace's fresh chat bridge must not count for OASIS.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w5', NULL, ?, 'pm2.claude-bridge', 'healthy', ?)", args: [CLIENT, ago(10 * S)] },
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('vps-inbox', 'p-cc', ?, 'vps.oasis-inbox-sweep', 'unknown', ?, ?)", args: [OASIS, ago(10 * S), JSON.stringify({ via: "vps-heartbeat", phase: "running" })] },
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('vps-scheduler', 'p-cc', ?, 'vps.oasis-scheduler', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('other-vps', NULL, ?, 'vps.oasis-content-tools-runner', 'healthy', ?)", args: [CLIENT, ago(5 * S)] },
     // Heartbeat cards: a retired host with a ping (never drawn) and a live one a day and a half old.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('h1', 'p-cc', ?, 'vercel', 'healthy', ?)", args: [OASIS, ago(10 * MIN)] },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('h2', 'p-cc', ?, 'cloudflare', 'healthy', ?)", args: [OASIS, ago(36 * H)] },
@@ -460,10 +463,28 @@ async function main() {
       "the newest row beats the month-old duplicate",
     );
     assert.equal(byService.get("pm2.atlas-telegram")?.state, "stopped_by_you", "a running local worker is an active health row");
-    assert.equal(byService.get("pm2.bravo-scheduler")?.state, "no_report", "the scheduler still runs here: no row yet is not a retirement");
-    assert.equal(byService.get("vps.oasis-telegram-bridge"), undefined, "the VPS reports nothing to this computer's health rows");
+    assert.equal(byService.get("pm2.bravo-scheduler"), undefined, "the verified-stopped computer scheduler remains retired");
+    assert.equal(byService.get("vps.oasis-telegram-bridge")?.state, "no_report", "no signed reading means no invented healthy daemon");
+    assert.equal(byService.get("vps.oasis-scheduler")?.state, "running", "actual VPS report is visible");
+    assert.equal(byService.get("vps.oasis-content-tools-runner")?.state, "no_report", "another tenant's VPS report cannot provide health");
+    assert.equal(byService.get("vps.oasis-inbox-sweep")?.state, "pending");
+    assert.equal(byService.get("vps.oasis-inbox-sweep")?.sentence, "Running — awaiting result");
     assert.equal(health.reporter?.state, "ok");
     assert.equal(health.attention.workersDown, 1, "stopped-by-you and no-report are not outages");
+  });
+  await check("workers: pending expires and Windows being offline does not collapse independent VPS outages", async () => {
+    const { getServiceSupabase } = await import("../lib/supabase-server");
+    const rows = await at.loadWorkerRows(getServiceSupabase(), OASIS);
+    const pendingWorker = { service: "vps.oasis-inbox-sweep", label: "Inbox sweep" };
+    assert.equal(at.describeWorker(pendingWorker, rows.get(pendingWorker.service), NOW + 6 * MIN).state, "stale");
+    for (const service of ["vps.oasis-headless-bridge", "vps.oasis-content-tools-runner"]) {
+      rows.set(service, { service, status: "down", last_ping_at: ago(10 * S), metadata: {} });
+    }
+    const background = at.describeBackground(rows, [{ label: "CCPC", state: "offline", lastSeenAt: ago(2 * H) }], NOW);
+    assert.equal(background.workersDown, 2,
+      "a powered-off computer needs nothing (its workers are optional since the cloud cutover); the two VPS outages still count");
+    assert.deepEqual(at.describeBackground(rows, [], NOW, { authUserId: "other-owner", isAgentsOwner: false }).workers, []);
+    assert.deepEqual(at.describeBackground(rows, [], NOW, undefined, CLIENT).workers, [], "OASIS inventory stays out of other workspaces");
   });
   await check("cron: this workspace's failures in 24 h, both registries, each with what to do", () => {
     assert.equal(health.cron?.count, 6);
@@ -556,6 +577,8 @@ async function main() {
   });
 
   // ── The page ────────────────────────────────────────────────────────────
+  await db.executeMultiple("CREATE TABLE workspace_agents_owner (tenant_id TEXT PRIMARY KEY, auth_user_id TEXT, revoked_at TEXT)");
+  await db.execute({ sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id) VALUES (?, ?)", args: [OASIS, CC.id] });
   const { signSession } = await import("../lib/turso-auth");
   sessionCookie = signSession({ sub: CC.id, email: CC.email, exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
   const HealthPage = (await import("../app/health/page")).default;
@@ -574,6 +597,8 @@ async function main() {
     assert.match(text, /Critical .{0,40}BRAVO|Critical .{0,80}classifier/i, "the critical event is listed and labelled Critical");
     assert.ok(!text.includes("CLIENT-PC-DO-NOT-LIST") && !text.includes("CLIENT-CRON-DO-NOT-COUNT") && !text.includes("CLIENT-EVENT-DO-NOT-COUNT"));
     assert.ok(!text.includes("Integration heartbeats"), "connections no longer render on System health");
+    assert.ok(text.includes("Running — awaiting result"), "an authenticated owner sees the neutral oneshot state");
+    assert.ok(text.includes("Empire scheduler (daemon VPS)"), "the real remote heartbeat is visible on System health");
   });
   await check("/health: no docker, Vercel, state-api, Supabase or 'unauthorized' anywhere on the page", () => {
     assert.doesNotMatch(text, /docker|vercel|state-api|supabase|unauthorized/i);

@@ -13,6 +13,7 @@ import {
 import {
   failQueuedComputerRun,
   failQueuedFallbackRun,
+  getRun,
   fallbackQueuedComputerRun,
   listQueuedFallbackRuns,
   listStaleRunningFallbackRuns,
@@ -70,6 +71,7 @@ export type FallbackDispatchSummary = {
   promoted: string[];
   started: string[];
   failed: string[];
+  errors: string[];
   deferred: string[];
   recovered: string[];
 };
@@ -107,6 +109,7 @@ export async function dispatchDueEngineFallbacks(input: {
     promoted: [],
     started: [],
     failed: [],
+    errors: [],
     deferred: [],
     recovered: [],
   };
@@ -191,6 +194,7 @@ export async function dispatchDueEngineFallbacks(input: {
         // removed workspaces are terminal authorization/configuration failures.
         if (resolved.status >= 500) {
           summary.deferred.push(run.id);
+          summary.errors.push(run.id);
           continue;
         }
         const stopped = await failQueuedFallbackRun(
@@ -207,7 +211,16 @@ export async function dispatchDueEngineFallbacks(input: {
       try {
         if (input.deps?.drive) await input.deps.drive(resolved.session, run.conversationId, run.id);
         else await driveConversation(executorDepsFor(resolved.session, input.db), run.conversationId, { maxRuns: 1 });
-        summary.started.push(run.id);
+        // driveConversation handles provider refusals by persisting the outcome;
+        // a resolved driver promise does not mean its run succeeded. Read only
+        // this tenant/member/run, including when a concurrent driver won the CAS.
+        const outcome = await getRun(input.db, { tenantId: run.tenantId, userId: run.userId }, run.id);
+        if (outcome?.status === "done") summary.started.push(run.id);
+        else if (outcome && ["failed", "interrupted", "missed"].includes(outcome.status)) summary.failed.push(run.id);
+        else {
+          summary.deferred.push(run.id);
+          if (!outcome) summary.errors.push(run.id);
+        }
       } catch (error) {
         console.error("[os.runs.fallback-dispatcher] driver failed", {
           tenantId: run.tenantId,
@@ -215,6 +228,7 @@ export async function dispatchDueEngineFallbacks(input: {
           error: error instanceof Error ? (error.stack ?? error.message) : String(error),
         });
         summary.deferred.push(run.id);
+        summary.errors.push(run.id);
       }
     }
   }));

@@ -37,6 +37,7 @@ import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPan
 import { OAuthConnectionPanel } from "@/components/os/connections/OAuthConnectionPanel";
 import { ServiceKeysForm } from "@/components/os/connections/ServiceKeysForm";
 import { TwilioWebhooksPanel } from "@/components/os/connections/TwilioWebhooksPanel";
+import { QuoWebhooksPanel } from "@/components/os/connections/QuoWebhooksPanel";
 import { RequestConnector } from "@/components/os/connections/RequestConnector";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { PersonalIntegrationsPanel } from "@/components/settings/PersonalIntegrationsPanel";
@@ -294,6 +295,7 @@ export function ConnectorDrawer({
           )}
 
           {savedKeys?.service === "twilio" && <TwilioWebhooksPanel key={def.slug} canManage version={keysRevision} />}
+          {savedKeys?.service === "quo" && <QuoWebhooksPanel key={def.slug} version={keysRevision} />}
 
           {status?.paths && status.paths.length > 0 && (
             // This workspace's own way in, with its state here (resolved on the

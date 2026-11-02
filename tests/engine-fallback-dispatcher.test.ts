@@ -330,6 +330,20 @@ async function main() {
     assert.deepEqual(summary.started, ["run-api-a", "run-api-b"]);
   });
 
+  await check("retryable session reads and driver errors are failures distinct from ordinary waiting", async () => {
+    for (const failure of ["read", "drive"]) {
+      const db = await testDb();
+      await insertCandidate(db, { id: `run-${failure}`, conversationId: "399ba1e9-cef3-4bfd-a53b-fbe7e5d0cde2", executor: "worker", reason: "computer_not_answering" });
+      const summary = await dispatchDueEngineFallbacks({ db, now: NOW, deps: {
+        resolveSession: async () => failure === "read" ? { ok: false, status: 503, error: "lookup_failed" } : { ok: true, session: {} as never },
+        drive: async () => { throw new Error("fixture_driver_failure"); },
+      } });
+      assert.deepEqual(summary.errors, [`run-${failure}`]);
+      assert.deepEqual(summary.deferred, [`run-${failure}`]);
+      assert.deepEqual(summary.started, []);
+    }
+  });
+
   await check("a killed long-running origin is reaped instead of stranding the queue", async () => {
     const db = await testDb();
     const conversationId = "399ba1e9-cef3-4bfd-a53b-fbe7e5d0cde2";
@@ -351,6 +365,51 @@ async function main() {
     assert.deepEqual(Array.from(row.rows[0]), ["interrupted", "interrupted"]);
     const events = await db.execute("SELECT kind FROM dept_chat_run_events WHERE run_id = 'run-stale' ORDER BY seq");
     assert.deepEqual(events.rows.map((row) => row[0]), ["error", "done"]);
+  });
+
+  await check("real executor provider refusal is reported as failed and the real Worker preserves its first receipt", async () => {
+    const db = await testDb();
+    const conversationId = "399ba1e9-cef3-4bfd-a53b-fbe7e5d0cde2";
+    await insertCandidate(db, { id: "real-provider-failure", conversationId, executor: "worker", reason: "computer_not_answering" });
+    const { driveConversation } = await import("../lib/os/runs/executor");
+    const deps = {
+      resolveSession: async () => ({ ok: true as const, session: {} as never }),
+      drive: async (_session: unknown, id: string) => { await driveConversation({ db,
+        scope: { tenantId: "tenant-a", userId: "user-a" }, departmentLabel: "Fixture", now: () => NOW,
+        history: "none", startTurn: async () => ({ ok: false, status: 503, error: "provider_unavailable", recordAs: "provider_unavailable" }),
+        recordOutcome: async () => undefined,
+      }, id, { maxRuns: 1 }); },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- replace only the route's cached test dependency
+    const realDispatcher = require("../lib/os/runs/fallback-dispatcher");
+    stub("../lib/os/runs/fallback-dispatcher", { ...realDispatcher, dispatchDueEngineFallbacks: () => dispatchDueEngineFallbacks({ db, now: NOW, deps }) });
+    stub("../lib/turso", { tursoConfigured: () => true, getTursoClient: () => db });
+    stub("../lib/automations/cron-switches", { cronPauseGate: async () => null });
+    process.env.CRON_SECRET = "fallback-fixture"; process.env.CRON_ATTEST_SECRET = "fallback-attest";
+    const { GET } = await import("../app/api/cron/dispatch-engine-fallbacks/route");
+    const { NextRequest } = await import("next/server");
+    const worker = (await import("../workers/oasis-cc-cron/src/index")).default;
+    const original = { fetch: globalThis.fetch, log: console.log }; let calls = 0;
+    const receipts: Array<{ path: string; ok: boolean; status: string; attempts: number }> = [];
+    try {
+      console.log = () => undefined;
+      globalThis.fetch = async (url, init) => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/cron/runs") { receipts.push(...JSON.parse(String(init?.body)).results); return Response.json({ ok: true }); }
+        if (target.pathname === "/api/cron/dispatch-engine-fallbacks") { calls++; return GET(new NextRequest(target, { headers: init?.headers })); }
+        return Response.json({ ok: true });
+      };
+      const pending: Promise<unknown>[] = [];
+      await worker.scheduled({ scheduledTime: Date.parse("2026-11-01T12:01:00Z"), cron: "* * * * *" },
+        { APP_ORIGIN: "https://fixture.invalid", CRON_FORWARD: "on", CRON_SECRET: process.env.CRON_SECRET, CRON_ATTEST_SECRET: process.env.CRON_ATTEST_SECRET },
+        { waitUntil: p => { pending.push(p); } });
+      await Promise.all(pending);
+      assert.equal(calls, 1);
+      assert.deepEqual(receipts.filter(r => r.path === "/api/cron/dispatch-engine-fallbacks").map(r => [r.ok, r.status, r.attempts]), [[false, "409", 1]]);
+      const row = (await db.execute("SELECT status,error_code FROM dept_chat_runs WHERE id='real-provider-failure'")).rows[0];
+      assert.equal(row.status, "failed"); assert.equal(row.error_code, "provider_unavailable");
+      assert.equal((await dispatchDueEngineFallbacks({ db, now: NOW, deps })).scanned, 0);
+    } finally { globalThis.fetch = original.fetch; console.log = original.log; }
   });
 
   await check("the durable dispatcher is registered in every scheduler surface", () => {

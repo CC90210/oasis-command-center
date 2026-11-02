@@ -29,6 +29,9 @@ assert.equal(messageSource({ channel: "note" }), "other", "note → other (All-o
 
 // --- normalizePhoneE164 ----------------------------------------------------
 assert.equal(normalizePhoneE164("+14165551212"), "+14165551212", "already E.164 passes through");
+assert.equal(normalizePhoneE164("+1234567"), "+1234567", "explicit seven-digit international numbers match the send boundary");
+assert.equal(normalizePhoneE164("+123456"), null, "shorter explicit numbers remain invalid");
+assert.equal(normalizePhoneE164("1234567"), null, "a local seven-digit number has no inferred country");
 assert.equal(normalizePhoneE164("4165551212"), "+14165551212", "10-digit → +1");
 assert.equal(normalizePhoneE164("14165551212"), "+14165551212", "11-digit leading 1 → +1");
 assert.equal(normalizePhoneE164("(416) 555-1212"), "+14165551212", "formatted → E.164");

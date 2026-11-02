@@ -32,6 +32,7 @@ import {
   describeStatusReporter,
   formatLastSeen,
   isOperatorStopped,
+  reportedWorkerStatus,
 } from "../lib/automations/worker-status";
 
 // ── 1. An operator stop is Off, not Degraded ──────────────────────────────
@@ -218,6 +219,17 @@ import {
     describeStatusReporter({ row: { status: "down", metadata: {}, last_ping_at: fresh }, bridgeOnline: true, now, staleMs }).error,
     "the bridge could not read the process table",
   );
+}
+
+// Only the signed inbox oneshot's pending marker is a usable in-progress report.
+{
+  const phase = { via: "vps-heartbeat", phase: "running" };
+  assert.equal(reportedWorkerStatus("vps.oasis-inbox-sweep", "unknown", phase), "pending");
+  assert.equal(reportedWorkerStatus("vps.oasis-inbox-sweep", "unknown", {}), "unconfigured");
+  assert.equal(reportedWorkerStatus("vps.oasis-inbox-sweep", "running", phase), "unconfigured");
+  assert.equal(reportedWorkerStatus("vps.oasis-scheduler", "unknown", phase), "unconfigured");
+  assert.equal(reportedWorkerStatus("pm2.claude-bridge", "unknown", phase), "unconfigured");
+  assert.equal(reportedWorkerStatus("vps.oasis-inbox-sweep", "down", phase), "down", "metadata never masks a known failure");
 }
 
 console.log("worker-status: all assertions passed");

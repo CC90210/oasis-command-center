@@ -233,6 +233,7 @@ type ClaimedRow = {
   step_index: number;
   channel: "sms" | "email";
   attempts: number;
+  claimed_at: string;
 };
 
 type LeadData = Record<string, unknown>;
@@ -249,9 +250,21 @@ export type DispatchDripsResult = {
   retryPending: number;
   failed: number;
   cancelled: number;
+  /** Rows put back unsent because a guard read was unavailable (no attempt spent). */
+  guardBlocked: number;
   /** True when the run stopped early because TextTorrent credits ran out. */
   creditHalted: boolean;
 };
+
+/** Guard reads whose outage proves nothing about the lead: the row is re-checked
+ *  later without spending a delivery attempt (CodeRabbit #791). Three transient
+ *  read failures used to mark a never-sent step permanently failed. */
+const GUARD_READ_UNAVAILABLE = new Set([
+  "drip_rep_standing_unavailable",
+  "drip_shopped_lookup_unavailable",
+  "drip_accelerated_lookup_unavailable",
+]);
+const GUARD_RETRY_MS = 5 * 60_000;
 
 /** Per-row outcome, tallied in-process by the main loop (no post-hoc DB
  *  query needed — every code path below returns exactly one of these). */
@@ -666,19 +679,36 @@ export async function handleGuardBlock(
   return markRescheduled(db, row, retryAt, `blast_safety_check_failed(${where}) - retrying`);
 }
 
-/** Not a failure — the recipient's local clock is outside the TCPA SMS
- *  window. Releases the claim back to 'scheduled' at the next in-window
- *  instant, WITHOUT bumping attempts (this isn't a retry budget spend). */
+class RescheduleWriteError extends Error {
+  constructor(message: "drip_reschedule_write_failed" | "drip_reschedule_claim_lost") {
+    super(message);
+  }
+}
+
+/** Release this exact claim for a later safe send or guard recheck without
+ * spending a delivery attempt. A failed write never claims success. */
 async function markRescheduled(
   db: Db,
   row: ClaimedRow,
   newScheduledForIso: string,
   reason: string,
 ): Promise<StepOutcome> {
-  await db
-    .from("drip_runs")
-    .update({ status: "scheduled", scheduled_for: newScheduledForIso, last_error: reason.slice(0, 500) })
-    .eq("id", row.id);
+  if (!row.claimed_at) throw new RescheduleWriteError("drip_reschedule_claim_lost");
+  let result;
+  try {
+    result = await db
+      .from("drip_runs")
+      .update({ status: "scheduled", scheduled_for: newScheduledForIso, last_error: reason.slice(0, 500) })
+      .eq("id", row.id)
+      .eq("tenant_id", row.tenant_id)
+      .eq("status", "sending")
+      .eq("claimed_at", row.claimed_at)
+      .select("id");
+  } catch {
+    throw new RescheduleWriteError("drip_reschedule_write_failed");
+  }
+  if (result.error) throw new RescheduleWriteError("drip_reschedule_write_failed");
+  if (result.data?.length !== 1) throw new RescheduleWriteError("drip_reschedule_claim_lost");
   return "rescheduled";
 }
 
@@ -808,7 +838,7 @@ export function buildContext(
  * signer and apply-link slug, and classifyRep's admin wire, the tenant's shared
  * line. An active rep gets `data` itself back.
  *
- * A failed standing read keeps today's behaviour; see assignedRepDeactivated.
+ * A failed standing read stops this attempt; the row's retry/error state records it.
  */
 async function signingData(row: ClaimedRow, data: LeadData, run: RunState): Promise<LeadData> {
   if (!(await assignedRepDeactivated(row.tenant_id, data.assigned_to, run.repDeactivated))) return data;
@@ -2085,7 +2115,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   const empty = (): DispatchDripsResult => ({
     ok: true, reclaimed, claimed: 0, processed: 0, sent: 0,
     dryRun: 0, rescheduled: 0, retryPending: 0, failed: 0, cancelled: 0,
-    creditHalted: false,
+    guardBlocked: 0, creditHalted: false,
   });
 
   // 2) Hourly send cap (live mode only) — the hard drip throttle. Count REAL
@@ -2107,12 +2137,17 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
         db.from("drip_runs").select("id", { count: "exact", head: true }).in("status", ["sent", "done"]).gte("sent_at", oneHourAgoIso),
         db.from("drip_runs").select("id", { count: "exact", head: true }).eq("status", "sending"),
       ]);
-      const sentLastHour = (settled.count || 0) + (inflight.count || 0);
+      if (settled.error || inflight.error ||
+          !Number.isSafeInteger(settled.count) || (settled.count as number) < 0 ||
+          !Number.isSafeInteger(inflight.count) || (inflight.count as number) < 0) {
+        throw new Error("drip_hourly_budget_unavailable");
+      }
+      const sentLastHour = (settled.count as number) + (inflight.count as number);
       claimBudget = Math.max(0, Math.min(BATCH_LIMIT, HOURLY_CAP - sentLastHour));
     } catch (err) {
-      // Can't measure the rate → trickle a few rather than risk a burst.
-      console.error("[dispatch-drips] hourly-cap count failed, trickling", err);
-      claimBudget = Math.min(BATCH_LIMIT, 5);
+      // Unknown usage is not permission to send. Fail before claiming due work.
+      console.error("[dispatch-drips] hourly-cap count unavailable", err);
+      throw new Error("drip_hourly_budget_unavailable");
     }
     if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
   }
@@ -2141,7 +2176,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     .update({ status: "sending", claimed_at: new Date().toISOString() })
     .in("id", dueIds)
     .eq("status", "scheduled")
-    .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts");
+    .select("id, tenant_id, lead_id, sequence_id, sequence_name, step_index, channel, attempts, claimed_at");
   if (claimRes.error) return empty();
   const claimed = (claimRes.data || []) as ClaimedRow[];
   if (claimed.length === 0) return empty();
@@ -2209,6 +2244,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
   let retryPending = 0;
   let failed = 0;
   let cancelled = 0;
+  let guardBlocked = 0;
   // Email volume budget, computed once for the whole run (2 aggregate queries +
   // one batched per-lead query) so per-row gating costs nothing. Only loaded
   // when real sends are enabled: a dry run moves no bytes, so there is no
@@ -2294,10 +2330,26 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     try {
       outcome = await processRow(db, row, leadMap, seqMap, run);
     } catch (err) {
-      console.error("[dispatch-drips] unhandled row error", row.id, err);
-      outcome = await markRetryOrFail(db, row, err instanceof Error ? err.message : "unhandled_error").catch(
-        () => "failed" as const,
-      );
+      const message = err instanceof Error ? err.message : "unhandled_error";
+      if (err instanceof RescheduleWriteError) {
+        // A failed write is not a delivery attempt. A lost claim is no longer
+        // ours to retry or fail in storage; leave it to its owner/recovery.
+        console.error("[dispatch-drips] reschedule failed", { id: row.id, tenantId: row.tenant_id, error: message });
+        outcome = "failed";
+      } else if (GUARD_READ_UNAVAILABLE.has(message)) {
+        // Nothing was sent: re-check after the outage without spending an
+        // attempt. guardBlocked keeps the tick red so the stall stays visible.
+        console.error("[dispatch-drips] guard read unavailable; rescheduled", row.id, message);
+        outcome = await markRescheduled(db, row, new Date(Date.now() + GUARD_RETRY_MS).toISOString(), message).catch(
+          () => "failed" as const,
+        );
+        if (outcome === "rescheduled") guardBlocked++;
+      } else {
+        console.error("[dispatch-drips] unhandled row error", row.id, err);
+        outcome = await markRetryOrFail(db, row, message).catch(
+          () => "failed" as const,
+        );
+      }
     }
     processed++;
     if (outcome === "sent") sent++;
@@ -2323,6 +2375,6 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
 
   return {
     ok: true, reclaimed, claimed: claimed.length, processed, sent, dryRun,
-    rescheduled, retryPending, failed, cancelled, creditHalted: run.creditExhausted,
+    rescheduled, retryPending, failed, cancelled, guardBlocked, creditHalted: run.creditExhausted,
   };
 }

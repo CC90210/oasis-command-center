@@ -20,9 +20,10 @@ import { loadCronFlows, type CronFlow } from "@/lib/automations/cron-runs";
 import { timeAgo } from "@/lib/devices/presence";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
-const DOT: Record<"ok" | "failed" | "none", string> = {
+const DOT: Record<"ok" | "failed" | "overdue" | "none", string> = {
   ok: "bg-status-engaged",
   failed: "bg-status-hot",
+  overdue: "bg-status-warm",
   none: "bg-fg-dim",
 };
 
@@ -35,7 +36,7 @@ export async function CronFlowCards({ canToggle = false }: { canToggle?: boolean
 /** The card itself, from data already read (null = the read failed). */
 export function CronFlowList({ flows, now, canToggle = false }: { flows: CronFlow[] | null; now: number; canToggle?: boolean }) {
   return (
-    <Card title="24/7 cloud automations (Cloudflare)" subtitle={cloudJobsSubtitle(flows, canToggle)}>
+    <Card title="24/7 cloud automations (Cloudflare)" subtitle={cloudJobsSubtitle(flows, canToggle, now)}>
       {flows === null ? null : (
         <ul className="divide-y divide-bg-border">
           {flows.map((flow) => {

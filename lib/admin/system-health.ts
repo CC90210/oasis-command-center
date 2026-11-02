@@ -321,7 +321,7 @@ export async function loadSystemHealth(tenantId: string, deps: SystemHealthDeps 
     safe("system_health.events", loadAttentionEvents(db, tenantId, now), null),
   ]);
   const guards = guardRow === null ? null : describeGuards(guardRow.row, now);
-  const background = describeBackground(workerRows, machines, now, viewer);
+  const background = describeBackground(workerRows, machines, now, viewer, tenantId);
   return {
     generatedAt: new Date(now).toISOString(),
     verdict: describeVerdict({ machines, guards, now }),

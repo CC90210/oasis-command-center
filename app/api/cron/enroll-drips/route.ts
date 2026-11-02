@@ -26,7 +26,8 @@ async function handleEnroll(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await runEnrollDrips();
-    return NextResponse.json({ ok: true, ...result });
+    const failed = result.perSequence.filter(sequence => sequence.error).length;
+    return NextResponse.json({ ...result, ok: failed === 0, failed }, { status: failed ? 409 : 200 });
   } catch (err) {
     console.error("[enroll-drips] unhandled error", err);
     return NextResponse.json(

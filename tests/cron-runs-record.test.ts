@@ -142,11 +142,12 @@ async function main(): Promise<void> {
 
     assert.equal(cards.cloudJobName(route), "Meeting Room Cleanup");
     assert.equal(cards.cloudJobName("/api/cron/not-a-known-job"), "Not a known job", "an unknown path falls back to its words");
-    const subtitle = cards.cloudJobsSubtitle(flows, true);
+    const subtitle = cards.cloudJobsSubtitle(flows, true, NOW);
     assert.match(subtitle, /^25 scheduled jobs run on Cloudflare whether or not your computer is on\./);
     assert.match(subtitle, /1 paused\./);
     assert.match(subtitle, /Switch any job off or on here\.$/);
-    assert.doesNotMatch(cards.cloudJobsSubtitle(flows, false), /Switch any job/, "no switch offered to a viewer who cannot use it");
+    assert.doesNotMatch(cards.cloudJobsSubtitle(flows, false, NOW), /Switch any job/, "no switch offered to a viewer who cannot use it");
+    assert.equal(cards.cloudRunFreshness(meet, NOW), "paused", "an old paused run is not overdue");
     await db.execute("DELETE FROM cron_job_switches");
   });
 
@@ -177,6 +178,43 @@ async function main(): Promise<void> {
     assert.equal(await stored("/api/cron/health-check"), runs.PAUSED_RUN_STATUS);
     await db.execute("DELETE FROM cron_job_switches");
     await db.execute("DELETE FROM cron_runs");
+  });
+
+  await check("freshness: missing reports turn old successes amber only after the schedule and retry budget", async () => {
+    const baseline = (await runs.loadCronFlows(db, NOW))!.find((f) => f.path === "/api/cron/health-check")!;
+    const lastAt = Date.parse("2026-10-28T12:00:00Z");
+    const ordinary = { ...baseline, schedule: "* * * * *", enabled: true, resumedAt: null, last: { ok: true, status: "200", ms: 200, at: iso(lastAt) } };
+    assert.equal(cards.lastRunLine(ordinary, lastAt + 6 * MIN).tone, "ok", "one minute until due plus five for two attempts/reporting");
+    assert.equal(cards.lastRunLine(ordinary, lastAt + 6 * MIN + 1).tone, "overdue");
+    assert.match(cards.lastRunLine(ordinary, lastAt + 7 * MIN).text, /^Overdue.*last OK report/);
+    const long = { ...ordinary, path: "/api/cron/dispatch-automations" };
+    assert.equal(cards.lastRunLine(long, lastAt + 31 * MIN).tone, "ok", "long dispatcher gets its full two-attempt budget");
+    assert.equal(cards.lastRunLine(long, lastAt + 31 * MIN + 1).tone, "overdue");
+    const failedRun = { ...ordinary, last: { ...ordinary.last, ok: false, status: "503" } };
+    assert.equal(cards.lastRunLine(failedRun, lastAt + MIN).tone, "failed");
+    assert.match(cards.lastRunLine(failedRun, lastAt + 7 * MIN).text, /last failed \(503\) report/);
+    assert.match(cards.cloudJobsSubtitle([ordinary, { ...ordinary, enabled: false }], false, lastAt + 7 * MIN), /1 overdue for a run report/);
+    for (const bad of ["not-a-time", iso(lastAt + 60 * MIN)]) {
+      assert.equal(cards.lastRunLine({ ...ordinary, last: { ...ordinary.last, at: bad } }, lastAt).tone, "none", "invalid/future timestamps cannot give green assurance");
+    }
+    assert.equal(cards.cloudRunFreshness({ ...ordinary, enabled: null }, lastAt), "unknown");
+    assert.equal(cards.cloudRunFreshness({ ...ordinary, schedule: "invalid" }, lastAt), "unknown");
+    assert.equal(cards.cloudRunFreshness({ ...ordinary, last: null }, lastAt), "unmeasured");
+  });
+
+  await check("freshness: resume time comes from the stored switch, and calendar gaps are not missed runs", async () => {
+    const path = "/api/cron/meet-relay";
+    await db.execute({ sql: "INSERT INTO cron_job_switches (route, enabled, changed_at, changed_by) VALUES (?, 1, ?, 'auth-cc-0001')", args: [path, iso(NOW)] });
+    const resumed = (await runs.loadCronFlows(db, NOW))!.find((f) => f.path === path)!;
+    assert.equal(resumed.resumedAt, iso(NOW));
+    assert.equal(cards.cloudRunFreshness(resumed, NOW), "fresh", "a newly enabled job gets a chance to run");
+    assert.equal(cards.lastRunLine({ ...resumed, last: null }, NOW).text, "Not measured yet");
+    assert.equal(cards.cloudRunFreshness({ ...resumed, schedule: "* * * * *", last: null }, NOW + 7 * MIN), "overdue", "known enable time allows detecting a first run that never reported");
+    const weekday = { ...resumed, resumedAt: null, schedule: "0 9 * * 1-5", timeZone: "America/Toronto", last: { ok: true, status: "200", ms: 100, at: "2026-10-30T13:00:00Z" } };
+    assert.equal(cards.cloudRunFreshness(weekday, Date.parse("2026-11-01T16:00:00Z")), "fresh", "weekend and fall DST transition are legitimate gaps");
+    assert.equal(cards.cloudRunFreshness(weekday, Date.parse("2026-11-02T14:05:00Z")), "fresh");
+    assert.equal(cards.cloudRunFreshness(weekday, Date.parse("2026-11-02T14:05:01Z")), "overdue", "Monday 09:00 is EST after DST, with five minutes to report");
+    await db.execute("DELETE FROM cron_job_switches");
   });
 
   await check("next run: a fixed Toronto time shifts through the spring gap", () => {

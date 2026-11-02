@@ -74,7 +74,7 @@ const smsSends: Array<{ tenantId: string; to: string }> = [];
 stubModule(require.resolve("../lib/integrations/quo"), {
   quoCredentialsOrNull: async (tenantId: string) => ({ tenantId, apiKey: "test", fromNumber: "+13653603976" }),
   quoSender: async () => ({ ok: true, number: "+13653603976", source: "configured" }),
-  quoStopIntakeConnected: () => true,
+  quoStopIntakeReadiness: () => ({ ready: true, reason: "ready" }),
   sendQuoSms: async (creds: { tenantId: string }, input: { to: string }) => {
     smsSends.push({ tenantId: creds.tenantId, to: input.to });
     return { ok: true, id: `QU${smsSends.length}`, status: "queued" };
@@ -297,7 +297,7 @@ async function main() {
     assert.equal(pass1.body.claimed, 4);
     assert.equal(pass1.body.sent, 2);
     assert.equal(pass1.body.failed, 2);
-    assert.equal(pass1.status, 503, "a failed row degrades the pass, as every failed row already did");
+    assert.equal(pass1.status, 409, "a durable failed row degrades the pass without an immediate scheduler retry");
   });
 
   // ── Pass 2: the standing read fails ───────────────────────────────────────

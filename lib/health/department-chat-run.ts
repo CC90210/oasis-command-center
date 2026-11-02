@@ -34,7 +34,7 @@ export type DepartmentChatRun = { tenantId: string; summary: RunSummary; failed:
 /** A run that could not happen: one check_broken result, so `worst` and the history say so. */
 export function brokenSummary(checkId: string, reason: string): RunSummary {
   const results = [{ id: checkId, verdict: "check_broken" as const, observed: NaN, baseline: null, reason: reason.slice(0, 300) }];
-  return { ran: 1, results, alerted: [], recovered: [], worst: worstVerdict(results) };
+  return { ran: 1, results, alerted: [], recovered: [], worst: worstVerdict(results), failedAlerts: 0 };
 }
 
 async function recordBrokenRun(tenantId: string, reason: string, nowMs: number): Promise<void> {

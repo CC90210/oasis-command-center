@@ -179,15 +179,12 @@ for (const tid of Object.keys(TENANT_ID_BRAND)) {
 // lane declared it fell to the runner default — SunBiz's — so an OASIS
 // merchant's blocked submission re-asserted into the client's channel every 15
 // minutes. The instant page resolves its lane from the tenant; this re-assertion
-// has no tenant to resolve, so it must tell everyone.
+// has no tenant to resolve. Only the platform operator receives aggregate
+// failures; customer channels must not receive another tenant's incident.
 const openCheck = FORM_CHECKS.find((c) => c.id === "forms.submit_failures_open");
 assert.ok(openCheck, "forms.submit_failures_open is gone");
-assert.ok(
-  Array.isArray(openCheck.lane) &&
-    openCheck.lane.includes("operator") &&
-    openCheck.lane.includes("sunbiz-ops"),
-  "the estate-wide blocked-submission check pages only one company again",
-);
+assert.equal(openCheck.lane, "operator",
+  "the estate-wide blocked-submission check must only page the platform operator");
 
 
 // ── BOTH funnel routes resolve identity, not just one ──────────────────────
