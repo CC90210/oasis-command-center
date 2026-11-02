@@ -157,7 +157,9 @@ export async function handleQuoInbound(req: Request, tenantId: string, deps: {
 /** Fixed provider host, GET only, no redirect can carry the API key elsewhere. */
 export async function verifyQuoWebhookProvider(config: QuoWebhookConfig, origin: string, signedAt: number, fetcher: typeof fetch = fetch): Promise<string> {
   const get = async (path: string) => {
-    const response = await fetcher(`https://api.quo.com${path}`, { method: "GET", redirect: "error", cache: "no-store",
+    // Workers supports manual, not error. Refuse every non-2xx response below;
+    // a redirect must never carry the account key to another destination.
+    const response = await fetcher(`https://api.quo.com${path}`, { method: "GET", redirect: "manual", cache: "no-store",
       headers: { Authorization: config.apiKey, "Quo-Api-Version": QUO_WEBHOOK_VERSION }, signal: AbortSignal.timeout(10_000) });
     if (!response.ok) { await response.body?.cancel(); throw new Error("quo_webhook_provider_unavailable"); }
     return object(await response.json()).data;

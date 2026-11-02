@@ -33,13 +33,18 @@ const fail = (code: string, status = 503): never => { throw new QuoSetupError(co
 async function provider(path: string, key: string, deps: QuoSetupDeps, body?: unknown): Promise<Record<string, unknown>> {
   // Provider responses may contain signing keys. Never log them or return them
   // to the caller. Bounded reads and rejected redirects apply to every request.
-  const response = await (deps.fetcher ?? fetch)(`https://api.quo.com${path}`, {
-    method: body === undefined ? "GET" : "POST", redirect: "error", cache: "no-store",
-    headers: { Authorization: key, "Quo-Api-Version": QUO_WEBHOOK_VERSION,
-      ...(body === undefined ? {} : { "content-type": "application/json" }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(body === undefined ? 8_000 : 12_000),
-  });
+  let response: Response;
+  try {
+    response = await (deps.fetcher ?? fetch)(`https://api.quo.com${path}`, {
+      // Workers rejects redirect:error before sending. manual plus the non-2xx
+      // check below refuses redirects without forwarding credentials anywhere.
+      method: body === undefined ? "GET" : "POST", redirect: "manual", cache: "no-store",
+      headers: { Authorization: key, "Quo-Api-Version": QUO_WEBHOOK_VERSION,
+        ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(body === undefined ? 8_000 : 12_000),
+    });
+  } catch { return fail("provider_unavailable"); }
   if (!response.ok) { await response.body?.cancel(); return fail("provider_unavailable"); }
   if (!response.body) return fail("provider_response_invalid");
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;

@@ -40,7 +40,7 @@ async function main() {
   const fetcher: typeof fetch = async (input, supplied) => {
     calls++;
     const url = new URL(String(input)); const init = supplied ?? {};
-    assert.equal(url.origin, "https://api.quo.com"); assert.equal(init.redirect, "error");
+    assert.equal(url.origin, "https://api.quo.com"); assert.equal(init.redirect, "manual");
     assert.equal(new Headers(init.headers).get("Authorization"), apiKey);
     assert.equal(new Headers(init.headers).get("Quo-Api-Version"), "2026-03-30");
     assert.ok(["GET", "POST"].includes(init.method!));
@@ -221,6 +221,33 @@ async function main() {
     assert.equal(result.status, 503); assert.equal(result.body.error, "provider_unavailable");
     assert.equal(result.body.numbers, undefined); assert.equal(posted.length, before);
     assert.equal((await rows()).length, 1);
+  });
+  await check("redirects and transport exceptions fail closed without a second request or secret output", async () => {
+    await reset(); const before = posted.length;
+    for (const status of [301, 302, 303, 307, 308]) {
+      const callsBefore = calls;
+      override = async () => new Response(null, { status, headers: { location: "https://untrusted.example/collect" } });
+      const result = await run(request());
+      assert.equal(result.status, 503); assert.equal(result.body.error, "provider_unavailable");
+      assert.equal(calls, callsBefore + 1, "never follows Location");
+    }
+    override = async () => { throw new TypeError(`transport failed ${apiKey}`); };
+    const result = await run(request()); override = null;
+    assert.equal(result.status, 503); assert.equal(result.body.error, "provider_unavailable");
+    assert.equal(posted.length, before); assert.equal((await rows()).length, 1);
+  });
+  await check("registration redirects stay uncertain and are never automatically repeated", async () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      await reset(); const before = posted.length; const callsBefore = calls;
+      override = async (_url, init) => init.method === "POST"
+        ? new Response(null, { status, headers: { location: "https://untrusted.example/collect" } }) : null;
+      const result = await run(request({ phoneNumberId: phoneId }));
+      assert.equal(result.status, 409); assert.equal(result.body.error, "registration_uncertain");
+      assert.equal((await run(request({ phoneNumberId: phoneId }))).body.error, "registration_uncertain");
+      assert.equal(posted.length, before + 1); assert.equal(calls, callsBefore + 3, "two discovery reads and one registration only");
+      assert.equal((await rows()).filter(row => row.service === "quo").length, 1, "no signing bundle is assumed saved");
+    }
+    override = null;
   });
   await check("route/UI expose owner setup and separate signed-delivery check", async () => {
     const route = readFileSync("app/api/integrations/quo/setup/route.ts", "utf8");

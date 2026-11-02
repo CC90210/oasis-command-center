@@ -58,7 +58,7 @@ async function main() {
   globalThis.fetch = async (url, init) => {
     providerCalls++;
     const target = new URL(String(url)); assert.equal(target.origin, "https://api.quo.com");
-    assert.equal(init?.method, "GET", "provider API is read-only"); assert.equal(init?.redirect, "error");
+    assert.equal(init?.method, "GET", "provider API is read-only"); assert.equal(init?.redirect, "manual");
     assert.equal(new Headers(init?.headers).get("authorization"), config.apiKey);
     assert.equal(new Headers(init?.headers).get("Quo-Api-Version"), "2026-03-30");
     if (providerStatus !== 200) return new Response("provider error must not escape", { status: providerStatus });
