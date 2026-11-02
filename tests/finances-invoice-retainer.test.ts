@@ -14,6 +14,7 @@
  *
  * Run: node --conditions=react-server --import tsx tests/finances-invoice-retainer.test.ts
  */
+import "./helpers/mock-nodemailer-loader.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";

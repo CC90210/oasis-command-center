@@ -29,6 +29,7 @@
  * Run: node --conditions=react-server --import tsx tests/role-gates-and-platform-keys.test.ts
  */
 import { CLIENT_A, CLIENT_B, OASIS, USERS, check, finish, login, setupDatabase, splitSql } from "./_delivery-harness";
+import "./helpers/mock-nodemailer-loader.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

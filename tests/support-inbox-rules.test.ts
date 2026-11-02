@@ -15,6 +15,7 @@
  * Run: node --conditions=react-server --import tsx tests/support-inbox-rules.test.ts
  */
 import "./_delivery-harness";
+import "./helpers/mock-nodemailer-loader.mjs";
 import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import { OASIS, check, finish, setupDatabase } from "./_delivery-harness";
