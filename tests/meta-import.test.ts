@@ -225,7 +225,14 @@ async function main() {
     const before = calls;
     try {
       await login(null); assert.equal((await POST(request())).status, 401);
-      for (const user of [USERS.rep, USERS.admin, USERS.clientA, USERS.formerOperator]) { await login(user); assert.equal((await POST(request())).status, 403); }
+      for (const user of [USERS.rep, USERS.admin, USERS.clientA]) { await login(user); assert.equal((await POST(request())).status, 403); }
+      const unchanged = await rows();
+      await login(USERS.formerOperator);
+      const removed = await POST(request());
+      assert.equal(removed.status, 401, "removed seats are refused before the operator gate");
+      assert.deepEqual(await removed.json(), { ok: false, error: "unauthorized" });
+      assert.equal(calls, before, "denied identities never call the provider");
+      assert.deepEqual(await rows(), unchanged, "denied identities never alter observations");
       await login(USERS.cc);
       assert.equal((await POST(request({ tenantId: CLIENT_A }))).status, 400);
       assert.equal((await POST(request(undefined, `?tenantId=${CLIENT_A}`))).status, 400);
