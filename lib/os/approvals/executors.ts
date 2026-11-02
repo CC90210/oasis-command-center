@@ -59,6 +59,8 @@ import { createHash } from "node:crypto";
 import type { Client, ResultSet } from "@libsql/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getTursoClient } from "@/lib/turso";
+import { resolveOsViewerFor } from "@/components/os/department/viewer";
+import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import type { BrandKey } from "@/lib/email/brands";
@@ -86,6 +88,7 @@ import { isFounderTenant, parseFoundersAllowlist, parseSlideUrls } from "@/lib/f
 import { PUBLISH_CHANNELS, refusalFor } from "@/lib/founders/publish-targets";
 import {
   ACTION_KIND_LABELS,
+  mayDecideApproval,
   publishAssetSnapshot,
   validatePublishPostPayload,
   validateReplyTicketPayload,
@@ -257,6 +260,15 @@ export function emailFailureMessage(reason: string, error: string): string {
   }
 }
 
+async function emailApproverRefusal(ctx: ExecutorContext): Promise<ExecutorOutcome | null> {
+  // A server resume has no request actor, but still has the recorded decider.
+  const approverId = ctx.approver?.userId ?? ctx.approval.decided_by;
+  const fresh = approverId ? await resolveOsViewerFor(ctx.tenant.id, approverId) : null;
+  return fresh?.ok && mayDecideApproval(approvalScopeFromViewer(fresh), ctx.approval.department_key)
+    ? null
+    : failed("approver_unavailable", "The approver no longer has permission in this workspace, or their access could not be verified. Nothing was sent.", EMAIL_PROVIDER);
+}
+
 const sendEmail: Executor = {
   readiness: (tenant) => emailReadiness(tenant),
   async run(ctx) {
@@ -272,6 +284,8 @@ const sendEmail: Executor = {
     const cc = [...new Set([...(v.value.cc ?? []), ...(approverEmail ? [approverEmail] : [])])].filter((c) => c !== to);
 
     if (ctx.deps.isDryRun("email")) {
+      const refusal = await emailApproverRefusal(ctx);
+      if (refusal) return refusal;
       return {
         ok: true,
         result: { outcome: "dry_run", provider: EMAIL_PROVIDER, would_send: { to, cc, subject } },
@@ -307,6 +321,12 @@ const sendEmail: Executor = {
       );
     }
 
+    // An approved row is not a permanent grant. The acting approver (or the
+    // recorded decider on a server resume) must still hold this department's
+    // permission in THIS workspace immediately before the external effect.
+    // The session can remain valid because they belong to another workspace.
+    const refusal = await emailApproverRefusal(ctx);
+    if (refusal) return refusal;
     const sent = await ctx.deps.sendEmail({
       tenantId: ctx.tenant.id,
       to,

@@ -101,19 +101,22 @@ export async function liveSeat(
       .select("id, email, team_role, is_owner, admin_access, deactivated_at, onboarding_completed_at, updated_at")
       .eq("auth_user_id", authUserId)
       .eq("tenant_id", tenantId)
+      .is("deactivated_at", null)
       .limit(20);
     if (profileRead.error) throw new Error(profileRead.error.message);
     const rows = (profileRead.data || []) as ProfileRow[];
-    if (rows.length === 0) return { live: false, reason: "no_profile" };
-    const active = rows.filter((r) => !r.deactivated_at);
-    if (active.length === 0) return { live: false, reason: "deactivated" };
+    if (rows.length === 0) {
+      const history = await db.from("user_profiles").select("id").eq("auth_user_id", authUserId).eq("tenant_id", tenantId).limit(1);
+      if (history.error) throw new Error(history.error.message);
+      return { live: false, reason: history.data?.length ? "deactivated" : "no_profile" };
+    }
     // A duplicate-row tenant (legacy data) uses the SAME canonical pick every
     // other seat resolver uses (lib/active-profile-resolver.ts
     // chooseActiveProfile: onboarded-owner > onboarded > owner > plain,
     // newest updated_at, then id, as the tiebreakers) — not just "any owner
     // row": an unfinished, never-onboarded owner duplicate must never outrank
     // a live, onboarded member row (Codex review, O3a).
-    const row = chooseActiveProfile(active as unknown as ActiveUserProfile[], null);
+    const row = chooseActiveProfile(rows as unknown as ActiveUserProfile[], null);
 
     const authRead = await db
       .from("_supabase_auth_users")

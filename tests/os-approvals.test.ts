@@ -1832,6 +1832,93 @@ async function main() {
     }
   });
 
+  await check("an approved email cannot send after its decider loses this seat, even with another active workspace", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute({ sql: "INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner) VALUES ('p-cc-other', ?, ?, ?, 'owner', 1)", args: [USERS.cc.id, USERS.cc.email, CLIENT] });
+    await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+    const before = sent.length;
+    try {
+      // No explicit actor: server resumes must recheck the stored decider too.
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) {
+        assert.equal(r.approval.status, "failed");
+        assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      }
+      assert.equal(sent.length, before);
+      assert.equal((await raw.execute("SELECT deactivated_at FROM user_profiles WHERE id = 'p-cc'")).rows[0].deactivated_at, "2026-11-02T00:00:00Z", "history is not rewritten");
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+      await raw.execute("DELETE FROM user_profiles WHERE id = 'p-cc-other'");
+    }
+  });
+
+  await check("email execution rechecks department permission after a role downgrade", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.rep, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute("UPDATE user_profiles SET team_role = 'read_only' WHERE id = 'p-rep'");
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.rep.id, email: USERS.rep.email } }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET team_role = 'opener' WHERE id = 'p-rep'");
+    }
+  });
+
+  await check("seat removal during the recipient checks is caught before email dispatch", async () => {
+    const a = await create({ payload: { to: "synthetic@recipient.test", cc: ["copy@recipient.test"], subject: "Fixture", body: "Synthetic fixture only." } });
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps({ emailSuppression: async () => {
+        await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+        return { suppressed: false, checkFailed: false };
+      } }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+    }
+  });
+
+  await check("email execution fails closed if the auth record cannot be read", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute('ALTER TABLE "_supabase_auth_users" RENAME TO fixture_auth_unavailable');
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.cc.id, email: USERS.cc.email } }, fakeDeps());
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute('ALTER TABLE fixture_auth_unavailable RENAME TO "_supabase_auth_users"');
+    }
+  });
+
+  await check("a removed decider's dry-run resume is refused, not reported as executed", async () => {
+    const a = await create();
+    assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+    await raw.execute("UPDATE user_profiles SET deactivated_at = '2026-11-02T00:00:00Z' WHERE id = 'p-cc'");
+    const before = sent.length;
+    try {
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps({ isDryRun: () => true }));
+      assert.ok(r.ok);
+      if (r.ok) {
+        assert.equal(r.approval.status, "failed");
+        assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      }
+      assert.equal(sent.length, before);
+    } finally {
+      await raw.execute("UPDATE user_profiles SET deactivated_at = NULL WHERE id = 'p-cc'");
+    }
+  });
+
   console.log(`os-approvals: ${passed} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);
 }
