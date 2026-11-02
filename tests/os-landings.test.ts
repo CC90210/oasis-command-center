@@ -279,13 +279,14 @@ async function main() {
       event("e-client", CLIENT, "bravo", "BRAVO_RECORD_CREATED", { note: "CLIENT-MARKER" }),
       event("e-unstamped", null, "bravo", "BRAVO_RECORD_CREATED", { note: "UNSTAMPED-MARKER" }),
       { sql: "INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at) VALUES ('bravo', 41, ?)", args: [iso(2 * MINUTE)] },
-      // Running comes from the agent's processes (pm2.<agent>-*), not its tick
-      // (2026-09-30): bravo's scheduler checked in 2 minutes ago, atlas's
-      // Telegram bridge an hour ago, and maven never reported.
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-1', ?, 'pm2.bravo-scheduler', 'healthy', ?)", args: [OASIS, iso(2 * MINUTE)] },
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-2', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [OASIS, iso(60 * MINUTE)] },
+      // Running comes from the agent's processes, not its tick (2026-09-30).
+      // Since the 2026-11-02 cloud cutover those are the signed VPS units:
+      // bravo's scheduler checked in 2 minutes ago, atlas's Telegram unit an
+      // hour ago, and maven never reported.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-1', ?, 'vps.oasis-scheduler', 'healthy', ?, ?)", args: [OASIS, iso(2 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-2', ?, 'vps.atlas-telegram', 'healthy', ?, ?)", args: [OASIS, iso(60 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
       // Another workspace's fresh ping for the same process must not light OASIS's fleet.
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-3', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [CLIENT, iso(1 * MINUTE)] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-3', ?, 'vps.atlas-telegram', 'healthy', ?, ?)", args: [CLIENT, iso(1 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
       // Pipeline: one paid client with a project and an open ticket, one lost deal.
       lead("lead-won", { stage: "in_build", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test", last_contacted_at: iso(3 * 24 * 60 * MINUTE) }),
       lead("lead-lost", { stage: "lost", company: "Gone Co", email: "x@gone.test" }),
