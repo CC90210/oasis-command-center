@@ -596,7 +596,7 @@ assert.deepEqual(
     now: NOW,
   });
   assert.equal(reads, 1, "one Late post shared by two platforms is read once");
-  assert.deepEqual(summary, { candidates: 1, postsRead: 1, readFailures: 0, updated: 1, contended: 0 });
+  assert.deepEqual(summary, { candidates: 1, postsRead: 1, readFailures: 0, deliveryFailures: 1, updated: 1, contended: 0 });
   assert.deepEqual(writes[0].livePlatforms, ["instagram"]);
   assert.equal(writes[0].state, "done", "a partial network refusal cannot make an accepted live post retryable");
   assert.equal((writes[0].result.instagram as Record<string, unknown>).status, "published");
