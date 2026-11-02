@@ -351,6 +351,7 @@ async function main() {
 
   await check("owner-only approvals ignore removed owners and stale owner duplicates", async () => {
     const { isWorkspaceOwnerForApprovals } = await import("../lib/os/approvals/session");
+    await db.execute(`INSERT INTO "_supabase_auth_users" (id, email) VALUES ('auth-owner', 'owner@test')`);
     await db.batch([
       { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, is_owner, deactivated_at) VALUES ('p-owner-removed', 'auth-owner', 'owner@test', ?, 1, ?)`, args: [TENANT_A, stamp] },
       { sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, is_owner, onboarding_completed_at) VALUES ('p-owner-current-member', 'auth-owner', 'owner@test', ?, 0, ?)`, args: [TENANT_A, stamp] },

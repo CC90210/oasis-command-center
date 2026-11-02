@@ -23,7 +23,9 @@
  * not finish).
  */
 import "server-only";
+import type { Client } from "@libsql/client";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { createTursoPostgrest } from "@/lib/turso-postgrest";
 import { dbBool } from "@/lib/db-bool";
 import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
 
@@ -59,6 +61,7 @@ type ProfileRow = {
 };
 
 type AuthRow = {
+  email?: unknown;
   banned_until?: string | null;
   deleted_at?: string | null;
   session_version?: unknown;
@@ -92,10 +95,12 @@ export async function liveSeat(
   tenantId: string,
   authUserId: string,
   sessionVersion?: number,
+  /** Server callers with an existing SQL handle must check that same database. */
+  sqlClient?: Client,
 ): Promise<SeatLiveness> {
   if (!tenantId || !authUserId) return { live: false, reason: "no_profile" };
   try {
-    const db = getServiceSupabase();
+    const db = sqlClient ? createTursoPostgrest(sqlClient) : getServiceSupabase();
     const profileRead = await db
       .from("user_profiles")
       .select("id, email, team_role, is_owner, admin_access, deactivated_at, onboarding_completed_at, updated_at")
@@ -116,11 +121,9 @@ export async function liveSeat(
     // newest updated_at, then id, as the tiebreakers) — not just "any owner
     // row": an unfinished, never-onboarded owner duplicate must never outrank
     // a live, onboarded member row (Codex review, O3a).
-    const row = chooseActiveProfile(rows as unknown as ActiveUserProfile[], null);
-
     const authRead = await db
       .from("_supabase_auth_users")
-      .select("id, banned_until, deleted_at, session_version")
+      .select("id, email, banned_until, deleted_at, session_version")
       .eq("id", authUserId)
       .maybeSingle();
     if (authRead.error) throw new Error(authRead.error.message);
@@ -135,6 +138,14 @@ export async function liveSeat(
         return { live: false, reason: "session_version_mismatch" };
       }
     }
+
+    // The normal session resolves with the email re-read from the auth
+    // record. Fresh authorization must use the SAME precedence: otherwise
+    // an old owner duplicate under another email can promote a current
+    // read-only seat. A caller-provided email is never authoritative here.
+    const email = typeof authRow.email === "string" ? authRow.email.trim().toLowerCase() : "";
+    if (!email) return { live: false, reason: "unavailable" };
+    const row = chooseActiveProfile(rows as unknown as ActiveUserProfile[], email);
 
     return {
       live: true,

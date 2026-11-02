@@ -14,9 +14,8 @@ import "server-only";
 import { NextResponse } from "next/server";
 import type { Client } from "@libsql/client";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { dbBool } from "@/lib/db-bool";
 import { resolveOsViewer, resolveOsViewerFor } from "@/components/os/department/viewer";
-import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
+import { liveSeat } from "@/lib/os/seat";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import type { ApprovalScope, ApprovalStatus } from "@/lib/os/approvals/rules";
 
@@ -51,8 +50,8 @@ export async function resolveApprovalSession(): Promise<ApprovalSession> {
 
 /** Is this user the workspace owner (user_profiles.is_owner)? For the owner-only approval kinds. */
 export async function isWorkspaceOwnerForApprovals(db: Client, tenantId: string, userId: string): Promise<boolean> {
-  const rows = (await db.execute({ sql: "SELECT id, email, is_owner, onboarding_completed_at, updated_at FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? AND deactivated_at IS NULL LIMIT 20", args: [tenantId, userId] })).rows;
-  return rows.length > 0 && dbBool(chooseActiveProfile(rows as unknown as ActiveUserProfile[], null).is_owner);
+  const seat = await liveSeat(tenantId, userId, undefined, db);
+  return seat.live && seat.profile.isOwner;
 }
 
 const MESSAGES: Record<string, string> = {

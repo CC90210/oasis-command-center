@@ -1919,6 +1919,61 @@ async function main() {
     }
   });
 
+  async function withStaleOwnerDuplicate(run: () => Promise<void>) {
+    await raw.execute({
+      sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+            VALUES ('p-reader-stale-owner', ?, 'previous-address@fixture.test', ?, 'owner', 1, '2020-01-01', '2020-01-01')`,
+      args: [USERS.reader.id, OASIS],
+    });
+    try { await run(); } finally { await raw.execute("DELETE FROM user_profiles WHERE id = 'p-reader-stale-owner'"); }
+  }
+
+  await check("POST approve never promotes a current-email read-only seat through an old-email owner duplicate", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      await login("reader");
+      const { resolveSessionContext } = await import("../lib/api-auth");
+      const normal = await resolveSessionContext();
+      assert.ok(normal.ok);
+      if (normal.ok) assert.equal(normal.teamRole, "read_only");
+      const a = await create({ departmentKey: "marketing" });
+      const saved = process.env.BRAVO_FORCE_DRY_RUN;
+      process.env.BRAVO_FORCE_DRY_RUN = "1";
+      const before = smtp.length;
+      try {
+        const response = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
+        assert.equal(response.status, 404, "fresh authorization must agree with the normal read-only session");
+        assert.equal(await statusOf(a.id), "pending");
+        assert.equal(smtp.length, before);
+      } finally {
+        if (saved === undefined) delete process.env.BRAVO_FORCE_DRY_RUN;
+        else process.env.BRAVO_FORCE_DRY_RUN = saved;
+      }
+    });
+  });
+
+  await check("fresh seat and owner-only gate preserve authenticated-email precedence", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      const { liveSeat } = await import("../lib/os/seat");
+      const { isWorkspaceOwnerForApprovals } = await import("../lib/os/approvals/session");
+      const seat = await liveSeat(OASIS, USERS.reader.id);
+      assert.ok(seat.live);
+      if (seat.live) assert.equal(seat.profile.id, "p-reader");
+      assert.equal(await isWorkspaceOwnerForApprovals(raw, OASIS, USERS.reader.id), false);
+    });
+  });
+
+  await check("email execution cannot promote the current-email actor through an old-email owner duplicate", async () => {
+    await withStaleOwnerDuplicate(async () => {
+      const a = await create({ departmentKey: "marketing" });
+      assert.ok((await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date())).ok);
+      const before = sent.length;
+      const r = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id, approver: { userId: USERS.reader.id, email: USERS.reader.email } }, fakeDeps({ isDryRun: () => true }));
+      assert.ok(r.ok);
+      if (r.ok) assert.equal(r.approval.execution_result?.reason, "approver_unavailable");
+      assert.equal(sent.length, before);
+    });
+  });
+
   console.log(`os-approvals: ${passed} passed, ${failures} failed`);
   process.exit(failures > 0 ? 1 : 0);
 }
