@@ -60,21 +60,15 @@ async function standInForSession() {
       },
     },
   } as unknown as NodeModule;
+  // Load the real namespace before replacing the page-only helper. Dynamic
+  // imports on Node 22 otherwise infer no named exports from the cache stub.
+  // Tool execution uses the real live-seat resolver and the fixture below.
+  const realViewer = await import("../components/os/department/viewer");
   const v = require.resolve("../components/os/department/viewer");
   require.cache[v] = {
     id: v, filename: v, path: dirname(v), loaded: true, children: [], paths: [],
     exports: {
-      resolveOsViewerFor: async (tenantId: string, userId: string) => {
-        const { capabilitiesFor } = await import("../lib/role-surfaces");
-        const { resolveOsModules } = await import("../lib/os/modules");
-        const capabilities = capabilitiesFor("founder", "client-c");
-        return {
-          ok: true, oasis: false, provisioned: true, authUserId: userId, email: null,
-          manifest: { agents: [{ slug: "client-chief", display_name: "Chief", enabled: true, departments: ["chief_of_staff"] }] },
-          surface: { ok: true, persona: "founder", capabilities, tenantId, tenantSlug: "client-c", userId, teamRole: "owner", degraded: false },
-          navInput: { persona: "founder", capabilities, isOperator: false, tenantSlug: "client-c", isOasisTenant: false, modules: resolveOsModules({ tenantSlug: "client-c", provisioned: true }), provisioned: true, founders: null },
-        };
-      },
+      ...realViewer,
       resolveOsViewer: async () => ({
         ok: true, oasis: false, manifest: null,
         surface: { ok: true, persona: "founder", tenantId: CLIENT, tenantSlug: "client-c", userId: "u-owner", teamRole: "owner", degraded: false },
@@ -109,7 +103,19 @@ async function main() {
       "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY ("id"));
     CREATE UNIQUE INDEX "tic_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, tenant_id TEXT, email TEXT, full_name TEXT, display_name TEXT,
+      team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0, deactivated_at TEXT, onboarding_completed_at TEXT, updated_at TEXT);
+    CREATE TABLE _supabase_auth_users (id TEXT PRIMARY KEY, email TEXT NOT NULL, session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+    CREATE TABLE tenant_manifests (tenant_id TEXT, slug TEXT, manifest TEXT, updated_at TEXT);
+    INSERT INTO tenants (id,slug) VALUES ('${CLIENT}','fixture-custom-key');
+    INSERT INTO _supabase_auth_users (id,email) VALUES ('a1','fixture@example.test');
+    INSERT INTO user_profiles (id,auth_user_id,tenant_id,email,team_role,is_owner) VALUES ('fixture-profile','a1','${CLIENT}','fixture@example.test','owner',1);
   `);
+  await db.execute({
+    sql: "INSERT INTO tenant_manifests (tenant_id,slug,manifest,updated_at) VALUES (?,?,?,?)",
+    args: [CLIENT, "fixture-custom-key", JSON.stringify({ tenant_slug: "fixture-custom-key", brand: { name: "Fixture", subtitle: "Isolated fixture", logo: "oasis", footer_label: "Fixture", footer_tagline: "Fixture" }, agents: [{ slug: "client-chief", display_name: "Chief", enabled: true, departments: ["chief_of_staff"] }], nav: [], os: { departments: ["chief_of_staff"], modules: [], chat_apps: [] } }), new Date().toISOString()],
+  });
   await standInForSession();
   const keys = await import("../lib/os/custom-keys");
   const hosts = await import("../lib/os/custom-key-hosts");
