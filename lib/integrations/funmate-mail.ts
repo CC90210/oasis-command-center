@@ -33,8 +33,8 @@ export async function verifyFunmateSmtp(): Promise<
 > {
   try {
     const c = getFunmateMailCredentials();
-    const nodemailer = await import("nodemailer");
-    const transport = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transport = await createSmtpTransport({
       host: c.smtpHost,
       port: c.smtpPort,
       secure: c.smtpSecure,

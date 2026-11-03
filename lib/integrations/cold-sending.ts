@@ -176,8 +176,8 @@ export async function sendColdEmail(args: {
   const html = buildTrackedHtml(textBody, { sendId, email: args.to, brand: "SunBiz", unsub: "none" });
 
   try {
-    const nodemailer = await import("nodemailer");
-    const transporter = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transporter = await createSmtpTransport({
       host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true,
       auth: { user: mb.address, pass: appPassword },
     });

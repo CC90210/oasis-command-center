@@ -142,8 +142,8 @@ export async function sendSunbizLenderMail(input: {
   }
 
   try {
-    const nodemailer = await import("nodemailer");
-    const transport = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transport = await createSmtpTransport({
       host: "smtp.gmail.com",
       port: 587,
       secure: false,

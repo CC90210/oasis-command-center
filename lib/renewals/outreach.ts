@@ -69,8 +69,8 @@ export async function notifyRenewalAgent(input: {
       if (to) {
         const agentName = (member?.display_name || member?.full_name || member?.email || "").trim();
         const emailText = inactive ? [lines[0], `(agent inactive: ${agentName})`, ...lines.slice(1)].join("\n") : text;
-        const nodemailer = await import("nodemailer");
-        const transport = nodemailer.createTransport({ host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true, auth: { user: creds.fromAddress, pass: creds.appPassword } });
+        const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+        const transport = await createSmtpTransport({ host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true, auth: { user: creds.fromAddress, pass: creds.appPassword } });
         await transport.sendMail({ from: await getSubmissionsFrom(input.tenantId), to, subject: `Renewal ready — ${input.merchant}`, text: emailText });
         results.email = true;
       }

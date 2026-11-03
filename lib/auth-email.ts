@@ -201,8 +201,8 @@ export async function sendAuthEmail(
   try {
     let transport = deps.transport;
     if (!transport) {
-      const nodemailer = await import("nodemailer");
-      transport = nodemailer.createTransport({
+      const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+      transport = await createSmtpTransport({
         host: resolved.config.host,
         port: resolved.config.port,
         secure: resolved.config.secure,

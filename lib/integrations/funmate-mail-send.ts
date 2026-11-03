@@ -34,8 +34,8 @@ export async function sendFunmateMail(input: {
   }
 
   try {
-    const nodemailer = await import("nodemailer");
-    const transport = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transport = await createSmtpTransport({
       host: creds.smtpHost,
       port: creds.smtpPort,
       secure: creds.smtpSecure,

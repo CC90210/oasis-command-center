@@ -132,11 +132,11 @@ export async function testConnection(
 ): Promise<{ ok: true; email: string } | { ok: false; error: string }> {
   try {
     const creds = await getSubmissionsCreds(tenantId, brand);
-    const nodemailer = await import("nodemailer");
-    const transporter = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transporter = await createSmtpTransport({
       host: "smtp.gmail.com",
       port: 587,
-      secure: false, // STARTTLS — nodemailer upgrades after EHLO.
+      secure: false, // STARTTLS: the connection upgrades after EHLO.
       requireTLS: true,
       auth: { user: creds.fromAddress, pass: creds.appPassword },
     });
