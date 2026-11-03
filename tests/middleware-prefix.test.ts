@@ -269,6 +269,12 @@ assert.equal(isPublic("/api/internal/vps-health"), true, "/api/internal/vps-heal
 for (const notPublic of ["/api/internal/vps-healthx", "/api/internal/vps-health-admin", "/api/internal/vps"]) {
   assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/vps-health is public`);
 }
+// Its switch applier (BEA scripts/ops/vps_unit_control.py) uses the same HMAC on
+// one more exact path (lib/automations/vps-unit-control.ts).
+assert.equal(isPublic("/api/internal/vps-control"), true, "/api/internal/vps-control is HMAC-gated inside its route and MUST bypass session middleware");
+for (const notPublic of ["/api/internal/vps-controlx", "/api/internal/vps-control-admin", "/api/internal/vps-controls"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated: only /api/internal/vps-control is public`);
+}
 
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone

@@ -27,7 +27,7 @@
  *       last_ping_at: string | null,
  *       purpose: string,             // 1-line "what this daemon does"
  *       runtime: "local" | "cloud" | "remote" | "retired",
- *       control_mode: "local_fleet" | "remote_bridge" | "none",
+ *       control_mode: "local_fleet" | "remote_bridge" | "server_switch" | "none",
  *       status_source: "integrations_health" | "website_sales_meeting_worker_health" | "none",
  *       archived_on?: string,        // ISO date if status === "archived"
  *       archived_reason?: string,    // short why-archived if status === "archived"
@@ -68,6 +68,9 @@ import { jsonRoute } from "@/lib/api-helpers";
 import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
 import { isOnline } from "@/lib/devices/presence";
 import { isAgentsOwner } from "@/lib/agents-owner";
+import { cloudJobsSwitchableForViewer } from "@/lib/automations/cloud-job-control";
+import { readVpsUnitControls, type VpsUnitControl } from "@/lib/automations/vps-unit-control";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -149,6 +152,21 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   // what POST will accept (Codex audit 2026-06-17).
   const { targetConfigured, roleAllowed } = bridgeControlEligibility(tenant, role);
   const sunbizControl = isSun && targetConfigured && roleAllowed;
+  // OASIS's daemon VPS workers (2026-11-03): CC switches them on and off with
+  // the same verdict as the cloud-job switches, and the server's own root
+  // timer applies the switch (lib/automations/vps-unit-control.ts). The
+  // switches ride along so a tile can say when the server could not apply one.
+  const serverSwitchAllowed = isOasis ? await cloudJobsSwitchableForViewer() : false;
+  const serverSwitches = new Map<string, VpsUnitControl>();
+  if (serverSwitchAllowed && tursoConfigured()) {
+    try {
+      for (const c of await readVpsUnitControls(getTursoClient())) serverSwitches.set(c.service, c);
+    } catch (error) {
+      // Not fatal: the tiles still show the server's live status; only the
+      // "could not apply" line is missing until the next refresh.
+      console.error("[background-workers] server switch read failed", error instanceof Error ? error.message : String(error));
+    }
+  }
 
   // Bridge liveness — the heartbeat tells us when the bridge last pushed
   // anything. Older than 2 minutes means daemon snapshots are stale.
@@ -264,6 +282,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       isTrueAdmin: session.isTrueAdmin,
       adminAccess: session.adminAccess,
       remoteControlAllowed: sunbizControl,
+      serverSwitchAllowed,
     });
     const configuredStatusSource =
       "status_source" in w ? (w.status_source as WorkerStatusSource | undefined) : undefined;
@@ -323,6 +342,9 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       // "cc". SUNBIZ_WORKERS always carries an explicit owner.
       owner: "owner" in w ? w.owner : "cc",
       not_expected_here: "not_expected_here" in w ? w.not_expected_here : undefined,
+      ...(controlMode === "server_switch" && serverSwitches.has(w.service) && {
+        server_switch: serverSwitches.get(w.service),
+      }),
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,
