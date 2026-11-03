@@ -341,14 +341,26 @@ async function main(): Promise<void> {
 
   await check("isFleetRow: only the signed VPS reporter's rows count, and retired computer copies never do", () => {
     const signed = JSON.stringify({ via: "vps-heartbeat", host: "oasis-daemon-1" });
-    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: signed }), true);
-    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: "{}" }), false, "no VPS marker");
+    const owner = `p-${OWNER}`;
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: signed }, owner), true);
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: "{}" }, owner), false, "no VPS marker");
     assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram",
-      metadata: JSON.stringify({ via: "vps-heartbeat", _reported_by: "paired_bridge" }) }), false,
+      metadata: JSON.stringify({ via: "vps-heartbeat", _reported_by: "paired_bridge" }) }, owner), false,
       "a computer's report that copies the VPS marker is still a computer's report");
-    assert.equal(fleet.isFleetRow({ service: "pm2.atlas-telegram", metadata: "{}" }), false, "retired computer copy");
-    assert.equal(fleet.isFleetRow({ service: "pm2.claude-bridge", metadata: "{}" }), true);
-    assert.equal(fleet.isFleetRow({ service: "vercel", metadata: "{}" }), false);
+    assert.equal(fleet.isFleetRow({ service: "pm2.atlas-telegram", metadata: "{}", profile_id: owner }, owner), false, "retired computer copy");
+    assert.equal(fleet.isFleetRow({ service: "pm2.claude-bridge", metadata: "{}", profile_id: owner }, owner), true);
+    assert.equal(fleet.isFleetRow({ service: "vercel", metadata: "{}" }, owner), false);
+  });
+
+  await check("isFleetRow: a computer row counts only from the agents owner's profile (CodeRabbit #797)", async () => {
+    const owner = await fleet.readAgentsOwnerProfileId(OASIS);
+    assert.equal(owner, `p-${OWNER}`);
+    assert.equal(await fleet.readAgentsOwnerProfileId(CLIENT), `p-${CLIENT_OWNER}`, "each workspace has its own owner");
+    const memberDown = { service: "pm2.atlas-anything", metadata: "{}", profile_id: `p-${MEMBER}` };
+    assert.equal(fleet.isFleetRow(memberDown, owner), false, "a member's computer cannot redden Atlas");
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: owner }, owner), true);
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: owner }, null), false, "no owner: no computer row counts");
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: null }, owner), false, "an unattributed row is nobody's");
   });
 
   console.log(`fleet-liveness: ${passed} passed, ${failed} failed`);

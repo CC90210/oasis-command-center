@@ -91,16 +91,21 @@ const RETIRED_SERVICES: ReadonlySet<string> = new Set(
 );
 
 /**
- * A row the fleet reads at all: an active computer process, or a daemon-VPS
- * unit that the signed VPS reporter wrote (via "vps-heartbeat", never a paired
- * computer's report). A retired computer copy (the Atlas and Maven bots since
- * 2026-11-02) is skipped, so its stale "down" cannot redden a running cloud bot.
- * PURE.
+ * A row the fleet reads at all: an active computer process that the agents
+ * owner's own computer reported (any workspace member's computer may ping, and
+ * a member's "pm2.atlas-x down" must not redden Atlas: CodeRabbit #797), or a
+ * daemon-VPS unit that the signed VPS reporter wrote (via "vps-heartbeat", never
+ * a paired computer's report). A retired computer copy (the Atlas and Maven bots
+ * since 2026-11-02) is skipped, so its stale "down" cannot redden a running cloud
+ * bot. With no agents owner profile, no computer row counts. PURE.
  */
-export function isFleetRow(row: { service: string; metadata?: unknown }): boolean {
+export function isFleetRow(
+  row: { service: string; metadata?: unknown; profile_id?: string | null },
+  ownerProfileId: string | null,
+): boolean {
   const service = String(row.service ?? "");
   if (RETIRED_SERVICES.has(service)) return false;
-  if (service.startsWith("pm2.")) return true;
+  if (service.startsWith("pm2.")) return Boolean(ownerProfileId) && row.profile_id === ownerProfileId;
   if (!service.startsWith("vps.")) return false;
   return heartbeatMetadata(row.metadata)?.via === "vps-heartbeat" && !isBridgeReport(row.metadata);
 }
@@ -267,6 +272,26 @@ export async function readLastJobs(tenantId: string, agents: readonly string[]):
   return out;
 }
 
+/**
+ * The agents owner's profile in this workspace: the only reporter whose
+ * computer rows (pm2.*) the fleet counts. Null when no owner is set or the
+ * owner has no profile here. Throws when a read fails.
+ */
+export async function readAgentsOwnerProfileId(tenantId: string): Promise<string | null> {
+  const owner = await readAgentsOwner(tenantId);
+  if (owner.state === "unavailable") throw new Error("fleet: agents owner read failed");
+  if (owner.state !== "set") return null;
+  const { data, error } = await getServiceSupabase()
+    .from("user_profiles")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", owner.authUserId)
+    .maybeSingle();
+  if (error) throw new Error(`fleet: user_profiles read failed: ${error.message}`);
+  const id = (data as { id?: string | null } | null)?.id;
+  return id ? String(id) : null;
+}
+
 /** The pairing that carried the freshest heartbeat among the agents, or null. PURE. */
 export function reportingPairingOf(states: ReadonlyArray<{ last_tick_at: string | null; reported_by_pairing_id?: string | null }>): string | null {
   let best: { at: number; id: string } | null = null;
@@ -284,12 +309,12 @@ export async function loadFleet(): Promise<Fleet> {
   const agents = [...OASIS_RUNTIME_AGENT_KEYS];
 
   const db = getServiceSupabase();
-  const [states, pings, lastJobs] = await Promise.all([
+  const [states, pings, lastJobs, ownerProfile] = await Promise.all([
     db.from("agent_state_snapshot").select("agent_name, tick_count, last_tick_at, reported_by_pairing_id").in("agent_name", agents),
     // One tenant's health rows are a few dozen; filter to pm2.* and vps.* below
     // rather than rely on an OR filter the data layer may not translate.
     tenantId
-      ? db.from("integrations_health").select("service, last_ping_at, status, metadata").eq("tenant_id", tenantId)
+      ? db.from("integrations_health").select("service, last_ping_at, status, metadata, profile_id").eq("tenant_id", tenantId)
       : Promise.resolve({ data: [], error: null }),
     tenantId
       ? readLastJobs(tenantId, agents).catch((err: unknown) => {
@@ -297,10 +322,20 @@ export async function loadFleet(): Promise<Fleet> {
           return null;
         })
       : Promise.resolve(new Map<string, FleetJob>()),
+    // A failed owner read must say "unknown", not quietly drop every computer row.
+    tenantId
+      ? readAgentsOwnerProfileId(tenantId).then(
+          (id) => ({ ok: true as const, id }),
+          (err: unknown) => {
+            console.error("[os.fleet.owner_profile]", err instanceof Error ? err.message : String(err));
+            return { ok: false as const, id: null };
+          },
+        )
+      : Promise.resolve({ ok: true as const, id: null }),
   ]);
   if (states.error) console.error("[os.fleet.state_snapshot]", states.error.message);
   if (pings.error) console.error("[os.fleet.integrations_health]", pings.error.message);
-  const signalsKnown = !states.error && !pings.error;
+  const signalsKnown = !states.error && !pings.error && ownerProfile.ok;
   const stateRows = (states.data || []) as Array<{ agent_name: string; last_tick_at: string | null; tick_count: number | null; reported_by_pairing_id: string | null }>;
   const computer: FleetComputer | null | undefined = tenantId
     ? await readFleetComputer(tenantId, reportingPairingOf(stateRows)).catch((err: unknown) => {
@@ -314,8 +349,8 @@ export async function loadFleet(): Promise<Fleet> {
       ? fleetSignals(
           agents,
           stateRows,
-          ((pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>)
-            .filter(isFleetRow),
+          ((pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown; profile_id: string | null }>)
+            .filter((row) => isFleetRow(row, ownerProfile.id)),
           Date.now(),
         )
       : new Map(),
