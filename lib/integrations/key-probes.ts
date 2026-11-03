@@ -473,8 +473,8 @@ async function reachableHost(
 }
 
 const defaultSmtpVerify: SmtpVerify = async ({ host, connectHost, port, secure, user, password }) => {
-  const nodemailer = await import("nodemailer");
-  const transport = nodemailer.createTransport({
+  const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+  const transport = await createSmtpTransport({
     // The checked address (or a vendor's own name); the saved name stays the
     // TLS server name, so the certificate is checked against it.
     host: connectHost,

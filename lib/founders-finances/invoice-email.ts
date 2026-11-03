@@ -252,8 +252,8 @@ export async function sendInvoiceEmail(args: {
     const support = resolveSupportMailbox();
     if (!support.ok) logSupportSenderFallback("invoice", support, mailbox.from);
   }
-  const nodemailer = await import("nodemailer");
-  const transport = nodemailer.createTransport({
+  const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+  const transport = await createSmtpTransport({
     host: "smtp.gmail.com",
     port: 587,
     secure: false,

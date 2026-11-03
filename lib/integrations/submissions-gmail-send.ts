@@ -144,7 +144,7 @@ async function sendOnce(
   generatedMessageId: string,
 ): Promise<{ ok: true; nodemailerMessageId: string; fromIdentity: string } | { ok: false; error: string; transient: boolean }> {
   try {
-    const nodemailer = await import("nodemailer");
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
     // The brand selects the CREDENTIAL, which is what makes the visible sender
     // and the DKIM signature agree. Absent brand = SunBiz = today's behaviour,
     // and lender shop-out mail deliberately never passes one.
@@ -182,7 +182,7 @@ async function sendOnce(
       ? `${payload.fromName} <${creds.fromAddress}>`
       : await getSubmissionsFrom(payload.tenantId, payload.brand);
 
-    const transporter = nodemailer.createTransport({
+    const transporter = await createSmtpTransport({
       host: "smtp.gmail.com",
       port: 587,
       secure: false,

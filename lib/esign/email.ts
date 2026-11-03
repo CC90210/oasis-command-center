@@ -167,8 +167,8 @@ export async function sendEnvelopeCompletedWithPdf(input: {
   const pass = (process.env.ESIGN_FROM_APP_PASSWORD || "").replace(/\s+/g, "");
   if (user && pass) {
     const fromName = (process.env.ESIGN_FROM_NAME || "").trim() || user;
-    const nodemailer = await import("nodemailer");
-    const transport = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transport = await createSmtpTransport({
       host: "smtp.gmail.com",
       port: 465,
       secure: true,

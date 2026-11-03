@@ -212,8 +212,8 @@ async function probeSmtp(input: {
     return { ok: false, error: "missing_smtp_fields" };
   }
   try {
-    const nodemailer = await import("nodemailer");
-    const transport = nodemailer.createTransport({
+    const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+    const transport = await createSmtpTransport({
       host: input.host,
       port: input.port,
       secure: input.secure,

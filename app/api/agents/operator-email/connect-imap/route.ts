@@ -53,8 +53,8 @@ async function verifyImap(address: string, appPassword: string): Promise<string 
 
 /** SMTP auth handshake. Returns null on success, an error string otherwise. */
 async function verifySmtp(address: string, appPassword: string): Promise<string | null> {
-  const nodemailer = await import("nodemailer");
-  const t = nodemailer.createTransport({
+  const { createSmtpTransport } = await import("@/lib/email/worker-smtp");
+  const t = await createSmtpTransport({
     host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true,
     auth: { user: address, pass: appPassword },
   });

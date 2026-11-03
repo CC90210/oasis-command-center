@@ -16,7 +16,7 @@
 import "server-only";
 import { inferForTenant } from "@/lib/ai/infer";
 import { checkSuppression } from "@/lib/email/suppression-scope";
-import nodemailer from "nodemailer";
+import { createSmtpTransport } from "@/lib/email/worker-smtp";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -279,7 +279,7 @@ export async function deliverWelcomeEmail(args: {
   let sentOk = false;
   let reason: string | null = null;
   try {
-    const transporter = nodemailer.createTransport({
+    const transporter = await createSmtpTransport({
       service: "gmail",
       auth: { user: gmailUser, pass: gmailPass },
     });
