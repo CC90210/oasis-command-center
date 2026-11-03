@@ -123,7 +123,7 @@ async function main() {
       schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_config TEXT NOT NULL DEFAULT '{}',
       owner_agent_key TEXT, is_active INTEGER NOT NULL DEFAULT 1, last_run_at TEXT,
       last_result TEXT, next_run_at TEXT, run_count INTEGER NOT NULL DEFAULT 0,
-      fail_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+      fail_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, owner_machine TEXT
     );
     CREATE TABLE workspace_agents_owner (
       tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,

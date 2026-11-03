@@ -41,6 +41,7 @@ import {
   isDaemonTransitionConfirmed,
   parseAutomationInventorySuccess,
   partitionCronJobsByOwner,
+  sortByOffReason,
   type AutomationInventoryMetadata,
   type DaemonConfirmationBaseline,
   type CronInventoryJob,
@@ -792,7 +793,7 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
                     No automations yet for this agent.
                   </div>
                 ) : (
-                  g.jobs.map((job) => {
+                  sortByOffReason(g.jobs).map((job) => {
                     const key = cronJobKey(job);
                     return editingKey === key ? (
                       <JobEditor
@@ -1050,6 +1051,27 @@ function JobRow({
                 Retired by plan
               </span>
             )}
+            {isEmpire && !retired && job.runs_on === "server" && (
+              <span
+                className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold"
+                title="The always-on server runs this schedule, whether or not your computer is on."
+              >
+                Runs on the server
+              </span>
+            )}
+            {isEmpire && !retired && job.runs_on === "computer" && (
+              <span
+                className="text-[10px] uppercase tracking-wider text-status-warm border border-status-warm/40 rounded-full px-1.5 py-0.5 font-bold"
+                title="Only runs while that computer is on."
+              >
+                Needs your computer
+              </span>
+            )}
+            {!retired && job.off_reason && (
+              <span className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold">
+                {job.off_reason.kind === "retired" ? "Retired" : "Paused"}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-1">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
@@ -1069,6 +1091,12 @@ function JobRow({
           {retired && (
             <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 text-[11px] text-fg-muted leading-relaxed">
               <span className="text-fg font-bold">Retired by plan.</span> {retired.reason}
+            </div>
+          )}
+          {!retired && job.off_reason && (
+            <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 text-[11px] text-fg-muted leading-relaxed">
+              <span className="text-fg font-bold">{job.off_reason.kind === "retired" ? "Retired." : "Paused."}</span>{" "}
+              {job.off_reason.text}
             </div>
           )}
           {/* Prefer operator-friendly copy from lib/cron-descriptions

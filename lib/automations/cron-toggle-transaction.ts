@@ -191,7 +191,20 @@ async function executeToggleUpdate(
   const legacySql = `UPDATE ${table} SET ${activeColumn} = ? WHERE id = ? AND tenant_id = ? AND ${activeColumn} = ?`;
   const legacyArgs = [newValue, input.id, input.tenantId, previousValue];
   if (input.source !== "tenant") {
-    return tx.execute({ sql: legacySql, args: legacyArgs });
+    if (newValue !== 1) return tx.execute({ sql: legacySql, args: legacyArgs });
+    // Resumed: the row's recorded off decision ("Paused — ...", "Retired — ...")
+    // no longer applies; clear it so a later switch-off never shows it again.
+    try {
+      return await tx.execute({
+        sql: `UPDATE ${table} SET ${activeColumn} = ?,
+                last_result = CASE WHEN last_result LIKE 'Paused%' OR last_result LIKE 'Retired%' THEN NULL ELSE last_result END
+              WHERE id = ? AND tenant_id = ? AND ${activeColumn} = ?`,
+        args: legacyArgs,
+      });
+    } catch (err) {
+      if (!isMissingColumnError(err as { message?: string; code?: string }, "last_result")) throw err;
+      return tx.execute({ sql: legacySql, args: legacyArgs });
+    }
   }
   const stampSchedule = newValue === 1;
   const fullSql = `UPDATE ${table}
