@@ -440,6 +440,15 @@ function WorkerRow({
           : effectiveStatus === "degraded"
             ? `Degraded — check the latest run${lastRun}`
             : "Waiting for first scheduled run";
+  } else if (
+    // CC pressed Start and the server has not reported acting on it yet: say
+    // so, rather than "Off — you stopped this" for the next heartbeat.
+    worker.server_switch?.desired === "on" &&
+    worker.server_switch.applied_for !== worker.server_switch.changed_at &&
+    effectiveStatus !== "healthy" &&
+    !serverSwitchFailure(worker.server_switch)
+  ) {
+    statusLabel = "Switching on — the server applies it within 30 seconds";
   } else if (operatorStopped) {
     statusLabel = `Off — you stopped this. Start it to resume.${lastSeen}`;
   } else if (
@@ -604,7 +613,9 @@ function WorkerActions({
     // that, so the override would never clear and the tile would lie.
     // For criticals we wait for the next genuine heartbeat (or the
     // operator's manual refresh) to update the tile.
-    if (result.ok && !isCritical) {
+    // Nor a daemon VPS switch: only the switch is stored at this point, and
+    // the refetch below shows "Switching off/on" until the server applies it.
+    if (result.ok && !isCritical && !serverSwitch) {
       const nextStatus: Worker["status"] =
         action === "stop" ? "down" : "healthy";
       onOptimistic(nextStatus);

@@ -283,6 +283,9 @@ async function main(): Promise<void> {
     const panel = readFileSync("components/automations/BackgroundWorkersPanel.tsx", "utf8");
     assert.match(panel, /runWorkerAction\(service, action, \{ confirm: Boolean\(serverConsequence\) \}\)/);
     assert.match(panel, /controlMode === "server_switch"/);
+    assert.match(panel, /result\.ok && !isCritical && !serverSwitch/, "no optimistic flip: only the switch is stored");
+    assert.match(panel, /Switching on — the server applies it within 30 seconds/);
+    assert.match(panel, /Switching off — the server applies it within 30 seconds/);
     const sql = readFileSync("database/turso/bravo__253_vps_unit_controls.sql", "utf8");
     assert.match(sql, /CREATE TABLE IF NOT EXISTS vps_unit_controls/);
     assert.doesNotMatch(sql.replace(/--.*$/gm, ""), /\b(DROP|DELETE|ALTER|UPDATE)\b/i, "additive only");
