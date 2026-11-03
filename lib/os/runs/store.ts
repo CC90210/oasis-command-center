@@ -694,24 +694,40 @@ export async function enqueueRun(
   const at = iso(input.now);
   const scheduledFor = input.scheduledFor ? iso(input.scheduledFor) : null;
   const deadlineAt = input.deadlineAt ? iso(input.deadlineAt) : null;
-  const matchesRetry = (run: Run): boolean =>
-    run.conversationId === input.conversationId &&
-    run.userText === input.text &&
-    run.chatMode === input.chatMode &&
-    run.showThinking === input.showThinking &&
-    run.source === source &&
-    run.executor === executor &&
-    run.origin === origin &&
-    run.targetPairingId === (input.targetPairingId ?? null) &&
-    run.runtimeEngineKind === (input.runtimeEngineKind ?? null) &&
-    run.runtimeEngineName === (input.runtimeEngineName ?? null) &&
-    run.runtimeFallbackPolicy === (input.runtimeFallbackPolicy ?? (hasRuntimeSnapshot ? "none" : null)) &&
-    run.runtimeFallbackReason === (input.runtimeFallbackReason ?? null) &&
-    run.runtimeApiProvider === (input.runtimeApiSnapshot?.provider ?? null) &&
-    run.runtimeApiModel === (input.runtimeApiSnapshot?.model.trim() ?? null) &&
-    run.automationId === (input.automationId ?? null) &&
-    run.scheduledFor === scheduledFor &&
-    run.deadlineAt === deadlineAt;
+  // A retry is the SAME request when everything the caller asked for matches.
+  // Two lifecycle steps rewrite columns afterwards, so a retry must accept them:
+  // - claimComputerRun stamps source='producer' and deadline_at (claim + 20 min)
+  //   once the run leaves 'queued';
+  // - fallbackQueuedComputerRun moves an opted-in computer run to the worker
+  //   with a recorded reason.
+  // Comparing those raw broke every retry after a claim: CC's Telegram "yo" ran
+  // and finished on the VPS (2026-11-03), and each queue retry then threw
+  // "reused with different input", so the answer never reached Telegram.
+  const matchesRetry = (run: Run): boolean => {
+    const leftQueue = run.status !== "queued";
+    const fellBack =
+      executor === "computer" && input.runtimeFallbackReason === undefined &&
+      run.executor === "worker" && run.runtimeFallbackPolicy === "workspace_api" && run.runtimeFallbackReason !== null;
+    return (
+      run.conversationId === input.conversationId &&
+      run.userText === input.text &&
+      run.chatMode === input.chatMode &&
+      run.showThinking === input.showThinking &&
+      (run.source === source || (leftQueue && run.source === "producer")) &&
+      (run.executor === executor || fellBack) &&
+      run.origin === origin &&
+      run.targetPairingId === (input.targetPairingId ?? null) &&
+      run.runtimeEngineKind === (input.runtimeEngineKind ?? null) &&
+      run.runtimeEngineName === (input.runtimeEngineName ?? null) &&
+      run.runtimeFallbackPolicy === (input.runtimeFallbackPolicy ?? (hasRuntimeSnapshot ? "none" : null)) &&
+      (run.runtimeFallbackReason === (input.runtimeFallbackReason ?? null) || fellBack) &&
+      run.runtimeApiProvider === (input.runtimeApiSnapshot?.provider ?? null) &&
+      run.runtimeApiModel === (input.runtimeApiSnapshot?.model.trim() ?? null) &&
+      run.automationId === (input.automationId ?? null) &&
+      run.scheduledFor === scheduledFor &&
+      (run.deadlineAt === deadlineAt || (leftQueue && deadlineAt === null))
+    );
+  };
   if (input.idempotent) {
     const existing = await getRun(db, scope, id);
     if (existing) {
