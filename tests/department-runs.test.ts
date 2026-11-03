@@ -377,6 +377,29 @@ async function main() {
       store.enqueueRun(db, scopeA, { ...input, text: "changed input" }),
       /idempotency key reused with different input/,
     );
+
+    // 2026-11-03: the computer's claim stamps source='producer' and a deadline.
+    // CC's Telegram "yo" finished on the VPS, and every queue retry then threw
+    // "reused with different input", so the answer never reached Telegram.
+    await db.execute({
+      sql: "UPDATE dept_chat_runs SET status = 'running', source = 'producer', deadline_at = ? WHERE id = ?",
+      args: [new Date(now().getTime() + 20 * 60_000).toISOString(), runId],
+    });
+    const afterClaim = await store.enqueueRun(db, scopeA, { ...input, now: new Date(now().getTime() + 30_000) });
+    assert.ok(afterClaim.ok && !afterClaim.created && afterClaim.run.id === runId, "a retry after the claim finds the run");
+    await db.execute({ sql: "UPDATE dept_chat_runs SET status = 'done', final_text = 'yo back' WHERE id = ?", args: [runId] });
+    const afterDone = await store.enqueueRun(db, scopeA, { ...input, now: new Date(now().getTime() + 60_000) });
+    assert.ok(afterDone.ok && !afterDone.created && afterDone.run.finalText === "yo back", "and after it finished, with its answer");
+    await assert.rejects(
+      store.enqueueRun(db, scopeA, { ...input, text: "changed after the claim" }),
+      /idempotency key reused with different input/,
+      "the request itself must still match",
+    );
+    await assert.rejects(
+      store.enqueueRun(db, scopeA, { ...input, runtimeEngineName: "opencode" }),
+      /idempotency key reused with different input/,
+      "so must the engine it was frozen to",
+    );
   });
 
   console.log("A run outlives the page");
