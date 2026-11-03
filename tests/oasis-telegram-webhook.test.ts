@@ -507,12 +507,36 @@ await check("the exact-device lane forces fallback=none and stable department_ta
     send: (async () => new Response('event: end\ndata: {"final_text":"Done through OpenCode/Kimi"}\n\n', { status: 200 })) as never,
   });
   assert.deepEqual(openCode, { outcome: "completed", text: "Done through OpenCode/Kimi" });
+
+  // CC, 2026-11-03: the daemon VPS runs only Claude Code, saved as the agents'
+  // engine; refusing it left Bravo the one bot that never answered.
+  const claudeSession = deviceSession("cli", "claude");
+  let claudeArgs: Record<string, unknown> | null = null;
+  const claude = await runOasisTelegramDeviceTurn(db, job, {
+    resolveContext: async () => ({
+      ok: true,
+      context: {
+        session: claudeSession,
+        engine: { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "workspace_api" },
+        agentSlug: "bravo",
+        userId: "auth-cc",
+      },
+    }),
+    executor: (() => ({ scope: claudeSession.scope })) as never,
+    send: (async (args: Record<string, unknown>) => {
+      claudeArgs = args;
+      return new Response('event: end\ndata: {"final_text":"Done on the VPS"}\n\n', { status: 200 });
+    }) as never,
+  });
+  assert.deepEqual(claude, { outcome: "completed", text: "Done on the VPS" });
+  assert.equal((claudeArgs!.computerDispatch as { fallback: string }).fallback, "none", "Claude never falls back to an API key either");
+  assert.equal((claudeArgs!.computerDispatch as { engineName: string }).engineName, "claude");
+  assert.equal(claudeArgs!.apiAccountSnapshot, null);
 });
 
-await check("stale Claude, API, local and unknown choices are refused before session resolution or dispatch", async () => {
+await check("API, local and unknown choices are refused before session resolution or dispatch", async () => {
   const job = parsedJob(41, "Do not dispatch this");
   const candidates = [
-    { label: "claude", engine: { kind: "cli", cli: "claude", pairingId: "pair-mac", fallback: "none" }, session: deviceSession("cli", "claude") },
     { label: "api", engine: { kind: "api", provider: "openai", pairingId: "pair-mac" }, session: deviceSession("local", undefined) },
     { label: "local", engine: { kind: "local", model: "ollama/kimi", pairingId: "pair-mac", fallback: "none" }, session: deviceSession("local", "ollama/kimi") },
     { label: "unknown", engine: { kind: "future", model: "future-engine", pairingId: "pair-mac" }, session: deviceSession("local", "future-engine") },
