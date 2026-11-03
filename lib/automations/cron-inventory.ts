@@ -189,8 +189,9 @@ export type OwnerPartition<T> = {
  * appear under `bravo`; this helper guarantees every source:id lands once.
  */
 /** Working rows first, then paused ones, then retired ones; order within a band is kept. */
-export function sortByOffReason<T extends { off_reason?: CronInventoryJob["off_reason"] }>(jobs: readonly T[]): T[] {
-  const band = (job: T) => (job.off_reason?.kind === "retired" ? 2 : job.off_reason?.kind === "paused" ? 1 : 0);
+export function sortByOffReason<T extends { off_reason?: CronInventoryJob["off_reason"]; retired?: CronInventoryJob["retired"] }>(jobs: readonly T[]): T[] {
+  const band = (job: T) =>
+    job.off_reason?.kind === "retired" || job.retired ? 2 : job.off_reason?.kind === "paused" ? 1 : 0;
   return jobs
     .map((job, index) => ({ job, index }))
     .sort((a, b) => band(a.job) - band(b.job) || a.index - b.index)

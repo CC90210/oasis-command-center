@@ -133,6 +133,22 @@ const rolledBack = await noAuditDb.execute("SELECT is_active FROM cron_jobs WHER
 assert.equal(Number(rolledBack.rows[0]?.is_active), 1, "audit failure must roll back the toggle");
 
 await noAuditDb.close();
+
+// Resuming an Empire job clears its recorded off decision (CodeRabbit #802), so a
+// later switch-off never shows the old "Paused — ..." reason; a run result stays.
+const decisions = await createDb();
+await decisions.execute("ALTER TABLE cron_jobs ADD COLUMN last_result TEXT");
+await decisions.batch([
+  { sql: "INSERT INTO cron_jobs (id, tenant_id, name, is_active, last_result) VALUES ('p', 'tenant-1', 'Paused job', 0, ?)", args: ["Paused \u2014 Zernio cancelled (CC, 2026-11-03)."] },
+  { sql: "INSERT INTO cron_jobs (id, tenant_id, name, is_active, last_result) VALUES ('r', 'tenant-1', 'Ran job', 0, 'sent: brief')", args: [] },
+], "write");
+for (const id of ["p", "r"]) {
+  const resumed = await toggleCronWithAudit(decisions, { source: "empire", id, tenantId: "tenant-1", enabled: true, actorEmail: null, actorUserId: "cc-user" });
+  assert.equal(resumed.ok, true, id);
+}
+const after = await decisions.execute("SELECT id, is_active, last_result FROM cron_jobs ORDER BY id");
+assert.deepEqual(after.rows.map((r) => [r.id, Number(r.is_active), r.last_result]), [["p", 1, null], ["r", 1, "sent: brief"]]);
+await decisions.close();
 console.log("atomic-cron-toggle: state and audit commit or roll back together");
 }
 

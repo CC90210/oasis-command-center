@@ -1051,7 +1051,7 @@ function JobRow({
                 Retired by plan
               </span>
             )}
-            {isEmpire && !retired && job.enabled && job.runs_on === "server" && (
+            {isEmpire && !retired && job.runs_on === "server" && (
               <span
                 className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold"
                 title="The always-on server runs this schedule, whether or not your computer is on."
@@ -1059,7 +1059,7 @@ function JobRow({
                 Runs on the server
               </span>
             )}
-            {isEmpire && !retired && job.enabled && job.runs_on === "computer" && (
+            {isEmpire && !retired && job.runs_on === "computer" && (
               <span
                 className="text-[10px] uppercase tracking-wider text-status-warm border border-status-warm/40 rounded-full px-1.5 py-0.5 font-bold"
                 title="Only runs while that computer is on."

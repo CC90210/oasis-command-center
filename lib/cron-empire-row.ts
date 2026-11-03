@@ -292,6 +292,8 @@ export type LastResultVerdict = {
  * time the job REALLY ran, and this is a separate, newer fact.
  */
 const SKIPPED_RESULT_RE = /^(?:skipped(?:-[a-z]+)?|deferred)\s*:/i;
+// CC's recorded on/off decision (offReasonOf). It says why a row is off, not how a run went.
+const DECISION_RESULT_RE = /^(?:Retired|Paused)\b/;
 
 function humanizeMinutes(minutes: number): string {
   if (minutes < 90) return `${minutes} min`;
@@ -374,6 +376,10 @@ export function classifyLastResult(raw: unknown): LastResultVerdict {
 
   if (SKIPPED_RESULT_RE.test(text.trim())) {
     return { text, status: "skipped", reason: null };
+  }
+
+  if (DECISION_RESULT_RE.test(text.trim())) {
+    return { text, status: "unknown", reason: "a recorded on/off decision, not a run result" };
   }
 
   if (OPAQUE_RESULTS.has(text.trim())) {

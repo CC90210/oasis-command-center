@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { normalizeEmpireRow, offReasonOf, runsOnOf } from "../lib/cron-empire-row";
+import { classifyLastResult, normalizeEmpireRow, offReasonOf, runsOnOf } from "../lib/cron-empire-row";
 import { sortByOffReason } from "../lib/automations/cron-inventory";
 
 let passed = 0;
@@ -63,6 +63,24 @@ check("the list shows working rows first, then paused, then retired, stable with
     { id: "r2", off_reason: { kind: "retired" as const, text: "z" } },
   ];
   assert.deepEqual(sortByOffReason(jobs).map((j) => j.id), ["w1", "w2", "p1", "r1", "r2"]);
+  // A retired-by-plan row with no reason line still sorts with the retired ones (CodeRabbit #802).
+  const planned = [{ id: "x", retired: { reason: "plan" } as never }, { id: "w" }, { id: "p", off_reason: { kind: "paused" as const, text: "y" } }];
+  assert.deepEqual(sortByOffReason(planned).map((j) => j.id), ["w", "p", "x"]);
+});
+
+check("a recorded decision is never read as a successful run (CodeRabbit #802)", () => {
+  for (const text of ["Paused \u2014 Zernio cancelled (CC, 2026-11-03).", "Retired \u2014 the Cloudflare job sends these now.", "Retired here \u2014 the inbox worker."]) {
+    const verdict = classifyLastResult(text);
+    assert.equal(verdict.status, "unknown", text);
+    assert.equal(verdict.text, text, "the reason text is kept");
+  }
+  assert.equal(classifyLastResult("sent: brief").status, "success");
+});
+
+check("paused Empire rows still say where they run", () => {
+  const ui = readFileSync("components/automations/CronJobsManager.tsx", "utf8");
+  assert.match(ui, /isEmpire && !retired && job\.runs_on === "server"/);
+  assert.match(ui, /isEmpire && !retired && job\.runs_on === "computer"/);
 });
 
 check("the Empire query selects owner_machine, so 'Runs on' reaches the page", () => {
