@@ -13,7 +13,8 @@ import {
   type TelegramReceiptPayload,
 } from "./receipt-store";
 import {
-  NO_PAIRED_COMPUTER_REPLY,
+  NO_COMPUTER_REPLIES,
+  noComputerReply,
   type OasisTelegramConfig,
   type OasisTelegramJob,
 } from "./protocol";
@@ -87,13 +88,14 @@ export async function runOasisTelegramJob(job: OasisTelegramJob, deps: TelegramJ
     }
     if (turn.outcome === "no_computer") {
       noComputer = true;
-      replyText = telegramReplyText(NO_PAIRED_COMPUTER_REPLY);
+      replyText = telegramReplyText(noComputerReply(turn.reason));
     } else {
       replyText = telegramReplyText(turn.text);
     }
     payload = await savePreparedTelegramReply(deps.db, job, replyText, leaseToken);
   } else {
-    noComputer = replyText === NO_PAIRED_COMPUTER_REPLY;
+    // A replayed prepared reply: any of the fixed no-computer replies counts.
+    noComputer = [...NO_COMPUTER_REPLIES].some((reply) => replyText === telegramReplyText(reply));
   }
 
   await markTelegramSending(deps.db, job, replyText, leaseToken);

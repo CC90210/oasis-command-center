@@ -391,6 +391,24 @@ async function main() {
     assert.equal(events.rows[0].correlation_id, TENANT);
   });
 
+  await check("a failed pairing lookup is 503 'try again', never 401 unknown_token (2026-11-02)", async () => {
+    // A 401 here told the VPS bridge its token was dead during a database blip:
+    // it deleted the token and re-paired, and the re-pair cleared the owner's
+    // approval, so the VPS stopped taking work until CC approved it again.
+    await pairing({ id: "bp-blip", userId: OWNER_ID, label: "Blip", token: "t-blip", scope: "daemon", pairedVia: "hmac" });
+    const ask = (token: string) =>
+      resolvePairingFromBearer(new NextRequest("https://oasisai.work/api/bridge/ping", { headers: { authorization: `Bearer ${token}` } }));
+    await db.execute("ALTER TABLE bridge_pairings RENAME TO bridge_pairings_offline");
+    try {
+      assert.deepEqual(await ask("t-blip"), { ok: false, status: 503, error: "pairing_lookup_unavailable" });
+    } finally {
+      await db.execute("ALTER TABLE bridge_pairings_offline RENAME TO bridge_pairings");
+    }
+    assert.equal((await ask("t-blip")).ok, true, "the same token answers once the database is back");
+    assert.deepEqual(await ask("t-never-issued"), { ok: false, status: 401, error: "unknown_token" },
+      "a token the database really does not know is still 401");
+  });
+
   // ── /api/devices owner semantics + audited admin disconnect ─────────────
   await check("GET /api/devices: a member sees only their own computer", async () => {
     await pairing({ id: "bp-member-connector", userId: MEMBER_ID, label: "Member laptop", token: "t-m", scope: "connector", pairedVia: "pair_code" });

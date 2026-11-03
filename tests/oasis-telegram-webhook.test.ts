@@ -12,7 +12,10 @@ import {
 } from "../lib/telegram/job-signature";
 import { runOasisTelegramJob } from "../lib/telegram/jobs";
 import {
+  CHAT_ENGINE_UNSUPPORTED_REPLY,
+  COMPUTER_AI_UNAVAILABLE_REPLY,
   NO_PAIRED_COMPUTER_REPLY,
+  noComputerReply,
   OASIS_TELEGRAM_QUEUE_NAME,
   OASIS_TELEGRAM_TENANT_ID,
   TELEGRAM_WEBHOOK_SECRET_HEADER,
@@ -377,6 +380,33 @@ await check("no exact online pairing gets the one deterministic Telegram reply",
   });
   assert.deepEqual(outcome, { outcome: "sent", telegramMessageId: 9002, noComputer: true });
   assert.equal(text, NO_PAIRED_COMPUTER_REPLY);
+});
+
+await check("a usage limit or sign-in failure is not answered with 'approve your computer' (CodeRabbit #798)", async () => {
+  const job = parsedJob(36);
+  await ensureTelegramReceipt(db, job, NOW);
+  const texts: string[] = [];
+  let sends = 0;
+  const deps = {
+    db,
+    config: { webhookSecret: "w", jobSigningSecret: "j", botToken: ENV.OASIS_TELEGRAM_BOT_TOKEN!, botId: BOT_ID, chatId: CHAT },
+    now: () => NOW,
+    deviceTurn: async () => ({ outcome: "no_computer" as const, reason: "subscription_limit" }),
+    sendReply: async (input: { text: string }) => {
+      texts.push(input.text);
+      sends += 1;
+      return sends === 1
+        ? { outcome: "rejected" as const, reason: "telegram_rejected:retry later" }
+        : { outcome: "sent" as const, messageId: 9006 };
+    },
+  };
+  await runOasisTelegramJob(job, deps);
+  const replayed = await runOasisTelegramJob(job, deps);
+  assert.deepEqual(replayed, { outcome: "sent", telegramMessageId: 9006, noComputer: true },
+    "the replayed saved reply is still classified as no-computer");
+  assert.deepEqual(texts, [COMPUTER_AI_UNAVAILABLE_REPLY, COMPUTER_AI_UNAVAILABLE_REPLY]);
+  assert.equal(noComputerReply("computer_not_approved"), NO_PAIRED_COMPUTER_REPLY);
+  assert.equal(noComputerReply("saved_engine_not_supported"), CHAT_ENGINE_UNSUPPORTED_REPLY);
 });
 
 await check("a known rejection retries the saved reply without a second inference", async () => {

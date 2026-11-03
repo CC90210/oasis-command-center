@@ -11,7 +11,40 @@ export const TELEGRAM_UPDATE_MAX_BYTES = 32 * 1024;
 export const TELEGRAM_JOB_MAX_BYTES = 16 * 1024;
 export const TELEGRAM_TEXT_MAX = 4096;
 export const TELEGRAM_REPLY_MAX = 4000;
-export const NO_PAIRED_COMPUTER_REPLY = "No paired computer is online right now.";
+// Each reply says what to do, not only what failed (2026-11-02: the VPS lost its
+// approval and CC only saw "No paired computer is online right now."). The
+// turn's own reason picks the reply, so a usage limit is never answered with
+// "approve your computer".
+export const NO_PAIRED_COMPUTER_REPLY =
+  "I couldn't answer: the computer chosen for my chats isn't taking work right now. " +
+  "Open Command Center › Settings › Your computers, then approve it or bring it back online.";
+export const COMPUTER_AI_UNAVAILABLE_REPLY =
+  "I couldn't answer: the computer chosen for my chats can't run its AI right now " +
+  "(its sign-in, usage limit or install). Open Command Center › Settings › Your computers to check it.";
+export const CHAT_ENGINE_UNSUPPORTED_REPLY =
+  "I couldn't answer: my chat settings point at an engine Telegram can't use. " +
+  "Open Command Center › Settings › AI brain and choose a computer for my chats.";
+
+const AI_ON_COMPUTER_REASONS = new Set([
+  "subscription_auth_failure",
+  "subscription_limit",
+  "cli_not_found",
+  "cli_account_unsupported",
+]);
+const ENGINE_CHOICE_REASONS = new Set(["saved_engine_not_supported", "department_profile_unsupported"]);
+
+/** The no-computer reply for a turn's reason; availability is the default. */
+export function noComputerReply(reason: string): string {
+  if (AI_ON_COMPUTER_REASONS.has(reason)) return COMPUTER_AI_UNAVAILABLE_REPLY;
+  if (ENGINE_CHOICE_REASONS.has(reason)) return CHAT_ENGINE_UNSUPPORTED_REPLY;
+  return NO_PAIRED_COMPUTER_REPLY;
+}
+
+export const NO_COMPUTER_REPLIES: ReadonlySet<string> = new Set([
+  NO_PAIRED_COMPUTER_REPLY,
+  COMPUTER_AI_UNAVAILABLE_REPLY,
+  CHAT_ENGINE_UNSUPPORTED_REPLY,
+]);
 
 export const OASIS_TELEGRAM_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
