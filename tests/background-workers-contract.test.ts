@@ -81,7 +81,9 @@ for (const service of [
 }
 
 // OASIS's own daemon-VPS services are listed so nothing that runs is missing,
-// and each must wait for its own signed live heartbeat. No machine controls.
+// and each must wait for its own signed live heartbeat. No bridge controls
+// them: since 2026-11-03 CC's switch is stored and the server applies it
+// (control_mode "server_switch", tests/vps-unit-control.test.ts).
 const vpsServices = [
   "vps.oasis-telegram-bridge",
   "vps.oasis-inbox-sweep",
@@ -100,9 +102,9 @@ for (const service of vpsServices) {
   assert.equal(worker.runtime, "remote");
   // Live since 2026-10-31: the VPS reporter writes these rows (lib/automations/vps-health.ts).
   assert.equal(worker.status_source, "integrations_health", `${service} reads the VPS reporter's live row`);
-  assert.equal(worker.control_mode, "none");
+  assert.equal(worker.control_mode, "server_switch");
   assert.equal(worker.manageable_via_pm2, false);
-  assert.equal(controllableOasisWorker(service), null, `${service} must never be controllable from here`);
+  assert.equal(controllableOasisWorker(service), null, `${service} must never be reachable through a bridge`);
 }
 
 assert.deepEqual(

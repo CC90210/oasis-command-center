@@ -23,6 +23,9 @@ import {
   countsTowardHealth,
   formatLastSeen,
   isOperatorStopped,
+  serverSwitchFailure,
+  VPS_CRITICAL_WORKERS,
+  type ServerSwitchState,
   type StatusReporter,
   type WorkerControlMode,
   type WorkerRuntime,
@@ -76,6 +79,9 @@ type Worker = {
    * now (defaults "cc" server-side for the pre-existing CC-only worker list)
    * — optional here only as a defensive fallback against a stale API. */
   owner?: "cc" | "adon" | "shared";
+  /** CC's on/off switch for a daemon VPS worker and the server's last report on applying it
+   * (control_mode "server_switch"; lib/automations/vps-unit-control.ts). */
+  server_switch?: ServerSwitchState;
 };
 
 const RUNTIME_GROUP_META: Record<WorkerRuntime, { label: string; detail: string }> = {
@@ -434,8 +440,23 @@ function WorkerRow({
           : effectiveStatus === "degraded"
             ? `Degraded — check the latest run${lastRun}`
             : "Waiting for first scheduled run";
+  } else if (
+    // CC pressed Start and the server has not reported acting on it yet: say
+    // so, rather than "Off — you stopped this" for the next heartbeat.
+    worker.server_switch?.desired === "on" &&
+    worker.server_switch.applied_for !== worker.server_switch.changed_at &&
+    effectiveStatus !== "healthy" &&
+    !serverSwitchFailure(worker.server_switch)
+  ) {
+    statusLabel = "Switching on — the server applies it within 30 seconds";
   } else if (operatorStopped) {
     statusLabel = `Off — you stopped this. Start it to resume.${lastSeen}`;
+  } else if (
+    optimisticStatus === null &&
+    worker.server_switch?.desired === "off" &&
+    effectiveStatus === "healthy"
+  ) {
+    statusLabel = "Switching off — the server applies it within 30 seconds";
   } else if (effectiveStatus === "pending") {
     statusLabel = `Running — awaiting result${lastSeen}`;
   } else if (effectiveStatus === "healthy") {
@@ -499,11 +520,18 @@ function WorkerRow({
           <div className="text-[11px] text-fg-dim mt-1">
             {statusLabel}
           </div>
+          {serverSwitchFailure(worker.server_switch) && (
+            <div className="text-[11px] text-status-warm mt-1">
+              The server couldn&apos;t apply your last switch: {serverSwitchFailure(worker.server_switch)}
+            </div>
+          )}
           {worker.control_mode !== "none" && controlMode !== "none" && (
             <WorkerActions
               service={worker.service}
+              label={worker.label}
               bridgeOnline={bridgeOnline}
-              remoteControl={controlMode === "remote_bridge"}
+              serverSwitch={controlMode === "server_switch"}
+              remoteControl={controlMode === "remote_bridge" || controlMode === "server_switch"}
               status={effectiveStatus}
               onOptimistic={setOptimisticStatus}
               onChange={onChange}
@@ -522,14 +550,19 @@ function WorkerRow({
  *  modal. */
 function WorkerActions({
   service,
+  label,
   bridgeOnline,
+  serverSwitch = false,
   remoteControl,
   status,
   onOptimistic,
   onChange,
 }: {
   service: string;
+  label: string;
   bridgeOnline: boolean;
+  /** A daemon VPS worker: the switch is stored and the server applies it. */
+  serverSwitch?: boolean;
   /** Route actions through the server-side bridge proxy (SunBiz VPS). */
   remoteControl: boolean;
   status: Worker["status"];
@@ -546,7 +579,18 @@ function WorkerActions({
     // Codex audit 2026-06-06 — critical workers need an explicit confirm
     // because stopping them severs the heartbeat that would correct any
     // stale UI state. Browser-native confirm() is the lowest-friction guard.
-    const isCritical = CRITICAL_WORKERS.has(service);
+    // The daemon VPS: say what goes quiet, and send the confirm the route
+    // requires for these workers (lib/automations/vps-unit-control.ts).
+    const serverConsequence = serverSwitch ? VPS_CRITICAL_WORKERS.get(service) : undefined;
+    if (serverConsequence && action !== "start") {
+      const ok = window.confirm(
+        action === "stop"
+          ? `Stop ${label} on the server? While it is off, ${serverConsequence} Press Start to turn it back on.`
+          : `Restart ${label} on the server? It is offline for a few seconds while it restarts.`,
+      );
+      if (!ok) return;
+    }
+    const isCritical = !serverSwitch && CRITICAL_WORKERS.has(service);
     if (isCritical && action !== "start") {
       const ok = window.confirm(
         `You're about to ${action} ${service.replace(/^pm2\./, "")} — this is a CRITICAL worker. ` +
@@ -560,7 +604,7 @@ function WorkerActions({
 
     setBusy(action);
     setFeedback(null);
-    const result = await runWorkerAction(service, action);
+    const result = await runWorkerAction(service, action, { confirm: Boolean(serverConsequence) });
     setBusy(null);
 
     // Codex audit — DON'T optimistically flip critical workers. The 90s
@@ -569,7 +613,9 @@ function WorkerActions({
     // that, so the override would never clear and the tile would lie.
     // For criticals we wait for the next genuine heartbeat (or the
     // operator's manual refresh) to update the tile.
-    if (result.ok && !isCritical) {
+    // Nor a daemon VPS switch: only the switch is stored at this point, and
+    // the refetch below shows "Switching off/on" until the server applies it.
+    if (result.ok && !isCritical && !serverSwitch) {
       const nextStatus: Worker["status"] =
         action === "stop" ? "down" : "healthy";
       onOptimistic(nextStatus);
