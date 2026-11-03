@@ -33,6 +33,13 @@ export type CronInventoryJob = {
   last_attempt_kind?: "missed" | "skipped" | "deferred" | null;
   /** Empire rows: the stored last_result verbatim, whatever the verdict. Shown only under Details. */
   last_result_text?: string | null;
+  /**
+   * Empire rows: where the scheduler that owns this row runs (cron_jobs.owner_machine).
+   * "server" = the always-on daemon VPS; "computer" = a named workstation; null = nobody.
+   */
+  runs_on?: "server" | "computer" | null;
+  /** An OFF Empire row whose result line records why: "Retired — …" or "Paused — …". */
+  off_reason?: { kind: "retired" | "paused"; text: string } | null;
   run_count: number;
   unresolved_failures?: number;
   created_at: string;
@@ -181,6 +188,15 @@ export type OwnerPartition<T> = {
  * Partition by exact normalized owner. Prefix matching made `bravo-ops` also
  * appear under `bravo`; this helper guarantees every source:id lands once.
  */
+/** Working rows first, then paused ones, then retired ones; order within a band is kept. */
+export function sortByOffReason<T extends { off_reason?: CronInventoryJob["off_reason"] }>(jobs: readonly T[]): T[] {
+  const band = (job: T) => (job.off_reason?.kind === "retired" ? 2 : job.off_reason?.kind === "paused" ? 1 : 0);
+  return jobs
+    .map((job, index) => ({ job, index }))
+    .sort((a, b) => band(a.job) - band(b.job) || a.index - b.index)
+    .map(({ job }) => job);
+}
+
 export function partitionCronJobsByOwner<T extends OwnedInventoryIdentity>(
   jobs: T[],
   agentKeys: string[],

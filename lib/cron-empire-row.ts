@@ -44,7 +44,31 @@ export type EmpireCronRow = {
   run_count: number | null;
   fail_count: number | null;
   created_at: string;
+  owner_machine?: string | null;
 };
+
+/** The daemon VPS's machine names (cron_jobs.owner_machine). */
+const SERVER_MACHINES = new Set(["oasis-daemon-1", "vps"]);
+
+/** Where an Empire row's scheduler runs: the always-on server, a workstation, or nobody. */
+export function runsOnOf(ownerMachine: unknown): "server" | "computer" | null {
+  const machine = asText(ownerMachine).trim().toLowerCase();
+  if (!machine) return null;
+  return SERVER_MACHINES.has(machine) ? "server" : "computer";
+}
+
+/**
+ * Why an OFF row is off, when its result line says so (CC, 2026-11-03: every
+ * switched-off automation states its reason). "Retired — the Cloudflare job
+ * sends these now" or "Paused — Zernio cancelled". Null for a row that is on,
+ * or off without a recorded reason.
+ */
+export function offReasonOf(enabled: boolean, lastResult: string): { kind: "retired" | "paused"; text: string } | null {
+  if (enabled) return null;
+  const match = /^(Retired|Paused)\b[^—-]*[—-]\s*(.+)$/s.exec(lastResult.trim());
+  if (!match) return null;
+  return { kind: match[1].toLowerCase() as "retired" | "paused", text: match[2].trim() };
+}
 
 /** Any value → string, without assuming the database kept its word. */
 function asText(v: unknown): string {
@@ -428,6 +452,8 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     // only inside a closed Details (lib/automations/run-summary.ts).
     last_attempt_kind: attemptKind,
     last_result_text: lastResult.trim() ? lastResult : null,
+    runs_on: runsOnOf(row.owner_machine),
+    off_reason: offReasonOf(asBool(row.is_active), lastResult),
     run_count: asCount(row.run_count),
     unresolved_failures: unresolvedFailures,
     created_at: row.created_at,
