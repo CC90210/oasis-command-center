@@ -275,15 +275,21 @@ async function main() {
       "skool_engine",
       "pm2.sunbiz-sequence-runner",
       "pm2.not-a-worker",
-      // Listed on the board, never controllable from it (no status, no bridge).
-      "vps.oasis-telegram-bridge",
-      "vps.oasis-inbox-sweep",
     ]) {
       const res = await post({ service, action: "start" });
       assert.equal(res.status, 400, service);
       assert.equal(((await res.json()) as { error: string }).error, "unknown_worker");
     }
     assert.equal(calls.length, 0);
+  });
+  await check("control: a daemon VPS worker never reaches a bridge; it goes to the server switch (tests/vps-unit-control.test.ts)", async () => {
+    await login(CC);
+    calls = [];
+    for (const service of ["vps.oasis-telegram-bridge", "vps.oasis-inbox-sweep"]) {
+      const res = await post({ service, action: "start" });
+      assert.notEqual(((await res.json()) as { error?: string }).error, "unknown_worker", service);
+    }
+    assert.equal(calls.length, 0, "no bridge call for a vps.* worker");
   });
   await check("control: a client owner and an OASIS closer get a 404, signed out a 401, and no bridge call", async () => {
     calls = [];

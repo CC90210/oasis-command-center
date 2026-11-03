@@ -24,7 +24,7 @@ import { readBodyCapped } from "@/lib/ledger/ingest";
 import { readAgentsOwner } from "@/lib/agents-owner";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
+import { SUPERVISOR_DISABLED, VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
 
 export const VPS_HEALTH_SERVICES = [
   "vps.oasis-telegram-bridge",
@@ -104,14 +104,43 @@ export async function ownerProfileIds(db: Client, tenantId: string): Promise<str
   return rs.rows.map((r) => String(r.id));
 }
 
+/**
+ * The VPS workers CC has switched OFF (vps_unit_controls, 2026-11-03). Their stopped units are
+ * reported as the deliberate stop they are, not as an outage. Throws on a failed read.
+ */
+export async function readSwitchedOffServices(db: Client): Promise<ReadonlySet<string>> {
+  const rs = await db.execute("SELECT service FROM vps_unit_controls WHERE desired = 'off'");
+  return new Set(rs.rows.map((r) => String(r.service)));
+}
+
+/**
+ * A stopped unit CC switched off reads as the supervisor's "disabled by operator" (the panel's
+ * "Off — you stopped this", the fleet landing and Attention all read it), never as "down". A unit
+ * still running after the switch is reported as running: the server has not applied it yet. PURE.
+ */
+export function asReported(
+  s: VpsHeartbeat["services"][number],
+  switchedOff: ReadonlySet<string>,
+): { status: string; error: string | null; extra: Record<string, unknown> } {
+  if (s.status === "down" && switchedOff.has(s.service)) {
+    return { status: "degraded", error: null, extra: { pm2_status: SUPERVISOR_DISABLED, switched_off: true } };
+  }
+  return {
+    status: s.status === "running" ? "unknown" : s.status,
+    error: s.status === "healthy" || s.status === "running" ? null : s.detail || s.status,
+    extra: s.status === "running" ? { phase: "running" } : {},
+  };
+}
+
 /** Upsert one row per (profile, service). Throws on a failed write. */
 export async function recordVpsHeartbeat(
   db: Client,
-  input: { tenantId: string; profileIds: string[]; heartbeat: VpsHeartbeat; now: Date },
+  input: { tenantId: string; profileIds: string[]; heartbeat: VpsHeartbeat; now: Date; switchedOff?: ReadonlySet<string> },
 ): Promise<number> {
   const at = input.now.toISOString();
+  const switchedOff = input.switchedOff ?? new Set<string>();
   const statements = input.profileIds.flatMap((profileId) =>
-    input.heartbeat.services.map((s) => ({
+    input.heartbeat.services.map((s) => ({ s, r: asReported(s, switchedOff) })).map(({ s, r }) => ({
       sql: `INSERT INTO integrations_health (tenant_id, profile_id, service, status, last_ping_at, last_error, metadata, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (profile_id, service) DO UPDATE SET
@@ -121,10 +150,10 @@ export async function recordVpsHeartbeat(
         input.tenantId,
         profileId,
         s.service,
-        s.status === "running" ? "unknown" : s.status,
+        r.status,
         at,
-        s.status === "healthy" || s.status === "running" ? null : s.detail || s.status,
-        JSON.stringify({ via: "vps-heartbeat", host: input.heartbeat.host, detail: s.detail, runtime: "remote", ...(s.status === "running" ? { phase: "running" } : {}) }),
+        r.error,
+        JSON.stringify({ via: "vps-heartbeat", host: input.heartbeat.host, detail: s.detail, runtime: "remote", ...r.extra }),
         at,
       ],
     })),
@@ -139,23 +168,30 @@ export type VpsHealthDeps = {
   now?: () => Date;
   db?: () => Client | null;
   profileIds?: (db: Client, tenantId: string) => Promise<string[]>;
+  switchedOff?: (db: Client) => Promise<ReadonlySet<string>>;
 };
 
+export type VpsAuth = { ok: true; raw: string } | { ok: false; response: Response };
+
 /**
- * Order: secret -> size -> signature (timing-safe, 300 s) -> JSON -> fields -> owner -> write. A
- * request that does not authenticate is never parsed and nothing is read or written for it.
+ * Secret -> size -> signature (timing-safe, 300 s), shared by every route the VPS calls
+ * (/api/internal/vps-health, /api/internal/vps-control). A request that does not authenticate is
+ * never parsed.
  */
-export async function handleVpsHeartbeat(req: Request, deps: VpsHealthDeps = {}): Promise<Response> {
-  const env = deps.env ?? process.env;
-  const now = (deps.now ?? (() => new Date()))();
+export async function authenticateVpsRequest(
+  req: Request,
+  env: Record<string, string | undefined>,
+  now: Date,
+  maxBytes: number = VPS_HEALTH_BODY_MAX_BYTES,
+): Promise<VpsAuth> {
   const secret = (env.CRON_SECRET || "").trim();
   if (secret.length < VPS_HEALTH_SECRET_MIN_LENGTH) {
-    return json(503, { ok: false, error: "not_installed", detail: "secret_not_set" });
+    return { ok: false, response: json(503, { ok: false, error: "not_installed", detail: "secret_not_set" }) };
   }
   const declared = Number(req.headers.get("content-length") || "0");
-  if (declared > VPS_HEALTH_BODY_MAX_BYTES) return json(413, { ok: false, error: "body_too_large" });
-  const raw = await readBodyCapped(req, VPS_HEALTH_BODY_MAX_BYTES);
-  if (raw === null) return json(413, { ok: false, error: "body_too_large" });
+  if (declared > maxBytes) return { ok: false, response: json(413, { ok: false, error: "body_too_large" }) };
+  const raw = await readBodyCapped(req, maxBytes);
+  if (raw === null) return { ok: false, response: json(413, { ok: false, error: "body_too_large" }) };
 
   const ts = (req.headers.get(HEADER_VPS_TIMESTAMP) || "").trim();
   const sig = (req.headers.get(HEADER_VPS_SIGNATURE) || "").trim().toLowerCase();
@@ -168,12 +204,27 @@ export async function handleVpsHeartbeat(req: Request, deps: VpsHealthDeps = {})
     toleranceSeconds: VPS_HEALTH_WINDOW_SECONDS,
   });
   if (!verdict.ok) {
-    return json(401, { ok: false, error: verdict.reason === "timestamp_outside_tolerance" ? "stale_timestamp" : "unauthorized" });
+    return {
+      ok: false,
+      response: json(401, { ok: false, error: verdict.reason === "timestamp_outside_tolerance" ? "stale_timestamp" : "unauthorized" }),
+    };
   }
+  return { ok: true, raw };
+}
+
+/**
+ * Order: secret -> size -> signature (timing-safe, 300 s) -> JSON -> fields -> owner -> write. A
+ * request that does not authenticate is never parsed and nothing is read or written for it.
+ */
+export async function handleVpsHeartbeat(req: Request, deps: VpsHealthDeps = {}): Promise<Response> {
+  const env = deps.env ?? process.env;
+  const now = (deps.now ?? (() => new Date()))();
+  const auth = await authenticateVpsRequest(req, env, now);
+  if (!auth.ok) return auth.response;
 
   let body: unknown;
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse(auth.raw);
   } catch {
     return json(422, { ok: false, error: "invalid_json" });
   }
@@ -190,8 +241,16 @@ export async function handleVpsHeartbeat(req: Request, deps: VpsHealthDeps = {})
     return json(503, { ok: false, error: "owner_unavailable" });
   }
   if (profiles.length === 0) return json(503, { ok: false, error: "owner_unavailable" });
+  // Best-effort: an unreadable switch table (or one not yet migrated) leaves every stopped unit
+  // reading "down", the honest default, and never blocks the heartbeat.
+  let switchedOff: ReadonlySet<string> = new Set();
   try {
-    const recorded = await recordVpsHeartbeat(db, { tenantId: WEBDEV_TENANT_ID, profileIds: profiles, heartbeat: parsed.value, now });
+    switchedOff = await (deps.switchedOff ?? readSwitchedOffServices)(db);
+  } catch (error) {
+    console.error("[vps-health] switch read failed", error instanceof Error ? error.message : String(error));
+  }
+  try {
+    const recorded = await recordVpsHeartbeat(db, { tenantId: WEBDEV_TENANT_ID, profileIds: profiles, heartbeat: parsed.value, now, switchedOff });
     return json(200, { ok: true, recorded });
   } catch (error) {
     console.error("[vps-health] write failed", error instanceof Error ? error.message : String(error));

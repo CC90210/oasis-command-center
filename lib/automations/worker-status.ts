@@ -35,6 +35,41 @@ export const VPS_ONESHOT_SERVICES: ReadonlySet<string> = new Set([
   "vps.oasis-meet-runner",
 ]);
 
+/**
+ * The daemon VPS workers whose Stop or Restart takes something CC relies on offline, with what goes
+ * quiet while each is off. The control route refuses a Stop or Restart of these without an explicit
+ * confirm, and the panel asks with this sentence (lib/automations/vps-unit-control.ts).
+ */
+export const VPS_CRITICAL_WORKERS: ReadonlyMap<string, string> = new Map([
+  ["vps.oasis-telegram-bridge", "Bravo stops answering you on Telegram."],
+  ["vps.oasis-headless-bridge", "agent chats and Telegram replies that run on the server wait until it is back."],
+  ["vps.oasis-scheduler", "the Empire schedules (the Brief, backups, health checks) stop running."],
+  ["vps.oasis-workspace-scheduler", "workspace scripts, including Atlas's inbox consumer, stop running."],
+  ["vps.atlas-telegram", "Atlas stops answering you on Telegram."],
+  ["vps.maven-telegram", "Maven stops answering you on Telegram."],
+]);
+
+/** CC's switch for a daemon VPS worker and the server's last report on it (vps_unit_controls). */
+export type ServerSwitchState = {
+  desired: "on" | "off";
+  changed_at: string;
+  restart_requested_at: string | null;
+  applied_at: string | null;
+  applied_for: string | null;
+  applied_ok: boolean | null;
+  applied_detail: string | null;
+};
+
+/**
+ * What the server said when it could NOT apply CC's latest switch, or null. A failure reported for
+ * an older switch is history, not news: only a report for the newest stamp counts. PURE.
+ */
+export function serverSwitchFailure(sw: ServerSwitchState | undefined | null): string | null {
+  if (!sw || sw.applied_ok !== false || !sw.applied_for) return null;
+  const latest = [sw.changed_at, sw.restart_requested_at].filter((v): v is string => Boolean(v)).sort().pop();
+  return sw.applied_for === latest ? sw.applied_detail || "systemctl failed" : null;
+}
+
 /** Decode persisted readings without trusting a cast or treating an in-flight result as success. */
 export function reportedWorkerStatus(service: string, status: unknown, metadata?: Record<string, unknown> | null): WorkerHealthStatus {
   if (status === "healthy" || status === "degraded" || status === "down") return status;
@@ -45,7 +80,14 @@ export function reportedWorkerStatus(service: string, status: unknown, metadata?
 }
 
 export type WorkerRuntime = "local" | "cloud" | "remote" | "retired";
-export type WorkerControlMode = "local_fleet" | "remote_bridge" | "none";
+/**
+ * local_fleet   - this computer's supervisor, through its bridge;
+ * remote_bridge - a client tenant's VPS, through the server-side bridge proxy;
+ * server_switch - OASIS's daemon VPS: CC's switch is stored and the server's own
+ *                 root timer applies it (lib/automations/vps-unit-control.ts);
+ * none          - no lifecycle control.
+ */
+export type WorkerControlMode = "local_fleet" | "remote_bridge" | "server_switch" | "none";
 export type WorkerStatusSource =
   | "integrations_health"
   | "website_sales_meeting_worker_health"
@@ -65,6 +107,8 @@ export function resolveWorkerControlMode(input: {
   isTrueAdmin: boolean;
   adminAccess: boolean;
   remoteControlAllowed?: boolean;
+  /** The viewer may switch OASIS's daemon VPS workers (the agents owner, CC). */
+  serverSwitchAllowed?: boolean;
 }): WorkerControlMode {
   if (
     input.runtime === "cloud" ||
@@ -72,6 +116,9 @@ export function resolveWorkerControlMode(input: {
     input.configuredMode === "none"
   ) {
     return "none";
+  }
+  if (input.configuredMode === "server_switch") {
+    return input.runtime === "remote" && input.serverSwitchAllowed === true ? "server_switch" : "none";
   }
   if (input.runtime === "local") {
     return input.isTrueAdmin || input.adminAccess ? "local_fleet" : "none";

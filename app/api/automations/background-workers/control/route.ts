@@ -70,6 +70,7 @@ import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { isAgentsOwner } from "@/lib/agents-owner";
 import { OASIS_OPERATOR_TENANT_ID } from "@/lib/platform-operator";
+import { handleVpsUnitSwitch } from "@/lib/automations/vps-unit-control";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,6 +78,11 @@ export const dynamic = "force-dynamic";
 const ALLOWED_ACTIONS = new Set(["start", "stop", "restart"]);
 
 export async function POST(req: Request) {
+  // THE DAEMON VPS (2026-11-03). A vps.* worker is never reached through a
+  // bridge: the switch is stored (CC only) and the server's own root timer
+  // applies it. See lib/automations/vps-unit-control.ts.
+  const vps = await vpsSwitchBody(req);
+  if (vps) return handleVpsUnitSwitch(req, vps);
   if (externalTenantSurfacesBlocked()) {
     // The OASIS deployment has one fleet: the operator's own machine. The
     // SunBiz remote path below never runs here.
@@ -238,6 +244,16 @@ async function controlOasisFleet(req: Request, bridge: BridgeAuthResult): Promis
   if (!audit.ok) console.error("[background-workers.control.audit]", audit.error);
   if (!result.ok) return bridgeFailure(result);
   return NextResponse.json({ ok: true, output: result.output || "ok" });
+}
+
+/** The body, when it names a daemon VPS worker; null for every other request (read from a clone). */
+async function vpsSwitchBody(req: Request): Promise<{ service?: unknown; action?: unknown; confirm?: unknown } | null> {
+  try {
+    const body = (await req.clone().json()) as { service?: unknown; action?: unknown; confirm?: unknown } | null;
+    return body && typeof body === "object" && typeof body.service === "string" && body.service.startsWith("vps.") ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A failed bridge call, named. A 401 is the token, never "offline". */

@@ -46,6 +46,13 @@ export function describeControlError(error: string | undefined, status: number):
       return "that worker isn't on the allowed list";
     case "invalid_action":
       return "that action isn't allowed";
+    case "confirm_required":
+      return "this worker needs your confirmation first";
+    case "cross_origin_refused":
+      return "open the dashboard directly and try again";
+    case "switch_write_failed":
+    case "database_not_configured":
+      return "the switch couldn't be saved; nothing changed, try again";
     case undefined:
     case "":
       return `the control request failed (HTTP ${status})`;
@@ -62,6 +69,8 @@ export function describeControlError(error: string | undefined, status: number):
 export async function runWorkerAction(
   service: string,
   action: WorkerAction,
+  /** confirm: CC said yes to stopping a critical daemon VPS worker (the route refuses it otherwise). */
+  opts: { confirm?: boolean } = {},
 ): Promise<{ ok: boolean; output: string }> {
   // The server allowlists the name and the bridge re-validates it; this only
   // refuses an obviously malformed one before a round trip.
@@ -73,7 +82,7 @@ export async function runWorkerAction(
     const res = await fetch(WORKER_CONTROL_ROUTE, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ service, action }),
+      body: JSON.stringify(opts.confirm ? { service, action, confirm: true } : { service, action }),
     });
     const text = await res.text();
     let data: { ok?: boolean; output?: string; is_error?: boolean; error?: string };
