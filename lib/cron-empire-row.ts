@@ -65,7 +65,7 @@ export function runsOnOf(ownerMachine: unknown): "server" | "computer" | null {
  */
 export function offReasonOf(enabled: boolean, lastResult: string): { kind: "retired" | "paused"; text: string } | null {
   if (enabled) return null;
-  const match = /^(Retired|Paused)\b[^—-]*[—-]\s*(.+)$/s.exec(lastResult.trim());
+  const match = /^(Retired|Paused)\b[^\u2014-]*[\u2014-]\s*(.+)$/s.exec(lastResult.trim());
   if (!match) return null;
   return { kind: match[1].toLowerCase() as "retired" | "paused", text: match[2].trim() };
 }
