@@ -230,20 +230,39 @@ class Session {
   }
 }
 
-/** RFC 5321 4.5.2 dot-stuffing on bytes, ending with CRLF . CRLF. */
+/**
+ * RFC 5321 4.5.2 dot-stuffing on bytes, ending with CRLF . CRLF.
+ *
+ * Two passes into one preallocated array: count the extra dots, then copy.
+ * A growing number[] costs 4–8 bytes per message byte, and a 24 MiB attachment
+ * (about 32 MB once base64-encoded) would pass the Workers 128 MB isolate limit
+ * (CodeRabbit #801).
+ */
 export function dotStuff(message: Uint8Array): Uint8Array {
-  const out: number[] = [];
+  let extraDots = 0;
   let lineStart = true;
   for (let i = 0; i < message.length; i++) {
+    if (lineStart && message[i] === 0x2e) extraDots++;
+    lineStart = message[i] === 0x0a && i > 0 && message[i - 1] === 0x0d;
+  }
+  const endsWithCrlf = message.length >= 2 && message[message.length - 2] === 0x0d && message[message.length - 1] === 0x0a;
+  const out = new Uint8Array(message.length + extraDots + (endsWithCrlf ? 0 : 2) + 3);
+  let o = 0;
+  lineStart = true;
+  for (let i = 0; i < message.length; i++) {
     const byte = message[i];
-    if (lineStart && byte === 0x2e) out.push(0x2e);
-    out.push(byte);
+    if (lineStart && byte === 0x2e) out[o++] = 0x2e;
+    out[o++] = byte;
     lineStart = byte === 0x0a && i > 0 && message[i - 1] === 0x0d;
   }
-  const endsWithCrlf = out.length >= 2 && out[out.length - 2] === 0x0d && out[out.length - 1] === 0x0a;
-  if (!endsWithCrlf) out.push(0x0d, 0x0a);
-  out.push(0x2e, 0x0d, 0x0a);
-  return Uint8Array.from(out);
+  if (!endsWithCrlf) {
+    out[o++] = 0x0d;
+    out[o++] = 0x0a;
+  }
+  out[o++] = 0x2e;
+  out[o++] = 0x0d;
+  out[o++] = 0x0a;
+  return out;
 }
 
 function capabilities(reply: Reply): string[] {
@@ -332,7 +351,8 @@ async function compose(message: SmtpMessage): Promise<Composed> {
   };
   return {
     envelope: { from: info.envelope.from, to: [...info.envelope.to] },
-    raw: new Uint8Array(info.message),
+    // A view of the composed Buffer, not a copy: large attachments stay one allocation.
+    raw: new Uint8Array(info.message.buffer, info.message.byteOffset, info.message.byteLength),
     messageId: info.messageId || "",
   };
 }

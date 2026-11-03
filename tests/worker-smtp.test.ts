@@ -246,6 +246,22 @@ async function main() {
     assert.equal(new TextDecoder().decode(dotStuff(new TextEncoder().encode("no newline"))), "no newline\r\n.\r\n");
   });
 
+  await check("dot-stuffing a 32 MB message allocates one exact-size byte array (CodeRabbit #801)", () => {
+    const size = 32 * 1024 * 1024;
+    const big = new Uint8Array(size).fill(0x41);
+    for (let i = 0; i + 3 < size; i += 76) { big[i] = 0x0d; big[i + 1] = 0x0a; big[i + 2] = 0x2e; }
+    let dottedLines = 0;
+    for (let i = 0; i < size; i++) {
+      if (big[i] === 0x2e && (i === 0 || (i >= 2 && big[i - 1] === 0x0a && big[i - 2] === 0x0d))) dottedLines++;
+    }
+    const endsWithCrlf = big[size - 2] === 0x0d && big[size - 1] === 0x0a;
+    const before = process.memoryUsage().heapUsed;
+    const out = dotStuff(big);
+    assert.ok(dottedLines > 400_000, "the fixture really has many dotted lines");
+    assert.equal(out.length, size + dottedLines + (endsWithCrlf ? 0 : 2) + 3, "one extra dot per dotted line, then CRLF . CRLF");
+    assert.ok(process.memoryUsage().heapUsed - before < 64 * 1024 * 1024, "no per-byte JS array on the heap");
+  });
+
   await check("a body line starting with '.' reaches the server dot-stuffed, so it can never end the message early", async () => {
     const wire = serverWire({});
     await createWireTransport(gmail(465), wire.factory).sendMail(message);
