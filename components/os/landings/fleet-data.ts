@@ -11,7 +11,9 @@
  *
  * WHAT "ALIVE" IS MADE OF, only facts the dashboard holds:
  *   - process check-ins: integrations_health rows pm2.<agent>-*, pushed by the
- *     bridge every minute (a process "Running" within 5 minutes);
+ *     bridge every minute, and the agent's daemon-VPS units (vps.<agent>-*,
+ *     Bravo's vps.oasis-*), pushed by the signed VPS reporter every minute (a
+ *     process "Running" within 5 minutes);
  *   - the agent's own heartbeat: agent_state_snapshot, written forward-only by
  *     the agents owner's computer (lib/bridge/fleet-ticks.ts) with its name,
  *     time, count and health ONLY. What an agent is working on stays on the Mac
@@ -32,7 +34,9 @@ import { getActiveProfile } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_RUNTIME_AGENT_KEYS } from "@/lib/agents";
 import { readAgentsOwner } from "@/lib/agents-owner";
-import { SUPERVISOR_DISABLED } from "@/lib/automations/worker-status";
+import { SUPERVISOR_DISABLED, VPS_ONESHOT_SERVICES } from "@/lib/automations/worker-status";
+import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
+import { heartbeatMetadata, isBridgeReport } from "@/lib/integrations/presence-heartbeat";
 
 /** An agent is Running when one of its processes checked in within 5 minutes (the daemon window). */
 export const FLEET_FRESHNESS_MS = 5 * 60 * 1000;
@@ -45,7 +49,7 @@ export type FleetSignal = {
   name: string;
   /** Running: at least one of the agent's processes checked in within FLEET_FRESHNESS_MS. */
   live: boolean;
-  /** The agent's processes that have ever reported (pm2.<agent>-*), how many are fresh, and how many fresh rows say down. */
+  /** The agent's processes that have ever reported (processPrefixesFor), how many are fresh, and how many fresh rows say down. */
   processCount: number;
   runningCount: number;
   downCount: number;
@@ -67,6 +71,43 @@ export type Liveness = "grey" | "green" | "amber" | "red";
 /** The process-ping prefix for an agent: bravo -> "pm2.bravo-". */
 export function processPrefixFor(agent: string): string {
   return `pm2.${agent}-`;
+}
+
+/**
+ * Every health-row prefix that belongs to an agent: its computer processes and,
+ * since the 2026-11-02 cloud cutover, its daemon-VPS units (signed reporter,
+ * lib/automations/vps-health.ts). Atlas and Maven poll from vps.atlas-telegram /
+ * vps.maven-telegram; Bravo's services are the vps.oasis-* units. Reading only
+ * pm2.* showed the moved bots as quiet, and every agent red once the computer
+ * was off, while all of them were running.
+ */
+export function processPrefixesFor(agent: string): string[] {
+  return [processPrefixFor(agent), agent === "bravo" ? "vps.oasis-" : `vps.${agent}-`];
+}
+
+/** Computer copies retired by lifecycle policy: their stale rows say nothing about the agent. */
+const RETIRED_SERVICES: ReadonlySet<string> = new Set(
+  OASIS_WORKERS.filter((w) => w.runtime === "retired").map((w) => w.service),
+);
+
+/**
+ * A row the fleet reads at all: an active computer process that the agents
+ * owner's own computer reported (any workspace member's computer may ping, and
+ * a member's "pm2.atlas-x down" must not redden Atlas: CodeRabbit #797), or a
+ * daemon-VPS unit that the signed VPS reporter wrote (via "vps-heartbeat", never
+ * a paired computer's report). A retired computer copy (the Atlas and Maven bots
+ * since 2026-11-02) is skipped, so its stale "down" cannot redden a running cloud
+ * bot. With no agents owner profile, no computer row counts. PURE.
+ */
+export function isFleetRow(
+  row: { service: string; metadata?: unknown; profile_id?: string | null },
+  ownerProfileId: string | null,
+): boolean {
+  const service = String(row.service ?? "");
+  if (RETIRED_SERVICES.has(service)) return false;
+  if (service.startsWith("pm2.")) return Boolean(ownerProfileId) && row.profile_id === ownerProfileId;
+  if (!service.startsWith("vps.")) return false;
+  return heartbeatMetadata(row.metadata)?.via === "vps-heartbeat" && !isBridgeReport(row.metadata);
 }
 
 export type Fleet = {
@@ -98,12 +139,14 @@ export function fleetSignals(
     const t = p.last_ping_at ? Date.parse(p.last_ping_at) : NaN;
     const at = Number.isFinite(t) ? t : 0;
     if (latest.has(p.service) && at <= (latest.get(p.service)?.at ?? 0)) continue;
-    latest.set(p.service, { at, up: processIsUp(p.status, p.metadata), down: p.status === "down" });
+    latest.set(p.service, { at, up: processIsUp(p.service, p.status, p.metadata), down: processIsDown(p.service, p.status) });
   }
   const out = new Map<string, FleetSignal>();
   for (const name of agents) {
-    const prefix = processPrefixFor(name);
-    const procs = [...latest.entries()].filter(([service]) => service.startsWith(prefix)).map(([, v]) => v);
+    const prefixes = processPrefixesFor(name);
+    const procs = [...latest.entries()]
+      .filter(([service]) => prefixes.some((prefix) => service.startsWith(prefix)))
+      .map(([, v]) => v);
     const fresh = (p: { at: number }) => p.at > 0 && now - p.at < FLEET_FRESHNESS_MS;
     const running = procs.filter((p) => p.up && fresh(p)).length;
     const down = procs.filter((p) => p.down && fresh(p)).length;
@@ -133,16 +176,35 @@ export function fleetSignals(
  */
 export function fleetLiveness(signal: FleetSignal | null | undefined, computer: FleetComputer | null | undefined, now: number): Liveness {
   if (!signal || (signal.processCount === 0 && !signal.lastTaskAt)) return "grey";
+  // A fresh failure wins over another healthy unit or a recent tick: Bravo has
+  // several VPS units, and one healthy unit must not hide a dead scheduler.
+  if (signal.downCount > 0) return "red";
   const tick = signal.lastTaskAt ? Date.parse(signal.lastTaskAt) : NaN;
   if (signal.live || (Number.isFinite(tick) && now - tick < TICK_FRESH_MS)) return "green";
   const seen = computer?.lastSeenAt ? Date.parse(computer.lastSeenAt) : NaN;
   const silent = Boolean(computer) && (!Number.isFinite(seen) || now - seen >= COMPUTER_SILENT_MS);
-  if (signal.downCount > 0 || silent) return "red";
+  if (silent) return "red";
   return "amber";
 }
 
-/** A row reports a process that is up: not "down", and not stopped by the operator. */
-function processIsUp(status: string | null | undefined, metadata: unknown): boolean {
+/**
+ * A row says its process is failing. A VPS unit reports "degraded" while it is
+ * activating or in auto-restart (lib/automations/vps-health.ts), which is a
+ * failing service, not a running one.
+ */
+function processIsDown(service: string, status: string | null | undefined): boolean {
+  return status === "down" || (service.startsWith("vps.") && status === "degraded");
+}
+
+/**
+ * A row reports a process that is up. A VPS unit is up only when its reporter
+ * says "healthy"; its bounded oneshot timers (inbox sweep, audit PDF, Meet)
+ * report a timer and a last result, not a running process, so they never make
+ * an agent alive on their own. A computer row is up unless it says down or the
+ * operator stopped it.
+ */
+function processIsUp(service: string, status: string | null | undefined, metadata: unknown): boolean {
+  if (service.startsWith("vps.")) return status === "healthy" && !VPS_ONESHOT_SERVICES.has(service);
   if (status === "down") return false;
   let meta: unknown = metadata;
   if (typeof meta === "string") {
@@ -210,6 +272,26 @@ export async function readLastJobs(tenantId: string, agents: readonly string[]):
   return out;
 }
 
+/**
+ * The agents owner's profile in this workspace: the only reporter whose
+ * computer rows (pm2.*) the fleet counts. Null when no owner is set or the
+ * owner has no profile here. Throws when a read fails.
+ */
+export async function readAgentsOwnerProfileId(tenantId: string): Promise<string | null> {
+  const owner = await readAgentsOwner(tenantId);
+  if (owner.state === "unavailable") throw new Error("fleet: agents owner read failed");
+  if (owner.state !== "set") return null;
+  const { data, error } = await getServiceSupabase()
+    .from("user_profiles")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", owner.authUserId)
+    .maybeSingle();
+  if (error) throw new Error(`fleet: user_profiles read failed: ${error.message}`);
+  const id = (data as { id?: string | null } | null)?.id;
+  return id ? String(id) : null;
+}
+
 /** The pairing that carried the freshest heartbeat among the agents, or null. PURE. */
 export function reportingPairingOf(states: ReadonlyArray<{ last_tick_at: string | null; reported_by_pairing_id?: string | null }>): string | null {
   let best: { at: number; id: string } | null = null;
@@ -227,10 +309,12 @@ export async function loadFleet(): Promise<Fleet> {
   const agents = [...OASIS_RUNTIME_AGENT_KEYS];
 
   const db = getServiceSupabase();
-  const [states, pings, lastJobs] = await Promise.all([
+  const [states, pings, lastJobs, ownerProfile] = await Promise.all([
     db.from("agent_state_snapshot").select("agent_name, tick_count, last_tick_at, reported_by_pairing_id").in("agent_name", agents),
+    // One tenant's health rows are a few dozen; filter to pm2.* and vps.* below
+    // rather than rely on an OR filter the data layer may not translate.
     tenantId
-      ? db.from("integrations_health").select("service, last_ping_at, status, metadata").eq("tenant_id", tenantId).like("service", "pm2.%")
+      ? db.from("integrations_health").select("service, last_ping_at, status, metadata, profile_id").eq("tenant_id", tenantId)
       : Promise.resolve({ data: [], error: null }),
     tenantId
       ? readLastJobs(tenantId, agents).catch((err: unknown) => {
@@ -238,10 +322,20 @@ export async function loadFleet(): Promise<Fleet> {
           return null;
         })
       : Promise.resolve(new Map<string, FleetJob>()),
+    // A failed owner read must say "unknown", not quietly drop every computer row.
+    tenantId
+      ? readAgentsOwnerProfileId(tenantId).then(
+          (id) => ({ ok: true as const, id }),
+          (err: unknown) => {
+            console.error("[os.fleet.owner_profile]", err instanceof Error ? err.message : String(err));
+            return { ok: false as const, id: null };
+          },
+        )
+      : Promise.resolve({ ok: true as const, id: null }),
   ]);
   if (states.error) console.error("[os.fleet.state_snapshot]", states.error.message);
   if (pings.error) console.error("[os.fleet.integrations_health]", pings.error.message);
-  const signalsKnown = !states.error && !pings.error;
+  const signalsKnown = !states.error && !pings.error && ownerProfile.ok;
   const stateRows = (states.data || []) as Array<{ agent_name: string; last_tick_at: string | null; tick_count: number | null; reported_by_pairing_id: string | null }>;
   const computer: FleetComputer | null | undefined = tenantId
     ? await readFleetComputer(tenantId, reportingPairingOf(stateRows)).catch((err: unknown) => {
@@ -255,7 +349,8 @@ export async function loadFleet(): Promise<Fleet> {
       ? fleetSignals(
           agents,
           stateRows,
-          (pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown }>,
+          ((pings.data || []) as Array<{ service: string; last_ping_at: string | null; status: string | null; metadata: unknown; profile_id: string | null }>)
+            .filter((row) => isFleetRow(row, ownerProfile.id)),
           Date.now(),
         )
       : new Map(),

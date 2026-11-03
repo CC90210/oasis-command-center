@@ -153,6 +153,53 @@ async function main(): Promise<void> {
     assert.equal(maven.downCount, 1, "a stale down row is not counted");
   });
 
+  await check("fleetSignals reads each agent's daemon-VPS units, so a powered-off computer is not a dead fleet", () => {
+    // 2026-11-02: Atlas and Maven poll from the VPS; their computer copies are
+    // retired and stopped. Reading only pm2.* made them quiet (red once the
+    // computer went silent) while both were running.
+    const signals = fleet.fleetSignals(["bravo", "atlas", "maven"], [], [
+      { service: "pm2.atlas-telegram", last_ping_at: ago(3 * 60 * MIN), status: "degraded", metadata: "{}" },
+      { service: "vps.atlas-telegram", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.maven-telegram", last_ping_at: ago(1 * MIN), status: "down", metadata: "{}" },
+      { service: "vps.oasis-scheduler", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-telegram-bridge", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+    ], NOW);
+    assert.equal(signals.get("atlas")?.live, true, "Atlas's VPS unit is its running process");
+    assert.equal(signals.get("atlas")?.processCount, 2, "its retired computer row is still counted, as stale");
+    assert.equal(signals.get("maven")?.live, false);
+    assert.equal(signals.get("maven")?.downCount, 1, "a fresh VPS down row still turns the agent red");
+    assert.deepEqual([signals.get("bravo")?.live, signals.get("bravo")?.runningCount], [true, 2],
+      "Bravo's services are the vps.oasis-* units");
+    const silentPc = { label: "CCPC (Windows)", lastSeenAt: ago(3 * 60 * MIN) };
+    assert.equal(fleet.fleetLiveness(signals.get("atlas"), silentPc, NOW), "green", "the computer being off does not redden a cloud agent");
+    assert.deepEqual(fleet.processPrefixesFor("atlas"), ["pm2.atlas-", "vps.atlas-"]);
+  });
+
+  await check("a fresh VPS failure wins; restart loops and idle timers are not running processes (CodeRabbit #797)", () => {
+    const pc = { label: "CCPC (Windows)", lastSeenAt: ago(1 * MIN) };
+    const mixed = fleet.fleetSignals(["bravo"], [{ agent_name: "bravo", last_tick_at: ago(1 * MIN), tick_count: 3 }], [
+      { service: "vps.oasis-telegram-bridge", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-scheduler", last_ping_at: ago(1 * MIN), status: "down", metadata: "{}" },
+    ], NOW);
+    assert.equal(fleet.fleetLiveness(mixed.get("bravo"), pc, NOW), "red",
+      "one healthy unit and a fresh tick do not hide a dead scheduler");
+    const restarting = fleet.fleetSignals(["atlas"], [], [
+      { service: "vps.atlas-telegram", last_ping_at: ago(1 * MIN), status: "degraded", metadata: "{}" },
+    ], NOW).get("atlas")!;
+    assert.deepEqual([restarting.live, restarting.downCount], [false, 1], "activating/auto-restart is failing, not running");
+    const timersOnly = fleet.fleetSignals(["bravo"], [], [
+      { service: "vps.oasis-inbox-sweep", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+      { service: "vps.oasis-meet-runner", last_ping_at: ago(1 * MIN), status: "healthy", metadata: "{}" },
+    ], NOW).get("bravo")!;
+    assert.deepEqual([timersOnly.live, timersOnly.runningCount, timersOnly.processCount], [false, 0, 2],
+      "a oneshot timer's last good result is not a running process");
+    const operatorStopped = fleet.fleetSignals(["maven"], [], [
+      { service: "pm2.maven-telegram", last_ping_at: ago(1 * MIN), status: "degraded", metadata: JSON.stringify({ pm2_status: "disabled by operator" }) },
+    ], NOW).get("maven")!;
+    assert.deepEqual([operatorStopped.live, operatorStopped.downCount], [false, 0],
+      "a computer row the operator stopped is neither running nor a failure");
+  });
+
   await check("parseAgentTicks accepts only well-formed house-agent ticks", () => {
     const good = { agent: "Bravo", last_tick_at: ago(1 * MIN), tick_count: 96, health: "green" };
     assert.deepEqual(ticks.parseAgentTicks(undefined, NOW), []);
@@ -279,6 +326,41 @@ async function main(): Promise<void> {
     const none = await ping(ownerToken, {});
     assert.equal(none.status, 200);
     assert.equal(none.json.agent_ticks_recorded, 0);
+  });
+
+  await check("the ping: a paired computer cannot write a VPS unit's row (CodeRabbit #797)", async () => {
+    const res = await ping(ownerToken, { services: {
+      "vps.oasis-scheduler": { status: "healthy" },
+      "pm2.claude-bridge": { status: "healthy" },
+    } });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const rows = (await db.execute("SELECT service FROM integrations_health WHERE service IN ('vps.oasis-scheduler','pm2.claude-bridge')")).rows
+      .map((r) => r.service);
+    assert.deepEqual(rows, ["pm2.claude-bridge"], "the reserved vps.* namespace is refused; the rest of the heartbeat lands");
+  });
+
+  await check("isFleetRow: only the signed VPS reporter's rows count, and retired computer copies never do", () => {
+    const signed = JSON.stringify({ via: "vps-heartbeat", host: "oasis-daemon-1" });
+    const owner = `p-${OWNER}`;
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: signed }, owner), true);
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram", metadata: "{}" }, owner), false, "no VPS marker");
+    assert.equal(fleet.isFleetRow({ service: "vps.atlas-telegram",
+      metadata: JSON.stringify({ via: "vps-heartbeat", _reported_by: "paired_bridge" }) }, owner), false,
+      "a computer's report that copies the VPS marker is still a computer's report");
+    assert.equal(fleet.isFleetRow({ service: "pm2.atlas-telegram", metadata: "{}", profile_id: owner }, owner), false, "retired computer copy");
+    assert.equal(fleet.isFleetRow({ service: "pm2.claude-bridge", metadata: "{}", profile_id: owner }, owner), true);
+    assert.equal(fleet.isFleetRow({ service: "vercel", metadata: "{}" }, owner), false);
+  });
+
+  await check("isFleetRow: a computer row counts only from the agents owner's profile (CodeRabbit #797)", async () => {
+    const owner = await fleet.readAgentsOwnerProfileId(OASIS);
+    assert.equal(owner, `p-${OWNER}`);
+    assert.equal(await fleet.readAgentsOwnerProfileId(CLIENT), `p-${CLIENT_OWNER}`, "each workspace has its own owner");
+    const memberDown = { service: "pm2.atlas-anything", metadata: "{}", profile_id: `p-${MEMBER}` };
+    assert.equal(fleet.isFleetRow(memberDown, owner), false, "a member's computer cannot redden Atlas");
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: owner }, owner), true);
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: owner }, null), false, "no owner: no computer row counts");
+    assert.equal(fleet.isFleetRow({ ...memberDown, profile_id: null }, owner), false, "an unattributed row is nobody's");
   });
 
   console.log(`fleet-liveness: ${passed} passed, ${failed} failed`);

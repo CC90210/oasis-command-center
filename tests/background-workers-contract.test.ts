@@ -50,6 +50,9 @@ const retiredByPlan = [
   "pm2.bravo-telegram",
   "pm2.dashboard-email-consumer",
   "pm2.dashboard-email-queue-monitor",
+  // Retired 2026-11-02 once their VPS units were verified polling.
+  "pm2.atlas-telegram",
+  "pm2.maven-telegram",
 ] as const;
 for (const service of retiredByPlan) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
@@ -61,15 +64,13 @@ for (const service of retiredByPlan) {
   assert.match(worker.not_expected_here ?? "", /^Retired by plan\b/);
   assert.equal(controllableOasisWorker(service), null, `${service} must fail closed in the control allowlist`);
 }
-// Verified 2026-11-01: these five still run on this computer, so the board must count
+// Verified 2026-11-02: these three still run on this computer, so the board must count
 // them with live status and the existing local control path. Retiring a
 // running process on the board is how it showed 2 workers while 8 ran.
 for (const service of [
   "pm2.claude-bridge",
   "pm2.claude-bridge-ping",
   "pm2.event-router",
-  "pm2.atlas-telegram",
-  "pm2.maven-telegram",
 ] as const) {
   const worker = OASIS_WORKERS.find((candidate) => candidate.service === service);
   assert.ok(worker, `${service} must remain visible as an active local service`);

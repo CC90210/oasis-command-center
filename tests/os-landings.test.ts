@@ -212,8 +212,9 @@ async function main() {
       status TEXT);
     CREATE TABLE agent_state_snapshot (agent_name TEXT PRIMARY KEY, tick_count INTEGER, last_tick_at TEXT,
       working_memory TEXT, health_status TEXT, reported_by_pairing_id TEXT);
-    CREATE TABLE integrations_health (id TEXT PRIMARY KEY, tenant_id TEXT, service TEXT, status TEXT,
+    CREATE TABLE integrations_health (id TEXT PRIMARY KEY, tenant_id TEXT, profile_id TEXT, service TEXT, status TEXT,
       last_ping_at TEXT, metadata TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE workspace_agents_owner (tenant_id TEXT PRIMARY KEY, auth_user_id TEXT, revoked_at TEXT);
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT, created_at TEXT, updated_at TEXT);
   `);
@@ -279,13 +280,18 @@ async function main() {
       event("e-client", CLIENT, "bravo", "BRAVO_RECORD_CREATED", { note: "CLIENT-MARKER" }),
       event("e-unstamped", null, "bravo", "BRAVO_RECORD_CREATED", { note: "UNSTAMPED-MARKER" }),
       { sql: "INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at) VALUES ('bravo', 41, ?)", args: [iso(2 * MINUTE)] },
-      // Running comes from the agent's processes (pm2.<agent>-*), not its tick
-      // (2026-09-30): bravo's scheduler checked in 2 minutes ago, atlas's
-      // Telegram bridge an hour ago, and maven never reported.
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-1', ?, 'pm2.bravo-scheduler', 'healthy', ?)", args: [OASIS, iso(2 * MINUTE)] },
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-2', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [OASIS, iso(60 * MINUTE)] },
+      // Running comes from the agent's processes, not its tick (2026-09-30).
+      // Since the 2026-11-02 cloud cutover those are the signed VPS units:
+      // bravo's scheduler checked in 2 minutes ago, atlas's Telegram unit an
+      // hour ago, and maven never reported.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-1', ?, 'vps.oasis-scheduler', 'healthy', ?, ?)", args: [OASIS, iso(2 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-2', ?, 'vps.atlas-telegram', 'healthy', ?, ?)", args: [OASIS, iso(60 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
       // Another workspace's fresh ping for the same process must not light OASIS's fleet.
-      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-3', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [CLIENT, iso(1 * MINUTE)] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata) VALUES ('ih-3', ?, 'vps.atlas-telegram', 'healthy', ?, ?)", args: [CLIENT, iso(1 * MINUTE), JSON.stringify({ via: "vps-heartbeat" })] },
+      // A workspace member's computer may ping; its fresh "down" for a Maven-named
+      // process must not count, because only the agents owner's computer rows do (CodeRabbit #797).
+      { sql: "INSERT INTO workspace_agents_owner (tenant_id, auth_user_id) VALUES (?, ?)", args: [OASIS, USERS.cc.id] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, profile_id, service, status, last_ping_at, metadata) VALUES ('ih-4', ?, 'p-worker', 'pm2.maven-anything', 'down', ?, '{}')", args: [OASIS, iso(1 * MINUTE)] },
       // Pipeline: one paid client with a project and an open ticket, one lost deal.
       lead("lead-won", { stage: "in_build", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test", last_contacted_at: iso(3 * 24 * 60 * MINUTE) }),
       lead("lead-lost", { stage: "lost", company: "Gone Co", email: "x@gone.test" }),
@@ -512,6 +518,9 @@ async function main() {
       assert.equal(fleetProp.signals.get("atlas")?.live, false, "atlas's only process last checked in an hour ago; another workspace's ping does not count");
       assert.equal(fleetProp.signals.get("atlas")?.processCount, 1);
     }
+    const maven = fleetProp.signals.get("maven") as { processCount: number; downCount: number } | undefined;
+    assert.equal(maven?.processCount, 0, "a member's computer row is not Maven's process");
+    assert.equal(maven?.downCount, 0, "and its fresh down cannot redden Maven");
   });
   await check("/admin + /admin/agents: requireOperator() is the first statement", () => {
     assert.equal(firstStatement("app/admin/page.tsx"), "await requireOperator();");

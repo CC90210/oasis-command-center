@@ -95,6 +95,7 @@ async function main() {
   await createSchema();
   const { getTenantBridgeStatus, getBridgeOnline, getOnlineBridgeComputerLabels } = await import("../lib/queries");
   const { loadMachines, describeBackground, LOCAL_OASIS_WORKERS } = await import("../lib/admin/attention");
+  const { OASIS_WORKERS } = await import("../lib/automations/oasis-workers");
   const { loadSystemHealth } = await import("../lib/admin/system-health");
   const cliStatus = await import("../lib/bridge-cli-status");
   const { appStatusLines } = await import("../components/settings/YourComputersCard");
@@ -208,21 +209,30 @@ async function main() {
     const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
     assert.ok(!LOCAL_OASIS_WORKERS.some(w => w.service === "pm2.bravo-scheduler"),
       "the retired local scheduler must not create a Windows dependency");
-    assert.ok(["pm2.atlas-telegram", "pm2.maven-telegram"].every(service =>
+    assert.ok(!["pm2.atlas-telegram", "pm2.maven-telegram"].some(service =>
       LOCAL_OASIS_WORKERS.some(w => w.service === service)),
-      "the bots remain watched locally until their cloud cutover is verified");
+      "the bots poll from the VPS since 2026-11-02; their computer copies are retired, not watched");
     assert.ok(result.workers?.filter(w => !w.service.startsWith("vps.")).every(w => w.state === "stale"),
       "local tiles still say they stopped reporting");
     assert.ok(result.workers?.filter(w => w.service.startsWith("vps.")).every(w => w.state === "no_report"),
       "the offline computer cannot invent a status for an unreported cloud service");
-    assert.equal(result.workersDown, 2,
-      "Atlas and Maven still depend on this computer until their actual cloud cutovers; optional local workers do not count");
-    const optionalOnly = new Map(workerRows);
-    for (const service of ["pm2.atlas-telegram", "pm2.maven-telegram"]) {
-      optionalOnly.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    assert.equal(result.workersDown, 0,
+      "every remaining computer worker is optional: stale local chat, heartbeat and activity tiles are not an outage");
+    // CodeRabbit #797: the VPS endpoint accepts partial lists. A reporter that
+    // vouched for some units but not the bots cannot produce an all-clear.
+    const remote = OASIS_WORKERS.filter((x) => x.runtime === "remote");
+    const partial = new Map(workerRows);
+    for (const w of remote.filter((x) => !/^vps\.(atlas|maven)-/.test(x.service))) {
+      partial.set(w.service, { service: w.service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
     }
-    assert.equal(describeBackground(optionalOnly, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
-      "stale optional local chat, heartbeat and activity workers do not invent an outage");
+    assert.equal(describeBackground(partial, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, null,
+      "unreported cloud bots beside reported units: unknown, not 0");
+    const complete = new Map(partial);
+    for (const service of ["vps.atlas-telegram", "vps.maven-telegram"]) {
+      complete.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
+    }
+    assert.equal(describeBackground(complete, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
+      "a complete healthy VPS report with the computer off is a real all-clear");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.
     const blindRows = new Map(workerRows);
