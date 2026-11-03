@@ -56,7 +56,8 @@ export type PairingRefusal =
   | { ok: false; status: 401; error: "missing_bearer" }
   | { ok: false; status: 401; error: "unknown_token" }
   | { ok: false; status: 403; error: "pairing_revoked" }
-  | { ok: false; status: 403; error: "token_reused_after_rotation" };
+  | { ok: false; status: 403; error: "token_reused_after_rotation" }
+  | { ok: false; status: 503; error: "pairing_lookup_unavailable" };
 
 /** A replaced token used again, outside the grace window, still answers for
  *  this: 60 s covers a computer that rotated and is a couple of requests
@@ -144,8 +145,13 @@ export async function resolvePairingFromBearer(
     .eq("bridge_token_hash", tokenHash)
     .maybeSingle();
   if (current.error) {
+    // A failed read proves nothing about the token. Answering 401 unknown_token
+    // here told the VPS bridge its token was dead during a database blip
+    // (2026-11-02 22:00Z): it deleted the token, re-paired, and the re-pair
+    // cleared the owner's approval, so the VPS stopped taking any work. A 503
+    // is "try again": bridges retry it and keep their token.
     console.error("[bridge.pairing-auth] lookup failed", current.error.message);
-    return { ok: false, status: 401, error: "unknown_token" };
+    return { ok: false, status: 503, error: "pairing_lookup_unavailable" };
   }
   if (current.data) {
     const row = current.data as PairingRow;
@@ -164,7 +170,11 @@ export async function resolvePairingFromBearer(
     .select(`${PAIRING_COLUMNS}, token_rotated_at`)
     .eq("previous_token_hash", tokenHash)
     .maybeSingle();
-  if (prior.error || !prior.data) return { ok: false, status: 401, error: "unknown_token" };
+  if (prior.error) {
+    console.error("[bridge.pairing-auth] prior-token lookup failed", prior.error.message);
+    return { ok: false, status: 503, error: "pairing_lookup_unavailable" };
+  }
+  if (!prior.data) return { ok: false, status: 401, error: "unknown_token" };
   const priorRow = prior.data as PairingRow;
   if (priorRow.revoked_at) return { ok: false, status: 403, error: "pairing_revoked" };
 

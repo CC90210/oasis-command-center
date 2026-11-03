@@ -11,7 +11,11 @@ export const TELEGRAM_UPDATE_MAX_BYTES = 32 * 1024;
 export const TELEGRAM_JOB_MAX_BYTES = 16 * 1024;
 export const TELEGRAM_TEXT_MAX = 4096;
 export const TELEGRAM_REPLY_MAX = 4000;
-export const NO_PAIRED_COMPUTER_REPLY = "No paired computer is online right now.";
+// Says what to do, not only what failed (2026-11-02: the VPS lost its approval
+// and CC only saw "No paired computer is online right now.").
+export const NO_PAIRED_COMPUTER_REPLY =
+  "I couldn't answer: the computer chosen for my chats isn't taking work right now. " +
+  "Open Command Center › Settings › Your computers, then approve it or bring it back online.";
 
 export const OASIS_TELEGRAM_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 

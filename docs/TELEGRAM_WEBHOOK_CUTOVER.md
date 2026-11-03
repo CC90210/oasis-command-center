@@ -19,9 +19,10 @@ SunBiz link-code route at `/api/telegram/webhook`.
 
 The route accepts text from the configured private CC chat only. It resolves
 the OASIS agents owner and the workspace's exact saved computer pairing, then
-queues a `department_task_v2` run with API fallback forced off. A missing or
-offline exact pairing gets the fixed reply `No paired computer is online right
-now.`
+queues a `department_task_v2` run with API fallback forced off. A missing,
+offline or unapproved exact pairing gets the fixed reply
+`NO_PAIRED_COMPUTER_REPLY` (`lib/telegram/protocol.ts`), which tells CC to open
+Settings › Your computers and approve the computer or bring it back online.
 
 ## Single-consumer cutover
 
