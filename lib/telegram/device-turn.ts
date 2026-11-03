@@ -14,20 +14,26 @@ export type TelegramDeviceTurnResult =
   | { outcome: "retry"; reason: string };
 
 type DeviceEngine = Exclude<AgentEngineChoice, { kind: "api" }>;
-const OASIS_TELEGRAM_CLI_ENGINES = ["codex", "opencode"] as const satisfies readonly CliEngine[];
+const OASIS_TELEGRAM_CLI_ENGINES = ["claude", "codex", "opencode"] as const satisfies readonly CliEngine[];
 type OasisTelegramCliEngine = DeviceEngine & {
   kind: "cli";
   cli: (typeof OASIS_TELEGRAM_CLI_ENGINES)[number];
 };
 
-/** Telegram may use only the two signed-in engines CC still operates. */
+/**
+ * Telegram runs on a signed-in AI app on the exact saved computer: Claude Code,
+ * Codex or OpenCode. Never an API key, a local model or an unknown engine.
+ *
+ * Claude was left out on 2026-11-01, when CC's Claude plan had been cancelled.
+ * Hours later CC signed the daemon VPS into Claude and saved that as the agents'
+ * engine (07:44Z), and Claude Code is the only app that VPS runs. Every Bravo
+ * message was then refused as an "engine Telegram can't use", while Atlas and
+ * Maven answered on the same Claude sign-in (CC, 2026-11-03).
+ */
 export function isOasisTelegramDeviceEngine(engine: unknown): engine is OasisTelegramCliEngine {
   if (!engine || typeof engine !== "object" || Array.isArray(engine)) return false;
   const candidate = engine as { kind?: unknown; cli?: unknown };
-  return candidate.kind === "cli" && (
-    candidate.cli === OASIS_TELEGRAM_CLI_ENGINES[0] ||
-    candidate.cli === OASIS_TELEGRAM_CLI_ENGINES[1]
-  );
+  return candidate.kind === "cli" && (OASIS_TELEGRAM_CLI_ENGINES as readonly unknown[]).includes(candidate.cli);
 }
 
 export type TelegramDeviceContext = {
