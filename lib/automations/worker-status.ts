@@ -207,6 +207,8 @@ export function formatLastSeen(iso: string, now: Date = new Date()): string {
 
 /** The bridge's own report on whether it could read the worker fleet. */
 export const FLEET_REPORTER_SERVICE = "fleet_watchdog";
+/** A powered-off computer is not evidence that its broken reporter recovered. */
+export const WORKER_REPORTER_OFFLINE_REASON = "operator computer offline; reporter not expected";
 
 /** The authenticated pairing which last wrote fleet_watchdog, stamped by the server. */
 export const REPORTER_PAIRING_ID_KEY = "_source_pairing_id";

@@ -21,6 +21,7 @@ import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
+import { WORKER_REPORTER_OFFLINE_REASON } from "@/lib/automations/worker-status";
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
@@ -251,6 +252,10 @@ export async function runHealthChecks(
       | null;
 
     if (result.verdict === "ok") {
+      // A PC being off makes its local reporter not applicable; it does not
+      // prove an earlier reporting outage recovered. Keep that episode open
+      // until the same paired computer comes back with a healthy report.
+      if (result.id === `fleet.worker_status_reporter` && result.reason === WORKER_REPORTER_OFFLINE_REASON) continue;
       // Announce recovery once, then clear the episode so the next failure
       // starts a fresh ladder rather than inheriting a 24h window.
       if (state?.first_failed_at) {

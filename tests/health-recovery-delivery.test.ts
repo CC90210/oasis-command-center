@@ -33,6 +33,7 @@ import { pendingRecoveryLanes, runHealthChecks } from "../lib/health/runner";
 import { DEPLOY_CHECKS } from "../lib/health/deploy-checks";
 import { evaluate } from "../lib/health/checks-core";
 import { healthAlertStateKey } from "../lib/health/alert-state-key";
+import { WORKER_REPORTER_OFFLINE_REASON } from "../lib/automations/worker-status";
 
 const RUNNER = readFileSync("lib/health/runner.ts", "utf8");
 
@@ -369,6 +370,37 @@ async function main() {
     assert.deepEqual(delivered, ["operator"]); assert.equal(summary.failedAlerts, 1);
     assert.equal(memory.states.get(key)?.last_signature, "recovery-pending:operator");
     assert.equal(memory.runRows.filter(row => row.check_id === "alerting.telegram_delivery").length, 1);
+  }
+
+  // The operator turning off the computer is not a recovery from a reporter
+  // failure. The alert episode remains open until that computer reports again.
+  {
+    const tenant = "22222222-2222-4222-8222-222222222222";
+    const memory = tenantIsolationDb();
+    const id = "fleet.worker_status_reporter";
+    const key = healthAlertStateKey(tenant, id);
+    memory.states.set(key, { alert_key: key, tenant_id: tenant,
+      last_signature: "fleet.worker_status_reporter:failing", last_alerted_at: new Date(NOW).toISOString(),
+      repeat_n: 0, first_failed_at: new Date(NOW - 60_000).toISOString(), updated_at: new Date(NOW).toISOString() });
+    let offline = true;
+    const check = { id, severity: "high" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => 0,
+      observeDetailed: async () => ({ observed: 0, reason: offline ? WORKER_REPORTER_OFFLINE_REASON : "none observed" }),
+      describe: () => "worker reporter is healthy" };
+    const messages: string[] = [];
+    const send = async (message: string) => { messages.push(message); return { ok: true }; };
+    const paused = await runHealthChecks(tenant, { checks: [check], db: memory.db as never,
+      nowMs: NOW, sendTelegramImpl: send as never });
+    assert.deepEqual(paused.recovered, []);
+    assert.deepEqual(messages, []);
+    assert.ok(memory.states.get(key)?.first_failed_at, "offline did not clear the failure episode");
+    offline = false;
+    const restored = await runHealthChecks(tenant, { checks: [check], db: memory.db as never,
+      nowMs: NOW + 60_000, sendTelegramImpl: send as never });
+    assert.deepEqual(restored.recovered, [id]);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /worker reporter is healthy/);
+    assert.equal(memory.states.get(key)?.first_failed_at, null);
   }
 
   {

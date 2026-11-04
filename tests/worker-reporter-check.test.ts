@@ -9,6 +9,7 @@ import { WORKER_REPORTER_CHECKS } from "../lib/health/worker-reporter-checks";
 import { evaluate } from "../lib/health/checks-core";
 import { recoveryDetail } from "../lib/health/runner";
 import { pickLocalWorkerPairing } from "../lib/automations/worker-status";
+import { WORKER_REPORTER_OFFLINE_REASON } from "../lib/automations/worker-status";
 
 const check = WORKER_REPORTER_CHECKS[0];
 const NOW = Date.parse("2026-09-24T12:00:00Z");
@@ -87,6 +88,10 @@ async function run() {
     ),
     0,
   );
+  assert.equal((await check.observeDetailed!(
+    fakeDb({ pairing: [{ id: "win", last_seen_at: minutesAgo(60) }], reporter: [{ status: "healthy", last_ping_at: minutesAgo(60) }] }),
+    "t", NOW,
+  )).reason, WORKER_REPORTER_OFFLINE_REASON);
   // Daemon VPS (`oasis-daemon-1 (Linux)`) and Mac online while CCPC (Windows) is off →
   // not this check's alarm (neither Linux nor Mac runs the Windows fleet_watchdog).
   assert.equal(
