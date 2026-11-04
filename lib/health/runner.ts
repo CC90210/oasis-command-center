@@ -145,6 +145,24 @@ function esc(s: string): string {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * Plain-English second line for a RECOVERED Telegram notice.
+ *
+ * `evaluate()` sets `reason: "none observed"` on every `must_be_zero` check
+ * that does not use `observeDetailed`, so Telegram previously received
+ * `🟢 RECOVERED — fleet.worker_status_reporter\nnone observed`. Checks with an
+ * `observed === 0` branch in `describe()` (worker-reporter, calendar, deploy)
+ * already have a human recovery sentence; count-based checks whose `describe()`
+ * templates `"${r.observed} ... did NOT arrive"` start with `"0 "` and get a
+ * clean all-clear line instead.
+ */
+export function recoveryDetail(check: Pick<DripCheck, "describe">, result: CheckResult): string {
+  if (result.reason !== "none observed") return result.reason;
+  const described = check.describe(result).trim();
+  if (described && !/^0\b/.test(described)) return described;
+  return "Back to normal (0 issues observed).";
+}
+
 export type RunSummary = {
   ran: number;
   results: CheckResult[];
@@ -247,9 +265,10 @@ export async function runHealthChecks(
         // the original alert. Do not re-page audiences that already accepted it.
         const owed = (pendingRecoveryLanes(state.last_signature) ?? currentLanes).filter(lane => currentLanes.includes(lane));
         const stillOwed: TelegramLane[] = [];
+        const recoveryLine = recoveryDetail(check, result);
         for (const lane of owed) {
           const r = await send(
-            `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
+            `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(recoveryLine)}`,
             { lane },
           ).catch(() => ({ ok: false }));
           if (!r.ok) stillOwed.push(lane);

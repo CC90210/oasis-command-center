@@ -46,6 +46,7 @@ import {
   FLEET_REPORTER_SERVICE,
   SUPERVISOR_DISABLED,
   describeStatusReporter,
+  pickLocalWorkerPairing,
   reportedWorkerStatus,
   type StatusReporter,
 } from "@/lib/automations/worker-status";
@@ -224,7 +225,7 @@ export function describeBackground(
   if (tenantId !== WEBDEV_TENANT_ID) return { workers: [], reporter: null, workersDown: 0 };
   if (viewer && !viewer.isAgentsOwner) return { workers: [], reporter: null, workersDown: 0 };
   if (workerRows === null) return { workers: null, reporter: null, workersDown: null };
-  const pc = machines?.[0] ?? null;
+  const pc = pickLocalWorkerPairing(machines);
   const reporterRow = workerRows.get(FLEET_REPORTER_SERVICE);
   const reporter = describeStatusReporter({
     row: reporterRow

@@ -60,6 +60,7 @@ import type {
 import {
   FLEET_REPORTER_SERVICE,
   describeStatusReporter,
+  pickLocalWorkerPairing,
   reportedWorkerStatus,
   resolveWorkerControlMode,
   selectWorkerInventory,
@@ -178,14 +179,13 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   // pairing is not a person's computer, so it keeps the workspace-wide query.
   let pairingQuery = db
     .from("bridge_pairings")
-    .select("last_seen_at")
+    .select("label, last_seen_at")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null);
   if (isOasis) pairingQuery = pairingQuery.eq("user_id", session.userId);
   const pairing = await pairingQuery
     .order("last_seen_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(10);
   if (pairing.error) {
     console.error("[background-workers] bridge pairing health read failed", pairing.error);
     return NextResponse.json(
@@ -197,7 +197,9 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       { status: 503 },
     );
   }
-  const lastSeenAt = (pairing.data as { last_seen_at: string | null } | null)?.last_seen_at ?? null;
+  const pairingRows = (pairing.data as Array<{ label?: string | null; last_seen_at: string | null }> | null) ?? [];
+  const chosenPairing = isOasis ? pickLocalWorkerPairing(pairingRows) : (pairingRows[0] ?? null);
+  const lastSeenAt = chosenPairing?.last_seen_at ?? null;
   // The one online rule every screen uses (lib/devices/presence.ts).
   const bridgeOnline = isOnline(lastSeenAt, Date.now());
 

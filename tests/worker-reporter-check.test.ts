@@ -6,6 +6,9 @@
 
 import assert from "node:assert/strict";
 import { WORKER_REPORTER_CHECKS } from "../lib/health/worker-reporter-checks";
+import { evaluate } from "../lib/health/checks-core";
+import { recoveryDetail } from "../lib/health/runner";
+import { pickLocalWorkerPairing } from "../lib/automations/worker-status";
 
 const check = WORKER_REPORTER_CHECKS[0];
 const NOW = Date.parse("2026-09-24T12:00:00Z");
@@ -72,6 +75,56 @@ async function run() {
       NOW,
     ),
     0,
+  );
+  // Daemon VPS (`oasis-daemon-1 (Linux)`) and Mac online while CCPC (Windows) is off →
+  // not this check's alarm (neither Linux nor Mac runs the Windows fleet_watchdog).
+  assert.equal(
+    await check.observe(
+      fakeDb({
+        pairing: [
+          { label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.2) },
+          { label: "192.168.11.27 (Mac)", last_seen_at: minutesAgo(0.4) },
+          { label: "CCPC (Windows)", last_seen_at: minutesAgo(60) },
+        ],
+        reporter: [{ status: "healthy", last_ping_at: minutesAgo(60) }],
+      }),
+      "t",
+      NOW,
+    ),
+    0,
+  );
+  // CCPC (Windows) online behind the VPS pairing, with a stale fleet report → silent (2).
+  assert.equal(
+    await check.observe(
+      fakeDb({
+        pairing: [
+          { label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.1) },
+          { label: "CCPC (Windows)", last_seen_at: minutesAgo(0.5) },
+        ],
+        reporter: [{ status: "healthy", last_ping_at: minutesAgo(30) }],
+      }),
+      "t",
+      NOW,
+    ),
+    2,
+  );
+  assert.deepEqual(
+    pickLocalWorkerPairing([
+      { label: "oasis-daemon-1 (Linux)", id: "vps" },
+      { label: "CC's MacBook Pro (Mac)", id: "mac" },
+      { label: "CCPC (Windows)", id: "win" },
+    ]),
+    { label: "CCPC (Windows)", id: "win" },
+  );
+  // Recovery wording uses check.describe(ok) instead of raw "none observed".
+  const okResult = evaluate(check.id, check.rule, 0, []);
+  assert.equal(
+    recoveryDetail(check, okResult),
+    "background-worker status is reaching the dashboard (or the bridge is offline, which its own banner reports).",
+  );
+  assert.equal(
+    recoveryDetail({ describe: (r) => `${r.observed} SMS rejected by the carrier` }, okResult),
+    "Back to normal (0 issues observed).",
   );
   // A failed read is check_broken (null), never a quiet OK.
   assert.equal(await check.observe(fakeDb({ pairing: online, reporter: [], error: true }), "t", NOW), null);

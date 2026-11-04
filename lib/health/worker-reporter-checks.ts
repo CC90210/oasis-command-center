@@ -19,7 +19,11 @@
 import "server-only";
 import type { DripCheck } from "./drip-checks";
 import { isProductionRuntime } from "./runtime-environment";
-import { FLEET_REPORTER_SERVICE, describeStatusReporter } from "@/lib/automations/worker-status";
+import {
+  FLEET_REPORTER_SERVICE,
+  describeStatusReporter,
+  pickLocalWorkerPairing,
+} from "@/lib/automations/worker-status";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { isOnline } from "@/lib/devices/presence";
 
@@ -40,11 +44,11 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
     if (!isProductionRuntime()) return OK;
     const [pairing, reporter] = await Promise.all([
       db.from("bridge_pairings")
-        .select("last_seen_at")
+        .select("label, last_seen_at")
         .eq("tenant_id", WEBDEV_TENANT_ID)
         .is("revoked_at", null)
         .order("last_seen_at", { ascending: false })
-        .limit(1),
+        .limit(10),
       db.from("integrations_health")
         .select("status, metadata, last_ping_at")
         .eq("tenant_id", WEBDEV_TENANT_ID)
@@ -54,8 +58,12 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
     ]);
     // A failed read is check_broken (null), never a quiet OK.
     if (pairing.error || reporter.error) return null;
-    // The one online rule every screen uses (lib/devices/presence.ts).
-    const bridgeOnline = isOnline(pairing.data?.[0]?.last_seen_at ?? null, endMs);
+    // Grade the computer that actually reports fleet_watchdog (CCPC), never the
+    // always-on daemon VPS (`oasis-daemon-1 (Linux)`) or Mac.
+    const localComputer = pickLocalWorkerPairing(
+      pairing.data as Array<{ label?: string | null; last_seen_at?: string | null }> | null,
+    );
+    const bridgeOnline = isOnline(localComputer?.last_seen_at ?? null, endMs);
     const row = reporter.data?.[0] as
       | { status: string; metadata: Record<string, unknown> | null; last_ping_at: string | null }
       | undefined;
