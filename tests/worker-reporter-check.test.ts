@@ -13,19 +13,30 @@ import { pickLocalWorkerPairing } from "../lib/automations/worker-status";
 const check = WORKER_REPORTER_CHECKS[0];
 const NOW = Date.parse("2026-09-24T12:00:00Z");
 
-type Rows = { pairing: unknown[] | null; reporter: unknown[] | null; error?: boolean };
+type Rows = { pairing: unknown[] | null; reporter: unknown[] | null; error?: boolean; sourceId?: string | null };
 
 /** Minimal stand-in for the two chained reads the check performs. */
 function fakeDb(rows: Rows) {
   return {
     from(table: string) {
-      const data = table === "bridge_pairings" ? rows.pairing : rows.reporter;
+      let data = table === "bridge_pairings" ? rows.pairing : rows.reporter?.map((item) => ({
+        ...(item as Record<string, unknown>),
+        metadata: {
+          ...((item as { metadata?: Record<string, unknown> }).metadata ?? {}),
+          ...(rows.sourceId === null ? {} : { _source_pairing_id: rows.sourceId ?? "win" }),
+        },
+      }));
       const chain = {
         select: () => chain,
-        eq: () => chain,
+        eq: (field: string, value: string) => {
+          if (table === "bridge_pairings" && field === "id") {
+            data = data?.filter((item) => (item as { id?: string }).id === value);
+          }
+          return chain;
+        },
         is: () => chain,
         order: () => chain,
-        limit: async () => ({ data, error: rows.error ? { message: "boom" } : null }),
+        limit: async (n: number) => ({ data: data?.slice(0, n), error: rows.error ? { message: "boom" } : null }),
       };
       return chain;
     },
@@ -36,7 +47,7 @@ const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
 
 async function run() {
   process.env.VERCEL_ENV = "production";
-  const online = [{ last_seen_at: minutesAgo(0.5) }];
+  const online = [{ id: "win", last_seen_at: minutesAgo(0.5) }];
 
   // Healthy reporter → 0.
   assert.equal(
@@ -70,7 +81,7 @@ async function run() {
   // Bridge itself offline → not this check's alarm.
   assert.equal(
     await check.observe(
-      fakeDb({ pairing: [{ last_seen_at: minutesAgo(60) }], reporter: [{ status: "healthy", last_ping_at: minutesAgo(60) }] }),
+      fakeDb({ pairing: [{ id: "win", last_seen_at: minutesAgo(60) }], reporter: [{ status: "healthy", last_ping_at: minutesAgo(60) }] }),
       "t",
       NOW,
     ),
@@ -82,9 +93,9 @@ async function run() {
     await check.observe(
       fakeDb({
         pairing: [
-          { label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.2) },
-          { label: "192.168.11.27 (Mac)", last_seen_at: minutesAgo(0.4) },
-          { label: "CCPC (Windows)", last_seen_at: minutesAgo(60) },
+          { id: "vps", label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.2) },
+          { id: "mac", label: "192.168.11.27 (Mac)", last_seen_at: minutesAgo(0.4) },
+          { id: "win", label: "CCPC (Windows)", last_seen_at: minutesAgo(60) },
         ],
         reporter: [{ status: "healthy", last_ping_at: minutesAgo(60) }],
       }),
@@ -98,8 +109,8 @@ async function run() {
     await check.observe(
       fakeDb({
         pairing: [
-          { label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.1) },
-          { label: "CCPC (Windows)", last_seen_at: minutesAgo(0.5) },
+          { id: "vps", label: "oasis-daemon-1 (Linux)", last_seen_at: minutesAgo(0.1) },
+          { id: "win", label: "CCPC (Windows)", last_seen_at: minutesAgo(0.5) },
         ],
         reporter: [{ status: "healthy", last_ping_at: minutesAgo(30) }],
       }),
@@ -113,9 +124,27 @@ async function run() {
       { label: "oasis-daemon-1 (Linux)", id: "vps" },
       { label: "CC's MacBook Pro (Mac)", id: "mac" },
       { label: "CCPC (Windows)", id: "win" },
-    ]),
+    ], "win"),
     { label: "CCPC (Windows)", id: "win" },
   );
+  // The operator can rename any device. A new Mac label, or ten newer remote
+  // pairings, cannot impersonate the Windows reporter's authenticated ID.
+  assert.deepEqual(
+    pickLocalWorkerPairing([
+      { label: "CC's laptop", id: "mac" },
+      ...Array.from({ length: 11 }, (_, i) => ({ label: "daemon", id: `remote-${i}` })),
+      { label: "Any name at all", id: "win" },
+    ], "win"),
+    { label: "Any name at all", id: "win" },
+  );
+  assert.equal(pickLocalWorkerPairing([{ label: "CCPC (Windows)", id: "win" }], null), null);
+  assert.equal(await check.observe(fakeDb({ pairing: online, reporter: [{ status: "healthy", last_ping_at: minutesAgo(1) }], sourceId: null }), "t", NOW), null,
+    "an unattributed reporter is unverified, never a false all-clear");
+  assert.equal(await check.observe(fakeDb({ pairing: [
+    ...Array.from({ length: 11 }, (_, i) => ({ id: `remote-${i}`, label: "My PC", last_seen_at: minutesAgo(0.1) })),
+    { id: "win", label: "CC's MacBook", last_seen_at: minutesAgo(0.5) },
+  ], reporter: [{ status: "healthy", last_ping_at: minutesAgo(30) }] }), "t", NOW), 2,
+    "filter by the authenticated ID before the database limit");
   // Recovery wording uses check.describe(ok) instead of raw "none observed".
   const okResult = evaluate(check.id, check.rule, 0, []);
   assert.equal(

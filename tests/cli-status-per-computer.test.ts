@@ -99,6 +99,20 @@ async function main() {
 
   await login(USERS.cc);
 
+  await check("worker reporter provenance is the bearer pairing, not client metadata or label", async () => {
+    const response = await pingRoute.POST(new NextRequest("https://oasisai.work/api/bridge/ping", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer win-token" },
+      body: JSON.stringify({ services: { fleet_watchdog: {
+        status: "healthy", metadata: { _source_pairing_id: MAC, workers_reported: 9 },
+      } } }),
+    }));
+    assert.equal(response.status, 200);
+    const saved = await db.execute({ sql: "SELECT metadata FROM integrations_health WHERE tenant_id = ? AND service = 'fleet_watchdog'", args: [OASIS] });
+    assert.equal(saved.rows.length, 1);
+    assert.equal(JSON.parse(String(saved.rows[0].metadata))._source_pairing_id, WIN);
+  });
+
   await check("two computers reporting different states both survive and render separately", async () => {
     assert.equal((await ping("win-token", READY)).status, 200);
     assert.equal((await ping("mac-token", SIGNED_OUT)).status, 200);

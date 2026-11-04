@@ -208,33 +208,26 @@ export function formatLastSeen(iso: string, now: Date = new Date()): string {
 /** The bridge's own report on whether it could read the worker fleet. */
 export const FLEET_REPORTER_SERVICE = "fleet_watchdog";
 
-/**
- * Pairings whose label names the daemon VPS or a Mac/Linux host that does not
- * run the Windows `fleet_watchdog` supervisor (`bravo_cli/local_bridge.py`).
- *
- * Until the daemon VPS (`oasis-daemon-1 (Linux)`) and Mac were paired,
- * `bridge_pairings` had only `CCPC (Windows)`, so "freshest pairing" and "the
- * computer that reports `fleet_watchdog` and `pm2.*`" were the same row. Once
- * `oasis-daemon-1 (Linux)` is always online, taking `pairings[0]` makes the
- * Windows PC read as online while it is powered off — which then marks
- * `fleet_watchdog` "silent" after 10 minutes and pages CC on Telegram.
- */
-const NON_LOCAL_WORKER_HOST_RE = /\b(?:oasis-daemon-1|Linux|Mac|Darwin)\b/i;
+/** The authenticated pairing which last wrote fleet_watchdog, stamped by the server. */
+export const REPORTER_PAIRING_ID_KEY = "_source_pairing_id";
 
-/**
- * Pick the freshest pairing that supervises local (`pm2.*`) workers and
- * reports `fleet_watchdog`. Rows without a label (older fixtures) remain
- * eligible so single-pairing callers behave unchanged. PURE.
- */
-export function pickLocalWorkerPairing<T extends { label?: string | null }>(
-  rows: readonly T[] | null | undefined,
-): T | null {
-  if (!rows || rows.length === 0) return null;
-  for (const row of rows) {
-    const label = typeof row.label === "string" ? row.label.trim() : "";
-    if (!label || !NON_LOCAL_WORKER_HOST_RE.test(label)) return row;
+export function reporterPairingId(metadata: unknown): string | null {
+  let value = metadata;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return null; }
   }
-  return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = (value as Record<string, unknown>)[REPORTER_PAIRING_ID_KEY];
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/** Never infer the reporter from a user-editable device label or list order. */
+export function pickLocalWorkerPairing<T extends { id?: string | null }>(
+  rows: readonly T[] | null | undefined,
+  pairingId: string | null,
+): T | null {
+  if (!pairingId) return null;
+  return rows?.find((row) => row.id === pairingId) ?? null;
 }
 
 export type StatusReporter = {

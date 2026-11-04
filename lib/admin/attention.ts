@@ -47,6 +47,7 @@ import {
   SUPERVISOR_DISABLED,
   describeStatusReporter,
   pickLocalWorkerPairing,
+  reporterPairingId,
   reportedWorkerStatus,
   type StatusReporter,
 } from "@/lib/automations/worker-status";
@@ -97,7 +98,7 @@ export function metadataObject(raw: unknown): Record<string, unknown> | null {
 // The one online rule every screen uses (lib/devices/presence.ts).
 export { machineState, type MachineState };
 
-export type PairedMachine = { label: string; lastSeenAt: string | null; state: MachineState };
+export type PairedMachine = { id: string; label: string; lastSeenAt: string | null; state: MachineState };
 
 /**
  * The workspace's paired computers, freshest first. Throws on a failed read.
@@ -116,7 +117,7 @@ export type PairedMachine = { label: string; lastSeenAt: string | null; state: M
  * (Codex, O3b -- the same bug class O2 already fixed for Automations).
  */
 export async function loadMachines(db: AdminDb, tenantId: string, now: number, viewer?: AttentionViewer): Promise<PairedMachine[]> {
-  let query = db.from("bridge_pairings").select("label, last_seen_at").eq("tenant_id", tenantId).is("revoked_at", null);
+  let query = db.from("bridge_pairings").select("id, label, last_seen_at").eq("tenant_id", tenantId).is("revoked_at", null);
   if (viewer?.authUserId) {
     // Spliced into an `.or()` filter string below: charset-allowlisted first,
     // not merely UUID-shaped (a legacy auth id in this codebase's own test
@@ -127,7 +128,8 @@ export async function loadMachines(db: AdminDb, tenantId: string, now: number, v
   }
   const r = await query.order("last_seen_at", { ascending: false });
   if (r.error) throw new Error(`bridge_pairings read failed: ${r.error.message}`);
-  return ((r.data || []) as Array<{ label: string | null; last_seen_at: string | null }>).map((p) => ({
+  return ((r.data || []) as Array<{ id: string; label: string | null; last_seen_at: string | null }>).map((p) => ({
+    id: p.id,
     label: p.label || "Unnamed computer",
     lastSeenAt: p.last_seen_at,
     state: machineState(p.last_seen_at, now),
@@ -225,10 +227,11 @@ export function describeBackground(
   if (tenantId !== WEBDEV_TENANT_ID) return { workers: [], reporter: null, workersDown: 0 };
   if (viewer && !viewer.isAgentsOwner) return { workers: [], reporter: null, workersDown: 0 };
   if (workerRows === null) return { workers: null, reporter: null, workersDown: null };
-  const pc = pickLocalWorkerPairing(machines);
   const reporterRow = workerRows.get(FLEET_REPORTER_SERVICE);
+  const sourceId = reporterPairingId(reporterRow?.metadata);
+  const pc = pickLocalWorkerPairing(machines, sourceId);
   const reporter = describeStatusReporter({
-    row: reporterRow
+    row: reporterRow && sourceId
       ? { status: reporterRow.status ?? "", metadata: metadataObject(reporterRow.metadata), last_ping_at: reporterRow.last_ping_at }
       : undefined,
     bridgeOnline: pc !== null && pc.state !== "offline",
@@ -236,7 +239,7 @@ export function describeBackground(
     staleMs: DAEMON_HEALTH_STALE_MS,
   });
   const workers = MONITORED_OASIS_WORKERS.map((w) => describeWorker(w, workerRows.get(w.service), now));
-  const blind = reporter.state === "failing" || reporter.state === "silent";
+  const blind = pc === null || reporter.state === "failing" || reporter.state === "silent";
   const down = workers.filter((w) => w.state === "down" || w.state === "stale");
   const localDown = down.filter((w) => !w.service.startsWith("vps.")).length;
   const remoteDown = down.length - localDown;

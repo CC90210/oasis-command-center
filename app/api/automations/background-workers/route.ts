@@ -61,6 +61,7 @@ import {
   FLEET_REPORTER_SERVICE,
   describeStatusReporter,
   pickLocalWorkerPairing,
+  reporterPairingId,
   reportedWorkerStatus,
   resolveWorkerControlMode,
   selectWorkerInventory,
@@ -169,40 +170,6 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     }
   }
 
-  // Bridge liveness — the heartbeat tells us when the bridge last pushed
-  // anything. Older than 2 minutes means daemon snapshots are stale.
-  //
-  // O2: for OASIS, scoped to the VIEWER'S OWN pairings, not the newest
-  // pairing in the workspace — only the agents owner reaches this line (the
-  // early return above), so this is CCPC specifically, but the query says so
-  // explicitly rather than relying on that gate never changing. SunBiz's VPS
-  // pairing is not a person's computer, so it keeps the workspace-wide query.
-  let pairingQuery = db
-    .from("bridge_pairings")
-    .select("label, last_seen_at")
-    .eq("tenant_id", tenantId)
-    .is("revoked_at", null);
-  if (isOasis) pairingQuery = pairingQuery.eq("user_id", session.userId);
-  const pairing = await pairingQuery
-    .order("last_seen_at", { ascending: false })
-    .limit(10);
-  if (pairing.error) {
-    console.error("[background-workers] bridge pairing health read failed", pairing.error);
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "bridge_health_unavailable",
-        message: "Automation health could not be verified. Refresh in a moment.",
-      },
-      { status: 503 },
-    );
-  }
-  const pairingRows = (pairing.data as Array<{ label?: string | null; last_seen_at: string | null }> | null) ?? [];
-  const chosenPairing = isOasis ? pickLocalWorkerPairing(pairingRows) : (pairingRows[0] ?? null);
-  const lastSeenAt = chosenPairing?.last_seen_at ?? null;
-  // The one online rule every screen uses (lib/devices/presence.ts).
-  const bridgeOnline = isOnline(lastSeenAt, Date.now());
-
   // integrations_health is keyed (profile_id, service). When the bridge
   // hasn't pushed (no profile_id, or no rows), fall back to "unconfigured".
   // The reporter row rides along with the workers it vouches for — see
@@ -267,6 +234,28 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       });
     }
   }
+
+  // Identify the local reporter by the pairing authenticated at write time,
+  // not an editable display label or a truncated list of newer devices.
+  const sourceId = isOasis ? reporterPairingId(healthMap.get(FLEET_REPORTER_SERVICE)?.metadata) : null;
+  let pairingRows: Array<{ id: string; last_seen_at: string | null }> = [];
+  if (!isOasis || sourceId) {
+    let pairingQuery = db.from("bridge_pairings")
+      .select("id, last_seen_at")
+      .eq("tenant_id", tenantId)
+      .is("revoked_at", null);
+    if (isOasis) pairingQuery = pairingQuery.eq("user_id", session.userId).eq("id", sourceId!);
+    const pairing = await pairingQuery.order("last_seen_at", { ascending: false }).limit(isOasis ? 1 : 10);
+    if (pairing.error) {
+      console.error("[background-workers] bridge pairing health read failed", pairing.error);
+      return NextResponse.json({ ok: false, error: "bridge_health_unavailable",
+        message: "Automation health could not be verified. Refresh in a moment." }, { status: 503 });
+    }
+    pairingRows = (pairing.data as Array<{ id: string; last_seen_at: string | null }> | null) ?? [];
+  }
+  const chosenPairing = isOasis ? pickLocalWorkerPairing(pairingRows, sourceId) : (pairingRows[0] ?? null);
+  const lastSeenAt = chosenPairing?.last_seen_at ?? null;
+  const bridgeOnline = isOnline(lastSeenAt, Date.now());
 
   const now = Date.now();
   const workers = workerSet.map((w) => {
@@ -409,7 +398,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     bridge_online: bridgeOnline,
     last_seen_at: lastSeenAt,
     status_reporter: describeStatusReporter({
-      row: healthMap.get(FLEET_REPORTER_SERVICE),
+      row: isOasis && !sourceId ? undefined : healthMap.get(FLEET_REPORTER_SERVICE),
       bridgeOnline,
       now,
       staleMs: DAEMON_HEALTH_STALE_MS,
