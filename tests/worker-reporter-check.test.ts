@@ -17,12 +17,17 @@ function fakeDb(rows: Rows) {
   return {
     from(table: string) {
       const data = table === "bridge_pairings" ? rows.pairing : rows.reporter;
+      const excluded: string[] = [];
       const chain = {
         select: () => chain,
         eq: () => chain,
         is: () => chain,
+        neq: (_column: string, value: string) => (excluded.push(value), chain),
         order: () => chain,
-        limit: async () => ({ data, error: rows.error ? { message: "boom" } : null }),
+        limit: async () => ({
+          data: Array.isArray(data) ? (data as Array<{ id?: string }>).filter((r) => !excluded.includes(String(r.id))) : data,
+          error: rows.error ? { message: "boom" } : null,
+        }),
       };
       return chain;
     },
@@ -73,6 +78,21 @@ async function run() {
     ),
     0,
   );
+  // The daemon VPS's always-online headless pairing is not this computer's
+  // bridge: with the PC off overnight the fleet report goes stale, and that is
+  // the offline computer, not a silent reporter (2026-11-05 nightly false page).
+  assert.equal(
+    await check.observe(
+      fakeDb({
+        pairing: [{ id: "c2644fe5-6464-421f-8eec-ff38fadc5248", last_seen_at: minutesAgo(0.2) }],
+        reporter: [{ status: "healthy", last_ping_at: minutesAgo(600) }],
+      }),
+      "t",
+      NOW,
+    ),
+    0,
+  );
+
   // A failed read is check_broken (null), never a quiet OK.
   assert.equal(await check.observe(fakeDb({ pairing: online, reporter: [], error: true }), "t", NOW), null);
 
