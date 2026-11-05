@@ -10,6 +10,7 @@ import { evaluate } from "../lib/health/checks-core";
 import { recoveryDetail } from "../lib/health/runner";
 import { pickLocalWorkerPairing } from "../lib/automations/worker-status";
 import { WORKER_REPORTER_OFFLINE_REASON } from "../lib/automations/worker-status";
+import { OASIS_SCRIPT_EXECUTOR } from "../lib/automations/tenant-script-lease";
 
 const check = WORKER_REPORTER_CHECKS[0];
 const NOW = Date.parse("2026-09-24T12:00:00Z");
@@ -32,6 +33,13 @@ function fakeDb(rows: Rows) {
         eq: (field: string, value: string) => {
           if (table === "bridge_pairings" && field === "id") {
             data = data?.filter((item) => (item as { id?: string }).id === value);
+          }
+          // Rows without a user_id stand for CC's own computers.
+          if (table === "bridge_pairings" && field === "user_id") {
+            data = data?.filter((item) => {
+              const owner = (item as { user_id?: string }).user_id;
+              return owner === undefined || owner === value;
+            });
           }
           return chain;
         },
@@ -150,6 +158,18 @@ async function run() {
     { id: "win", label: "CC's MacBook", last_seen_at: minutesAgo(0.5) },
   ], reporter: [{ status: "healthy", last_ping_at: minutesAgo(30) }] }), "t", NOW), 2,
     "filter by the authenticated ID before the database limit");
+  // Only CC's own computers are graded (CodeRabbit, #805): a report stamped by
+  // another member's online connector never makes CC's fleet read "silent".
+  assert.equal(await check.observe(fakeDb({
+    pairing: [{ id: "member-connector", user_id: "someone-else", last_seen_at: minutesAgo(0.2) }],
+    reporter: [{ status: "healthy", last_ping_at: minutesAgo(600) }],
+    sourceId: "member-connector",
+  }), "t", NOW), 0);
+  // ...while CC's own stamped computer, online with a stale report, still pages.
+  assert.equal(await check.observe(fakeDb({
+    pairing: [{ id: "win", user_id: OASIS_SCRIPT_EXECUTOR.userId, last_seen_at: minutesAgo(0.2) }],
+    reporter: [{ status: "healthy", last_ping_at: minutesAgo(600) }],
+  }), "t", NOW), 2);
   // Recovery wording uses check.describe(ok) instead of raw "none observed".
   const okResult = evaluate(check.id, check.rule, 0, []);
   assert.equal(

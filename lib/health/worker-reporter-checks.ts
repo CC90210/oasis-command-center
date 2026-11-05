@@ -28,6 +28,7 @@ import {
 } from "@/lib/automations/worker-status";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { isOnline } from "@/lib/devices/presence";
+import { OASIS_SCRIPT_EXECUTOR } from "@/lib/automations/tenant-script-lease";
 
 const OK = 0;
 const FAILING = 1;
@@ -52,9 +53,15 @@ const observeReporter: NonNullable<DripCheck["observeDetailed"]> = async (db, _t
     // The server stamps this ID from the bearer-authenticated bridge pairing.
     const sourceId = reporterPairingId(row?.metadata);
     if (!sourceId) return { observed: null, reason: "worker report has no authenticated source" };
+    // Grading the computer that wrote the report (not the freshest pairing)
+    // keeps the always-online daemon VPS and a Mac left on from reading "bridge
+    // online, fleet silent" while the PC is off (2026-11-05 nightly false page).
+    // Only CC's own computers count (CodeRabbit, #805): the executor's user is
+    // the agents owner whose fleet this row reports.
     const pairing = await db.from("bridge_pairings")
       .select("id, last_seen_at")
       .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("user_id", OASIS_SCRIPT_EXECUTOR.userId)
       .eq("id", sourceId)
       .is("revoked_at", null)
       .limit(1);
