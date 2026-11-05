@@ -22,6 +22,7 @@ import { isProductionRuntime } from "./runtime-environment";
 import { FLEET_REPORTER_SERVICE, describeStatusReporter } from "@/lib/automations/worker-status";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { isOnline } from "@/lib/devices/presence";
+import { OASIS_SCRIPT_EXECUTOR } from "@/lib/automations/tenant-script-lease";
 
 const OK = 0;
 const FAILING = 1;
@@ -39,10 +40,20 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
     // Only production grades the operator's fleet; previews have no bridge.
     if (!isProductionRuntime()) return OK;
     const [pairing, reporter] = await Promise.all([
+      // The COMPUTER's bridge, which is what reports the worker fleet. The
+      // daemon VPS's headless pairing is always online and never reports it,
+      // so counting it read "bridge online, fleet silent" every night the PC
+      // was off and paged "WORKER STATUS HAS GONE SILENT", then "RECOVERED"
+      // each morning (2026-11-05).
+      // ...and only CC's own computers (CodeRabbit, #805): another member's
+      // connector being online must not make CC's stale report read "silent".
+      // The executor's user IS the agents owner whose fleet this row reports.
       db.from("bridge_pairings")
         .select("last_seen_at")
         .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("user_id", OASIS_SCRIPT_EXECUTOR.userId)
         .is("revoked_at", null)
+        .neq("id", OASIS_SCRIPT_EXECUTOR.pairingId)
         .order("last_seen_at", { ascending: false })
         .limit(1),
       db.from("integrations_health")

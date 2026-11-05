@@ -71,6 +71,7 @@ import { isAgentsOwner } from "@/lib/agents-owner";
 import { cloudJobsSwitchableForViewer } from "@/lib/automations/cloud-job-control";
 import { readVpsUnitControls, type VpsUnitControl } from "@/lib/automations/vps-unit-control";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { OASIS_SCRIPT_EXECUTOR } from "@/lib/automations/tenant-script-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -181,7 +182,13 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     .select("last_seen_at")
     .eq("tenant_id", tenantId)
     .is("revoked_at", null);
-  if (isOasis) pairingQuery = pairingQuery.eq("user_id", session.userId);
+  // ...and never the daemon VPS's headless pairing: it is always online, so
+  // counting it made this computer read "online" with the PC off, and every
+  // local tile "Down — stopped reporting" instead of "computer offline"
+  // (2026-11-05). The VPS's own workers report through their heartbeat.
+  if (isOasis) {
+    pairingQuery = pairingQuery.eq("user_id", session.userId).neq("id", OASIS_SCRIPT_EXECUTOR.pairingId);
+  }
   const pairing = await pairingQuery
     .order("last_seen_at", { ascending: false })
     .limit(1)
