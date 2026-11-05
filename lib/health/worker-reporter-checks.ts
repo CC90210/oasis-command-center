@@ -45,9 +45,13 @@ export const WORKER_REPORTER_CHECKS: DripCheck[] = [{
       // so counting it read "bridge online, fleet silent" every night the PC
       // was off and paged "WORKER STATUS HAS GONE SILENT", then "RECOVERED"
       // each morning (2026-11-05).
+      // ...and only CC's own computers (CodeRabbit, #805): another member's
+      // connector being online must not make CC's stale report read "silent".
+      // The executor's user IS the agents owner whose fleet this row reports.
       db.from("bridge_pairings")
         .select("last_seen_at")
         .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("user_id", OASIS_SCRIPT_EXECUTOR.userId)
         .is("revoked_at", null)
         .neq("id", OASIS_SCRIPT_EXECUTOR.pairingId)
         .order("last_seen_at", { ascending: false })
