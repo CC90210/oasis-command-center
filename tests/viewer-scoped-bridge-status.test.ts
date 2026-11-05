@@ -190,7 +190,7 @@ async function main() {
   // ── Fleet reporter / background workers: agents owner only ──────────────
   await check("describeBackground(viewer): CC (the agents owner) sees the workers list; Adon (not the owner) sees none, not 'unknown'", () => {
     const workerRows = new Map();
-    const machines = [{ label: "CCPC (Windows)", lastSeenAt: fresh, state: "online" as const }];
+    const machines = [{ id: "bp-cc", label: "CCPC (Windows)", lastSeenAt: fresh, state: "online" as const }];
     const forCC = describeBackground(workerRows, machines, now.getTime(), { authUserId: CC, isAgentsOwner: true });
     assert.ok(Array.isArray(forCC.workers) && forCC.workers.length > 0);
     const forAdon = describeBackground(workerRows, machines, now.getTime(), { authUserId: ADON, isAgentsOwner: false });
@@ -202,10 +202,10 @@ async function main() {
     const workerRows = new Map(
       [...LOCAL_OASIS_WORKERS.map((w) => w.service), "fleet_watchdog"].map((service) => [
         service,
-        { service, status: "healthy", last_ping_at: longAgo, metadata: {} },
+        { service, status: "healthy", last_ping_at: longAgo, metadata: service === "fleet_watchdog" ? { _source_pairing_id: "bp-cc" } : {} },
       ]),
     );
-    const offlinePc = [{ label: "CCPC (Windows)", lastSeenAt: longAgo, state: "offline" as const }];
+    const offlinePc = [{ id: "bp-cc", label: "CCPC (Windows)", lastSeenAt: longAgo, state: "offline" as const }];
     const result = describeBackground(workerRows, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
     assert.ok(!LOCAL_OASIS_WORKERS.some(w => w.service === "pm2.bravo-scheduler"),
       "the retired local scheduler must not create a Windows dependency");
@@ -233,16 +233,21 @@ async function main() {
     }
     assert.equal(describeBackground(complete, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
       "a complete healthy VPS report with the computer off is a real all-clear");
+    const noLocalPairing = [{ id: "bp-mac", label: "CCPC (Windows)", lastSeenAt: now.toISOString(), state: "online" as const }];
+    assert.equal(describeBackground(complete, noLocalPairing, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, null,
+      "an unidentified reporter cannot turn stale local rows into a known outage or a false all-clear");
     // A computer reporter that cannot read its process table voids only its own
     // count; a stale VPS service is still reported.
     const blindRows = new Map(workerRows);
     blindRows.set("fleet_watchdog", { service: "fleet_watchdog", status: "down", last_ping_at: now.toISOString(),
-      metadata: { error: "process table unreadable" } });
+      metadata: { error: "process table unreadable", _source_pairing_id: "bp-cc" } });
     blindRows.set("vps.oasis-scheduler", { service: "vps.oasis-scheduler", status: "down", last_ping_at: now.toISOString(), metadata: {} });
-    const onlinePc = [{ label: "CCPC (Windows)", lastSeenAt: now.toISOString(), state: "online" as const }];
+    const onlinePc = [{ id: "bp-cc", label: "CCPC (Windows)", lastSeenAt: now.toISOString(), state: "online" as const }];
     const blind = describeBackground(blindRows, onlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true });
     assert.equal(blind.reporter?.state, "failing");
     assert.equal(blind.workersDown, 1, "the VPS outage stays visible while the computer's reporter is blind");
+    assert.equal(describeBackground(blindRows, noLocalPairing, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 1,
+      "missing local provenance never hides a known VPS outage");
     assert.ok(
       LOCAL_OASIS_WORKERS.every((w) => (w.runtime ?? "local") === "local" && w.service.startsWith("pm2.")),
       "remote (VPS) rows never enter the local alarm list",

@@ -78,6 +78,7 @@ import {
 import { parseRuntimeClaimState } from "@/lib/bridge/runtime-jobs";
 import { processStamp, reconnectForCheckIn } from "@/lib/devices/reconnect";
 import { AGENT_INBOX_PROTOCOL } from "@/lib/agent-inbox-types";
+import { FLEET_REPORTER_SERVICE, REPORTER_PAIRING_ID_KEY } from "@/lib/automations/worker-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -254,7 +255,12 @@ export async function POST(req: NextRequest) {
       // Every row a computer reports is marked as its report (set last, so a
       // computer cannot send it away): it is never read as the check of a value
       // OASIS keeps on its server (lib/integrations/presence-heartbeat.ts).
-      metadata: { ...reported, [BRIDGE_REPORT_KEY]: BRIDGE_REPORT_VALUE },
+      metadata: {
+        ...reported, [BRIDGE_REPORT_KEY]: BRIDGE_REPORT_VALUE,
+        // The bearer token authenticates this ID. A client-supplied ID cannot
+        // override it, even after the device is renamed or another device pings.
+        ...(service === FLEET_REPORTER_SERVICE ? { [REPORTER_PAIRING_ID_KEY]: pairing.pairingId } : {}),
+      },
     };
     // The CLI inventory is per computer: this pairing writes ONLY its own entry
     // (recordCliMachine), so two paired computers never replace each other.

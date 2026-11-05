@@ -227,7 +227,7 @@ async function main() {
       sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('w3', 'p-cc', ?, 'pm2.atlas-telegram', 'degraded', ?, ?)",
       args: [OASIS, ago(30 * S), JSON.stringify({ pm2_status: "disabled by operator" })],
     },
-    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w4', 'p-cc', ?, 'fleet_watchdog', 'healthy', ?)", args: [OASIS, ago(30 * S)] },
+    { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('w4', 'p-cc', ?, 'fleet_watchdog', 'healthy', ?, ?)", args: [OASIS, ago(30 * S), JSON.stringify({ _source_pairing_id: "bp-1" })] },
     // Another workspace's fresh chat bridge must not count for OASIS.
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at) VALUES ('w5', NULL, ?, 'pm2.claude-bridge', 'healthy', ?)", args: [CLIENT, ago(10 * S)] },
     { sql: "INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata) VALUES ('vps-inbox', 'p-cc', ?, 'vps.oasis-inbox-sweep', 'unknown', ?, ?)", args: [OASIS, ago(10 * S), JSON.stringify({ via: "vps-heartbeat", phase: "running" })] },
@@ -480,7 +480,7 @@ async function main() {
     for (const service of ["vps.oasis-headless-bridge", "vps.oasis-content-tools-runner"]) {
       rows.set(service, { service, status: "down", last_ping_at: ago(10 * S), metadata: {} });
     }
-    const background = at.describeBackground(rows, [{ label: "CCPC", state: "offline", lastSeenAt: ago(2 * H) }], NOW);
+    const background = at.describeBackground(rows, [{ id: "bp-1", label: "CCPC", state: "offline", lastSeenAt: ago(2 * H) }], NOW);
     assert.equal(background.workersDown, 2,
       "a powered-off computer needs nothing (its workers are optional since the cloud cutover); the two VPS outages still count");
     assert.deepEqual(at.describeBackground(rows, [], NOW, { authUserId: "other-owner", isAgentsOwner: false }).workers, []);
@@ -566,13 +566,13 @@ async function main() {
     assert.ok(logged.some((l) => l.includes("system_health.cron_failures")), "the failure is logged");
   });
   await check("a fleet reporter that can't read the process table makes the down count unknown", async () => {
-    await db.execute("UPDATE integrations_health SET status = 'down', metadata = '{\"error\":\"pm2 jlist EPERM\"}' WHERE id = 'w4'");
+    await db.execute("UPDATE integrations_health SET status = 'down', metadata = '{\"error\":\"pm2 jlist EPERM\",\"_source_pairing_id\":\"bp-1\"}' WHERE id = 'w4'");
     try {
       const h = await sh.loadSystemHealth(OASIS, { now: NOW, probeCloud });
       assert.equal(h.reporter?.state, "failing");
       assert.equal(h.attention.workersDown, null);
     } finally {
-      await db.execute("UPDATE integrations_health SET status = 'healthy', metadata = '{}' WHERE id = 'w4'");
+      await db.execute("UPDATE integrations_health SET status = 'healthy', metadata = '{\"_source_pairing_id\":\"bp-1\"}' WHERE id = 'w4'");
     }
   });
 

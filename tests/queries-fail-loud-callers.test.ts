@@ -424,10 +424,11 @@ async function main() {
     assert.equal(one(opsRender.client, "BridgeCliPanel").serverBridgeOnline, false);
     assert.match(ops, /No events recorded yet/);
     assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions|paired machines)/);
-    for (const tile of OPS_TILES) {
+    for (const tile of OPS_TILES.filter((name) => name !== "Workers down")) {
       assert.match(ops, new RegExp(`${tile} 0 `), `${tile}: a readable empty count is a real 0`);
     }
-    assert.match(ops, /All clear/);
+    assert.match(ops, /Workers down Couldn't check/, "no pairing means local worker status is unverified, not a known zero");
+    assert.doesNotMatch(ops, /All clear/);
     assert.match(ops, /0 bridge ?s online/); // the walker spaces JSX text pieces
     assert.match(ops, /No machines paired yet/);
     const analytics = (await render(await AnalyticsPage())).text;
@@ -471,8 +472,8 @@ async function main() {
       health: (await render(await HealthPage())).text,
     });
     const passing = await pages();
-    assert.match(passing.health, /Nothing needs you/);
-    assert.match(passing.ops, /All clear/);
+    assert.match(passing.health, /Couldn't check everything/);
+    assert.doesNotMatch(passing.ops, /All clear/);
     assert.doesNotMatch(passing.ops, /Outcome checks:/);
     await db.execute({
       sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES ('hc-fail', ?, 'calendar.workspace_credential_usable', 'failing', 'workspace credential rejected', ?)",
@@ -480,10 +481,11 @@ async function main() {
     });
     try {
       const failing = await pages();
-      for (const tile of OPS_TILES) {
+      for (const tile of OPS_TILES.filter((name) => name !== "Workers down")) {
         assert.match(failing.ops, new RegExp(`${tile} 0 `), `${tile}: the alarm counts are still 0`);
       }
-      assert.match(failing.health, /\b1 need ?s you/, "the header counts the failing check");
+      assert.match(failing.health, /Couldn't check everything/, "missing worker provenance must stay unknown even when an outcome check fails");
+      assert.match(failing.health, /workspace credential rejected/, "the known outcome failure must still be visible");
       assert.doesNotMatch(failing.ops, /All clear/, "All clear reads the same count");
       assert.match(failing.ops, /Outcome checks: 1 need ?s you/, "and says where it is");
     } finally {

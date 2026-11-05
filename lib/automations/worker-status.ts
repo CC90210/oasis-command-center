@@ -207,6 +207,30 @@ export function formatLastSeen(iso: string, now: Date = new Date()): string {
 
 /** The bridge's own report on whether it could read the worker fleet. */
 export const FLEET_REPORTER_SERVICE = "fleet_watchdog";
+/** A powered-off computer is not evidence that its broken reporter recovered. */
+export const WORKER_REPORTER_OFFLINE_REASON = "operator computer offline; reporter not expected";
+
+/** The authenticated pairing which last wrote fleet_watchdog, stamped by the server. */
+export const REPORTER_PAIRING_ID_KEY = "_source_pairing_id";
+
+export function reporterPairingId(metadata: unknown): string | null {
+  let value = metadata;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = (value as Record<string, unknown>)[REPORTER_PAIRING_ID_KEY];
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+/** Never infer the reporter from a user-editable device label or list order. */
+export function pickLocalWorkerPairing<T extends { id?: string | null }>(
+  rows: readonly T[] | null | undefined,
+  pairingId: string | null,
+): T | null {
+  if (!pairingId) return null;
+  return rows?.find((row) => row.id === pairingId) ?? null;
+}
 
 export type StatusReporter = {
   /**
