@@ -52,6 +52,7 @@ export const FULL_BLEED_PREFIXES: readonly string[] = [
   "/unsubscribe", // email opt-out landing: the recipient may be another company's customer
   "/link-expired", // where an unverifiable tracking click lands; belongs to no company
   "/desktop-link", // signed in, but it draws its own Desktop Connect header (U1-16)
+  "/checkout/success", // Stripe checkout return — fires gtag conversion, no auth
 ];
 
 /** Does this path render without the OS shell? */

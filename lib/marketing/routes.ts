@@ -60,6 +60,9 @@ export const MARKETING_PATHS = [
   "/work",
   "/about",
   "/contact",
+  "/audit", // free business AI audit — 3-step intake form
+  "/command-center", // AI Command Center OS demo
+  "/pricing", // transparent tier ladder
   // "/start" (the former /welcome entry-path page) was removed 2026-09-29 (F0
   // containment): it fed the developer install funnel (/configure, /download),
   // which cloned a repo that is now private. The page calls notFound().

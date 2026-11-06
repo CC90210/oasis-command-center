@@ -494,6 +494,23 @@ export default async function RootLayout({
         <script
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
+        {/* Google Tag (gtag.js) — PMax conversion tracking. Tag ID: AW-18509362419.
+            Loaded afterInteractive so it never blocks first paint. The inline
+            init script must load before the gtag.js script tag. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.dataLayer = window.dataLayer || [];
+              function gtag(){dataLayer.push(arguments);}
+              gtag('js', new Date());
+              gtag('config', 'AW-18509362419');
+            `,
+          }}
+        />
+        <script
+          async
+          src="https://www.googletagmanager.com/gtag/js?id=AW-18509362419"
+        />
       </head>
       {/* `grain` is gone entirely, not merely scoped. It drew a fixed 40px
           grid across the viewport, and a previous pass narrowed it to the

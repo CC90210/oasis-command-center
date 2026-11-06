@@ -3,7 +3,7 @@
 # Regenerate rather than hand-editing (the build env is derived from the app's
 # secret manifest, which is the single source of truth for key NAMES).
 #
-# WHAT THIS DOES: every push to main builds the Worker with @opennextjs/cloudflare and deploys it.
+# WHAT THIS DOES: every push to main that the CI workflow passes builds the Worker with @opennextjs/cloudflare and deploys it.
 # WHAT IT DOES NOT DO: push Worker SECRETS. Those stay operator-managed from the
 # agents env store (`wrangler_tool.py secrets-push --app oasis-command-center`) — a deploy does
 # not clear a Worker's existing secrets, so CI never needs them at runtime.
@@ -22,6 +22,7 @@
 #   BRAVO_FORCE_DRY_RUN
 #   CHAT_RESUME_HMAC_KEY
 #   CLOUDFLARE_ACCOUNT_ID
+#   CONNECTIONS_OAUTH_STATE_SECRET
 #   CONVERSATIONS_SPINE
 #   CRON_ALLOW_LOCAL
 #   DRIPS_EMAIL_DAILY_CAP_BLUERISE
@@ -60,6 +61,8 @@
 #   NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_BLUERISE  (inlined into the client bundle)
 #   NEXT_PUBLIC_OPTINVAULT_SITE_KEY_BLUERISE  (inlined into the client bundle)
 #   NEXT_PUBLIC_OPTINVAULT_URL  (inlined into the client bundle)
+#   OASIS_SALES_TELEGRAM_BOT_TOKEN
+#   OASIS_SALES_TELEGRAM_CHAT_ID
 #   OASIS_TELEGRAM_BOT_TOKEN
 #   OASIS_TELEGRAM_CHAT_ID
 #   OASIS_TURSO_AUTH_TOKEN
@@ -77,7 +80,6 @@
 #   TEXTTORRENT_FROM_NUMBER
 #   TEXTTORRENT_PUBLIC_KEY
 #   TEXTTORRENT_TENANT_ID
-#   TPS_AUTO_ENROLL_SINCE
 #   TURSO_AUTH_TOKEN
 #   TURSO_DATABASE_URL
 #   api_key_Constant_Contact
@@ -103,6 +105,8 @@
 #   NEXT_PUBLIC_BRIDGE_CHAT_BASE  (inlined into the client bundle)
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY  (inlined into the client bundle)
 #   NEXT_PUBLIC_SUPABASE_URL  (inlined into the client bundle)
+#   OASIS_MCP_TOKEN_KEY_K1
+#   OASIS_MCP_TOKEN_KID
 #   OASIS_OUTBOUND_HMAC_SECRET
 #   OPERATOR_EMAIL
 #   PUBLIC_APP_URL
@@ -113,6 +117,25 @@
 #   WISE_PROFILE_ID
 #   SUPPORT_GMAIL_USER
 #   SUPPORT_GMAIL_APP_PASSWORD
+#   SUPPORT_INGEST_SECRET_BEA
+#   SLACK_CLIENT_ID
+#   SLACK_CLIENT_SECRET
+#   SLACK_SIGNING_SECRET
+#   INTUIT_CLIENT_ID
+#   INTUIT_CLIENT_SECRET
+#   XERO_CLIENT_ID
+#   XERO_CLIENT_SECRET
+#   ZOOM_CLIENT_ID
+#   ZOOM_CLIENT_SECRET
+#   META_APP_ID
+#   META_APP_SECRET
+#   TOOLS_RUNNER_SECRET_BEA
+#   MEET_TOKEN_SECRET
+#   CF_REALTIME_APP_ID
+#   CF_REALTIME_APP_SECRET
+#   CF_TURN_KEY_ID
+#   CF_TURN_KEY_API_TOKEN
+#   BOOKING_AGENT_SECRET_BEA
 #
 # Until CLOUDFLARE_API_TOKEN exists the job still BUILDS (real signal on build
 # breakage) and SKIPS the deploy with a warning — no red CI while the migration
@@ -120,7 +143,11 @@
 name: Deploy to Cloudflare Workers
 
 on:
-  push:
+  # Only what CI passed: the run starts when CI completes on main and
+  # the job below deploys only on success (wrangler_tool _deploy_trigger).
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -130,10 +157,16 @@ concurrency:
 
 jobs:
   deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -179,6 +212,7 @@ jobs:
           BRAVO_FORCE_DRY_RUN: ${{ secrets.BRAVO_FORCE_DRY_RUN }}
           CHAT_RESUME_HMAC_KEY: ${{ secrets.CHAT_RESUME_HMAC_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONNECTIONS_OAUTH_STATE_SECRET: ${{ secrets.CONNECTIONS_OAUTH_STATE_SECRET }}
           CONVERSATIONS_SPINE: ${{ secrets.CONVERSATIONS_SPINE }}
           CRON_ALLOW_LOCAL: ${{ secrets.CRON_ALLOW_LOCAL }}
           DRIPS_EMAIL_DAILY_CAP_BLUERISE: ${{ secrets.DRIPS_EMAIL_DAILY_CAP_BLUERISE }}
@@ -217,6 +251,8 @@ jobs:
           NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_BLUERISE: ${{ secrets.NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_BLUERISE }}
           NEXT_PUBLIC_OPTINVAULT_SITE_KEY_BLUERISE: ${{ secrets.NEXT_PUBLIC_OPTINVAULT_SITE_KEY_BLUERISE }}
           NEXT_PUBLIC_OPTINVAULT_URL: ${{ secrets.NEXT_PUBLIC_OPTINVAULT_URL }}
+          OASIS_SALES_TELEGRAM_BOT_TOKEN: ${{ secrets.OASIS_SALES_TELEGRAM_BOT_TOKEN }}
+          OASIS_SALES_TELEGRAM_CHAT_ID: ${{ secrets.OASIS_SALES_TELEGRAM_CHAT_ID }}
           OASIS_TELEGRAM_BOT_TOKEN: ${{ secrets.OASIS_TELEGRAM_BOT_TOKEN }}
           OASIS_TELEGRAM_CHAT_ID: ${{ secrets.OASIS_TELEGRAM_CHAT_ID }}
           OASIS_TURSO_AUTH_TOKEN: ${{ secrets.OASIS_TURSO_AUTH_TOKEN }}
@@ -234,7 +270,6 @@ jobs:
           TEXTTORRENT_FROM_NUMBER: ${{ secrets.TEXTTORRENT_FROM_NUMBER }}
           TEXTTORRENT_PUBLIC_KEY: ${{ secrets.TEXTTORRENT_PUBLIC_KEY }}
           TEXTTORRENT_TENANT_ID: ${{ secrets.TEXTTORRENT_TENANT_ID }}
-          TPS_AUTO_ENROLL_SINCE: ${{ secrets.TPS_AUTO_ENROLL_SINCE }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           api_key_Constant_Contact: ${{ secrets.api_key_Constant_Contact }}
@@ -260,6 +295,8 @@ jobs:
           NEXT_PUBLIC_BRIDGE_CHAT_BASE: ${{ secrets.NEXT_PUBLIC_BRIDGE_CHAT_BASE }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          OASIS_MCP_TOKEN_KEY_K1: ${{ secrets.OASIS_MCP_TOKEN_KEY_K1 }}
+          OASIS_MCP_TOKEN_KID: ${{ secrets.OASIS_MCP_TOKEN_KID }}
           OASIS_OUTBOUND_HMAC_SECRET: ${{ secrets.OASIS_OUTBOUND_HMAC_SECRET }}
           OPERATOR_EMAIL: ${{ secrets.OPERATOR_EMAIL }}
           PUBLIC_APP_URL: ${{ secrets.PUBLIC_APP_URL }}
@@ -270,11 +307,50 @@ jobs:
           WISE_PROFILE_ID: ${{ secrets.WISE_PROFILE_ID }}
           SUPPORT_GMAIL_USER: ${{ secrets.SUPPORT_GMAIL_USER }}
           SUPPORT_GMAIL_APP_PASSWORD: ${{ secrets.SUPPORT_GMAIL_APP_PASSWORD }}
+          SUPPORT_INGEST_SECRET_BEA: ${{ secrets.SUPPORT_INGEST_SECRET_BEA }}
+          SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
+          SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
+          INTUIT_CLIENT_ID: ${{ secrets.INTUIT_CLIENT_ID }}
+          INTUIT_CLIENT_SECRET: ${{ secrets.INTUIT_CLIENT_SECRET }}
+          XERO_CLIENT_ID: ${{ secrets.XERO_CLIENT_ID }}
+          XERO_CLIENT_SECRET: ${{ secrets.XERO_CLIENT_SECRET }}
+          ZOOM_CLIENT_ID: ${{ secrets.ZOOM_CLIENT_ID }}
+          ZOOM_CLIENT_SECRET: ${{ secrets.ZOOM_CLIENT_SECRET }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          TOOLS_RUNNER_SECRET_BEA: ${{ secrets.TOOLS_RUNNER_SECRET_BEA }}
+          MEET_TOKEN_SECRET: ${{ secrets.MEET_TOKEN_SECRET }}
+          CF_REALTIME_APP_ID: ${{ secrets.CF_REALTIME_APP_ID }}
+          CF_REALTIME_APP_SECRET: ${{ secrets.CF_REALTIME_APP_SECRET }}
+          CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
+          CF_TURN_KEY_API_TOKEN: ${{ secrets.CF_TURN_KEY_API_TOKEN }}
+          BOOKING_AGENT_SECRET_BEA: ${{ secrets.BOOKING_AGENT_SECRET_BEA }}
+
+      # A re-run of an older CI run fires workflow_run again with that
+      # run's head_sha, and would put an older commit back on production.
+      # Only the commit still at the tip of its branch deploys, checked
+      # right before the deploy, so a newer push always wins.
+      - name: Still the newest commit?
+        id: fresh
+        if: github.event_name == 'workflow_run'
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        shell: bash
+        run: |
+          tip="$(git ls-remote origin "refs/heads/${HEAD_BRANCH}" | cut -f1)"
+          if [ "$tip" = "$HEAD_SHA" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${HEAD_SHA} is no longer the tip of ${HEAD_BRANCH} (now ${tip:-unknown}); the newer commit deploys instead."
+          fi
 
       - name: Deploy to Cloudflare Workers
-        if: steps.preflight.outputs.ready == 'true'
+        if: steps.preflight.outputs.ready == 'true' && steps.fresh.outputs.fresh != 'false'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --var DEPLOY_ENV:production --var DEPLOY_PLATFORM:cloudflare --var DEPLOY_SURFACE:oasis --var DEPLOY_GIT_REF:${{ github.ref_name }} --var DEPLOY_GIT_SHA:${{ github.sha }}
+          command: deploy --var DEPLOY_ENV:production --var DEPLOY_PLATFORM:cloudflare --var DEPLOY_SURFACE:oasis --var DEPLOY_GIT_REF:${{ github.event.workflow_run.head_branch || github.ref_name }} --var DEPLOY_GIT_SHA:${{ github.event.workflow_run.head_sha || github.sha }}
