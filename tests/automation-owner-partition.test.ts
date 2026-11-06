@@ -8,6 +8,7 @@ import {
   partitionCronJobsByOwner,
   type CronInventoryJob,
 } from "../lib/automations/cron-inventory";
+import { cronPlacementForName } from "../lib/automations/cron-placement";
 
 function job(source: "tenant" | "empire", id: string, owner: string): CronInventoryJob {
   return {
@@ -27,6 +28,7 @@ function job(source: "tenant" | "empire", id: string, owner: string): CronInvent
     run_count: 0,
     created_at: "2026-09-16T00:00:00.000Z",
     updated_at: "2026-09-16T00:00:00.000Z",
+    ...(source === "empire" ? { placement: null } : {}),
   };
 }
 
@@ -172,6 +174,59 @@ assert.equal(
 
 const valid = parseAutomationInventorySuccess({ ok: true, jobs, inventory });
 assert.equal(valid.ok, true);
+const mappedPlacement = cronPlacementForName("Daily Automation Register");
+assert.ok(mappedPlacement);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? { ...entry, name: "Daily Automation Register", placement: mappedPlacement }
+      : entry),
+    inventory,
+  }).ok,
+  true,
+  "a validated Empire placement survives runtime validation",
+);
+const { placement: _missingPlacement, ...empireWithoutPlacement } = jobs[1];
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1 ? empireWithoutPlacement : entry),
+    inventory,
+  }).ok,
+  false,
+  "an Empire row that omits the placement verdict fails closed",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 1
+      ? {
+          ...entry,
+          placement: {
+            destination: "cloud",
+            phase: "deferred",
+            label: "Contradictory",
+            detail: "Wrong phase for this destination.",
+          },
+        }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "a destination/phase contradiction fails closed",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: jobs.map((entry, index) => index === 0
+      ? { ...entry, placement: mappedPlacement }
+      : entry),
+    inventory,
+  }).ok,
+  false,
+  "tenant rows cannot claim an OASIS house placement",
+);
 const retiredMarker = { label: "Instagram DM setter", reason: "Computer copy stays off." };
 const retiredJob = { ...jobs[1], enabled: false, retired: retiredMarker };
 assert.equal(

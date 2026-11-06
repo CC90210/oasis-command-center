@@ -144,7 +144,9 @@ assert.match(manager, /Retry/, "load failures must provide an in-place retry");
 assert.match(manager, /Last refreshed/, "operators must see when the inventory was last confirmed");
 assert.match(manager, /Couldn't delete/, "delete failures must be visible to the operator");
 assert.match(manager, /unresolved_failures/,
-  "Empire failure counters must remain visibly red until a successful run clears them");
+  "Empire failure counters remain visible as historical evidence during migration");
+assert.match(manager, /legacyHistory\s*\? "text-fg-muted border-bg-border bg-bg-deep\/50"/,
+  "a placed legacy row keeps its old failure count without presenting it as a current red incident");
 assert.match(manager, /!inventory\.empire_included/,
   "a hidden Empire lane must be stated on the page, never inferred from an absence of rows");
 assert.match(manager, /This list covers this workspace&apos;s automations only/,

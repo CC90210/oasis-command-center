@@ -48,6 +48,10 @@ import {
   buildAutomationInventoryMetadata,
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
+import {
+  cronPlacementForName,
+  type CronPlacementState,
+} from "@/lib/automations/cron-placement";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -228,6 +232,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     ReturnType<typeof normalizeEmpireRow> & {
       daemon: DaemonState | null;
       retired: RetiredCronState | null;
+      placement: CronPlacementState | null;
     }
   > = [];
   if (isAgentsOwner) {
@@ -251,11 +256,27 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     // the shared normalizer stays daemon-agnostic; only this route knows
     // which parked rows a PM2 daemon has taken over. Null for the ordinary
     // rows the shared scheduler still runs; filled in below.
-    empireJobs = ((empireQuery.data || []) as EmpireCronRow[]).map((row) => ({
-      ...normalizeEmpireRow(row),
-      daemon: null as DaemonState | null,
-      retired: null as RetiredCronState | null,
-    }));
+    empireJobs = ((empireQuery.data || []) as EmpireCronRow[]).map((row) => {
+      const normalized = normalizeEmpireRow(row);
+      return {
+        ...normalized,
+        daemon: null as DaemonState | null,
+        retired: null as RetiredCronState | null,
+        placement: cronPlacementForName(normalized.name),
+      };
+    });
+    if (isOasisOperatorTenant) {
+      const unmapped = empireJobs.filter((job) => job.placement === null);
+      if (unmapped.length > 0) {
+        // Do not guess a destination for a newly seeded OASIS row. The wire
+        // carries `placement: null`, which the UI renders as a loud, locked
+        // "Destination unassigned" state until the ledger is reconciled.
+        console.error("[api/cron-jobs GET] OASIS cron placement is unmapped", {
+          tenantId,
+          rows: unmapped.map((job) => ({ id: job.id, name: job.name })),
+        });
+      }
+    }
   }
 
   // Parked process rows: mark retired copies as reference-only, and attach

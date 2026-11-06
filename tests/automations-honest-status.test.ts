@@ -32,7 +32,7 @@ const manager = read("components/automations/CronJobsManager.tsx");
 assert.match(manager, /const run = summarizeRun\(job\);/);
 assert.match(manager, /const ranBad = run\.failed;/, "only a real failure is red; a skip or deferral is not");
 assert.match(manager, /: ranBad \|\| overdue/, "the card border reads that same verdict");
-assert.match(manager, /const ranOk = !ranBad && run\.lastRan\?\.tone === "ok";/, "a skipped slot never gets the success tick");
+assert.match(manager, /const ranOk = !legacyHistory && !ranBad && run\.lastRan\?\.tone === "ok";/, "a skipped slot or legacy scheduler result never gets the success tick");
 assert.match(manager, /run\.lastRan\.text/, "the Last ran line is the summary's");
 assert.match(manager, /\{run\.lastAttempt && \([\s\S]{0,200}data-testid="cron-last-attempt"[\s\S]{0,200}\{run\.lastAttempt\}/, "Last attempt is its own line, only when it differs");
 assert.match(
@@ -49,8 +49,16 @@ assert.doesNotMatch(manager, /run\.details\.slice\(/, "the evidence is never cut
 const teamRow = manager.slice(manager.indexOf("function TeamJobRow("), manager.indexOf("function JobRow("));
 const ownRow = manager.slice(manager.indexOf("function JobRow("), manager.indexOf("function RunResultLine("));
 assert.match(teamRow, /<RunResultLine run=\{summarizeRun\(job\)\} \/>/, "a team row has its result line");
-assert.match(ownRow, /<RunResultLine run=\{run\} daemon=\{Boolean\(daemon \|\| retired\)\} \/>/, "your own row uses the same line and marks parked history");
+assert.match(ownRow, /<RunResultLine run=\{run\} daemon=\{legacyHistory\} \/>/, "your own row uses the same line and marks parked history");
 assert.equal((manager.match(/data-testid="cron-result-line"/g) || []).length, 1, "the result line is written once");
+
+// Reconciled OASIS rows are historical scheduler records while their work
+// moves to Cloudflare/VPS (or awaits a retirement/off decision). Their old
+// PC timestamps must not create an overdue red card or a live-looking switch.
+assert.match(manager, /const nextRun = legacyHistory/);
+assert.match(manager, /disabled=\{isPending \|\| Boolean\(retired\) \|\| \(isEmpire && !daemon\)\}/);
+assert.match(manager, /Destination unassigned/,
+  "a newly seeded OASIS row without a ledger entry fails loud instead of falling back to PC ownership");
 
 // The counts read as two counts of the same thing.
 assert.match(manager, /Yours \$\{tenantCount\} · OASIS platform \$\{empireCount\} \(operators only\)/);

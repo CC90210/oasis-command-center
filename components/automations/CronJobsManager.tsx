@@ -59,7 +59,11 @@ type CronJob = CronInventoryJob;
  */
 function isRunning(job: CronJob): boolean {
   if (job.retired) return false;
-  return job.daemon ? job.daemon.state === "running" : job.enabled;
+  if (job.daemon) return job.daemon.state === "running";
+  // Reconciled Empire rows are legacy scheduler records. Their stored
+  // is_active flag is not the state of the Cloudflare/VPS destination.
+  if (job.source === "empire") return false;
+  return job.enabled;
 }
 
 type Props = {
@@ -503,6 +507,10 @@ export function CronJobsManager({ agentKeys, canCreateScripts = false, emptyHint
       await toggleDaemonBacked(job);
       return;
     }
+    // The 2026-10-30 placement ledger owns every OASIS scheduler row. Its
+    // legacy switch cannot safely start or stop the Cloudflare/VPS owner (and
+    // an unmapped row must fail closed), so only tenant schedules reach PATCH.
+    if (job.source === "empire") return;
     const next = !job.enabled;
     const key = cronJobKey(job);
     setPendingKey(key);
@@ -921,18 +929,21 @@ function JobRow({
 }) {
   const friendlySchedule = humanizeCron(job.schedule);
   const showRawSchedule = friendlySchedule !== job.schedule;
-  // Empire rows live in cron_jobs and are seeded from scripts/cron_engine.py.
-  // The enabled toggle now wires through to the cron_jobs.is_active column
-  // (Phase 7 — operators get real pause/resume on empire crons without
-  // editing SEED_JOBS). Schedule + action_config remain read-only since
-  // SEED_JOBS re-asserts them on every bridge tick; only the on/off is
-  // operator-controlled.
+  // Empire rows live in cron_jobs and are retained here as migration history.
+  // Their computer-era switch is locked: destination controls live with the
+  // Cloudflare/VPS owner, never this legacy row.
   const isEmpire = job.source === "empire";
   // A dedicated PM2 process owns this row's work. `job.enabled` is then the
   // parked interlock flag that keeps a second runner off the same script — it
   // is not this automation's state, and nothing below may read it as one.
   const daemon = job.daemon ?? null;
   const retired = job.retired ?? null;
+  // The GET contract requires this field on every Empire row. A null is not a
+  // fallback to the old scheduler; it is the loud, fail-closed unmapped state.
+  const placementContract = isEmpire && job.placement !== undefined;
+  const placement = placementContract ? job.placement ?? null : null;
+  const placementUnmapped = placementContract && placement === null && !daemon && !retired;
+  const legacyHistory = Boolean(daemon || retired || placementContract);
   const running = isRunning(job);
   const daemonUnknown = daemon !== null && daemon.state === "unknown";
   // Every sentence this row says about its last run comes from one pure
@@ -943,7 +954,7 @@ function JobRow({
   // Only a real failure is red. A skipped or held-back latest tick is not,
   // even while the failure counter is still set (that keeps its own badge).
   const ranBad = run.failed;
-  const ranOk = !ranBad && run.lastRan?.tone === "ok";
+  const ranOk = !legacyHistory && !ranBad && run.lastRan?.tone === "ok";
   // The stored result cannot say either way — a truncated `}` tail. Rendered
   // without a verdict rather than inheriting the success tick it used to get by
   // falling through the else.
@@ -954,7 +965,7 @@ function JobRow({
   // What the promised next fire actually means now that the clock has passed it.
   // Daemon-backed rows are excluded by construction: their cron twin is parked,
   // so its next_run_at is not a promise anyone made.
-  const nextRun = daemon || retired
+  const nextRun = legacyHistory
     ? null
     : describeNextRun({
         nextRunAt: job.next_run_at,
@@ -974,6 +985,10 @@ function JobRow({
       : daemon.state === "stopped"
         ? "border-status-warm/30 bg-status-warm/5"
         : "border-bg-border bg-bg-deep/40"
+    : placement
+      ? "border-bg-border bg-bg-deep/40"
+      : placementUnmapped
+        ? "border-status-warm/30 bg-status-warm/5"
     : !job.enabled
       ? "border-bg-border bg-bg-deep/40 opacity-60"
       : ranBad || overdue
@@ -984,13 +999,13 @@ function JobRow({
   return (
     <div className={`rounded-lg border p-4 ${borderClass}`}>
       <div className="flex items-start gap-4">
-        {/* Toggle — prominent, labeled. Empire + tenant rows share the
-            same toggle UX now; the API route dispatches by source. */}
+        {/* Toggle — prominent, labeled. Reconciled Empire scheduler rows are
+            reference-only; only a dedicated daemon or tenant row is live. */}
         <div className="shrink-0">
           <button
             type="button"
             onClick={onToggle}
-            disabled={isPending || Boolean(retired)}
+            disabled={isPending || Boolean(retired) || (isEmpire && !daemon)}
             className="flex flex-col items-center gap-0.5 group disabled:opacity-70"
             title={
               retired
@@ -1001,10 +1016,12 @@ function JobRow({
                   : daemon.state === "stopped"
                     ? `The ${daemon.process_name} process is stopped — click to start it.`
                     : `Can't read ${daemon.process_name}'s status right now. Clicking will try to start it.`
+                : placement
+                  ? placement.detail
+                  : placementUnmapped
+                    ? "Destination unassigned. Reconcile this OASIS row before any runner can own it."
                 : isEmpire
-                  ? job.enabled
-                    ? "OASIS platform schedule — click to pause. Its schedule and action are set on the operator's machine; only the on/off flips here."
-                    : "OASIS platform schedule — click to resume."
+                  ? "This legacy OASIS scheduler row is locked."
                   : job.enabled
                     ? "Click to disable — keeps the spec, stops firing"
                     : "Click to enable"
@@ -1016,13 +1033,31 @@ function JobRow({
               <Loader2 className="w-7 h-7 text-accent animate-spin" />
             ) : daemonUnknown ? (
               <HelpCircle className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
+            ) : placement || placementUnmapped ? (
+              <ToggleLeft className="w-7 h-7 text-fg-dim" />
             ) : running ? (
               <ToggleRight className="w-7 h-7 text-status-engaged group-hover:scale-110 transition-transform" />
             ) : (
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
             <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : daemonUnknown ? "text-fg-dim" : running ? "text-status-engaged" : "text-fg-faint"}`}>
-              {retired ? "Retired" : isPending ? (daemon ? "Confirming" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
+              {retired
+                ? "Retired"
+                : placement
+                  ? placement.phase === "moving"
+                    ? "Moving"
+                    : placement.phase === "recommended"
+                      ? "Review"
+                      : "Off"
+                  : placementUnmapped
+                    ? "Unmapped"
+                    : isPending
+                      ? (daemon ? "Confirming" : "Saving")
+                      : daemonUnknown
+                        ? "Unknown"
+                        : running
+                          ? "On"
+                          : "Off"}
             </span>
           </button>
         </div>
@@ -1050,6 +1085,16 @@ function JobRow({
                 Retired by plan
               </span>
             )}
+            {placement && (
+              <span className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold">
+                {placement.label}
+              </span>
+            )}
+            {placementUnmapped && (
+              <span className="text-[10px] uppercase tracking-wider text-status-warm border border-status-warm/40 bg-status-warm/10 rounded-full px-1.5 py-0.5 font-bold">
+                Destination unassigned
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-1">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
@@ -1060,7 +1105,11 @@ function JobRow({
               {job.action_type.replace(/_/g, " ")}
             </span>
             {typeof job.unresolved_failures === "number" && job.unresolved_failures > 0 && (
-              <span className="text-[10px] font-bold text-status-warm border border-status-warm/40 bg-status-warm/10 rounded-full px-1.5 py-0.5">
+              <span className={`text-[10px] font-bold border rounded-full px-1.5 py-0.5 ${
+                legacyHistory
+                  ? "text-fg-muted border-bg-border bg-bg-deep/50"
+                  : "text-status-warm border-status-warm/40 bg-status-warm/10"
+              }`}>
                 {job.unresolved_failures} unresolved failure{job.unresolved_failures === 1 ? "" : "s"}
               </span>
             )}
@@ -1069,6 +1118,17 @@ function JobRow({
           {retired && (
             <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 text-[11px] text-fg-muted leading-relaxed">
               <span className="text-fg font-bold">Retired by plan.</span> {retired.reason}
+            </div>
+          )}
+          {placement && (
+            <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 text-[11px] text-fg-muted leading-relaxed">
+              <span className="text-fg font-bold">{placement.label}.</span> {placement.detail}
+            </div>
+          )}
+          {placementUnmapped && (
+            <div className="mt-2 rounded-md border border-status-warm/30 bg-status-warm/5 px-2.5 py-2 text-[11px] text-status-warm leading-relaxed">
+              <span className="font-bold">Destination unassigned.</span>{" "}
+              This OASIS row is locked until the placement ledger names one owner.
             </div>
           )}
           {/* Prefer operator-friendly copy from lib/cron-descriptions
@@ -1104,7 +1164,7 @@ function JobRow({
                 expression stays available in the tooltip. */}
             <span
               className="inline-flex items-center gap-1.5 text-fg-muted"
-              title={daemon || retired ? `Parked scheduler entry: ${job.schedule}` : undefined}
+              title={legacyHistory ? `Legacy scheduler entry: ${job.schedule}` : undefined}
             >
               <Clock className="w-3.5 h-3.5" />
               <span className="font-medium text-fg">
@@ -1112,9 +1172,13 @@ function JobRow({
                   ? "Continuously — its own process"
                   : retired
                     ? "Parked — retired by plan"
+                    : placement
+                      ? placement.label
+                      : placementUnmapped
+                        ? "Destination unassigned"
                     : friendlySchedule}
               </span>
-              {!daemon && !retired && showRawSchedule && (
+              {!legacyHistory && showRawSchedule && (
                 <span className="text-fg-faint font-mono text-[10px]">({job.schedule})</span>
               )}
             </span>
@@ -1123,17 +1187,17 @@ function JobRow({
                 {ranOk ? (
                   <Check className="w-3.5 h-3.5 text-status-engaged" />
                 ) : run.lastRan.tone === "bad" ? (
-                  <XCircle className="w-3.5 h-3.5 text-status-warm" />
+                  <XCircle className={`w-3.5 h-3.5 ${legacyHistory ? "text-fg-dim" : "text-status-warm"}`} />
                 ) : ranUnclear ? (
                   <HelpCircle className="w-3.5 h-3.5 text-fg-dim" />
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
-                <span className={run.lastRan.tone === "bad" && !daemon && !retired ? "text-status-warm font-medium" : "text-fg-muted"}>
+                <span className={run.lastRan.tone === "bad" && !legacyHistory ? "text-status-warm font-medium" : "text-fg-muted"}>
                   {/* For a daemon-backed row this is history from when the
                       shared scheduler still ran it — say so, rather than
                       letting it read as the process's last tick. */}
-                  {daemon || retired ? `Last scheduler run ${timeAgo(job.last_run_at)}` : run.lastRan.text}
+                  {legacyHistory ? `Last scheduler run ${timeAgo(job.last_run_at)}` : run.lastRan.text}
                 </span>
                 <span className="text-fg-faint">·</span>
                 <span className="text-fg-faint">{job.run_count} total</span>
@@ -1196,7 +1260,7 @@ function JobRow({
         )}
       </div>
 
-      <RunResultLine run={run} daemon={Boolean(daemon || retired)} />
+      <RunResultLine run={run} daemon={legacyHistory} />
     </div>
   );
 }
