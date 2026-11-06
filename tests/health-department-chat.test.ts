@@ -498,7 +498,10 @@ async function main() {
       return { ok: true };
     };
     const first = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW, sendTelegramImpl: send as never });
-    assert.deepEqual(first.alerted, ["department_chat_outcomes"]);
+    assert.deepEqual(first.alerted, [], "one failing run is unconfirmed until the next run (two-strike, 2026-11-06)");
+    assert.equal(pages.length, 0);
+    const confirmed = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 5 * MIN, sendTelegramImpl: send as never });
+    assert.deepEqual(confirmed.alerted, ["department_chat_outcomes"]);
     assert.equal(pages.length, 1);
     assert.equal(pages[0].lane, "operator");
     assert.match(pages[0].text, /FAILING/);
