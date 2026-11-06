@@ -1,12 +1,10 @@
 /**
  * POST /api/automations/save-draft
  *
- * Phase 10.3 — persist an operator-reviewed AutomationDraft as:
- *   1. A Python file at scripts/<script_filename> (written via the local
- *      bridge's write_file tool, since Vercel can't reach the operator's
- *      disk).
- *   2. A tenant_cron_jobs row with action_type=script_run pointing at
- *      that script.
+ * Phase 10.3 — persist an operator-reviewed AutomationDraft as a paused,
+ * exact-pairing tenant_cron_jobs row. Its reviewed source stays in the
+ * server-only template record; the poll route signs it for the selected
+ * daemon, which verifies that approval before atomically materializing it.
  *
  * Body: {
  *   draft: AutomationDraft,
@@ -15,23 +13,34 @@
  * Response 200: { ok: true, script_path, cron_id }
  * Response 4xx: { ok: false, error, message? }
  *
- * Trust model: the bridge runs as the operator. The dashboard sends the
- * draft + a confirmation flag; the bridge writes the file and the
- * dashboard inserts the cron row. We don't trigger execution — the
- * next scheduled tick fires it naturally (operator has time to inspect
- * the new automation on /automations before it runs).
+ * Trust model: the bridge runs as the operator. The dashboard stores the
+ * reviewed draft + a confirmation flag, binds the template to the cron row,
+ * and pins both to a validated daemon pairing. We don't trigger execution:
+ * the row stays disabled until the operator turns it on.
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { createHash, randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { AutomationDraft } from "@/lib/ai-automation-drafter";
 import { CRON_RULE_SENTENCE, isValidCronExpr } from "@/lib/automations/cron-grammar";
 import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
+import { AutomationPipelineError, parseAutomationPipeline, targetMachineIsSelectable, type AutomationPipeline } from "@/lib/automations/pipeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const FILENAME_RE = /^[a-z][a-z0-9_]*\.py$/;
+
+type TargetPairing = {
+  id: string;
+  label: string | null;
+  user_id: string | null;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+  scope: string | null;
+  tool_capabilities?: unknown;
+};
 
 // The schedule goes through the one shared grammar (lib/automations/
 // cron-grammar.ts). This route used to accept day names (MON-FRI), which the
@@ -68,7 +77,7 @@ export async function POST(req: NextRequest) {
   if (!gate.ok) return gate.response;
   const ctx = gate.ctx;
 
-  let body: { draft?: Partial<AutomationDraft>; confirmed?: boolean };
+  let body: { draft?: Partial<AutomationDraft>; confirmed?: boolean; pipeline?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -79,6 +88,17 @@ export async function POST(req: NextRequest) {
   }
 
   const draft = body.draft || {};
+  let pipeline: AutomationPipeline | null = null;
+  if (body.pipeline !== undefined) {
+    try {
+      pipeline = parseAutomationPipeline(body.pipeline);
+    } catch (error) {
+      if (error instanceof AutomationPipelineError) {
+        return NextResponse.json({ ok: false, error: "pipeline_invalid", field: error.field, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+  }
   const errors: string[] = [];
   if (!draft.suggested_name || draft.suggested_name.length > 80) errors.push("suggested_name");
   if (!draft.script_filename || !FILENAME_RE.test(draft.script_filename)) errors.push("script_filename");
@@ -91,12 +111,40 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  if (!pipeline) {
+    return NextResponse.json(
+      { ok: false, error: "pipeline_required", message: "Complete the four setup steps and choose a compatible computer before saving." },
+      { status: 400 },
+    );
+  }
 
-  // Insert the cron row first so the bridge file-write can include the
-  // cron_id as a breadcrumb in the script header (lets operators trace
-  // a misbehaving script back to its row).
+  // Insert the cron row first so the server-only template can bind to that
+  // exact row id. Polling refuses any template/cron pairing that drifts.
   const db = getServiceSupabase();
+  let target: TargetPairing | null = null;
+  const pairing = await db
+    .from("bridge_pairings")
+    .select("id, label, user_id, last_seen_at, revoked_at, scope, tool_capabilities")
+    .eq("id", pipeline.target_pairing_id)
+    .eq("tenant_id", ctx.tenantId)
+    .maybeSingle();
+  if (pairing.error) {
+    console.error("[automations.save-draft] target pairing lookup failed", { tenantId: ctx.tenantId, error: pairing.error.message });
+    return NextResponse.json({ ok: false, error: "target_machine_unavailable", message: "The selected computer could not be checked. Refresh its status and try again." }, { status: 503 });
+  }
+  target = pairing.data as TargetPairing | null;
+  if (!target || target.user_id !== ctx.authUserId) {
+    return NextResponse.json({ ok: false, error: "target_machine_not_owned", message: "Choose one of your own paired computers." }, { status: 403 });
+  }
+  if (!targetMachineIsSelectable(target)) {
+    return NextResponse.json({ ok: false, error: "target_machine_unsupported", message: "That computer is offline or does not support generated automations yet. Update and start its bridge, then try again." }, { status: 409 });
+  }
+  const cronId = randomUUID();
+  const templateId = randomUUID();
+  const sourceHash = createHash("sha256").update(draft.script_content!, "utf8").digest("hex");
+  const scriptPath = `scripts/_generated/${cronId}/${sourceHash.slice(0, 16)}_${draft.script_filename}`;
   const cronPayload = {
+    id: cronId,
     tenant_id: ctx.tenantId,
     agent_key: draft.agent_key!.toLowerCase(),
     name: draft.suggested_name!,
@@ -105,14 +153,23 @@ export async function POST(req: NextRequest) {
     action_type: "script_run",
     action_payload: {
       // The script_run handler in bravo_cli reads {script, args} from
-      // action_payload. We point at scripts/<filename> (relative to
-      // PROJECT_ROOT) so the operator can edit it on disk later.
-      script: `scripts/${draft.script_filename}`,
+      // action_payload. The destination stays under PROJECT_ROOT/scripts.
+      script: scriptPath,
       args: [],
+      // The source stays in the reviewed automation_templates record. The
+      // authenticated poll route verifies this id + cron binding, then signs
+      // the source for the exact pairing before returning it to the daemon.
+      _automation_template_id: templateId,
       // Provenance — surface that this was AI-drafted so reviewers know
       // to read it carefully before flipping enabled=true.
       _ai_drafted: true,
       _ai_drafted_at: new Date().toISOString(),
+      _automation_department: pipeline.department,
+      _automation_trigger: pipeline.trigger_kind,
+      _automation_inputs: pipeline.input_parameters,
+      _automation_outputs: pipeline.expected_outputs,
+      _connector_keys: pipeline.connector_keys,
+      _target_pairing_id: pipeline.target_pairing_id,
     },
     // Disabled on creation. Operator flips on after inspecting the
     // generated file. Prevents an AI-drafted script from running before
@@ -126,6 +183,7 @@ export async function POST(req: NextRequest) {
     created_by: ctx.authUserId,
     owner_user_id: ctx.authUserId,
     last_scheduled_for: new Date().toISOString(),
+    target_pairing_id: pipeline.target_pairing_id,
   };
   const insRes = await db
     .from("tenant_cron_jobs")
@@ -138,18 +196,50 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
-  const cronId = (insRes.data as { id: string }).id;
+  if (target) {
+    const template = await db.from("automation_templates").insert({
+      id: templateId,
+      tenant_id: ctx.tenantId,
+      created_by: ctx.authUserId,
+      cron_job_id: cronId,
+      target_pairing_id: pipeline.target_pairing_id,
+      target_label: target.label || "Paired computer",
+      department: pipeline.department,
+      objective: pipeline.objective,
+      trigger_kind: pipeline.trigger_kind,
+      schedule_hint: pipeline.schedule_hint,
+      input_parameters_json: pipeline.input_parameters,
+      expected_outputs: pipeline.expected_outputs,
+      connector_keys_json: pipeline.connector_keys,
+      draft_json: draft,
+      status: "ready",
+    });
+    if (template.error) {
+      const cleanup = await db.from("tenant_cron_jobs").delete().eq("id", cronId).eq("tenant_id", ctx.tenantId).eq("owner_user_id", ctx.authUserId);
+      if (cleanup.error) {
+        console.error("[automations.save-draft] template insert and cron compensation both failed", {
+          tenantId: ctx.tenantId,
+          cronId,
+          templateError: template.error.message,
+          cleanupError: cleanup.error.message,
+        });
+      }
+      return NextResponse.json(
+        { ok: false, error: "automation_template_insert_failed", message: "The automation template could not be saved, so the paused schedule was rolled back." },
+        { status: 500 },
+      );
+    }
+  }
 
-  // The actual script-write happens on the operator's machine via the
-  // local bridge — Vercel can't touch the operator's disk. The dashboard
-  // client picks up the response and POSTs to localhost:9100/exec-tool
-  // with the write_file tool. We return enough metadata for the client
-  // to do that.
+  // The targeted daemon receives the source only through its authenticated
+  // cron poll. There is deliberately no browser/server push through the
+  // tenant-level bridge proxy: that proxy may address a different machine.
   return NextResponse.json({
     ok: true,
     cron_id: cronId,
-    script_path: `scripts/${draft.script_filename}`,
-    script_content: draft.script_content,
-    next_step: "client_should_post_to_bridge_write_file",
+    script_path: scriptPath,
+    template_id: templateId,
+    target_label: target?.label || null,
+    next_step: "enable_after_review",
   });
 }

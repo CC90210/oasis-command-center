@@ -179,7 +179,8 @@ async function main() {
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, agents_enabled TEXT,
       updated_at TEXT, deactivated_at TEXT, joined_at TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
-    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, label TEXT, last_seen_at TEXT, revoked_at TEXT);
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, label TEXT, user_id TEXT,
+      last_seen_at TEXT, revoked_at TEXT, scope TEXT, tool_capabilities TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT UNIQUE,
       slug TEXT UNIQUE, manifest TEXT, version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
     CREATE TABLE tenant_cron_jobs (
@@ -188,7 +189,16 @@ async function main() {
       schedule TEXT NOT NULL, action_type TEXT NOT NULL, action_payload TEXT NOT NULL DEFAULT '{}',
       enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, last_run_status TEXT, last_run_output TEXT,
       last_run_error TEXT, run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
-      last_scheduled_for TEXT, created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+      last_scheduled_for TEXT, target_pairing_id TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
+    );
+    CREATE TABLE automation_templates (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, created_by TEXT NOT NULL,
+      cron_job_id TEXT NOT NULL, target_pairing_id TEXT NOT NULL, target_label TEXT NOT NULL,
+      department TEXT NOT NULL, objective TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+      schedule_hint TEXT, input_parameters_json TEXT NOT NULL, expected_outputs TEXT NOT NULL,
+      connector_keys_json TEXT NOT NULL, draft_json TEXT NOT NULL, status TEXT NOT NULL,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT
     );
     CREATE TABLE workspace_agents_owner (
       tenant_id TEXT PRIMARY KEY, auth_user_id TEXT NOT NULL, set_by TEXT NOT NULL,
@@ -207,6 +217,11 @@ async function main() {
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [OASIS] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'clientco', 'Client Co')", args: [CLIENT] },
       profile("cc", OASIS, "owner", 1),
+      {
+        sql: `INSERT INTO bridge_pairings (id, tenant_id, label, user_id, last_seen_at, scope, tool_capabilities)
+              VALUES ('pair-cc-main', ?, 'CCPC (Windows)', ?, ?, 'daemon', ?)`,
+        args: [OASIS, USERS.cc.id, new Date().toISOString(), JSON.stringify(["generated_script_v1"])],
+      },
       profile("owner", CLIENT, "owner", 1),
       profile("member", CLIENT, "member", 0),
       // O2: script-automation creation is gated on the workspace's AGENTS
@@ -271,6 +286,16 @@ async function main() {
   const draftBody = { description: "Send me a summary of new leads every morning at eight." };
   const saveBody = (schedule: string) => ({
     confirmed: true,
+    pipeline: {
+      department: "sales",
+      objective: "Send the operator a concise summary of new leads.",
+      trigger_kind: "schedule",
+      schedule_hint: "Weekdays at eight",
+      input_parameters: ["lead_id"],
+      expected_outputs: "A concise lead summary",
+      connector_keys: [],
+      target_pairing_id: "pair-cc-main",
+    },
     draft: {
       suggested_name: "Morning lead summary",
       suggested_description: "Summarises new leads.",

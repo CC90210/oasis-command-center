@@ -74,7 +74,7 @@ async function check(name: string, fn: () => Promise<void>) {
   }
 }
 
-type PollBody = { ok?: boolean; error?: string; message?: string; jobs?: Array<{ id: string }>; polled_at?: string };
+type PollBody = { ok?: boolean; error?: string; message?: string; jobs?: Array<{ id: string; target_pairing_id?: string }>; polled_at?: string };
 
 async function main() {
   console.log("cron-poll-owner:");
@@ -90,7 +90,7 @@ async function main() {
       name TEXT NOT NULL, description TEXT, schedule TEXT NOT NULL, action_type TEXT NOT NULL,
       action_payload TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
       last_run_at TEXT, last_run_status TEXT, last_run_output TEXT, last_run_error TEXT,
-      run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT,
+      run_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, owner_user_id TEXT, target_pairing_id TEXT,
       created_at TEXT NOT NULL, updated_at TEXT
     );
     -- O3a: the poll also requires the pairing owner's live seat (lib/os/seat.ts).
@@ -130,6 +130,16 @@ async function main() {
               VALUES ('legacy-job', ?, 'Legacy job', '0 10 * * *', 'script_run', '{}', 1, NULL, ?)`,
         args: [TENANT, STAMP],
       },
+      {
+        sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, action_type, action_payload, enabled, owner_user_id, target_pairing_id, created_at)
+              VALUES ('cc-targeted-job', ?, 'CC targeted job', '0 11 * * *', 'script_run', '{}', 1, ?, 'pair-cc', ?)`,
+        args: [TENANT, CC_USER, STAMP],
+      },
+      {
+        sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, action_type, action_payload, enabled, owner_user_id, target_pairing_id, created_at)
+              VALUES ('other-target-job', ?, 'Other computer job', '0 12 * * *', 'script_run', '{}', 1, ?, 'pair-adon', ?)`,
+        args: [TENANT, CC_USER, STAMP],
+      },
     ],
     "write",
   );
@@ -138,6 +148,15 @@ async function main() {
   const { NextRequest } = await import("next/server");
   const get = (token: string) =>
     poll.GET(new NextRequest("http://localhost/api/cron-jobs/poll", { headers: { authorization: `Bearer ${token}` } }));
+  const report = async (token: string, jobId: string) => {
+    const response = await poll.POST(new NextRequest("http://localhost/api/cron-jobs/poll", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, status: "success", output: "ok" }),
+    }));
+    return { status: response.status, body: (await response.json()) as PollBody & { run_count?: number } };
+  };
+  const runCount = async (jobId: string) => Number((await db.execute({ sql: "SELECT run_count FROM tenant_cron_jobs WHERE id = ?", args: [jobId] })).rows[0].run_count);
   const lastPollOkAt = async (pairingId: string) => {
     const rs = await db.execute({ sql: "SELECT last_poll_ok_at FROM bridge_pairings WHERE id = ?", args: [pairingId] });
     return rs.rows[0]?.last_poll_ok_at as string | null | undefined;
@@ -148,7 +167,8 @@ async function main() {
     const body = (await res.json()) as PollBody;
     assert.equal(res.status, 200, JSON.stringify(body));
     const ids = (body.jobs || []).map((j) => j.id).sort();
-    assert.deepEqual(ids, ["cc-job", "legacy-job"]);
+    assert.deepEqual(ids, ["cc-job", "cc-targeted-job", "legacy-job"]);
+    assert.ok((body.jobs || []).every((job) => !("target_pairing_id" in job)), "internal pairing ids are not returned to the runner");
   });
 
   await check("a 200 stamps last_poll_ok_at for that pairing", async () => {
@@ -159,6 +179,29 @@ async function main() {
     assert.ok(stamped, "last_poll_ok_at is now set");
     assert.ok(Number.isFinite(Date.parse(String(stamped))), "it is a real timestamp");
     if (before) assert.ok(Date.parse(String(stamped)) > Date.parse(String(before)), "it moves forward on every poll");
+  });
+
+  await check("only the row owner on the exact target pairing may report its result", async () => {
+    const ALT_TOKEN = "cc-second-computer-token-00000000003";
+    await db.execute({
+      sql: `INSERT INTO bridge_pairings (id, tenant_id, label, user_id, bridge_token_hash) VALUES ('pair-cc-alt', ?, 'CC laptop', ?, ?)`,
+      args: [TENANT, CC_USER, sha256(ALT_TOKEN)],
+    });
+    const before = await runCount("cc-targeted-job");
+
+    const wrongOwner = await report(ADON_TOKEN, "cc-job");
+    assert.equal(wrongOwner.status, 409, JSON.stringify(wrongOwner.body));
+    assert.equal(wrongOwner.body.error, "owner_mismatch");
+
+    const wrongComputer = await report(ALT_TOKEN, "cc-targeted-job");
+    assert.equal(wrongComputer.status, 409, JSON.stringify(wrongComputer.body));
+    assert.equal(wrongComputer.body.error, "target_pairing_mismatch");
+    assert.equal(await runCount("cc-targeted-job"), before, "a non-target daemon did not stamp the row");
+
+    const exact = await report(CC_TOKEN, "cc-targeted-job");
+    assert.equal(exact.status, 200, JSON.stringify(exact.body));
+    assert.equal(exact.body.run_count, before + 1);
+    assert.equal(await runCount("cc-targeted-job"), before + 1);
   });
 
   await check("Adon's computer, which owns none of the tenant's enabled rows besides the unowned one, still gets the unowned row — then owns nothing once that row is removed, and gets 409 owner_mismatch", async () => {
@@ -237,6 +280,42 @@ async function main() {
     assert.equal(res.status, 200);
     assert.deepEqual(((await res.json()) as PollBody).jobs, []);
     assert.equal(await lastPollOkAt("pair-mac"), null, "a computer that is not the executor never stamps the scheduler's health");
+  });
+
+  await check("the default executor ignores another owner's job pinned to another pairing", async () => {
+    const OASIS_CCPC_TOKEN = "oab_test_oasis_ccpc_executor";
+    await db.batch([
+      {
+        sql: `INSERT INTO bridge_pairings (id, tenant_id, label, user_id, bridge_token_hash) VALUES ('pair-oasis-ccpc', 'ef8d389e-3f15-43f2-ae00-3660f69a1452', 'CCPC (Windows)', ?, ?)`,
+        args: [CC_USER, sha256(OASIS_CCPC_TOKEN)],
+      },
+      {
+        sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, action_type, action_payload, enabled, owner_user_id, target_pairing_id, created_at)
+              VALUES ('oasis-other-owner-target', 'ef8d389e-3f15-43f2-ae00-3660f69a1452', 'Other owner pinned job', '0 8 * * *', 'script_run', '{}', 1, ?, 'pair-mac', ?)`,
+        args: [ADON_USER, STAMP],
+      },
+    ], "write");
+    const res = await get(OASIS_CCPC_TOKEN);
+    assert.equal(res.status, 200);
+    assert.deepEqual(((await res.json()) as PollBody).jobs, []);
+    assert.ok(await lastPollOkAt("pair-oasis-ccpc"), "a healthy empty executor poll is stamped");
+  });
+
+  await check("an exact target lets a non-default OASIS computer fetch and report only its pinned job", async () => {
+    const MAC_TOKEN = "oab_test_mac_not_the_executor";
+    await db.execute({
+      sql: `INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, action_type, action_payload, enabled, owner_user_id, target_pairing_id, created_at)
+            VALUES ('oasis-mac-target', 'ef8d389e-3f15-43f2-ae00-3660f69a1452', 'Pinned Mac job', '0 9 * * *', 'script_run', '{}', 1, ?, 'pair-mac', ?)`,
+      args: [CC_USER, STAMP],
+    });
+    const res = await get(MAC_TOKEN);
+    assert.equal(res.status, 200);
+    assert.deepEqual(((await res.json()) as PollBody).jobs?.map((job) => job.id), ["oasis-mac-target"]);
+    assert.ok(await lastPollOkAt("pair-mac"), "the exact target poll counts as a healthy delivery");
+
+    const run = await report(MAC_TOKEN, "oasis-mac-target");
+    assert.equal(run.status, 200, JSON.stringify(run.body));
+    assert.equal(run.body.run_count, 1);
   });
 
   if (failures > 0) {

@@ -20,7 +20,14 @@ export const thClass = "border-b border-bg-border px-3 py-2 text-[10px] font-bol
 export const tdClass = "border-b border-bg-border/60 px-3 py-2 align-top";
 export const numClass = "text-right tabular-nums";
 
-export const INVOICE_STATUS_TONE = { draft: "neutral", sent: "info", overdue: "hot", paid: "engaged", void: "neutral" } as const;
+export const INVOICE_STATUS_TONE = {
+  draft: "neutral",
+  sent: "info",
+  overdue: "hot",
+  partially_paid: "warm",
+  paid: "engaged",
+  void: "neutral",
+} as const;
 
 export function amountTone(cents: number): string {
   return cents < 0 ? "text-status-hot" : cents > 0 ? "text-status-engaged" : "text-fg-muted";

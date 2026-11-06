@@ -23,9 +23,9 @@ export const INVOICE_PAYMENT_METHODS = ["wise", "stripe", "wise_stripe"] as cons
 export type InvoicePaymentMethod = (typeof INVOICE_PAYMENT_METHODS)[number];
 
 export const PAYMENT_METHOD_LABEL: Readonly<Record<InvoicePaymentMethod, string>> = {
-  wise: "Bank transfer (Wise)",
-  stripe: "Card (Stripe)",
-  wise_stripe: "Bank transfer (Wise) or card (Stripe)",
+  wise: "Wise / bank wire only",
+  stripe: "Stripe only",
+  wise_stripe: "Hybrid: Wise / wire + Stripe",
 };
 
 /** A new one-off invoice asks for a bank transfer; recurring billing stays on Stripe subscriptions. */

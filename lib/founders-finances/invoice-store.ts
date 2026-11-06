@@ -84,6 +84,8 @@ export type ContactRow = {
   email: string;
   company: string;
   address: string;
+  notes: string;
+  archived: number;
   stripe_customer_id: string | null;
 };
 
@@ -162,7 +164,7 @@ export async function loadInvoiceLines(id: string): Promise<InvoiceLineRow[]> {
 }
 
 export async function loadContact(id: string): Promise<ContactRow | null> {
-  return queryOne<ContactRow>(`SELECT id, entity_id, kind, name, email, company, address, stripe_customer_id FROM fin_contacts WHERE id = ?`, [id]);
+  return queryOne<ContactRow>(`SELECT id, entity_id, kind, name, email, company, address, notes, archived, stripe_customer_id FROM fin_contacts WHERE id = ?`, [id]);
 }
 
 /** Dr AR / Cr revenue per line / Cr GST, QST payable — in the invoice currency at the issue date's rate. */

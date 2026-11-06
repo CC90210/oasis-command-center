@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * seed-oasis-offer-pages.ts - create OASIS's four offer pages (PROTOCOL,
- * COMMAND, COMMUNITY, FLEET) and the "Start here" router (/vsl) as DRAFTS in
+ * seed-oasis-offer-pages.ts - create OASIS's four core offer pages (AI AUDIT,
+ * PROTOCOLS, COMMAND, FLEET) plus the supporting COMMUNITY and "Start here"
+ * router pages as DRAFTS in
  * OASIS's own workspace, from content/offers/oasis/*.json (HANDOVER
  * 2026-10-12 sections 4 and 6, slice 4 "Content").
  *
- * Not to be confused with scripts/seed-offer-pages.ts, which gives the two
- * older funnels (ai-audit, start) an empty draft. This script never touches
- * those forms.
+ * Not to be confused with scripts/seed-offer-pages.ts, which gives older
+ * funnels an empty draft. This script can attach a missing draft page to the
+ * exact live ai-audit form, but never changes that form or publishes the page.
  *
  * WHAT IT WRITES, AND WHAT IT NEVER DOES:
  *   - Each form is created SWITCHED OFF (forms.enabled = 0). Nobody can reach
@@ -37,7 +38,8 @@
  * --tenant-slug oasis-ai-cc and exactly one of --dry-run / --apply are required;
  * anything else is refused before the database is opened.
  *
- * REQUIRES migration bravo__203 (form_offer_pages) and Turso credentials
+ * REQUIRES migrations bravo__203 (form_offer_pages) and bravo__220
+ * (forms.routing), plus Turso credentials
  * (TURSO_DATABASE_URL + TURSO_AUTH_TOKEN, or TURSO_DB_PATH for a local file).
  */
 import { readFileSync } from "node:fs";
@@ -52,6 +54,7 @@ import {
   type FormBranding,
   type FormStep,
 } from "../lib/forms/types";
+import { parseFormRouting } from "../lib/forms/routing";
 import { parseOfferPageDoc, type OfferPageDoc } from "../lib/offer-pages/types";
 import { createOfferRow, isMissingOfferTable, readOfferRow } from "../lib/offer-pages/store";
 import { lintDoc, type ClaimHit } from "../lib/offer-pages/claims";
@@ -59,8 +62,12 @@ import { lintDoc, type ClaimHit } from "../lib/offer-pages/claims";
 /** The only workspace this content belongs to. */
 export const OASIS_TENANT_SLUG = "oasis-ai-cc";
 
+/** The conversion paths named in the public funnel contract. */
+export const CORE_OFFER_SLUGS = ["ai-audit", "protocols", "command", "fleet"] as const;
+/** Supporting paths remain available without being counted as core offers. */
+export const SUPPORTING_OFFER_SLUGS = ["vsl", "community"] as const;
 /** The files, in the order they are seeded and reported. */
-export const OASIS_OFFER_SLUGS = ["vsl", "protocol", "command", "community", "fleet"] as const;
+export const OASIS_OFFER_SLUGS = [...CORE_OFFER_SLUGS, ...SUPPORTING_OFFER_SLUGS] as const;
 
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const TOP_KEYS = ["slug", "pillar", "form", "community_link", "work_steps", "routing_rules", "offer_page"];
@@ -77,6 +84,7 @@ export type OfferContent = {
     steps: FormStep[];
     on_complete_stage: string | null;
     step_outcomes: Record<string, string>;
+    routing: unknown[];
   };
   communityLink: { label: string; href: string };
   doc: OfferPageDoc;
@@ -131,6 +139,19 @@ export function parseOfferContent(raw: unknown, file: string): OfferContent {
     throw new ContentError(file, `form: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  let routing: unknown[] = [];
+  if (raw.routing_rules !== undefined) {
+    if (!isRecord(raw.routing_rules) || Object.keys(raw.routing_rules).some((key) => key !== "rules") || !Array.isArray(raw.routing_rules.rules)) {
+      throw new ContentError(file, "routing_rules must contain only a rules array");
+    }
+    try {
+      parseFormRouting(raw.routing_rules.rules);
+      routing = raw.routing_rules.rules;
+    } catch (err) {
+      throw new ContentError(file, `routing_rules: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const link = raw.community_link;
   if (!isRecord(link) || typeof link.label !== "string" || typeof link.href !== "string") {
     throw new ContentError(file, "community_link needs a label and an href");
@@ -155,6 +176,7 @@ export function parseOfferContent(raw: unknown, file: string): OfferContent {
       steps,
       on_complete_stage: typeof f.on_complete_stage === "string" ? f.on_complete_stage : null,
       step_outcomes: stepOutcomes,
+      routing,
     },
     communityLink: { label: link.label, href: link.href },
     doc,
@@ -208,6 +230,7 @@ export type FormOutcome =
   | "created"
   | "would_create"
   | "resumed" // our own switched-off form from an earlier run
+  | "attached_live" // a named core offer already live; only its missing page draft is added
   | "skipped_live" // a switched-on form with this slug: not ours to repurpose
   | "skipped_foreign"; // a switched-off form with this slug but another name
 export type PageOutcome = "created" | "would_create" | "exists_left" | "skipped";
@@ -282,8 +305,8 @@ export async function seedOasisOfferPages(
         // enabled = 0: the form is off until a person switches it on. The
         // NOT EXISTS keeps a concurrent run from making a second one.
         await db.execute({
-          sql: `INSERT INTO forms (id, tenant_id, slug, name, description, branding, steps, on_complete_stage, step_outcomes, enabled, redirect_url, created_by)
-                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL
+          sql: `INSERT INTO forms (id, tenant_id, slug, name, description, branding, steps, on_complete_stage, step_outcomes, routing, enabled, redirect_url, created_by)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL
                 WHERE NOT EXISTS (SELECT 1 FROM forms WHERE tenant_id = ? AND slug = ?)`,
           args: [
             id,
@@ -295,6 +318,7 @@ export async function seedOasisOfferPages(
             JSON.stringify(c.form.steps),
             c.form.on_complete_stage,
             JSON.stringify(c.form.step_outcomes),
+            JSON.stringify(c.form.routing),
             tenantId,
             c.slug,
           ],
@@ -309,8 +333,15 @@ export async function seedOasisOfferPages(
         formId = id;
       }
     } else if (existing.enabled) {
-      pages.push({ slug: c.slug, pillar: c.pillar, formId: existing.id, form: "skipped_live", page: "skipped", hits });
-      continue;
+      const isNamedCoreOffer = (CORE_OFFER_SLUGS as readonly string[]).includes(c.slug) && existing.name === c.form.name;
+      if (!isNamedCoreOffer) {
+        pages.push({ slug: c.slug, pillar: c.pillar, formId: existing.id, form: "skipped_live", page: "skipped", hits });
+        continue;
+      }
+      // AI Audit and FLEET are already live acquisition forms. The seed may
+      // attach a draft page to those exact, explicitly named core forms, but
+      // it never changes their fields, enabled state or public page state.
+      form = "attached_live";
     } else if (existing.name !== c.form.name) {
       pages.push({ slug: c.slug, pillar: c.pillar, formId: existing.id, form: "skipped_foreign", page: "skipped", hits });
       continue;
@@ -346,7 +377,7 @@ export function formatReport(report: SeedReport, content: OfferContent[]): strin
     const c = content.find((x) => x.slug === p.slug);
     out.push("");
     out.push(`${p.pillar} (/f/${OASIS_TENANT_SLUG}/${p.slug})`);
-    out.push(`  form : ${p.form}${p.formId ? ` (${p.formId})` : ""}, switched off`);
+    out.push(`  form : ${p.form}${p.formId ? ` (${p.formId})` : ""}${p.form === "attached_live" ? ", existing live form left unchanged" : ", switched off"}`);
     out.push(`  page : ${p.page}, draft only`);
     if (c) {
       out.push(`  headline : ${c.doc.hero.headline ?? "(none)"}`);

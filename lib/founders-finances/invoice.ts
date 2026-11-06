@@ -232,15 +232,28 @@ export function effectiveInvoiceStatus(
  * it is listed as `retainer`, never counted with sent/overdue. Every other
  * invoice shows its effective status unchanged.
  */
-export type InvoiceListStatus = InvoiceStatus | "retainer";
+export type InvoiceListStatus = InvoiceStatus | "partially_paid" | "retainer";
 
-export function invoiceListStatus(effective: InvoiceStatus, hasAmountDueNow: boolean): InvoiceListStatus {
-  return !hasAmountDueNow && (effective === "sent" || effective === "overdue") ? "retainer" : effective;
+export function invoiceListStatus(
+  effective: InvoiceStatus,
+  hasAmountDueNow: boolean,
+  payment?: { amountPaidCents: number; totalCents: number },
+): InvoiceListStatus {
+  if (!hasAmountDueNow && (effective === "sent" || effective === "overdue")) return "retainer";
+  if (
+    effective === "sent" &&
+    payment &&
+    payment.amountPaidCents > 0 &&
+    payment.amountPaidCents < payment.totalCents
+  ) {
+    return "partially_paid";
+  }
+  return effective;
 }
 
 /** The statuses that mean "money is owed on this invoice now". */
 export function isOpenListStatus(s: InvoiceListStatus): boolean {
-  return s === "sent" || s === "overdue";
+  return s === "sent" || s === "overdue" || s === "partially_paid";
 }
 
 const TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {

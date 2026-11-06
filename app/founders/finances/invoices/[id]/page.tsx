@@ -355,13 +355,17 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
       {(isDraft || (open && inv.amount_paid_cents === 0)) && (
         <div className="flex justify-end">
           <ActionButton
-            action="invoice.void"
+            action={isDraft ? "invoice.delete_draft" : "invoice.void"}
             payload={{ invoice_id: inv.id }}
-            label="Void invoice"
+            label={isDraft ? "Delete draft" : "Void invoice"}
             tone="danger"
-            confirm={`Void this invoice? An issued invoice's receivable is reversed; the number stays used.${
-              retainerLinkUrl ? " Its retainer link stops working; a subscription the client already started keeps running until you cancel it in Stripe." : ""
-            }`}
+            confirm={
+              isDraft
+                ? "Delete this unissued draft? It has no accounting effect and cannot be recovered."
+                : `Void this invoice? An issued invoice's receivable is reversed; the number stays used.${
+                    retainerLinkUrl ? " Its retainer link stops working; a subscription the client already started keeps running until you cancel it in Stripe." : ""
+                  }`
+            }
           />
         </div>
       )}

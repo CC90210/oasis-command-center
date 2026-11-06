@@ -175,7 +175,14 @@
       "headline": "Before anyone builds anything, find out where AI pays back",
       "subheadline": "An enterprise AI and security audit maps where AI will earn its keep in your operation and where it is a liability. Then, if it makes sense, we build the fleet of AI agents to run it. The audit fee is credited in full to the build.",
       "cta_label": "Request your audit",
-      "video": null,
+      "video": {
+        "source": "library",
+        "asset_id": "a334c542-abd4-476b-9048-f2e373553c61",
+        "video_media_id": "01d32c8d-c112-492d-8379-7039318e26de",
+        "rights": { "by": "CMO Library approval", "at": "2026-10-14T01:56:29.210Z" },
+        "aspect": "9:16",
+        "duration_s": 30
+      },
       "show_transcript": false,
       "vsl_script": {
         "source": "cc",

@@ -287,6 +287,8 @@ async function main() {
   await check("status: nothing due now is never overdue; a one-time balance still is", async () => {
     assert.equal(inv.effectiveInvoiceStatus({ status: "sent", dueDate: "2026-01-01", totalCents: 0, amountPaidCents: 0 }, "2026-09-24"), "sent");
     assert.equal(inv.effectiveInvoiceStatus({ status: "sent", dueDate: "2026-01-01", totalCents: 100, amountPaidCents: 0 }, "2026-09-24"), "overdue");
+    assert.equal(inv.invoiceListStatus("sent", true, { amountPaidCents: 25, totalCents: 100 }), "partially_paid");
+    assert.equal(inv.invoiceListStatus("overdue", true, { amountPaidCents: 25, totalCents: 100 }), "overdue", "a late partial balance stays overdue");
     assert.equal(inv.hasAmountDueNow({ totalCents: 0, retainerMonthlyCents: 50000 }), false, "retainer-only");
     assert.equal(inv.hasAmountDueNow({ totalCents: 0, retainerMonthlyCents: 0 }), true, "no retainer: today's behaviour");
     assert.equal(inv.hasAmountDueNow({ totalCents: 100, retainerMonthlyCents: 50000 }), true);

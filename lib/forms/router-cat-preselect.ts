@@ -16,7 +16,7 @@
 
 /** p1..p4, fixed by the funnel doc's pillar order (HANDOVER section 4). */
 export const CAT_TO_ROUTER_PATH: Readonly<Record<string, string>> = {
-  p1: "protocol",
+  p1: "protocols",
   p2: "command",
   p3: "community",
   p4: "fleet",

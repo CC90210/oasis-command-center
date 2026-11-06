@@ -8,6 +8,7 @@ import { after } from "next/server";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
+import { CustomerManager } from "@/components/founders/finances/CustomerManager";
 import { INVOICE_STATUS_TONE as STATUS_TONE, numClass, primaryButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
 import { financePage, loadInvoicesPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
@@ -33,7 +34,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
     ),
   );
   // "sent" and "overdue" are invoices with money owed now; an issued invoice that only sets up a retainer is under "retainer".
-  const filters = ["", "draft", "sent", "overdue", "retainer", "paid", "void"];
+  const filters = ["", "draft", "sent", "partially_paid", "overdue", "retainer", "paid", "void"];
   const retainerNote = { none: "no link yet", not_emailed: "link not emailed yet", emailed: "link emailed" } as const;
 
   return (
@@ -56,7 +57,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
               href={f ? `/founders/finances/invoices?status=${f}` : "/founders/finances/invoices"}
               className={`rounded-md px-2.5 py-1 text-xs font-semibold ${status === f ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
             >
-              {f ? f[0].toUpperCase() + f.slice(1) : "All"}
+              {f ? (f === "partially_paid" ? "Partially paid" : f[0].toUpperCase() + f.slice(1)) : "All"}
             </Link>
           ))}
         </div>
@@ -132,15 +133,10 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
 
       <Card title="Customers" subtitle={`${contacts.length} on file`}>
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <ul className="divide-y divide-bg-border/60 text-sm">
-            {contacts.length === 0 && <li className="py-2 text-fg-muted">No customers yet. Add your first one with the form.</li>}
-            {contacts.map((c) => (
-              <li key={c.id} className="flex justify-between gap-3 py-2">
-                <span>{c.name}</span>
-                <span className="truncate text-fg-muted">{c.email || "no email"}</span>
-              </li>
-            ))}
-          </ul>
+          <CustomerManager
+            entity={entity.slug}
+            customers={contacts.map((c) => ({ id: c.id, name: c.name, email: c.email, company: c.company, address: c.address, notes: c.notes }))}
+          />
           <ActionForm
             action="contact.create"
             hidden={{ entity: entity.slug, kind: "customer" }}

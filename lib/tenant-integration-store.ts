@@ -324,6 +324,34 @@ export async function getTenantIntegrationBundle(
 }
 
 /**
+ * Vault-only bundle read for health checks and other fail-closed status paths.
+ * Unlike the compatibility reader above, storage or decryption failures throw
+ * and no environment fallback is possible.
+ */
+export async function getTenantIntegrationBundleStrict(
+  tenantId: string,
+  service: string,
+): Promise<Record<string, string>> {
+  if (!tenantId || !service) throw new Error("tenant_integration_scope_missing");
+  const db = getServiceSupabase();
+  const result = await db
+    .from("tenant_integration_credentials")
+    .select("field_key, encrypted_value")
+    .eq("tenant_id", tenantId)
+    .eq("service", service);
+  if (result.error) throw new Error(result.error.message || "tenant_integration_bundle_failed");
+  const bundle: Record<string, string> = {};
+  for (const row of (result.data || []) as Array<{ field_key: string; encrypted_value: string }>) {
+    try {
+      bundle[row.field_key] = decryptField(row.encrypted_value);
+    } catch {
+      throw new Error(`tenant_integration_credential_unreadable:${row.field_key}`);
+    }
+  }
+  return bundle;
+}
+
+/**
  * Strict, value-free credential readiness for operator-facing status UI.
  *
  * Mirrors the send paths: env counts only for an OASIS tenant, and an

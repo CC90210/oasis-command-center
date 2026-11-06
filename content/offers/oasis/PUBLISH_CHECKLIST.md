@@ -1,6 +1,6 @@
 # OASIS offer pages: publish checklist
 
-The five pages in this folder (the "Start here" router plus PROTOCOL, COMMAND, COMMUNITY and FLEET) are seeded
+The six pages in this folder (the four core offers AI AUDIT, PROTOCOLS, COMMAND and FLEET, plus the "Start here" router and COMMUNITY) are seeded
 by `scripts/seed-oasis-offer-pages.ts` as **drafts behind switched-off forms**. Nothing here is public. A page goes
 live only when Adon or CC has confirmed every item below, switched its form On, and pressed Publish in the builder.
 
@@ -44,7 +44,7 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
 - [ ] **Every flagged sentence in section 7 ticked** in the builder, after the edits above.
 - [ ] **Form switched On, then Publish.** The gate refuses while the form is off.
 - [ ] **Public paths:** until slice V6 ships short paths, the pages live at `/f/oasis-ai-cc/<slug>`
-      (`vsl`, `protocol`, `command`, `community`, `fleet`).
+      (`ai-audit`, `protocols`, `command`, `fleet`, `vsl`, `community`).
 - [ ] **Slugs free in production.** The seed has not been run against production. Its dry run reports any form
       already using one of these slugs (`--tenant-slug oasis-ai-cc --dry-run`), and it never touches a form it did
       not create.
@@ -62,7 +62,12 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
       the factual lines only; the story beats are prompts in square brackets.
 - [ ] `?cat=p1..p4` preselecting a card and `kw=` being recorded arrive with V2 and V5.
 
-## 3. PROTOCOL (`protocol`)
+## 3. AI AUTOMATION AUDIT (`ai-audit`)
+
+- [ ] Confirm the diagnostic and native booking duration are both exactly 15 minutes.
+- [ ] Confirm the page may promise a quick-win roadmap from that focused diagnostic.
+
+## 4. PROTOCOLS (`protocols`)
 
 - [ ] **One number for each range:** 1A $17 to $47, 1B $97 to $197, 1D $97 to $395.
 - [ ] **Stripe Payment Links** for each pack (1A to 1D), the two add-ons ($27 prompt pack, $47 video vault) and
@@ -77,7 +82,7 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
       you open it"** (the meaning of "mystery") are accurate.
 - [ ] Downsells kept off the page on purpose: 1C to 1B at $147, 1D to 1A at $47 (checkout-flow offers, not page copy).
 
-## 4. COMMAND (`command`)
+## 5. COMMAND (`command`)
 
 - [ ] **One number for the range:** 2C $2,500 to $3,500 a month.
 - [ ] **Expedited VIP vault bonus: confirm its value and what it includes.** The funnel doc gives "$500 value";
@@ -95,7 +100,7 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
 - [ ] **VIP at "$97 a month"** in the downsell answer must match the single number Adon picks for the 3B range
       ($47 to $97).
 
-## 5. COMMUNITY (`community`)
+## 6. COMMUNITY (`community`)
 
 - [ ] **One number for each range:** 3B $47 to $97 a month, 3C $2,500 to $5,000 a month.
 - [ ] **Stripe Payment Link for the VIP mastermind** (HANDOVER publish checklist item 6).
@@ -105,7 +110,7 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
 - [ ] The innocence gate works as the HANDOVER describes: "Yes, I have a budget" shows the VIP room, mentorship and
       COMMAND as choices. Choosing COMMAND does not redirect anyone; that arrives with V5.
 
-## 6. FLEET (`fleet`)
+## 7. FLEET (`fleet`)
 
 - [ ] **One number for each range:** 4A $2,500 to $7,500, 4B $5,000 to $15,000+, 4C $2,000 to $5,000.
 - [ ] **The audit fee is "credited in full to the build"** (funnel doc: 100% credited). Confirm the terms.
@@ -118,7 +123,7 @@ currency and the price ranges first, edit the copy, and tick the flagged sentenc
       names and option values, and never touches `/ai-audit` (it holds 21 responses and live links point at it).
       Decide which form FLEET keeps.
 
-## 7. Sentences the claims linter flags
+## 8. Sentences the claims linter flags
 
 Each needs an owner's tick in the builder: "true, and we can back it". Generated from `lintDoc` on the drafts as
 written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence is missing from this list.
@@ -134,7 +139,21 @@ written; `tests/offer-pages-oasis-content.test.ts` fails if any flagged sentence
 | `faq.items[0].a` | the word "revenue" | We also ask about revenue and budget so we can point you to the page that fits, and you can change your mind on any page. |
 | `faq.items[2].q` | the word "revenue" | Why do you ask about revenue and budget? |
 
-### PROTOCOL (`protocol`): 7
+### AI AUTOMATION AUDIT (`ai-audit`): 7
+
+| Where | Why flagged | Exact sentence |
+|---|---|---|
+| `hero.eyebrow` | a number | AI AUTOMATION AUDIT, 15 MINUTES |
+| `hero.subheadline` | a number | In 15 focused minutes, we map the first quick win, the systems it touches and the next move that removes real work. |
+| `hero.cta_label` | a number | Book the 15-minute audit |
+| `faq.items[0].q` | a number | Is the audit really 15 minutes? |
+| `book.eyebrow` | a number | Your next 15 minutes |
+| `book.lede` | a number | Answer the short diagnostic, then choose a live 15-minute slot. |
+| `seo.title` | a number | 15-minute AI Automation Audit \| OASIS AI |
+
+Exact SEO title for the claim ledger: `15-minute AI Automation Audit | OASIS AI`.
+
+### PROTOCOLS (`protocols`): 7
 
 | Where | Why | Sentence |
 |---|---|---|

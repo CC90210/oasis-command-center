@@ -133,7 +133,14 @@
       "headline": "Your follow-up, booking and back office, running without you",
       "subheadline": "The OASIS Command Center answers new leads, books the call and keeps the back office moving while you do the work you are paid for. We set it up for you, or you set it up yourself.",
       "cta_label": "Book your discovery call",
-      "video": null,
+      "video": {
+        "source": "library",
+        "asset_id": "066532f1-2573-4a37-9a84-4b95e296eca8",
+        "video_media_id": "e3de8f4c-5942-464b-a4b0-ae0bb3677653",
+        "rights": { "by": "CMO Library approval", "at": "2026-10-14T01:56:29.210Z" },
+        "aspect": "16:9",
+        "duration_s": 22
+      },
       "show_transcript": false,
       "vsl_script": {
         "source": "cc",

@@ -36,6 +36,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, Trash2, Plus, Upload, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { VAULT_SERVICE_DEFINITIONS, type VaultServiceCheck, type VaultServiceId } from "@/lib/credential-vault/catalog";
 
 type CustomCredentialRow = {
   key: string;
@@ -80,6 +81,8 @@ export function CustomCredentialsVault() {
   const [bulkText, setBulkText] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkResults, setBulkResults] = useState<UpsertResult[] | null>(null);
+  const [serviceChecks, setServiceChecks] = useState<Partial<Record<VaultServiceId, VaultServiceCheck>>>({});
+  const [checkingService, setCheckingService] = useState<VaultServiceId | null>(null);
 
   const fetchRows = useCallback(async () => {
     setLoading(true);
@@ -201,6 +204,28 @@ export function CustomCredentialsVault() {
     }
   }
 
+  async function testService(provider: VaultServiceId) {
+    setCheckingService(provider);
+    setErr(null);
+    try {
+      const response = await fetch("/api/credentials/custom/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const body = (await response.json().catch(() => null)) as { ok?: boolean; status?: VaultServiceCheck; error?: string } | null;
+      if (!response.ok || !body?.ok || !body.status) {
+        setErr(body?.error || `Connection check failed (${response.status}).`);
+        return;
+      }
+      setServiceChecks((current) => ({ ...current, [provider]: body.status }));
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "connection_check_failed");
+    } finally {
+      setCheckingService(null);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <p className="text-xs text-fg-muted leading-relaxed max-w-3xl">
@@ -209,6 +234,47 @@ export function CustomCredentialsVault() {
         via the <code className="font-mono text-fg">get_credential</code> tool. The value
         never appears in chat — only the result of the action that used it.
       </p>
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3" aria-label="Credential connection checks">
+        {VAULT_SERVICE_DEFINITIONS.map((service) => {
+          const status = serviceChecks[service.id];
+          const savedKeys = new Set(rows.filter((row) => row.has_value).map((row) => row.key.toUpperCase()));
+          const ready = service.keyGroups.every((group) => group.aliases.some((alias) => savedKeys.has(alias.toUpperCase())));
+          const tone = status?.state === "connected" ? "border-status-engaged/40 bg-status-engaged/5" : status?.state === "error" ? "border-status-hot/40 bg-status-hot/5" : "border-bg-border bg-bg-elev/20";
+          return (
+            <section key={service.id} className={`rounded-lg border p-3 ${tone}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-bold text-fg">{service.label}</p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-fg-muted">{service.description}</p>
+                </div>
+                {status?.state === "connected" ? <CheckCircle2 className="h-4 w-4 shrink-0 text-status-engaged" /> : <KeyRound className="h-4 w-4 shrink-0 text-fg-dim" />}
+              </div>
+              <div className="mt-3 space-y-1">
+                {service.keyGroups.map((group) => {
+                  const present = group.aliases.some((alias) => savedKeys.has(alias.toUpperCase()));
+                  return (
+                    <div key={group.label} className="flex items-center justify-between gap-2 font-mono text-[10px]">
+                      <span className="truncate text-fg-dim">{group.label}</span>
+                      <span className={present ? "text-status-engaged" : "text-status-warm"}>{present ? "saved" : "missing"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {status && <p role="status" className={`mt-3 text-[11px] leading-relaxed ${status.state === "connected" ? "text-status-engaged" : status.state === "not_configured" ? "text-status-warm" : "text-status-hot"}`}>{status.detail}</p>}
+              <button
+                type="button"
+                onClick={() => void testService(service.id)}
+                disabled={!ready || checkingService !== null}
+                className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-xs font-semibold text-fg transition-colors hover:border-[rgba(31,227,240,0.45)] disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {checkingService === service.id && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {checkingService === service.id ? "Testing…" : ready ? "Test connection" : "Add required keys"}
+              </button>
+            </section>
+          );
+        })}
+      </div>
 
       {/* Existing entries */}
       <div className="rounded-lg border border-bg-border bg-bg-elev/30">

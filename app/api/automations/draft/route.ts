@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { draftAutomation } from "@/lib/ai-automation-drafter";
 import { CRON_RULE_SENTENCE } from "@/lib/automations/cron-grammar";
 import { gateScriptAutomationCreate } from "@/lib/automations/script-access";
+import { AutomationPipelineError, buildAutomationDescription, parseAutomationPipeline } from "@/lib/automations/pipeline";
 
 const BAD_SCHEDULE = "automation_draft_bad_schedule";
 
@@ -30,13 +31,23 @@ export async function POST(req: NextRequest) {
   if (!gate.ok) return gate.response;
   const ctx = gate.ctx;
 
-  let body: { description?: unknown };
+  let body: { description?: unknown; pipeline?: unknown };
   try {
-    body = (await req.json()) as { description?: unknown };
+    body = (await req.json()) as { description?: unknown; pipeline?: unknown };
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
-  const description = typeof body.description === "string" ? body.description.trim() : "";
+  let description = typeof body.description === "string" ? body.description.trim() : "";
+  if (body.pipeline !== undefined) {
+    try {
+      description = buildAutomationDescription(parseAutomationPipeline(body.pipeline));
+    } catch (error) {
+      if (error instanceof AutomationPipelineError) {
+        return NextResponse.json({ ok: false, error: "pipeline_invalid", field: error.field, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+  }
   if (description.length < 10) {
     return NextResponse.json(
       { ok: false, error: "description_too_short", message: "Describe in at least one sentence what the automation should do." },

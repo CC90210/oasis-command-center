@@ -112,10 +112,65 @@ export async function listContacts(viewer: FinanceViewer, entityRef: string, kin
   const entity = await requireEntity(viewer, entityRef);
   const kinds = kind === "customer" ? ["customer", "both"] : kind === "vendor" ? ["vendor", "both"] : ["customer", "vendor", "both"];
   return query<ContactRow>(
-    `SELECT id, entity_id, kind, name, email, company, address, stripe_customer_id FROM fin_contacts
+    `SELECT id, entity_id, kind, name, email, company, address, notes, archived, stripe_customer_id FROM fin_contacts
       WHERE entity_id = ? AND archived = 0 AND kind IN (${kinds.map(() => "?").join(",")}) ORDER BY name`,
     [entity.id, ...kinds],
   );
+}
+
+/** Update the mutable address-book fields. Historical invoices keep the same contact id. */
+export async function updateContact(
+  viewer: FinanceViewer,
+  entityRef: string,
+  contactId: string,
+  raw: Record<string, unknown>,
+): Promise<void> {
+  const entity = await requireEntity(viewer, entityRef);
+  const current = await loadContact(contactId);
+  if (!current || current.entity_id !== entity.id || current.archived === 1) {
+    throw new FinanceNotFound();
+  }
+  const name = text(raw.name, 200);
+  if (!name) throw new FinanceInputError("contact name is required");
+  const emailRaw = text(raw.email, 254);
+  const email = emailRaw ? validateEmail(emailRaw) : "";
+  if (emailRaw && !email) throw new FinanceInputError("contact email is not valid");
+  const kind = raw.kind === "vendor" || raw.kind === "both" ? raw.kind : "customer";
+  await writeBatch([
+    {
+      sql: `UPDATE fin_contacts SET kind = ?, name = ?, email = ?, company = ?, address = ?, notes = ?
+             WHERE id = ? AND entity_id = ? AND archived = 0`,
+      args: [kind, name, email || "", text(raw.company, 200), text(raw.address, 500), text(raw.notes, 1000), contactId, entity.id],
+    },
+    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "contact.updated", objectType: "contact", objectId: contactId }),
+  ]);
+}
+
+/**
+ * Archive, never hard-delete. Invoice, payment and ledger rows keep their
+ * contact foreign key, while the contact disappears from future pickers.
+ */
+export async function archiveContact(viewer: FinanceViewer, entityRef: string, contactId: string): Promise<void> {
+  const entity = await requireEntity(viewer, entityRef);
+  const current = await loadContact(contactId);
+  if (!current || current.entity_id !== entity.id || current.archived === 1) throw new FinanceNotFound();
+  const linked = await queryOne<{ invoices: number; payments: number }>(
+    `SELECT
+       (SELECT COUNT(*) FROM fin_invoices WHERE entity_id = ? AND contact_id = ?) AS invoices,
+       (SELECT COUNT(*) FROM fin_payments WHERE entity_id = ? AND contact_id = ?) AS payments`,
+    [entity.id, contactId, entity.id, contactId],
+  );
+  await writeBatch([
+    { sql: `UPDATE fin_contacts SET archived = 1 WHERE id = ? AND entity_id = ? AND archived = 0`, args: [contactId, entity.id] },
+    auditStatement({
+      entityId: entity.id,
+      actor: viewerLabel(viewer),
+      action: "contact.archived",
+      objectType: "contact",
+      objectId: contactId,
+      detail: { retained_invoice_links: Number(linked?.invoices || 0), retained_payment_links: Number(linked?.payments || 0) },
+    }),
+  ]);
 }
 
 export async function createContact(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
@@ -361,7 +416,10 @@ export async function listInvoices(viewer: FinanceViewer, entityRef: string, sta
     return {
       ...r,
       effective_status: effective,
-      list_status: invoiceListStatus(effective, hasAmountDueNow(r)),
+      list_status: invoiceListStatus(effective, hasAmountDueNow(r), {
+        amountPaidCents: r.amount_paid_cents,
+        totalCents: r.total_cents,
+      }),
       balance_cents: r.status === "void" ? 0 : balanceDueCents({ totalCents: r.total_cents, amountPaidCents: r.amount_paid_cents }),
       retainer_cents: retainerMonthlyCents(r),
       retainer_link: localRetainerLink(r),
@@ -393,7 +451,10 @@ export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string)
     invoice: inv,
     effectiveStatus,
     /** What the page labels it: `retainer` for an issued invoice with nothing due now (never "open"). */
-    listStatus: invoiceListStatus(effectiveStatus, hasAmountDueNow(inv)),
+    listStatus: invoiceListStatus(effectiveStatus, hasAmountDueNow(inv), {
+      amountPaidCents: inv.amount_paid_cents,
+      totalCents: inv.total_cents,
+    }),
     lines,
     contact,
     payments,
@@ -1367,6 +1428,40 @@ export async function voidInvoice(viewer: FinanceViewer, invoiceId: string): Pro
   await writeBatch(statements);
   await deactivatePaymentLinkIfPaid(invoiceId, true).catch((e) => console.error("[finances:invoices] link deactivate failed", e instanceof Error ? e.message : e));
   await deactivateRetainerLink(inv).catch((e) => console.error("[finances:invoices] retainer link deactivate failed", e instanceof Error ? e.message : e));
+}
+
+/**
+ * Delete an unissued draft. Issued invoices are accounting records and can
+ * only be voided; the conditional deletes keep a racing finalization from
+ * losing lines.
+ */
+export async function deleteDraftInvoice(viewer: FinanceViewer, invoiceId: string): Promise<void> {
+  const entity = await requireRowEntity(viewer, "fin_invoices", invoiceId);
+  businessOnly(entity);
+  const inv = await loadInvoice(invoiceId);
+  if (!inv) throw new FinanceNotFound();
+  if (inv.status !== "draft" || inv.number || inv.recognition_entry_id || inv.amount_paid_cents > 0) {
+    throw new FinanceInputError("only an unissued draft with no payments can be deleted");
+  }
+  const payment = await queryOne<{ id: string }>(
+    `SELECT id FROM fin_payments WHERE entity_id = ? AND invoice_id = ? LIMIT 1`,
+    [entity.id, invoiceId],
+  );
+  if (payment) throw new FinanceInputError("this draft has a payment record and cannot be deleted");
+  await writeBatch([
+    {
+      sql: `DELETE FROM fin_invoice_lines
+             WHERE invoice_id = ?
+               AND EXISTS (SELECT 1 FROM fin_invoices WHERE id = ? AND entity_id = ? AND status = 'draft' AND number IS NULL AND recognition_entry_id IS NULL AND amount_paid_cents = 0)`,
+      args: [invoiceId, invoiceId, entity.id],
+    },
+    {
+      sql: `DELETE FROM fin_invoices
+             WHERE id = ? AND entity_id = ? AND status = 'draft' AND number IS NULL AND recognition_entry_id IS NULL AND amount_paid_cents = 0`,
+      args: [invoiceId, entity.id],
+    },
+    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_deleted", objectType: "invoice", objectId: invoiceId }),
+  ]);
 }
 
 /**

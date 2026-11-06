@@ -21,11 +21,13 @@
  *        last_run_error / run_count++.
  */
 
+import { createHash, createHmac } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, isMissingColumnError } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { isScriptActionType, SCRIPT_ACTION_TYPES } from "@/lib/automations/action-types";
+import { GENERATED_SCRIPT_CAPABILITY, machineToolCapabilities } from "@/lib/automations/pipeline";
 import { resolvePairingFromBearer, isDaemonScope } from "@/lib/bridge/pairing-auth";
 import { liveSeat } from "@/lib/os/seat";
 
@@ -102,6 +104,179 @@ function isBridgeOk(r: BridgeOk | BridgeRefusal): r is BridgeOk {
   return (r as BridgeOk).tenantId !== undefined;
 }
 
+const GENERATED_FILENAME_RE = /^[a-z][a-z0-9_]*\.py$/;
+
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function presentedBearer(req: NextRequest): string {
+  const auth = req.headers.get("authorization") || "";
+  return auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+}
+
+function generatedScriptMessage(jobId: string, agentKey: string, scriptPath: string, source: string): string {
+  const sourceHash = createHash("sha256").update(source, "utf8").digest("hex");
+  return `v1\n${jobId}\n${agentKey}\n${scriptPath}\n${sourceHash}`;
+}
+
+/**
+ * Turn an operator-reviewed template into a one-poll, pairing-specific source
+ * envelope. The cron row never stores executable source and none of its
+ * forgeable provenance flags count as approval. The daemon must prove it has
+ * the exact bearer that authenticated this poll before it writes the file.
+ */
+async function attachApprovedGeneratedScripts(
+  db: ReturnType<typeof getServiceSupabase>,
+  rows: Array<Record<string, unknown> & { owner_user_id?: string | null; target_pairing_id?: string | null }>,
+  bridge: BridgeOk,
+  bearer: string,
+): Promise<
+  | { ok: true; rows: Array<Record<string, unknown> & { owner_user_id?: string | null; target_pairing_id?: string | null }> }
+  | { ok: false; error: string }
+> {
+  const parsedRows = rows.map((row) => {
+    const payload = jsonObject(row.action_payload) || {};
+    const sanitized = { ...payload };
+    delete sanitized._generated_script;
+    delete sanitized._generated_script_content;
+    return { row, payload: sanitized, templateId: typeof sanitized._automation_template_id === "string" ? sanitized._automation_template_id.trim() : "" };
+  });
+  const templateIds = [...new Set(parsedRows.map((entry) => entry.templateId).filter(Boolean))];
+  if (templateIds.length === 0) {
+    return { ok: true, rows: parsedRows.map(({ row, payload }) => ({ ...row, action_payload: payload })) };
+  }
+  if (!bearer) {
+    console.error("[api/cron-jobs/poll] authenticated request had no usable bearer for generated-script signing");
+    await recordGeneratedDeliveryFailure(db, bridge, "generated_script_bearer_missing", { templateIds });
+    return { ok: false, error: "generated_script_bearer_missing" };
+  }
+
+  const capabilityRead = await db
+    .from("bridge_pairings")
+    .select("tool_capabilities")
+    .eq("id", bridge.pairingId)
+    .eq("tenant_id", bridge.tenantId)
+    .maybeSingle();
+  if (capabilityRead.error) {
+    console.error("[api/cron-jobs/poll] pairing capability lookup failed", {
+      tenantId: bridge.tenantId,
+      pairingId: bridge.pairingId,
+      error: capabilityRead.error.message,
+    });
+    await recordGeneratedDeliveryFailure(db, bridge, "generated_script_capability_lookup_failed", { templateIds });
+    return { ok: false, error: "generated_script_capability_lookup_failed" };
+  }
+  const capabilities = machineToolCapabilities(capabilityRead.data?.tool_capabilities);
+  if (!capabilities.includes(GENERATED_SCRIPT_CAPABILITY)) {
+    await recordGeneratedDeliveryFailure(db, bridge, "generated_script_capability_missing", { templateIds });
+    return { ok: false, error: "generated_script_capability_missing" };
+  }
+
+  const templateRead = await db
+    .from("automation_templates")
+    .select("id, created_by, cron_job_id, target_pairing_id, draft_json, status")
+    .eq("tenant_id", bridge.tenantId)
+    .in("id", templateIds);
+  if (templateRead.error) {
+    console.error("[api/cron-jobs/poll] generated-template lookup failed", {
+      tenantId: bridge.tenantId,
+      templateCount: templateIds.length,
+      error: templateRead.error.message,
+    });
+    await recordGeneratedDeliveryFailure(db, bridge, "generated_template_lookup_failed", { templateIds });
+    return { ok: false, error: "generated_template_lookup_failed" };
+  }
+  const templates = new Map<string, Record<string, unknown>>(
+    ((templateRead.data || []) as Array<Record<string, unknown>>).map((row) => [String(row.id), row]),
+  );
+
+  const approved: Array<Record<string, unknown> & { owner_user_id?: string | null; target_pairing_id?: string | null }> = [];
+  for (const { row, payload, templateId } of parsedRows) {
+    if (!templateId) {
+      approved.push({ ...row, action_payload: payload });
+      continue;
+    }
+    const template = templates.get(templateId);
+    const draft = template ? jsonObject(template.draft_json) : null;
+    const filename = typeof draft?.script_filename === "string" ? draft.script_filename : "";
+    const source = typeof draft?.script_content === "string" ? draft.script_content : "";
+    const sourceHash = createHash("sha256").update(source, "utf8").digest("hex");
+    const scriptPath = `scripts/_generated/${String(row.id)}/${sourceHash.slice(0, 16)}_${filename}`;
+    const agentKey = typeof draft?.agent_key === "string" ? draft.agent_key.trim().toLowerCase() : "";
+    const valid = Boolean(
+      template
+      && template.status === "ready"
+      && template.cron_job_id === row.id
+      && template.target_pairing_id === bridge.pairingId
+      && template.created_by === row.owner_user_id
+      && row.target_pairing_id === bridge.pairingId
+      && agentKey
+      && agentKey === String(row.agent_key || "").trim().toLowerCase()
+      && GENERATED_FILENAME_RE.test(filename)
+      && payload.script === scriptPath
+      && source
+      && !source.includes("\0")
+      && Buffer.byteLength(source, "utf8") <= 100_000
+    );
+    if (!valid) {
+      console.error("[api/cron-jobs/poll] generated-template binding refused", { tenantId: bridge.tenantId, jobId: row.id, templateId });
+      await recordGeneratedDeliveryFailure(db, bridge, "generated_template_binding_invalid", { jobId: row.id, templateId });
+      return { ok: false, error: "generated_template_binding_invalid" };
+    }
+    delete payload.root;
+    const signature = createHmac("sha256", bearer)
+      .update(generatedScriptMessage(String(row.id), agentKey, scriptPath, source), "utf8")
+      .digest("hex");
+    approved.push({
+      ...row,
+      action_payload: {
+        ...payload,
+        script: scriptPath,
+        args: [],
+        _generated_script: { version: 1, source, signature },
+      },
+    });
+  }
+  return { ok: true, rows: approved };
+}
+
+/** Operator-visible signal for a poll that cannot safely deliver reviewed source. */
+async function recordGeneratedDeliveryFailure(
+  db: ReturnType<typeof getServiceSupabase>,
+  bridge: BridgeOk,
+  error: string,
+  details: Record<string, unknown>,
+): Promise<void> {
+  try {
+    const result = await db.from("agent_events").insert({
+      event_type: "generated_automation_delivery_failed",
+      publisher_agent: "cron-poll",
+      severity: "error",
+      payload: { error, pairing_id: bridge.pairingId, pairing_label: bridge.label, ...details },
+      correlation_id: bridge.tenantId,
+    });
+    if (result.error) {
+      console.error("[api/cron-jobs/poll] failed to persist generated-delivery event", {
+        tenantId: bridge.tenantId,
+        error: result.error.message,
+      });
+    }
+  } catch (eventError) {
+    console.error("[api/cron-jobs/poll] generated-delivery event threw", {
+      tenantId: bridge.tenantId,
+      error: eventError instanceof Error ? eventError.message : String(eventError),
+    });
+  }
+}
+
 /**
  * Best-effort: the moment a poll last answered this computer with 200. Feeds
  * the agents-owner attention item "House scheduler has not fetched jobs for N
@@ -126,15 +301,7 @@ export async function GET(req: NextRequest) {
   const bridge = await resolveBridge(req);
   if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
   const db = getServiceSupabase();
-  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
-    // 200 with an empty list, not an error: the machine is paired and healthy,
-    // it is simply not this tenant's executor. An error would make its daemon
-    // retry-spin; an empty list makes it idle politely. It does NOT stamp
-    // last_poll_ok_at: that stamp means "the house scheduler fetched its jobs",
-    // and another of the owner's computers polling must never hide the
-    // executor being down (Codex review, O2).
-    return NextResponse.json({ ok: true, jobs: [], polled_at: new Date().toISOString() });
-  }
+  const expectedExecutor = isExpectedExecutor(bridge.tenantId, bridge.label);
 
   // Only enabled jobs go to the bridge — disabled rows still live in the
   // table for the operator to re-enable later, but they don't tick.
@@ -153,15 +320,28 @@ export async function GET(req: NextRequest) {
   // correct-looking 200 the moment it is actually a sign the column has not
   // landed yet. A named 503 stops the daemon's retry loop from masquerading
   // as a healthy, empty tenant.
-  const { data, error } = await db
+  const resultWithTarget = await db
     .from("tenant_cron_jobs")
     .select(
-      "id, agent_key, name, schedule, action_type, action_payload, enabled, last_run_at, run_count, owner_user_id",
+      "id, agent_key, name, schedule, action_type, action_payload, enabled, last_run_at, run_count, owner_user_id, target_pairing_id",
     )
     .eq("tenant_id", bridge.tenantId)
     .eq("enabled", true)
     .in("action_type", [...SCRIPT_ACTION_TYPES])
     .order("created_at", { ascending: true });
+  // Rollout safety: migration 225 may land after this code. Legacy rows have
+  // no target and must keep polling exactly as before rather than taking the
+  // scheduler down during that window.
+  const result = resultWithTarget.error && isMissingColumnError(resultWithTarget.error, "target_pairing_id")
+    ? await db
+      .from("tenant_cron_jobs")
+      .select("id, agent_key, name, schedule, action_type, action_payload, enabled, last_run_at, run_count, owner_user_id")
+      .eq("tenant_id", bridge.tenantId)
+      .eq("enabled", true)
+      .in("action_type", [...SCRIPT_ACTION_TYPES])
+      .order("created_at", { ascending: true })
+    : resultWithTarget;
+  const { data, error } = result;
   if (error) {
     if (isMissingColumnError(error, "owner_user_id")) {
       return NextResponse.json(
@@ -175,21 +355,35 @@ export async function GET(req: NextRequest) {
     }
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
-  const rows = (data || []) as Array<Record<string, unknown> & { owner_user_id?: string | null }>;
+  const rows = (data || []) as Array<Record<string, unknown> & { owner_user_id?: string | null; target_pairing_id?: string | null }>;
+  // Untargeted rows keep the legacy, label-based executor. An exact target is
+  // stronger and lets the wizard choose another compatible daemon without
+  // giving that daemon access to the tenant's legacy jobs.
+  const routedRows = expectedExecutor
+    ? rows.filter((row) => !row.target_pairing_id || row.target_pairing_id === bridge.pairingId)
+    : rows.filter((row) => row.target_pairing_id === bridge.pairingId);
+  if (!expectedExecutor && routedRows.length === 0) {
+    return NextResponse.json({ ok: true, jobs: [], polled_at: new Date().toISOString() });
+  }
   // A row with an owner goes only to the computer whose paired user_id IS that
   // owner. A row with no owner (a legacy row the migration's backfill could
   // not resolve) keeps today's label-only rule — it has no person to prefer.
-  const owned = rows.filter((row) => !row.owner_user_id || row.owner_user_id === bridge.userId);
+  const ownerEligible = routedRows.filter((row) => !row.owner_user_id || row.owner_user_id === bridge.userId);
   // There ARE enabled rows for this tenant, but every one of them belongs to
   // someone else: this is the computer being paired to the wrong PERSON, not
   // an empty tenant. An empty 200 here is exactly what makes Bravo's runner
   // idle in silence (cron_runner.py:505-515) — so this is a named refusal
   // instead, never the plausible-looking empty list.
-  if (rows.length > 0 && owned.length === 0) {
+  if (routedRows.length > 0 && ownerEligible.length === 0) {
     return bad(409, "owner_mismatch");
   }
+  const owned = ownerEligible;
+  const approved = await attachApprovedGeneratedScripts(db, owned, bridge, presentedBearer(req));
+  if (!approved.ok) {
+    return NextResponse.json({ ok: false, error: approved.error }, { status: 503 });
+  }
   await stampLastPollOk(db, bridge.pairingId);
-  const jobs = owned.map(({ owner_user_id: _ownerUserId, ...job }) => job);
+  const jobs = approved.rows.map(({ owner_user_id: _ownerUserId, target_pairing_id: _targetPairingId, ...job }) => job);
   return NextResponse.json({ ok: true, jobs, polled_at: new Date().toISOString() });
 }
 
@@ -198,11 +392,6 @@ export async function POST(req: NextRequest) {
   if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!isBridgeOk(bridge)) return bad(bridge.status, bridge.message);
-  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
-    // The WRITE side is the one that poisons rows — refuse it loudly so the
-    // machine's own log says exactly why its report was not accepted.
-    return bad(403, "executor_not_authorized_for_tenant");
-  }
 
   let body: Record<string, unknown>;
   try {
@@ -221,22 +410,33 @@ export async function POST(req: NextRequest) {
   const errorText = typeof body?.error === "string" ? body.error.slice(0, 2000) : null;
 
   const db = getServiceSupabase();
-  // The bridge may only report on a job it could have been served. Read the
-  // row's type first, tenant-scoped; anything that is not a script job is
-  // refused BEFORE record_tenant_cron_run, so a department task's run_count and
-  // last-run status are only ever the dispatcher's.
-  const typeRead = await db
+  // The bridge may only report on a job it could have been served. Re-check
+  // its type, owner and exact target pairing before record_tenant_cron_run;
+  // another daemon in the same tenant must never stamp this row by id.
+  const targetedRead = await db
     .from("tenant_cron_jobs")
-    .select("id, action_type")
+    .select("id, action_type, owner_user_id, target_pairing_id")
     .eq("id", jobId)
     .eq("tenant_id", bridge.tenantId)
     .maybeSingle();
-  if (typeRead.error) {
-    console.error("[api/cron-jobs/poll POST] job type read failed", { tenantId: bridge.tenantId, jobId, error: typeRead.error.message });
+  // During a rolling deploy the code can arrive just before migration 225.
+  // Legacy rows have no exact target, so retain their owner gate and current
+  // report behavior until the column lands.
+  const jobRead = targetedRead.error && isMissingColumnError(targetedRead.error, "target_pairing_id")
+    ? await db
+      .from("tenant_cron_jobs")
+      .select("id, action_type, owner_user_id")
+      .eq("id", jobId)
+      .eq("tenant_id", bridge.tenantId)
+      .maybeSingle()
+    : targetedRead;
+  if (jobRead.error) {
+    console.error("[api/cron-jobs/poll POST] job routing read failed", { tenantId: bridge.tenantId, jobId, error: jobRead.error.message });
     return NextResponse.json({ ok: false, error: "job_lookup_failed" }, { status: 500 });
   }
-  if (!typeRead.data) return bad(404, "job_not_found_or_other_tenant");
-  if (!isScriptActionType((typeRead.data as { action_type?: unknown }).action_type)) {
+  if (!jobRead.data) return bad(404, "job_not_found_or_other_tenant");
+  const job = jobRead.data as { action_type?: unknown; owner_user_id?: string | null; target_pairing_id?: string | null };
+  if (!isScriptActionType(job.action_type)) {
     return NextResponse.json(
       {
         ok: false,
@@ -245,6 +445,16 @@ export async function POST(req: NextRequest) {
       },
       { status: 409 },
     );
+  }
+  if (job.owner_user_id && job.owner_user_id !== bridge.userId) {
+    return bad(409, "owner_mismatch");
+  }
+  if (job.target_pairing_id && job.target_pairing_id !== bridge.pairingId) {
+    return bad(409, "target_pairing_mismatch");
+  }
+  if (!job.target_pairing_id && !isExpectedExecutor(bridge.tenantId, bridge.label)) {
+    // A non-default daemon may report only the exact jobs pinned to it.
+    return bad(403, "executor_not_authorized_for_tenant");
   }
 
   // Migration 087 — atomic single-statement update via record_tenant_cron_run.

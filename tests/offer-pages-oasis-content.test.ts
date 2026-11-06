@@ -14,9 +14,9 @@
  *      guarantee section, the only bonus is COMMAND's with no value, every
  *      price is a figure the funnel doc states, every monthly plan says how to
  *      cancel, every page has "What if I'm not ready?" pointing at its tracked
- *      community link, and every hero has an empty video slot and a script.
+ *      community link, and every core hero has a confirmed Library video.
  *   4. Against a scratch libSQL file: a dry run writes nothing; --apply makes
- *      five SWITCHED-OFF forms and five DRAFT pages (never live, never
+ *      six forms and six DRAFT pages (never live, never
  *      published) in the workspace found by slug; a second run changes
  *      nothing; a half-finished run resumes; a form someone else owns is left
  *      alone; and the claims gate refuses to publish any of them.
@@ -31,7 +31,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const CONTENT_DIR = join(ROOT, "content", "offers", "oasis");
-const SLUGS = ["vsl", "protocol", "command", "community", "fleet"];
+const CORE_SLUGS = ["ai-audit", "protocols", "command", "fleet"];
+const SLUGS = [...CORE_SLUGS, "vsl", "community"];
 const HOUSE_AGENTS = /\b(bravo|maven|atlas|aura|apex|knut)\b/i;
 
 /**
@@ -88,9 +89,14 @@ function visibleText(json: Raw): string[] {
 
 async function main() {
   const db = await setupOfferDatabase();
+  // setupOfferDatabase covers the offer-page migrations. The router column
+  // is owned by migration bravo__220 and is applied here because this suite
+  // verifies the seed-to-routing path in one scratch database.
+  await db.execute("ALTER TABLE forms ADD COLUMN routing TEXT NOT NULL DEFAULT '[]'");
   const seed = await import("../scripts/seed-oasis-offer-pages");
   const { parseOfferPageDoc } = await import("../lib/offer-pages/types");
   const { parseFormSteps } = await import("../lib/forms/types");
+  const { firstMatchingGo, parseFormRouting } = await import("../lib/forms/routing");
   const claims = await import("../lib/offer-pages/claims");
 
   console.log("offer-pages-oasis-content:");
@@ -135,13 +141,13 @@ async function main() {
   });
 
   await step("a broken file is refused before anything is written", () => {
-    const { json } = rawFile("protocol");
+    const { json } = rawFile("protocols");
     const bad = JSON.parse(JSON.stringify(json));
     bad.offer_page.sections.push({ key: "results", items: [{ kind: "quote", quote: "Great.", who: "A client" }] });
-    assert.throws(() => seed.parseOfferContent(bad, "protocol.json"), /evidence/);
+    assert.throws(() => seed.parseOfferContent(bad, "protocols.json"), /evidence/);
     const wrongLink = JSON.parse(JSON.stringify(json));
     wrongLink.community_link.href = "https://t.me/+somewhere";
-    assert.throws(() => seed.parseOfferContent(wrongLink, "protocol.json"), /community_link/);
+    assert.throws(() => seed.parseOfferContent(wrongLink, "protocols.json"), /community_link/);
   });
 
   // -- 3. copy rules ------------------------------------------------------
@@ -207,10 +213,17 @@ async function main() {
     }
   });
 
-  await step("every hero: an empty video slot, a script by the founders, no transcript drawn yet, kept out of search", () => {
+  await step("every core hero uses a confirmed CMO Library video with a stable aspect; scripts stay hidden from search", () => {
     for (const slug of SLUGS) {
       const doc = rawFile(slug).json.offer_page;
-      assert.equal(doc.hero.video, null, slug);
+      if (CORE_SLUGS.includes(slug)) {
+        assert.equal(doc.hero.video.source, "library", slug);
+        assert.equal(doc.hero.video.rights.by, "CMO Library approval", slug);
+        assert.match(doc.hero.video.rights.at, /^\d{4}-\d{2}-\d{2}T/, slug);
+        assert.ok(["16:9", "9:16", "1:1", "4:5"].includes(doc.hero.video.aspect), slug);
+      } else {
+        assert.equal(doc.hero.video, null, slug);
+      }
       assert.equal(doc.hero.vsl_script.source, "cc", slug);
       assert.ok(doc.hero.vsl_script.text.length > 800, `${slug}: script too short`);
       assert.match(doc.hero.vsl_script.text, /BEAT 1\. HOOK/, slug);
@@ -226,7 +239,7 @@ async function main() {
     const values = (name: string) =>
       AI_AUDIT_STEPS.flatMap((s) => s.fields).find((f) => f.name === name)!.options!.map((o) => o.value);
     const steps = rawFile("vsl").json.form.steps;
-    assert.deepEqual(steps[0].fields[0].options.map((o: Raw) => o.value), ["protocol", "command", "community", "fleet"]);
+    assert.deepEqual(steps[0].fields[0].options.map((o: Raw) => o.value), ["protocols", "command", "community", "fleet"]);
     const fit = steps[1].fields;
     assert.deepEqual(fit.find((f: Raw) => f.name === "monthly_revenue").options.map((o: Raw) => o.value), values("monthly_revenue"));
     assert.deepEqual(fit.find((f: Raw) => f.name === "budget").options.map((o: Raw) => o.value), values("budget"));
@@ -246,7 +259,7 @@ async function main() {
   };
   const before = await counts();
 
-  await step("a dry run writes nothing and reports five forms and five pages it would create", async () => {
+  await step("a dry run writes nothing and reports six forms and six pages it would create", async () => {
     const r = await seed.seedOasisOfferPages(db, { tenantSlug: "oasis-ai-cc", apply: false, content });
     assert.equal(r.tenantId, OASIS);
     assert.deepEqual(r.pages.map((p) => [p.slug, p.form, p.page]), SLUGS.map((s) => [s, "would_create", "would_create"]));
@@ -254,18 +267,19 @@ async function main() {
   });
 
   const NOW = "2026-10-12T15:00:00.000Z";
-  await step("--apply: five switched-off forms and five draft pages in the workspace found by slug, nothing published", async () => {
+  await step("--apply: six switched-off forms and six draft pages in the workspace found by slug, nothing published", async () => {
     const r = await seed.seedOasisOfferPages(db, { tenantSlug: "oasis-ai-cc", apply: true, content, now: NOW });
     const t = await db.execute({ sql: "SELECT id FROM tenants WHERE slug = 'oasis-ai-cc'", args: [] });
     assert.equal(r.tenantId, String(t.rows[0].id));
     assert.deepEqual(r.pages.map((p) => [p.slug, p.form, p.page]), SLUGS.map((s) => [s, "created", "created"]));
-    assert.deepEqual(await counts(), { forms: before.forms + 5, pages: before.pages + 5 });
+    assert.deepEqual(await counts(), { forms: before.forms + 6, pages: before.pages + 6 });
     for (const c of content) {
-      const f = await db.execute({ sql: "SELECT id, enabled, name, steps FROM forms WHERE tenant_id = ? AND slug = ?", args: [OASIS, c.slug] });
+      const f = await db.execute({ sql: "SELECT id, enabled, name, steps, routing FROM forms WHERE tenant_id = ? AND slug = ?", args: [OASIS, c.slug] });
       assert.equal(f.rows.length, 1, c.slug);
       assert.equal(Number(f.rows[0].enabled), 0, `${c.slug}: form is switched on`);
       assert.equal(String(f.rows[0].name), c.form.name);
       assert.deepEqual(parseFormSteps(JSON.parse(String(f.rows[0].steps))), c.form.steps);
+      assert.deepEqual(JSON.parse(String(f.rows[0].routing)), c.form.routing, `${c.slug}: routing was not persisted`);
       const p = await db.execute({
         sql: "SELECT draft, draft_version, published, published_version, live, template_key FROM form_offer_pages WHERE tenant_id = ? AND form_id = ?",
         args: [OASIS, String(f.rows[0].id)],
@@ -277,6 +291,37 @@ async function main() {
       assert.equal(String(p.rows[0].template_key), c.doc.template);
       assert.deepEqual(parseOfferPageDoc(String(p.rows[0].draft)), c.doc, `${c.slug}: stored draft differs from the content`);
     }
+  });
+
+  await step("the seeded VSL routes every explicit path and preserves the high-revenue FLEET override", async () => {
+    const row = await db.execute({ sql: "SELECT routing FROM forms WHERE tenant_id = ? AND slug = 'vsl'", args: [OASIS] });
+    const rules = parseFormRouting(JSON.parse(String(row.rows[0].routing)));
+    const base = { monthly_revenue: "10k_50k", budget: "under_2k" };
+    assert.equal(firstMatchingGo(rules, { ...base, path: "protocols" }), "protocols");
+    assert.equal(firstMatchingGo(rules, { ...base, path: "command" }), "command");
+    assert.equal(firstMatchingGo(rules, { ...base, path: "community" }), "community");
+    assert.equal(firstMatchingGo(rules, { ...base, path: "fleet" }), "fleet");
+    assert.equal(firstMatchingGo(rules, { ...base, path: "command", monthly_revenue: "250k_plus" }), "fleet");
+  });
+
+  await step("an exact live core form keeps its fields and enabled state while receiving only a replacement draft page", async () => {
+    const audit = content.find((item) => item.slug === "ai-audit")!;
+    const found = await db.execute({ sql: "SELECT id, steps FROM forms WHERE tenant_id = ? AND slug = 'ai-audit'", args: [OASIS] });
+    const formId = String(found.rows[0].id);
+    const originalSteps = String(found.rows[0].steps);
+    await db.batch([
+      { sql: "UPDATE forms SET enabled = 1 WHERE id = ?", args: [formId] },
+      { sql: "DELETE FROM form_offer_pages WHERE tenant_id = ? AND form_id = ?", args: [OASIS, formId] },
+    ], "write");
+    const result = await seed.seedOasisOfferPages(db, { tenantSlug: "oasis-ai-cc", apply: true, content: [audit], now: "2026-10-13T15:00:00.000Z" });
+    assert.deepEqual(result.pages.map((page) => [page.form, page.page]), [["attached_live", "created"]]);
+    const form = await db.execute({ sql: "SELECT enabled, steps FROM forms WHERE id = ?", args: [formId] });
+    assert.equal(Number(form.rows[0].enabled), 1, "the acquisition form was switched off");
+    assert.equal(String(form.rows[0].steps), originalSteps, "the live form fields changed");
+    const page = await db.execute({ sql: "SELECT live, published FROM form_offer_pages WHERE form_id = ?", args: [formId] });
+    assert.equal(Number(page.rows[0].live), 0);
+    assert.equal(page.rows[0].published, null);
+    await db.execute({ sql: "UPDATE forms SET enabled = 0 WHERE id = ?", args: [formId] });
   });
 
   await step("a second --apply changes nothing", async () => {
@@ -291,7 +336,7 @@ async function main() {
     const r = await seed.seedOasisOfferPages(db, { tenantSlug: "oasis-ai-cc", apply: true, content, now: "2026-10-13T00:00:00.000Z" });
     assert.deepEqual(r.pages.map((p) => [p.form, p.page]), SLUGS.map(() => ["resumed", "exists_left"]));
     assert.deepEqual(await read(), snap);
-    assert.deepEqual(await counts(), { forms: before.forms + 5, pages: before.pages + 5 });
+    assert.deepEqual(await counts(), { forms: before.forms + 6, pages: before.pages + 6 });
   });
 
   await step("a run that stopped after the form resumes: the page is added, the form is not duplicated", async () => {
@@ -300,7 +345,7 @@ async function main() {
     const r = await seed.seedOasisOfferPages(db, { tenantSlug: "oasis-ai-cc", apply: true, content, now: NOW });
     const community = r.pages.find((p) => p.slug === "community")!;
     assert.deepEqual([community.form, community.page], ["resumed", "created"]);
-    assert.deepEqual(await counts(), { forms: before.forms + 5, pages: before.pages + 5 });
+    assert.deepEqual(await counts(), { forms: before.forms + 6, pages: before.pages + 6 });
   });
 
   await step("a form someone else owns under the same slug (switched on, or another name) is left alone and gets no page", async () => {
@@ -332,7 +377,9 @@ async function main() {
       assert.ok(gate.blockers.some((b) => /Switch the form on first/.test(b)), `${c.slug}: no form-off blocker`);
       const hits = claims.lintDoc(c.doc, { fallbackHeadline: c.form.branding.headline ?? "" });
       assert.equal(gate.claims.length, hits.length);
-      assert.ok(hits.length > 0, `${c.slug}: prices on the page but nothing flagged`);
+      if (visibleText(rawFile(c.slug).json).some((text) => /\$\d/.test(text))) {
+        assert.ok(hits.length > 0, `${c.slug}: prices on the page but nothing flagged`);
+      }
     }
   });
 

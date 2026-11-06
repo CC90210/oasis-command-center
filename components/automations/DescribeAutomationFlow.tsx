@@ -1,41 +1,18 @@
 "use client";
 
-/**
- * DescribeAutomationFlow — "Tell me what you want, AI writes the script".
- *
- * Phase 10.3 of the OASIS HQ redesign. CC's complaint: "I don't know how
- * easy it is to create a new automation — we may have to build a custom
- * Python script." This component lets him type a paragraph; Claude returns
- * a draft script + cron schedule; he reviews + saves.
- *
- * Three states:
- *   1. INPUT — textarea + "Draft with AI" button
- *   2. REVIEW — generated draft is editable inline; "Save automation" /
- *      "Re-draft" / "Cancel"
- *   3. SAVED — confirmation + link to the new cron row (disabled by
- *      default; operator flips on after inspecting the generated file).
- *
- * Save flow:
- *   - POST /api/automations/save-draft → returns {cron_id, script_path,
- *     script_content}
- *   - Then client POSTs to the same-origin, authenticated
- *     /api/bridge/exec-tool proxy (app/api/bridge/exec-tool/route.ts) with
- *     write_file to persist the script to disk. The proxy holds the bridge
- *     bearer server-side and reaches the paired machine for the viewer's
- *     tenant.
- *
- *     BUG (2026-10-10): this used to POST straight from the BROWSER to the
- *     local bridge's default loopback address — i.e. whatever computer the
- *     VIEWER's browser happens to be running on. Only CC's PC runs that
- *     local bridge, so for Adon (or anyone else on the shared OASIS
- *     workspace) the save half-failed every time, with no way to fix it
- *     from their own machine. Routing through the proxy means the SERVER
- *     reaches the paired machine, so it works the same way for every
- *     signed-in owner, not just whoever is sitting at it.
- */
-
 import { useState } from "react";
-import { Sparkles, Loader2, AlertCircle, Save, RotateCcw, X, CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Loader2, RotateCcw, Save, Sparkles } from "lucide-react";
+import {
+  AUTOMATION_DEPARTMENTS,
+  AUTOMATION_TRIGGERS,
+  parseAutomationPipeline,
+  suggestConnectorKeys,
+  targetMachineIsSelectable,
+  targetMachineState,
+  type AutomationDepartment,
+  type AutomationPipeline,
+  type AutomationTrigger,
+} from "@/lib/automations/pipeline";
 
 type Draft = {
   suggested_name: string;
@@ -48,351 +25,274 @@ type Draft = {
   reasoning: string;
 };
 
-type State =
-  | { kind: "input"; description: string }
-  | { kind: "drafting"; description: string }
-  | { kind: "review"; description: string; draft: Draft }
-  | { kind: "saving"; description: string; draft: Draft }
-  | { kind: "saved"; cronId: string; scriptPath: string }
-  | { kind: "error"; message: string; description: string };
+type Device = {
+  id: string;
+  label: string | null;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+  scope: string | null;
+  tool_capabilities?: string[] | string | null;
+  mine?: boolean;
+};
 
-const EXAMPLES = [
-  "Every Monday at 7am, pull my Stripe revenue for the prior week and send me a one-line summary to Telegram.",
-  "Daily at noon, check my Calendly for tomorrow's bookings and Telegram me the list so I can prep.",
-  "Every Friday at 4pm, run our lead scorer over any leads created in the last 7 days and email me the top 5.",
-];
+type CredentialRow = { key: string; has_value: boolean };
+type Phase = "wizard" | "drafting" | "review" | "saving" | "saved";
 
-/**
- * Plain-English reason the /api/bridge/exec-tool write failed, keyed on the
- * proxy's own error code (app/api/bridge/exec-tool/route.ts). Named after
- * the pattern in lib/automations/worker-control.ts:describeControlError —
- * same idea, different route, so the two bridge-write surfaces on this page
- * both name which computer/bridge the trouble is, in words, instead of a
- * bare error code.
- */
-export function describeBridgeWriteError(
-  error: string | undefined,
-  status: number,
-  output?: string,
-): string {
-  switch (error) {
-    case "bridge_unreachable":
-      return "the paired computer's bridge could not be reached";
-    case "bridge_not_configured":
-      return "no computer bridge is set up for this workspace yet";
-    // O1: neutral, not an outage — this account is not the workspace's
-    // computer owner, so writing the script file through its bridge is not
-    // available to it.
-    case "not_your_computer":
-      return "this runs on another team member's computer, so only they can use it";
-    case "agents_owner_not_set":
-      return "no one has been set as this workspace's computer owner yet";
-    case "agents_owner_unavailable":
-      return "couldn't confirm this workspace's computer owner just now — try again in a moment";
-    case "tool_disallowed_for_role":
-      return "your account role can't write automation files";
-    case "rate_limited":
-      return "too many requests just now — wait a few seconds and retry";
-    case "unauthenticated":
-    case "no_profile":
-    case "no_tenant":
-    case "profile_lookup_failed":
-    case "tenant_lookup_failed":
-    case "bridge_not_enabled_for_tenant":
-      return "you're signed out or not set up for this workspace — sign in and try again";
-    case "payload_too_large":
-      return "the generated script is too large to save this way";
-    case undefined:
-    case "":
-      return output || `the bridge write failed (HTTP ${status})`;
-    default:
-      return error;
-  }
+const DEPARTMENT_LABEL: Record<AutomationDepartment, string> = {
+  marketing: "Marketing",
+  sales: "Sales",
+  operations: "Operations",
+  finance: "Finance",
+  customer_success: "Customer success",
+  executive: "Executive",
+};
+
+const TRIGGER_LABEL: Record<AutomationTrigger, string> = {
+  schedule: "On a schedule",
+  event: "When an event appears",
+  manual: "Manual until activated",
+};
+
+function fieldClass() {
+  return "w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg placeholder:text-fg-dim focus:border-accent focus:outline-none";
+}
+
+function relativeSeen(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return "unknown";
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  return minutes < 1 ? "just now" : `${minutes}m ago`;
 }
 
 export function DescribeAutomationFlow() {
-  const [state, setState] = useState<State>({ kind: "input", description: "" });
+  const [step, setStep] = useState(1);
+  const [phase, setPhase] = useState<Phase>("wizard");
+  const [department, setDepartment] = useState<AutomationDepartment | null>(null);
+  const [objective, setObjective] = useState("");
+  const [triggerKind, setTriggerKind] = useState<AutomationTrigger>("schedule");
+  const [scheduleHint, setScheduleHint] = useState("");
+  const [inputText, setInputText] = useState("");
+  const [expectedOutputs, setExpectedOutputs] = useState("");
+  const [credentials, setCredentials] = useState<CredentialRow[]>([]);
+  const [connectorKeys, setConnectorKeys] = useState<string[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [targetPairingId, setTargetPairingId] = useState("");
+  const [loadingContext, setLoadingContext] = useState(false);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [saved, setSaved] = useState<{ cronId: string; scriptPath: string; targetLabel: string | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  async function draft() {
-    // The error view is the input view with the message under it and the
-    // description kept, so "Draft with AI" must work from there too. It used to
-    // return here until the text was edited, which made the very step a refusal
-    // asks for ("Click Draft with AI to write it again") a dead button.
-    if (state.kind !== "input" && state.kind !== "error") return;
-    const description = state.description.trim();
-    if (description.length < 10) {
-      setState({ kind: "error", message: "Describe at least one full sentence — what should happen, when, and where the output goes.", description: state.description });
+  function pipeline(): AutomationPipeline {
+    return parseAutomationPipeline({
+      department,
+      objective,
+      trigger_kind: triggerKind,
+      schedule_hint: scheduleHint,
+      input_parameters: inputText,
+      expected_outputs: expectedOutputs,
+      connector_keys: connectorKeys,
+      target_pairing_id: targetPairingId,
+    });
+  }
+
+  async function openConnectors() {
+    setError(null);
+    try {
+      parseAutomationPipeline({
+        department,
+        objective,
+        trigger_kind: triggerKind,
+        schedule_hint: scheduleHint,
+        input_parameters: inputText,
+        expected_outputs: expectedOutputs,
+        connector_keys: [],
+        target_pairing_id: "placeholder-machine",
+      });
+    } catch (validation) {
+      setError(validation instanceof Error ? validation.message : "Finish the workflow details first.");
       return;
     }
-    setState({ kind: "drafting", description });
+    setLoadingContext(true);
     try {
-      const r = await fetch("/api/automations/draft", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ description }),
-      });
-      const json = (await r.json()) as { ok: boolean; draft?: Draft; error?: string; message?: string };
-      if (!json.ok || !json.draft) {
-        setState({ kind: "error", message: json.message || json.error || "Drafting failed", description });
-        return;
-      }
-      setState({ kind: "review", description, draft: json.draft });
-    } catch (err) {
-      setState({ kind: "error", message: (err as Error).message, description });
+      const [credentialsResponse, devicesResponse] = await Promise.all([
+        fetch("/api/credentials/custom", { cache: "no-store" }),
+        fetch("/api/devices", { cache: "no-store" }),
+      ]);
+      const credentialsBody = (await credentialsResponse.json().catch(() => ({}))) as { ok?: boolean; entries?: CredentialRow[]; error?: string };
+      const devicesBody = (await devicesResponse.json().catch(() => ({}))) as { ok?: boolean; devices?: Device[]; error?: string };
+      if (!credentialsResponse.ok || !credentialsBody.ok) throw new Error(credentialsBody.error || "The credential vault could not be read.");
+      if (!devicesResponse.ok || !devicesBody.ok) throw new Error(devicesBody.error || "Paired computers could not be read.");
+      const savedCredentials = (credentialsBody.entries || []).filter((row) => row.has_value);
+      const ownDevices = (devicesBody.devices || []).filter((device) => device.mine !== false);
+      setCredentials(savedCredentials);
+      setDevices(ownDevices);
+      setConnectorKeys(suggestConnectorKeys(department!, objective, savedCredentials.map((row) => row.key)));
+      setStep(3);
+    } catch (contextError) {
+      setError(contextError instanceof Error ? contextError.message : "Setup context could not be loaded.");
+    } finally {
+      setLoadingContext(false);
     }
   }
 
-  async function save() {
-    if (state.kind !== "review") return;
-    const { description, draft } = state;
-    setState({ kind: "saving", description, draft });
+  function openTargets() {
+    const selectable = devices
+      .filter((device) => targetMachineIsSelectable(device))
+      .sort((a, b) => Date.parse(b.last_seen_at || "") - Date.parse(a.last_seen_at || ""));
+    setTargetPairingId((current) => current || selectable[0]?.id || "");
+    setError(selectable.length ? null : "No online computer with generated-automation support is available. Update and start its bridge, then reload this step.");
+    setStep(4);
+  }
 
-    // Step 1: server-side persist (cron row + return the script content)
-    const r = await fetch("/api/automations/save-draft", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ draft, confirmed: true }),
-    });
-    const json = (await r.json()) as {
-      ok: boolean;
-      cron_id?: string;
-      script_path?: string;
-      script_content?: string;
-      error?: string;
-      message?: string;
-    };
-    if (!json.ok || !json.cron_id || !json.script_path || !json.script_content) {
-      setState({
-        kind: "error",
-        message: json.message || json.error || "Save failed",
-        description,
-      });
+  async function createDraft() {
+    let parsed: AutomationPipeline;
+    try {
+      parsed = pipeline();
+    } catch (validation) {
+      setError(validation instanceof Error ? validation.message : "Finish every setup step first.");
       return;
     }
-
-    // Step 2: write the actual Python file to the operator's disk via the
-    // same-origin, authenticated bridge proxy. The proxy (not the browser)
-    // reaches the paired machine, so this works the same for every owner.
+    setError(null);
+    setPhase("drafting");
     try {
-      const bridgeRes = await fetch("/api/bridge/exec-tool", {
+      const response = await fetch("/api/automations/draft", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tool_name: "write_file",
-          input: { path: json.script_path, content: json.script_content },
-        }),
+        body: JSON.stringify({ pipeline: parsed }),
       });
-      // A non-JSON answer (a gateway error page) must still reach
-      // describeBridgeWriteError with its HTTP status, not read as "unreachable".
-      const bridgeJson = (await bridgeRes.json().catch(() => ({}))) as {
-        ok?: boolean;
-        output?: string;
-        is_error?: boolean;
-        error?: string;
-      };
-      if (!bridgeJson.ok || bridgeJson.is_error) {
-        const reason = describeBridgeWriteError(bridgeJson.error, bridgeRes.status, bridgeJson.output);
-        setState({
-          kind: "error",
-          message: `Cron row created but the script file write failed: ${reason}. Edit ${json.script_path} manually before enabling.`,
-          description,
-        });
-        return;
-      }
-    } catch (err) {
-      setState({
-        kind: "error",
-        message: `Cron row created but the Command Center couldn't reach the paired computer's bridge. Save ${json.script_path} manually before enabling. ${(err as Error).message}`,
-        description,
-      });
-      return;
+      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; draft?: Draft; error?: string; message?: string };
+      if (!response.ok || !body.ok || !body.draft) throw new Error(body.message || body.error || "Drafting failed.");
+      setDraft(body.draft);
+      setPhase("review");
+    } catch (draftError) {
+      setError(draftError instanceof Error ? draftError.message : "Drafting failed.");
+      setPhase("wizard");
     }
+  }
 
-    setState({ kind: "saved", cronId: json.cron_id, scriptPath: json.script_path });
+  async function saveDraft() {
+    if (!draft) return;
+    const parsed = pipeline();
+    setPhase("saving");
+    setError(null);
+    try {
+      const response = await fetch("/api/automations/save-draft", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ draft, pipeline: parsed, confirmed: true }),
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        cron_id?: string;
+        script_path?: string;
+        target_label?: string | null;
+        error?: string;
+        message?: string;
+      };
+      if (!response.ok || !body.ok || !body.cron_id || !body.script_path) {
+        throw new Error(body.message || body.error || "Save failed.");
+      }
+      setSaved({ cronId: body.cron_id, scriptPath: body.script_path, targetLabel: body.target_label || null });
+      setPhase("saved");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Save failed.");
+      setPhase("review");
+    }
   }
 
   function reset() {
-    setState({ kind: "input", description: "" });
+    setStep(1);
+    setPhase("wizard");
+    setDepartment(null);
+    setObjective("");
+    setTriggerKind("schedule");
+    setScheduleHint("");
+    setInputText("");
+    setExpectedOutputs("");
+    setCredentials([]);
+    setConnectorKeys([]);
+    setDevices([]);
+    setTargetPairingId("");
+    setDraft(null);
+    setSaved(null);
+    setError(null);
   }
 
-  // ─── INPUT ────────────────────────────────────────────────────────────
-  if (state.kind === "input" || state.kind === "error") {
-    return (
-      <div className="rounded-xl border border-accent/30 bg-accent/5 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-accent" />
-            <span className="font-bold text-sm text-fg">Describe what you want — your agent writes it for you</span>
-          </div>
-        </div>
-        <textarea
-          value={state.description}
-          onChange={(e) => setState({ kind: "input", description: e.target.value })}
-          placeholder={EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)]}
-          rows={3}
-          className="w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg placeholder-fg-dim focus:outline-none focus:border-accent transition-colors resize-y"
-        />
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] text-fg-dim leading-snug">
-            Your agent writes the code and picks the schedule. You read it, tweak if needed, then save.
-            New automations land switched off, so nothing runs until you flip it on yourself.
-          </span>
-          <button
-            type="button"
-            onClick={draft}
-            disabled={state.description.trim().length < 10}
-            className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs shrink-0 disabled:opacity-40"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            Draft with AI
-          </button>
-        </div>
-        {state.kind === "error" && (
-          <div className="flex items-start gap-2 text-xs text-status-warm bg-status-warm/5 border border-status-warm/30 rounded p-2.5">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            <div>{state.message}</div>
-          </div>
-        )}
-      </div>
-    );
+  if (phase === "drafting") {
+    return <div className="flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/5 p-5"><Loader2 className="h-5 w-5 animate-spin text-accent" /><div><p className="text-sm font-bold text-fg">Building the reviewed draft…</p><p className="text-[11px] text-fg-muted">The four setup steps are being translated into a paused script job.</p></div></div>;
   }
 
-  // ─── DRAFTING ─────────────────────────────────────────────────────────
-  if (state.kind === "drafting") {
+  if ((phase === "review" || phase === "saving") && draft) {
+    const target = devices.find((device) => device.id === targetPairingId);
     return (
-      <div className="rounded-xl border border-accent/30 bg-accent/5 p-4 flex items-center gap-3">
-        <Loader2 className="w-5 h-5 text-accent animate-spin" />
-        <div>
-          <div className="text-sm text-fg font-bold">Drafting your automation...</div>
-          <div className="text-[11px] text-fg-muted mt-0.5">
-            Your agent is writing the script + picking a schedule. ~10 seconds.
-          </div>
+      <div className="space-y-4 rounded-xl border border-status-engaged/40 bg-status-engaged/5 p-4">
+        <div className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-status-engaged" /><p className="text-sm font-bold text-fg">Review before saving</p></div>
+        <dl className="grid gap-2 text-sm sm:grid-cols-[9rem_1fr]">
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Name</dt><dd>{draft.suggested_name}</dd>
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Department</dt><dd>{DEPARTMENT_LABEL[department!]}</dd>
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Schedule</dt><dd>{draft.schedule_human} <span className="font-mono text-[11px] text-fg-dim">({draft.schedule})</span></dd>
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Computer</dt><dd>{target?.label || "Paired computer"}</dd>
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Credentials</dt><dd>{connectorKeys.length ? connectorKeys.join(", ") : "None required"}</dd>
+          <dt className="text-xs font-bold uppercase tracking-wider text-fg-muted">Script</dt><dd className="font-mono text-xs">scripts/{draft.script_filename}</dd>
+        </dl>
+        <details className="rounded-lg border border-bg-border bg-bg-deep/40"><summary className="cursor-pointer px-3 py-2 text-xs text-fg-muted">Inspect generated Python ({draft.script_content.split("\n").length} lines)</summary><pre className="max-h-96 overflow-auto px-3 pb-3 font-mono text-[10px] text-fg-dim">{draft.script_content}</pre></details>
+        <p className="rounded-lg bg-bg-deep/40 p-3 text-[11px] leading-relaxed text-fg-muted"><span className="font-bold text-fg">Why this design:</span> {draft.reasoning}</p>
+        {error && <p role="alert" className="flex items-start gap-2 rounded-md border border-status-hot/30 bg-status-hot/10 p-2.5 text-xs text-status-hot"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p>}
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" className="btn-secondary inline-flex items-center gap-1.5 text-xs" disabled={phase === "saving"} onClick={() => setPhase("wizard")}><ChevronLeft className="h-3.5 w-3.5" />Edit setup</button>
+          <button type="button" className="btn-secondary inline-flex items-center gap-1.5 text-xs" disabled={phase === "saving"} onClick={() => void createDraft()}><RotateCcw className="h-3.5 w-3.5" />Re-draft</button>
+          <button type="button" className="btn-send inline-flex items-center gap-1.5 text-xs" disabled={phase === "saving"} onClick={() => void saveDraft()}>{phase === "saving" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}{phase === "saving" ? "Saving…" : "Save automation (disabled)"}</button>
         </div>
       </div>
     );
   }
 
-  // ─── REVIEW ───────────────────────────────────────────────────────────
-  if (state.kind === "review" || state.kind === "saving") {
-    const { draft } = state;
-    const saving = state.kind === "saving";
+  if (phase === "saved" && saved) {
     return (
-      <div className="rounded-xl border border-status-engaged/40 bg-status-engaged/5 p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-status-engaged" />
-            <span className="font-bold text-sm text-fg">Review the draft</span>
-          </div>
-          <button
-            type="button"
-            onClick={reset}
-            disabled={saving}
-            className="text-fg-dim hover:text-fg p-1 disabled:opacity-50"
-            title="Discard + start over"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="grid sm:grid-cols-[8rem_1fr] gap-y-2 gap-x-3 text-sm">
-          <div className="text-fg-muted text-xs uppercase tracking-wider font-bold">Name</div>
-          <div className="text-fg font-medium">{draft.suggested_name}</div>
-
-          <div className="text-fg-muted text-xs uppercase tracking-wider font-bold">Description</div>
-          <div className="text-fg-muted">{draft.suggested_description}</div>
-
-          <div className="text-fg-muted text-xs uppercase tracking-wider font-bold">Schedule</div>
-          <div className="text-fg">
-            {draft.schedule_human}{" "}
-            <span className="text-fg-faint font-mono text-[11px]">({draft.schedule})</span>
-          </div>
-
-          <div className="text-fg-muted text-xs uppercase tracking-wider font-bold">Agent</div>
-          <div className="text-fg">{draft.agent_key}</div>
-
-          <div className="text-fg-muted text-xs uppercase tracking-wider font-bold">Script</div>
-          <div className="text-fg font-mono text-xs">scripts/{draft.script_filename}</div>
-        </div>
-
-        <details className="rounded-lg border border-bg-border bg-bg-deep/40">
-          <summary className="cursor-pointer select-none px-3 py-2 text-xs text-fg-muted hover:text-fg">
-            ▸ Inspect generated Python ({draft.script_content.split("\n").length} lines)
-          </summary>
-          <pre className="px-3 pb-3 text-[10px] text-fg-dim font-mono overflow-x-auto max-h-96 overflow-y-auto">
-            {draft.script_content}
-          </pre>
-        </details>
-
-        <div className="text-[11px] text-fg-muted leading-snug bg-bg-deep/40 rounded p-2.5">
-          {/* Drafting agent's name — was hardcoded as "Bravo's" which
-              leaked CC's empire agent into every tenant view (Sun Biz
-              would see "Bravo's reasoning" attached to a Solara
-              draft). Use the actual draft.agent_key, title-cased. */}
-          <span className="font-bold text-fg">
-            {draft.agent_key
-              ? `${draft.agent_key.charAt(0).toUpperCase()}${draft.agent_key.slice(1).toLowerCase()}'s reasoning:`
-              : "AI reasoning:"}
-          </span>{" "}
-          {draft.reasoning}
-        </div>
-
-        <div className="flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={reset}
-            disabled={saving}
-            className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs disabled:opacity-50"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Start over
-          </button>
-          <button
-            type="button"
-            onClick={save}
-            disabled={saving}
-            className="btn-send inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs disabled:opacity-50"
-          >
-            {saving ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              <>
-                <Save className="w-3.5 h-3.5" />
-                Save automation (disabled)
-              </>
-            )}
-          </button>
-        </div>
+      <div className="space-y-3 rounded-xl border border-status-engaged/40 bg-status-engaged/5 p-4">
+        <div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-status-engaged" /><p className="text-sm font-bold text-fg">Automation saved (paused)</p></div>
+        <p className="text-sm leading-relaxed text-fg-muted">The reusable template and paused schedule are stored in the Command Center. When you enable it, {saved.targetLabel || "the selected computer"} will materialize <code className="font-mono text-fg">{saved.scriptPath}</code> from the reviewed source before each run.</p>
+        <button type="button" onClick={reset} className="btn-secondary inline-flex items-center gap-1.5 text-xs"><Sparkles className="h-3.5 w-3.5" />Build another</button>
       </div>
     );
   }
 
-  // ─── SAVED ────────────────────────────────────────────────────────────
-  if (state.kind === "saved") {
-    return (
-      <div className="rounded-xl border border-status-engaged/40 bg-status-engaged/5 p-4 space-y-3">
-        <div className="flex items-center gap-2">
-          <CheckCircle2 className="w-5 h-5 text-status-engaged" />
-          <span className="font-bold text-sm text-fg">Automation saved (paused)</span>
-        </div>
-        <div className="text-sm text-fg-muted leading-relaxed">
-          The script is at <code className="font-mono text-fg">{state.scriptPath}</code> and a
-          paused cron row is in the list below. Inspect the file, then flip the toggle to
-          activate. The scheduler picks up the change on its next 60s poll.
-        </div>
-        <button
-          type="button"
-          onClick={reset}
-          className="btn-secondary inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs"
-        >
-          <Sparkles className="w-3.5 h-3.5" />
-          Draft another
-        </button>
+  return (
+    <div className="space-y-4 rounded-xl border border-accent/30 bg-accent/5 p-4">
+      <div>
+        <div className="flex items-center gap-2"><Sparkles className="h-4 w-4 text-accent" /><p className="text-sm font-bold text-fg">Build an automation</p></div>
+        <p className="mt-1 text-[11px] text-fg-muted">Four explicit steps. New automations land switched off, so nothing runs until you review and activate it.</p>
       </div>
-    );
-  }
+      <ol className="grid grid-cols-4 gap-2" aria-label="Automation setup progress">
+        {["Department", "Workflow", "Connectors", "Computer"].map((label, index) => {
+          const number = index + 1;
+          return <li key={label} className={`rounded-md border px-2 py-2 text-center text-[10px] font-bold uppercase tracking-wider ${step === number ? "border-accent/50 bg-accent/10 text-fg" : number < step ? "border-status-engaged/30 text-status-engaged" : "border-bg-border text-fg-dim"}`}><span className="block font-mono text-[9px]">0{number}</span>{label}</li>;
+        })}
+      </ol>
 
-  return null;
+      {step === 1 && (
+        <div className="space-y-3"><p className="text-sm font-semibold text-fg">Which department owns the outcome?</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{AUTOMATION_DEPARTMENTS.map((item) => <button key={item} type="button" aria-pressed={department === item} onClick={() => setDepartment(item)} className={`rounded-lg border p-3 text-left text-sm font-semibold transition-colors ${department === item ? "border-accent/50 bg-accent/10 text-fg" : "border-bg-border bg-bg-deep/50 text-fg-muted hover:text-fg"}`}>{DEPARTMENT_LABEL[item]}</button>)}</div><div className="flex justify-end"><button type="button" disabled={!department} onClick={() => setStep(2)} className="btn-send inline-flex items-center gap-1.5 text-xs disabled:opacity-40">Workflow details<ChevronRight className="h-3.5 w-3.5" /></button></div></div>
+      )}
+
+      {step === 2 && (
+        <div className="space-y-3">
+          <label className="block text-xs font-bold uppercase tracking-wider text-fg-muted">Objective<textarea rows={3} className={`${fieldClass()} mt-1 normal-case tracking-normal`} value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="When a qualified lead arrives, prepare a concise account brief and send it to the sales owner." /></label>
+          <div className="grid gap-3 sm:grid-cols-2"><label className="block text-xs font-bold uppercase tracking-wider text-fg-muted">Trigger<select className={`${fieldClass()} mt-1 normal-case tracking-normal`} value={triggerKind} onChange={(e) => setTriggerKind(e.target.value as AutomationTrigger)}>{AUTOMATION_TRIGGERS.map((item) => <option key={item} value={item}>{TRIGGER_LABEL[item]}</option>)}</select></label><label className="block text-xs font-bold uppercase tracking-wider text-fg-muted">{triggerKind === "schedule" ? "Schedule" : "Schedule hint"}<input className={`${fieldClass()} mt-1 normal-case tracking-normal`} value={scheduleHint} onChange={(e) => setScheduleHint(e.target.value)} placeholder={triggerKind === "schedule" ? "Weekdays at 9am or 0 9 * * 1-5" : "How often should OASIS check?"} /></label></div>
+          <div className="grid gap-3 sm:grid-cols-2"><label className="block text-xs font-bold uppercase tracking-wider text-fg-muted">Input parameters<textarea rows={2} className={`${fieldClass()} mt-1 normal-case tracking-normal`} value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="lead_id, date range, owner" /></label><label className="block text-xs font-bold uppercase tracking-wider text-fg-muted">Expected output<textarea rows={2} className={`${fieldClass()} mt-1 normal-case tracking-normal`} value={expectedOutputs} onChange={(e) => setExpectedOutputs(e.target.value)} placeholder="A Telegram summary and a saved CRM note" /></label></div>
+          <div className="flex justify-between"><button type="button" className="btn-secondary inline-flex items-center gap-1 text-xs" onClick={() => setStep(1)}><ChevronLeft className="h-3.5 w-3.5" />Department</button><button type="button" className="btn-send inline-flex items-center gap-1.5 text-xs" disabled={loadingContext} onClick={() => void openConnectors()}>{loadingContext ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}{loadingContext ? "Reading workspace…" : "Bind connectors"}<ChevronRight className="h-3.5 w-3.5" /></button></div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="space-y-3"><div><p className="text-sm font-semibold text-fg">Credentials were matched by department and objective</p><p className="mt-1 text-[11px] text-fg-muted">Only credential names are bound to the template. Values stay encrypted and never enter this page or the AI prompt.</p></div>{credentials.length === 0 ? <p className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">No custom vault credentials are saved. This automation can still use built-in Command Center services.</p> : <div className="grid gap-2 sm:grid-cols-2">{credentials.map((row) => { const selected = connectorKeys.includes(row.key); return <label key={row.key} className={`flex items-center gap-2 rounded-lg border p-3 text-xs ${selected ? "border-accent/40 bg-accent/10 text-fg" : "border-bg-border bg-bg-deep/40 text-fg-muted"}`}><input type="checkbox" checked={selected} onChange={() => setConnectorKeys((current) => selected ? current.filter((key) => key !== row.key) : [...current, row.key])} className="h-4 w-4 accent-[#1FE3F0]" /><span className="font-mono">{row.key}</span>{selected && <span className="ml-auto text-[10px] text-status-engaged">bound</span>}</label>; })}</div>}<div className="flex justify-between"><button type="button" className="btn-secondary inline-flex items-center gap-1 text-xs" onClick={() => setStep(2)}><ChevronLeft className="h-3.5 w-3.5" />Workflow</button><button type="button" className="btn-send inline-flex items-center gap-1.5 text-xs" onClick={openTargets}>Choose computer<ChevronRight className="h-3.5 w-3.5" /></button></div></div>
+      )}
+
+      {step === 4 && (
+        <div className="space-y-3"><div><p className="text-sm font-semibold text-fg">Run it on a live paired computer</p><p className="mt-1 text-[11px] text-fg-muted">The freshest eligible computer is selected automatically. Offline and connector-only pairings cannot receive scheduled scripts.</p></div><div className="space-y-2">{devices.map((device) => { const selectable = targetMachineIsSelectable(device); const state = targetMachineState(device.last_seen_at); return <button key={device.id} type="button" disabled={!selectable} onClick={() => setTargetPairingId(device.id)} className={`flex w-full items-center justify-between gap-3 rounded-lg border p-3 text-left ${targetPairingId === device.id ? "border-accent/50 bg-accent/10" : "border-bg-border bg-bg-deep/40"} disabled:cursor-not-allowed disabled:opacity-45`}><span><span className="block text-sm font-semibold text-fg">{device.label || "Paired computer"}</span><span className="text-[11px] text-fg-muted">Last heartbeat {relativeSeen(device.last_seen_at)} · {device.scope || "legacy daemon"}</span></span><span className={`text-[10px] font-bold uppercase tracking-wider ${state === "online" ? "text-status-engaged" : state === "idle" ? "text-status-warm" : "text-status-hot"}`}>{state}</span></button>; })}</div>{error && <p role="alert" className="flex items-start gap-2 rounded-md border border-status-warm/30 bg-status-warm/10 p-2.5 text-xs text-status-warm"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p>}<div className="flex justify-between"><button type="button" className="btn-secondary inline-flex items-center gap-1 text-xs" onClick={() => setStep(3)}><ChevronLeft className="h-3.5 w-3.5" />Connectors</button><button type="button" className="btn-send inline-flex items-center gap-1.5 text-xs" disabled={!targetPairingId} onClick={() => void createDraft()}><Sparkles className="h-3.5 w-3.5" />Draft for review</button></div></div>
+      )}
+
+      {error && step !== 4 && <p role="alert" className="flex items-start gap-2 rounded-md border border-status-warm/30 bg-status-warm/10 p-2.5 text-xs text-status-warm"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p>}
+    </div>
+  );
 }

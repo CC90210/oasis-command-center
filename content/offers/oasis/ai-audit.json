@@ -1,0 +1,157 @@
+{
+  "slug": "ai-audit",
+  "pillar": "AI AUTOMATION AUDIT",
+  "community_link": {
+    "label": "Not ready? Join the free community",
+    "href": "/go/community?form=ai-audit&t=oasis-ai-cc"
+  },
+  "work_steps": [
+    { "title": "Show us the bottleneck", "body": "Tell us where leads, delivery or admin still depends on someone remembering the next step." },
+    { "title": "Map the first quick win", "body": "We separate the automation that can pay back quickly from the ideas that add more software without removing work." },
+    { "title": "Leave with a clear next move", "body": "You get a practical roadmap for what to automate first, whether you build it yourself or ask OASIS to help." }
+  ],
+  "form": {
+    "name": "AI Automation Audit",
+    "slug": "ai-audit",
+    "description": "OASIS 15-minute automation diagnostic and quick-win roadmap.",
+    "branding": {
+      "primary_color": "#e8c547",
+      "accent_color": "#faf9f5",
+      "headline": "Find the first automation worth building",
+      "subheadline": "A focused diagnostic for the operational bottleneck costing you time every week.",
+      "thanks_message": "Your audit request is in. Choose a 15-minute time and bring the workflow that creates the most drag. Not ready to book? Join the free community: https://oasisai.work/go/community?form=ai-audit&t=oasis-ai-cc"
+    },
+    "on_complete_stage": "researched",
+    "step_outcomes": {},
+    "steps": [
+      {
+        "key": "identity",
+        "title": "Who are we mapping this for?",
+        "description": "Your contact details and company.",
+        "cta_label": "Next",
+        "fields": [
+          { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
+          { "name": "email", "label": "Work email", "type": "email", "required": true, "placeholder": "you@company.com" },
+          { "name": "phone", "label": "Mobile number", "type": "phone", "required": true, "placeholder": "+1 555 555 5555" },
+          { "name": "company", "label": "Company", "type": "text", "required": true, "placeholder": "Your company" },
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "ai-audit" }
+        ]
+      },
+      {
+        "key": "bottleneck",
+        "title": "Where does work stall?",
+        "description": "Pick the closest answer, then add the useful detail.",
+        "cta_label": "Book my 15-minute audit",
+        "fields": [
+          {
+            "name": "automation_goal",
+            "label": "What should AI take off your plate first?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "sales_leadgen", "label": "Lead response and sales follow-up" },
+              { "value": "customer_support", "label": "Customer support and repeat questions" },
+              { "value": "workflow_automation", "label": "Manual admin between systems" },
+              { "value": "agent_fleet", "label": "A coordinated AI agent operation" }
+            ]
+          },
+          { "name": "bottleneck_detail", "label": "What happens on a bad week?", "type": "textarea", "maxLength": 1000, "placeholder": "Leads wait in the inbox because nobody owns the next step." },
+          {
+            "name": "timeframe",
+            "label": "When do you want it working?",
+            "type": "select",
+            "required": true,
+            "options": [
+              { "value": "immediate", "label": "Immediately" },
+              { "value": "30_days", "label": "Within 30 days" },
+              { "value": "quarter", "label": "This quarter" },
+              { "value": "exploring", "label": "I am exploring" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "offer_page": {
+    "v": 1,
+    "template": "book_call",
+    "theme": { "canvas": "dark", "logo": "workspace" },
+    "nav": { "pinned": ["obstacles", "what_you_get", "faq"], "cta_label": "Book the 15-minute audit" },
+    "hero": {
+      "eyebrow": "AI AUTOMATION AUDIT, 15 MINUTES",
+      "headline": "Find the first automation worth building",
+      "subheadline": "Bring the workflow that keeps slipping. In 15 focused minutes, we map the first quick win, the systems it touches and the next move that removes real work.",
+      "cta_label": "Book the 15-minute audit",
+      "video": {
+        "source": "library",
+        "asset_id": "a5abecba-58db-4f48-94a0-3fbcd2eeabae",
+        "video_media_id": "d1d21536-6dd1-46aa-8469-ae073eb225a3",
+        "rights": { "by": "CMO Library approval", "at": "2026-10-14T01:56:29.210Z" },
+        "aspect": "9:16",
+        "duration_s": 17
+      },
+      "show_transcript": false,
+      "vsl_script": {
+        "source": "cc",
+        "text": "AI AUTOMATION AUDIT VSL. Target length 60 to 90 seconds. Founder on camera, with a short Command Center screen recording using synthetic data only.\n\n[BEAT 1. HOOK]\nYou do not need another list of AI tools. You need to know which piece of work is worth removing first. If leads wait, handoffs get missed or the same admin gets repeated every week, bring that workflow to a 15-minute audit.\n\n[BEAT 2. THE PROBLEM]\nMost automation projects start with a tool and go hunting for a use. That is why they create another dashboard without giving the owner any time back. We start with the bottleneck: what enters, who touches it, where it waits and what a good result looks like.\n\n[BEAT 3. WHAT HAPPENS]\nFirst, you show us the workflow that creates the most drag. Second, we map the trigger, the systems involved and the decision points that still need a person. Third, we identify the smallest useful automation and the safe next step. If the right answer is not to automate it yet, we will tell you that plainly.\n\n[BEAT 4. WHAT YOU LEAVE WITH]\nYou leave with a quick-win roadmap: what to automate first, what inputs it needs, where a human approval belongs and what should wait. It is a diagnostic, not a generic pitch deck.\n\n[BEAT 5. CALL TO ACTION]\nAnswer the short form below and choose a 15-minute time. Bring the messy workflow. We will bring a clear map. If you are not ready to book, the free community is linked below this video."
+      }
+    },
+    "sections": [
+      {
+        "key": "obstacles",
+        "eyebrow": "The expensive part is the waiting",
+        "title": "The bottleneck is usually between the tools",
+        "items": [
+          { "title": "Leads wait for a reply", "body": "The enquiry arrived, but the next action still depends on someone seeing it and remembering what to send." },
+          { "title": "Handoffs live in people's heads", "body": "The process works when the right person is online, and stalls when they are busy." },
+          { "title": "Admin repeats every week", "body": "Copying data, checking status and sending the same update keep taking time because no system owns the whole loop." },
+          { "title": "New tools add another inbox", "body": "A point solution moves the work without removing it, so the owner still watches every step." }
+        ]
+      },
+      {
+        "key": "what_you_get",
+        "eyebrow": "Your quick-win map",
+        "title": "A focused diagnostic, not a software tour",
+        "lede": "We use the call to make the first automation decision concrete.",
+        "items": [
+          { "title": "The bottleneck in plain language", "body": "The trigger, the delay, the owner and the outcome are mapped around the way your business works now." },
+          { "title": "The smallest useful automation", "body": "A first build that removes a complete piece of work instead of creating another dashboard to manage." },
+          { "title": "Human approvals placed on purpose", "body": "The decisions that need judgment stay visible. Repetitive movement and follow-up become candidates for automation." },
+          { "title": "A practical next step", "body": "Build it yourself, use a packaged blueprint or scope a Command Center deployment only when the fit is clear." }
+        ]
+      },
+      {
+        "key": "faq",
+        "title": "Questions before you book",
+        "items": [
+          { "q": "Is the audit really 15 minutes?", "a": "Yes. Bring one workflow, not the whole company. The goal is to identify the first useful move and what information a deeper build would need." },
+          { "q": "Do I need to prepare anything?", "a": "Know where the workflow starts, which tools it touches and where it usually waits. Screenshots are helpful but not required." },
+          { "q": "Will you recommend OASIS either way?", "a": "No. The right next step may be a DIY protocol, a Command Center deployment, a larger fleet audit or no build yet." },
+          { "q": "What happens after the call?", "a": "You leave with the recommended first move. If an OASIS build makes sense, we can scope it separately. The audit does not switch anything on." },
+          { "q": "What if I'm not ready?", "a": "Join the free OASIS community, see how the systems are built and come back when the timing is right. Join here: https://oasisai.work/go/community?form=ai-audit&t=oasis-ai-cc" }
+        ]
+      }
+    ],
+    "book": {
+      "eyebrow": "Your next 15 minutes",
+      "title": "Book the AI Automation Audit",
+      "lede": "Answer the short diagnostic, then choose a live 15-minute slot.",
+      "mode": "form_then_link",
+      "qualify": "after"
+    },
+    "seo": {
+      "title": "15-minute AI Automation Audit | OASIS AI",
+      "description": "Map the first automation worth building and leave with a focused quick-win roadmap.",
+      "indexable": false
+    },
+    "brief": {
+      "audience": "Operators with one clear workflow bottleneck who need a focused first step.",
+      "promise": "A 15-minute diagnostic that identifies the first useful automation and the next move.",
+      "included": "Bottleneck map, trigger and system boundaries, human approval points and a quick-win recommendation.",
+      "proof_available": "The approved CMO Library video demonstrates the operating-system direction. No client result claim is made.",
+      "price": "No price is stated for this diagnostic.",
+      "bonuses": "None.",
+      "guarantee": "None stated. The page promises a diagnostic and roadmap only."
+    }
+  }
+}

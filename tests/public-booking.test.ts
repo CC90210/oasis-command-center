@@ -160,7 +160,7 @@ await check("preserves an existing rep owner and collaborators when founders joi
 await check("enables booking only for OASIS forms that promise a founder call", () => {
   assert.deepEqual(PUBLIC_BOOKING_FORM_SLUGS, ["ai-audit", "command", "fleet"]);
   for (const slug of PUBLIC_BOOKING_FORM_SLUGS) assert.equal(isPublicBookingFormSlug(slug), true);
-  for (const slug of ["protocol", "community", "vsl", "support", "start"]) {
+  for (const slug of ["protocols", "community", "vsl", "support", "start"]) {
     assert.equal(isPublicBookingFormSlug(slug), false, `${slug} must not force a sales call`);
   }
   assert.equal(publicBookingDurationMinutes("ai-audit"), 15);

@@ -56,6 +56,14 @@ const HANDLERS: Record<string, Handler> = {
   },
   "rules.apply": async (v, b) => ({ applied: await txns.applyRulesToUnreviewed(v, str(b.entity)), message: "Rules applied." }),
   "contact.create": async (v, b) => ({ id: await invoices.createContact(v, str(b.entity), b), message: "Contact added." }),
+  "contact.update": async (v, b) => {
+    await invoices.updateContact(v, str(b.entity), str(b.contact_id), b);
+    return { message: "Customer updated." };
+  },
+  "contact.archive": async (v, b) => {
+    await invoices.archiveContact(v, str(b.entity), str(b.contact_id));
+    return { message: "Customer archived. Historical invoices and payments were kept." };
+  },
   "invoice.create": async (v, b) => {
     const id = await invoices.createDraftInvoice(v, str(b.entity), b);
     return { id, redirect: `/founders/finances/invoices/${id}` };
@@ -78,6 +86,10 @@ const HANDLERS: Record<string, Handler> = {
   "invoice.void": async (v, b) => {
     await invoices.voidInvoice(v, str(b.invoice_id));
     return { message: "Invoice voided." };
+  },
+  "invoice.delete_draft": async (v, b) => {
+    await invoices.deleteDraftInvoice(v, str(b.invoice_id));
+    return { redirect: "/founders/finances/invoices", message: "Draft deleted." };
   },
   "bill.create": async (v, b) => ({ id: await bills.createBill(v, str(b.entity), b), message: b.kind === "bill" ? "Bill recorded." : "Expense recorded." }),
   "bill.pay": async (v, b) => {

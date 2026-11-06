@@ -6,20 +6,24 @@
     "href": "/go/community?form=vsl&t=oasis-ai-cc"
   },
   "routing_rules": {
-    "status": "First cut from HANDOVER section 4 (the funnel doc's triage: self-selection + revenue + intent). Data, not code: slice V2/V5 stores these per workspace so CC and Adon can tune them. Nothing reads this yet.",
-    "precedence": "First match wins, top to bottom, in the HANDOVER table's order. The table overlaps (for example a COMMAND pick with no budget also matches the COMMUNITY row); CC and Adon confirm the order before V2 ships.",
-    "fields": {
-      "path": ["protocol", "command", "community", "fleet"],
-      "monthly_revenue": ["pre_revenue", "under_10k", "10k_50k", "50k_250k", "250k_plus"],
-      "budget": ["none_yet", "under_2k", "2k_5k", "5k_15k", "15k_plus"]
-    },
     "rules": [
       {
-        "go": "protocol",
-        "community_link_first": true,
+        "go": "fleet",
         "when_any": [
-          { "path": ["protocol"] },
-          { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
+          { "path": ["fleet"] },
+          { "monthly_revenue": ["250k_plus"] }
+        ]
+      },
+      {
+        "go": "protocols",
+        "when_any": [
+          { "path": ["protocols"] }
+        ]
+      },
+      {
+        "go": "community",
+        "when_any": [
+          { "path": ["community"] }
         ]
       },
       {
@@ -30,24 +34,16 @@
         ]
       },
       {
-        "go": "community",
+        "go": "protocols",
         "when_any": [
-          { "path": ["community"] },
-          { "budget": ["none_yet"] }
+          { "monthly_revenue": ["pre_revenue", "under_10k"], "budget": ["none_yet"] }
         ]
       },
       {
-        "go": "fleet",
+        "go": "community",
         "when_any": [
-          { "path": ["fleet"] },
-          { "monthly_revenue": ["250k_plus"] }
-        ],
-        "not_asked_here": "The HANDOVER table also routes team size 21+ to FLEET. The router does not ask team size; FLEET's own form does."
-      },
-      {
-        "go": "community_link",
-        "when": "the visitor closes the router, or answers not now",
-        "note": "Tracked through /go/community (slice V5)."
+          { "budget": ["none_yet"] }
+        ]
       }
     ]
   },
@@ -77,7 +73,7 @@
             "type": "select",
             "required": true,
             "options": [
-              { "value": "protocol", "label": "PROTOCOL: I want to set it up myself" },
+              { "value": "protocols", "label": "PROTOCOLS: I want to set it up myself" },
               { "value": "command", "label": "COMMAND: I run a service business and leads slip through" },
               { "value": "community", "label": "COMMUNITY: I am early and want to build alongside others" },
               { "value": "fleet", "label": "FLEET: we are a larger or multi-location operation" }

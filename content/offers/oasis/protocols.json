@@ -1,9 +1,9 @@
 {
-  "slug": "protocol",
+  "slug": "protocols",
   "pillar": "PROTOCOL",
   "community_link": {
     "label": "Not ready? Join the free community",
-    "href": "/go/community?form=protocol&t=oasis-ai-cc"
+    "href": "/go/community?form=protocols&t=oasis-ai-cc"
   },
   "work_steps": [
     { "title": "Pick the pack that matches where you are", "body": "Quick wins if you are starting out, blueprints if you build your own systems, the full suite if you run an agency." },
@@ -12,14 +12,14 @@
   ],
   "form": {
     "name": "PROTOCOL: SOPs, prompts and blueprints",
-    "slug": "protocol",
+    "slug": "protocols",
     "description": "OASIS offer page draft (PROTOCOL, cat=p1). Collects contact details and the pack picked; checkout links are sent by the OASIS team until Stripe Payment Links exist.",
     "branding": {
       "primary_color": "#e8c547",
       "accent_color": "#faf9f5",
       "headline": "Pick your PROTOCOL pack",
       "subheadline": "The SOPs, prompts and blueprints OASIS runs on. Tell us where to send your checkout link.",
-      "thanks_message": "Thanks, we have your pick. A member of the OASIS team will email you a secure checkout link. Not ready to buy? Join the free community: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc"
+      "thanks_message": "Thanks, we have your pick. A member of the OASIS team will email you a secure checkout link. Not ready to buy? Join the free community: https://oasisai.work/go/community?form=protocols&t=oasis-ai-cc"
     },
     "on_complete_stage": "researched",
     "step_outcomes": {},
@@ -33,7 +33,7 @@
           { "name": "name", "label": "Your name", "type": "text", "required": true, "placeholder": "First and last" },
           { "name": "email", "label": "Email", "type": "email", "required": true, "placeholder": "you@company.com", "help": "Your checkout link goes here." },
           { "name": "phone", "label": "Mobile number", "type": "phone", "help": "Optional." },
-          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "protocol" }
+          { "name": "pillar", "label": "Pillar", "type": "hidden", "value": "protocols" }
         ]
       },
       {
@@ -107,7 +107,14 @@
       "headline": "Run your business on the same SOPs and prompts OASIS runs on",
       "subheadline": "The exact procedures, prompt packs and system blueprints we use, packaged so you can set them up yourself this week. Pick the pack that fits where you are, from a quick win to the full suite.",
       "cta_label": "Pick your pack",
-      "video": null,
+      "video": {
+        "source": "library",
+        "asset_id": "4fdb37a5-2620-42cd-b93f-9514511e64e3",
+        "video_media_id": "3af86fe1-6ec7-4540-ac76-c81504799250",
+        "rights": { "by": "CMO Library approval", "at": "2026-10-14T01:56:29.210Z" },
+        "aspect": "9:16",
+        "duration_s": 17
+      },
       "show_transcript": false,
       "vsl_script": {
         "source": "cc",
@@ -148,7 +155,7 @@
           { "q": "How do I pay?", "a": "Leave your details below and pick your pack. A member of the OASIS team will email you a secure checkout link." },
           { "q": "Is this a subscription?", "a": "No. Each pack is a one-time purchase. Nothing renews." },
           { "q": "What if I want it done for me?", "a": "Then PROTOCOL is not the right fit. Look at COMMAND, where we set up the OASIS Command Center for your business." },
-          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocol&t=oasis-ai-cc" }
+          { "q": "What if I'm not ready?", "a": "That is fine. Join the free OASIS community on Telegram, build alongside us, and come back when the timing is right. It costs nothing. Join here: https://oasisai.work/go/community?form=protocols&t=oasis-ai-cc" }
         ]
       }
     ],

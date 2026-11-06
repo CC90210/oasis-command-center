@@ -47,14 +47,14 @@ const tenants: Row[] = [
 
 const forms: Row[] = [
   { id: "f-vsl", tenant_id: OASIS_TENANT_ID, slug: "vsl", name: "Start here", enabled: true },
-  { id: "f-protocol", tenant_id: OASIS_TENANT_ID, slug: "protocol", name: "Protocol", enabled: true },
+  { id: "f-protocols", tenant_id: OASIS_TENANT_ID, slug: "protocols", name: "Protocol", enabled: true },
   { id: "f-command", tenant_id: OASIS_TENANT_ID, slug: "command", name: "Command", enabled: true },
   { id: "f-community", tenant_id: OASIS_TENANT_ID, slug: "community", name: "Community", enabled: true },
   { id: "f-fleet", tenant_id: OASIS_TENANT_ID, slug: "fleet", name: "Fleet", enabled: true },
   { id: "f-disabled", tenant_id: OASIS_TENANT_ID, slug: "disabled-path", name: "Disabled", enabled: false },
   // Same slug as OASIS's own, but in ANOTHER tenant — proves resolution never
   // widens past the router's own tenant.
-  { id: "f-other-protocol", tenant_id: OTHER_TENANT_ID, slug: "protocol", name: "Other protocol", enabled: true },
+  { id: "f-other-protocols", tenant_id: OTHER_TENANT_ID, slug: "protocols", name: "Other protocols", enabled: true },
 ];
 
 class FakeQuery {
@@ -96,30 +96,30 @@ async function main() {
 
   console.log("  rejects go as an absolute URL (never an open redirect at the DATA layer either)");
   assert.throws(
-    () => parseFormRouting([{ go: "https://evil.example.com", when_any: [{ path: ["protocol"] }] }]),
+    () => parseFormRouting([{ go: "https://evil.example.com", when_any: [{ path: ["protocols"] }] }]),
     RoutingDefinitionError,
   );
 
   console.log("  rejects an empty when_any");
-  assert.throws(() => parseFormRouting([{ go: "protocol", when_any: [] }]), RoutingDefinitionError);
+  assert.throws(() => parseFormRouting([{ go: "protocols", when_any: [] }]), RoutingDefinitionError);
 
   console.log("  rejects an unknown top-level key");
   assert.throws(
-    () => parseFormRouting([{ go: "protocol", when_any: [{ path: ["protocol"] }], extra: true }]),
+    () => parseFormRouting([{ go: "protocols", when_any: [{ path: ["protocols"] }], extra: true }]),
     RoutingDefinitionError,
   );
 
   console.log("  rejects a condition value that is not a non-empty string array");
-  assert.throws(() => parseFormRouting([{ go: "protocol", when_any: [{ path: [] }] }]), RoutingDefinitionError);
-  assert.throws(() => parseFormRouting([{ go: "protocol", when_any: [{ path: "protocol" }] }]), RoutingDefinitionError);
+  assert.throws(() => parseFormRouting([{ go: "protocols", when_any: [{ path: [] }] }]), RoutingDefinitionError);
+  assert.throws(() => parseFormRouting([{ go: "protocols", when_any: [{ path: "protocols" }] }]), RoutingDefinitionError);
 
   console.log("firstMatchingGo / ruleMatches (pure evaluation, HANDOVER table scenarios):");
 
-  console.log("  chose PROTOCOL -> protocol, even with fields that would also match a later rule");
-  assert.equal(firstMatchingGo(oasisRules, { path: "protocol", budget: "15k_plus" }), "protocol");
+  console.log("  chose PROTOCOL -> protocols, even with fields that would also match a later rule");
+  assert.equal(firstMatchingGo(oasisRules, { path: "protocols", budget: "15k_plus" }), "protocols");
 
-  console.log("  pre-revenue + no budget -> protocol (second disjunct, no path chosen)");
-  assert.equal(firstMatchingGo(oasisRules, { monthly_revenue: "under_10k", budget: "none_yet" }), "protocol");
+  console.log("  pre-revenue + no budget -> protocols (second disjunct, no path chosen)");
+  assert.equal(firstMatchingGo(oasisRules, { monthly_revenue: "under_10k", budget: "none_yet" }), "protocols");
 
   console.log("  chose COMMAND with revenue $10k+ -> command");
   assert.equal(firstMatchingGo(oasisRules, { path: "command", monthly_revenue: "50k_250k" }), "command");
@@ -143,11 +143,11 @@ async function main() {
   for (const budget of ["2k_5k", "5k_15k", "15k_plus"]) {
     assert.equal(firstMatchingGo(oasisRules, { path: "fleet", budget }), "fleet", `fleet + ${budget}`);
     assert.equal(firstMatchingGo(oasisRules, { path: "community", budget }), "community", `community + ${budget}`);
-    assert.equal(firstMatchingGo(oasisRules, { path: "protocol", budget }), "protocol", `protocol + ${budget}`);
+    assert.equal(firstMatchingGo(oasisRules, { path: "protocols", budget }), "protocols", `protocols + ${budget}`);
   }
 
   console.log("  $250K+ a month goes to FLEET whatever card was picked (the one deliberate override)");
-  for (const path of ["protocol", "command", "community", "fleet"]) {
+  for (const path of ["protocols", "command", "community", "fleet"]) {
     assert.equal(firstMatchingGo(oasisRules, { path, monthly_revenue: "250k_plus" }), "fleet", path);
   }
 
@@ -162,8 +162,8 @@ async function main() {
 
   console.log("resolveRouterDestination (database-backed, real OASIS tenant):");
 
-  console.log("  protocol resolves to /f/oasis-ai-cc/protocol");
-  assert.equal(await destinationFor(oasisRules, { path: "protocol" }), "/f/oasis-ai-cc/protocol");
+  console.log("  protocols resolves to /f/oasis-ai-cc/protocols");
+  assert.equal(await destinationFor(oasisRules, { path: "protocols" }), "/f/oasis-ai-cc/protocols");
 
   console.log("  command resolves to /f/oasis-ai-cc/command");
   assert.equal(await destinationFor(oasisRules, { path: "command", monthly_revenue: "50k_250k" }), "/f/oasis-ai-cc/command");
@@ -178,7 +178,7 @@ async function main() {
   assert.equal(await destinationFor(oasisRules, {}), "/go/community?form=vsl&t=oasis-ai-cc");
 
   console.log("  every resolved destination is a RELATIVE path (never an absolute URL)");
-  for (const answers of [{ path: "protocol" }, { path: "command", monthly_revenue: "50k_250k" }, { path: "community" }, { path: "fleet" }, {}]) {
+  for (const answers of [{ path: "protocols" }, { path: "command", monthly_revenue: "50k_250k" }, { path: "community" }, { path: "fleet" }, {}]) {
     const dest = await destinationFor(oasisRules, answers);
     assert.ok(dest, `expected a destination for ${JSON.stringify(answers)}`);
     assert.ok(dest!.startsWith("/"), `destination must be relative: ${dest}`);
@@ -188,48 +188,48 @@ async function main() {
   console.log("Refusal behavior (the open-redirect / cross-tenant guards):");
 
   console.log("  a rule naming ANOTHER tenant's form (same slug) never resolves to it -- falls through to community");
-  const crossTenantRule: FormRoutingRule[] = [{ go: "protocol", whenAny: [{ path: ["protocol"] }] }];
-  // Router is in OASIS's own tenant; "protocol" exists in BOTH tenants. Must
+  const crossTenantRule: FormRoutingRule[] = [{ go: "protocols", whenAny: [{ path: ["protocols"] }] }];
+  // Router is in OASIS's own tenant; "protocols" exists in BOTH tenants. Must
   // resolve to OASIS's own, never the other tenant's row with the same slug.
-  assert.equal(await destinationFor(crossTenantRule, { path: "protocol" }), "/f/oasis-ai-cc/protocol");
+  assert.equal(await destinationFor(crossTenantRule, { path: "protocols" }), "/f/oasis-ai-cc/protocols");
   // And explicitly: resolving as if the ROUTER belonged to the other tenant
-  // must land on the OTHER tenant's protocol, never OASIS's -- same-tenant
+  // must land on the OTHER tenant's protocols, never OASIS's -- same-tenant
   // scoping, not a slug-wide lookup.
   assert.equal(
-    await destinationFor(crossTenantRule, { path: "protocol" }, OTHER_TENANT_ID, "other-co"),
-    "/f/other-co/protocol",
+    await destinationFor(crossTenantRule, { path: "protocols" }, OTHER_TENANT_ID, "other-co"),
+    "/f/other-co/protocols",
   );
 
   console.log("  a rule naming a DISABLED form in the SAME tenant falls through to community");
-  const disabledRule: FormRoutingRule[] = [{ go: "disabled-path", whenAny: [{ path: ["protocol"] }] }];
-  assert.equal(await destinationFor(disabledRule, { path: "protocol" }), "/go/community?form=vsl&t=oasis-ai-cc");
+  const disabledRule: FormRoutingRule[] = [{ go: "disabled-path", whenAny: [{ path: ["protocols"] }] }];
+  assert.equal(await destinationFor(disabledRule, { path: "protocols" }), "/go/community?form=vsl&t=oasis-ai-cc");
 
   console.log("  a rule naming a form that does not exist at all falls through to community");
-  const missingRule: FormRoutingRule[] = [{ go: "no-such-form", whenAny: [{ path: ["protocol"] }] }];
-  assert.equal(await destinationFor(missingRule, { path: "protocol" }), "/go/community?form=vsl&t=oasis-ai-cc");
+  const missingRule: FormRoutingRule[] = [{ go: "no-such-form", whenAny: [{ path: ["protocols"] }] }];
+  assert.equal(await destinationFor(missingRule, { path: "protocols" }), "/go/community?form=vsl&t=oasis-ai-cc");
 
   console.log("  community_link for a tenant with NO community configured resolves to null, not a guess");
-  const communityLinkRule: FormRoutingRule[] = [{ go: COMMUNITY_LINK_GO, whenAny: [{ path: ["protocol"] }] }];
+  const communityLinkRule: FormRoutingRule[] = [{ go: COMMUNITY_LINK_GO, whenAny: [{ path: ["protocols"] }] }];
   assert.equal(
-    await destinationFor(communityLinkRule, { path: "protocol" }, OTHER_TENANT_ID, "other-co"),
+    await destinationFor(communityLinkRule, { path: "protocols" }, OTHER_TENANT_ID, "other-co"),
     null,
     "no configured community and no other rule -- null means the form's own ordinary behavior, never a guess",
   );
 
   console.log("  a disabled destination is skipped in favour of a LATER rule that DOES resolve");
   const fallThroughToNextRule: FormRoutingRule[] = [
-    { go: "disabled-path", whenAny: [{ path: ["protocol"] }] },
-    { go: "fleet", whenAny: [{ path: ["protocol"] }] },
+    { go: "disabled-path", whenAny: [{ path: ["protocols"] }] },
+    { go: "fleet", whenAny: [{ path: ["protocols"] }] },
   ];
-  assert.equal(await destinationFor(fallThroughToNextRule, { path: "protocol" }), "/f/oasis-ai-cc/fleet");
+  assert.equal(await destinationFor(fallThroughToNextRule, { path: "protocols" }), "/f/oasis-ai-cc/fleet");
 
   console.log("router-cat-preselect:");
 
   const vslSteps = [
-    { fields: [{ name: "path", options: [{ value: "protocol" }, { value: "command" }, { value: "community" }, { value: "fleet" }] }] },
+    { fields: [{ name: "path", options: [{ value: "protocols" }, { value: "command" }, { value: "community" }, { value: "fleet" }] }] },
   ];
   console.log("  ?cat=p1..p4 map to the right path value");
-  assert.equal(routerPathForCatParam("p1"), "protocol");
+  assert.equal(routerPathForCatParam("p1"), "protocols");
   assert.equal(routerPathForCatParam("p2"), "command");
   assert.equal(routerPathForCatParam("p3"), "community");
   assert.equal(routerPathForCatParam("p4"), "fleet");
@@ -241,7 +241,7 @@ async function main() {
   assert.equal(routerPathForCatParam(undefined), null);
 
   console.log("  routerPrefillForCat seeds {path: value} only when the form actually offers it");
-  assert.deepEqual(routerPrefillForCat(vslSteps, "p1"), { path: "protocol" });
+  assert.deepEqual(routerPrefillForCat(vslSteps, "p1"), { path: "protocols" });
   assert.equal(routerPrefillForCat(vslSteps, "p9"), null, "unknown cat");
   assert.equal(routerPrefillForCat([{ fields: [{ name: "email" }] }], "p1"), null, "form has no path field at all");
 
