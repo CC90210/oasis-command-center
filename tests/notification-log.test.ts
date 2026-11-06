@@ -158,8 +158,9 @@ async function run() {
     assert.match(route, /readRecentNotifications\(getTursoClient\(\), WEBDEV_TENANT_ID,/);
     // The panel drops an answer that is no longer the newest request's.
     const panel = readFileSync("components/automations/NotificationLogPanel.tsx", "utf8");
-    assert.match(panel, /const seq = \+\+latest\.current;\n(?:\s*\/\/[^\n]*\n)*\s*const qs = /);
-    assert.match(panel, /\{ retries: 2 \}\);\n\s*if \(seq !== latest\.current\) return;\n/);
+    // \r?\n: a Windows checkout (core.autocrlf) has CRLF line ends.
+    assert.match(panel, /const seq = \+\+latest\.current;\r?\n(?:\s*\/\/[^\n]*\n)*\s*const qs = /);
+    assert.match(panel, /\{ retries: 2 \}\);\r?\n\s*if \(seq !== latest\.current\) return;\r?\n/);
   }
 
   console.log("notification-log: all assertions passed");
