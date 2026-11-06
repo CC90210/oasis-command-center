@@ -56,9 +56,9 @@ function signFailed(formId: string, detail: string): NextResponse {
 }
 
 export async function POST(req: NextRequest) {
-  // The body is a signed link, a file name and a type (about 0.4 KB), read
-  // through a byte cap that refuses before reading and cuts off at the cap
-  // (lib/forms/bounded-body.ts).
+  // The body is a signed link, a file name and a type (0.4 KB, or 1.15 KB with
+  // the longest file name allowed), read through a byte cap that refuses before
+  // reading and cuts off at the cap (lib/forms/bounded-body.ts).
   const read = await readBoundedJson(req, SMALL_BODY_CAP_BYTES);
   if (!read.ok) return bodyRefusal("forms.upload-url", req, read, SMALL_BODY_CAP_BYTES);
   // A JSON value that is not an object (null, a list) has no token: the check

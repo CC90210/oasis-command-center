@@ -126,7 +126,7 @@ import { isHoneypotFilled } from "@/lib/forms/honeypot";
 import { linkVisitToLead, isValidVisitId } from "@/lib/offers/tracking-store";
 import { stampUtmOnLead, type UtmInput } from "@/lib/offer-pages/utm";
 import { bodyRefusal, readBoundedJson, SUBMIT_BODY_CAP_BYTES } from "@/lib/forms/bounded-body";
-import { answerTooLargeSentence, boundAnswers, type AnswerRefusal } from "@/lib/forms/answer-limits";
+import { answerRefusal, boundAnswers } from "@/lib/forms/answer-limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -556,17 +556,6 @@ function formDefinitionCorrupt(where: string, formId: string, err: FormDefinitio
   return NextResponse.json({ ok: false, error: "form_definition_corrupt" }, { status: 500 });
 }
 
-/** A step's answers that cannot go on, as the browser is told. */
-function refuseAnswers(refusal: AnswerRefusal): NextResponse {
-  if (refusal.kind === "invalid_answers") {
-    return NextResponse.json({ ok: false, error: "invalid_answers" }, { status: 400 });
-  }
-  return NextResponse.json(
-    { ok: false, error: "answer_too_large", field: refusal.field, message: answerTooLargeSentence(refusal) },
-    { status: 413 },
-  );
-}
-
 /**
  * One step's answers against their limits (lib/forms/answer-limits.ts). An
  * answer over its limit is cut in place, so the lead is kept, and logged by
@@ -586,7 +575,8 @@ function boundStepAnswers(
   }
   if (!bounded.refusal) return null;
   console.warn("[forms.submit] answers refused", { where, form_id: formId, step_index: stepIndex, refusal: bounded.refusal });
-  return refuseAnswers(bounded.refusal);
+  const { status, error, extra } = answerRefusal(bounded.refusal);
+  return NextResponse.json({ ok: false, error, ...extra }, { status });
 }
 
 /** The file types a field can take, by the names a visitor knows them by. */

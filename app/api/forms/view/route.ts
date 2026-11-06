@@ -34,8 +34,9 @@ export const dynamic = "force-dynamic";
 // "Viewed" (in /api/forms/submit). The old POST_VIEWED_STAGES guard is gone.
 
 export async function POST(req: NextRequest) {
-  // The body is a signed link (144 characters), read through a byte cap that
-  // refuses before reading and cuts off at the cap (lib/forms/bounded-body.ts).
+  // The body is a signed link (227 characters, 302 at the worst), read through
+  // a byte cap that refuses before reading and cuts off at the cap
+  // (lib/forms/bounded-body.ts).
   const read = await readBoundedJson(req, SMALL_BODY_CAP_BYTES);
   if (!read.ok) return bodyRefusal("forms.view", req, read, SMALL_BODY_CAP_BYTES);
   // A JSON value that is not an object (null, a list) has no token: the token

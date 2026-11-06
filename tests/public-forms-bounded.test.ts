@@ -7,8 +7,8 @@
  *   - `await req.json()` buffered the whole body, up to what the platform lets
  *     through, before any check could run (submit, view, upload-url, and the
  *     failure beacon, which read `req.text()` first and measured after).
- *   - No answer had a length limit. The rest of the body was bounded only by
- *     the platform.
+ *   - No answer had a length limit: the rest of the body was bounded only by
+ *     the platform, and the support form stored whatever object it was sent.
  *   - upload-url answered `sign_failed: <the storage client's words>`, and any
  *     throw under it (storage not set up) escaped as an unhandled 500.
  *   - Three form-definition refusals sent the definition's own path and reason.
@@ -17,15 +17,20 @@
  *   - The Meet room routes built their database client outside the handler's
  *     try, so a client that could not be built was an unhandled 500 with no log.
  *
- * WHAT THE NUMBERS ARE (measured, not guessed; the report of this change has the
- * method):
+ * WHAT THE NUMBERS ARE. Measured from the code and the data, not guessed: the
+ * seeded form definitions (the *-seed.ts files and sunbiz-templates.ts in
+ * lib/forms, lib/delivery/support-form.ts), form links signed the way production
+ * signs them (lib/form-links.ts), and signature PNGs drawn stroke by stroke the
+ * way components/forms/SignaturePad.tsx draws them.
  *   - submit takes 88 MiB: the route has always accepted 60 MiB of inline files
  *     per request (PER_REQUEST_DECODED_CAP_BYTES), which is 80 MiB of base64, so
  *     no cap can sit lower without refusing files it accepts today; the other
  *     8 MiB is the answers, 20 times the largest text-only request measured
  *     (a heavy signature plus a 30-field form at every limit, about 0.4 MB).
- *   - view and upload-url take 16 KiB: their body is a 144-character link, plus
- *     a file name and type for an upload (about 0.4 KB).
+ *   - view and upload-url take 16 KiB. A form link is 227 characters (302 at
+ *     the worst: UUID ids and a 63-character workspace slug), so view's body is
+ *     0.31 KB at most and upload-url's 0.4 KB, or 1.15 KB with the longest file
+ *     name a browser allows: 14 times the worst of them.
  *   - the failure beacon takes 64 KiB: the most a browser sends with keepalive.
  *   - an answer takes 10,000 characters unless its field says less (the largest
  *     limit any seeded form declares is 5,000), a field that declares more is
@@ -217,27 +222,32 @@ async function main() {
 
   // -- first, before anything builds the app's database client ---------------
   console.log("public-forms-bounded:");
-  await check("every Meet room route whose database client cannot be built answers JSON and logs under its own name, never an unhandled throw", async () => {
+  await check("every Meet route whose database client cannot be built (the five a guest uses, and the host's panel) answers JSON and logs under its own name, never an unhandled throw", async () => {
     const saved = process.env.TURSO_DB_PATH;
     delete process.env.TURSO_DB_PATH;
     try {
       const { getTursoClient } = await import("../lib/turso");
       assert.throws(() => getTursoClient(), /Turso misconfigured/, "precondition: nothing has built the client yet");
+      const panel = await import("../app/api/calendar/meet/route");
+      const room = "/api/meet/abc-defg-hij";
       const routes = [
-        ["join", "POST", await import("../app/api/meet/[code]/join/route")],
-        ["leave", "POST", await import("../app/api/meet/[code]/leave/route")],
-        ["host", "POST", await import("../app/api/meet/[code]/host/route")],
-        ["sfu", "POST", await import("../app/api/meet/[code]/sfu/route")],
-        ["state", "GET", await import("../app/api/meet/[code]/state/route")],
+        ["join", "POST", await import("../app/api/meet/[code]/join/route"), `${room}/join`],
+        ["leave", "POST", await import("../app/api/meet/[code]/leave/route"), `${room}/leave`],
+        ["host", "POST", await import("../app/api/meet/[code]/host/route"), `${room}/host`],
+        ["sfu", "POST", await import("../app/api/meet/[code]/sfu/route"), `${room}/sfu`],
+        ["state", "GET", await import("../app/api/meet/[code]/state/route"), `${room}/state`],
+        // The host's panel (signed in) is built the same way, and logs under its handlers' names.
+        ["rooms.list", "GET", panel, "/api/calendar/meet"],
+        ["rooms.create", "POST", panel, "/api/calendar/meet"],
       ] as const;
       const { NextRequest } = await import("next/server");
-      for (const [where, method, mod] of routes) {
+      for (const [where, method, mod, url] of routes) {
         const lines: string[] = [];
         const errors = console.error;
         console.error = (...a: unknown[]) => void lines.push(a.map((x) => (typeof x === "string" ? x : x instanceof Error ? x.message : JSON.stringify(x))).join(" "));
         let res: Response;
         try {
-          const req = new NextRequest(`http://localhost/api/meet/abc-defg-hij/${where}`, {
+          const req = new NextRequest(`http://localhost${url}`, {
             method,
             headers: { "content-type": "application/json", origin: "http://localhost", host: "localhost" },
             ...(method === "POST" ? { body: JSON.stringify({ name: "Guest" }) } : {}),
@@ -258,13 +268,19 @@ async function main() {
 
   // -- the world the form routes run in -----------------------------------------
   await seed.executeMultiple(`
-    DROP TABLE forms;
+    -- The harness's forms table has no foreign key to tenants, which the form read joins through, and
+    -- no forms.routing (migration bravo__220). Rebuilt with both, keeping the support form that
+    -- migration 183 seeded (the support intake is checked below).
+    ALTER TABLE forms RENAME TO forms_harness;
     CREATE TABLE forms (
       id TEXT NOT NULL PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), slug TEXT NOT NULL, name TEXT NOT NULL,
       description TEXT, branding TEXT NOT NULL DEFAULT '{}', steps TEXT NOT NULL DEFAULT '[]',
       on_complete_stage TEXT, step_outcomes TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
       redirect_url TEXT, created_by TEXT, created_at TEXT, updated_at TEXT, routing TEXT
     );
+    INSERT INTO forms (id, tenant_id, slug, name, description, branding, steps, on_complete_stage, step_outcomes, enabled, redirect_url, created_by, created_at, updated_at)
+      SELECT id, tenant_id, slug, name, description, branding, steps, on_complete_stage, step_outcomes, enabled, redirect_url, created_by, created_at, updated_at FROM forms_harness;
+    DROP TABLE forms_harness;
     CREATE TABLE IF NOT EXISTS agent_events (
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
       event_type TEXT, publisher_agent TEXT, severity TEXT, target_agent TEXT,
@@ -301,6 +317,9 @@ async function main() {
   const view = await import("../app/api/forms/view/route");
   const upload = await import("../app/api/forms/upload-url/route");
   const beacon = await import("../app/api/forms/submit-failure/route");
+  const booking = await import("../app/api/forms/booking/route");
+  const bookingAvailability = await import("../app/api/forms/booking/availability/route");
+  const bookingDetailsOnly = await import("../app/api/forms/booking/details-only/route");
   const { getTursoClient } = await import("../lib/turso");
 
   // Fault injection on the app's own database client (the seed client is a
@@ -390,7 +409,7 @@ async function main() {
   // A request whose body is a stream the test can watch: how many reads were
   // asked of it, and how many bytes were handed over. highWaterMark 0 means
   // nothing is read ahead, so a count of zero is proof that nothing was read.
-  const streamed = (path: string, o: { declared?: number; chunk: number; total: number }) => {
+  const streamed = (path: string, o: { declared?: number; chunk: number; total: number; headers?: Record<string, string> }) => {
     const state = { pulls: 0, pulled: 0 };
     const chunk = new Uint8Array(o.chunk).fill(0x20); // JSON whitespace: valid to the end, never a document
     const stream = new ReadableStream<Uint8Array>(
@@ -407,7 +426,7 @@ async function main() {
       },
       { highWaterMark: 0 },
     );
-    const headers: Record<string, string> = { "content-type": "application/json", "x-forwarded-for": nextIp() };
+    const headers: Record<string, string> = { "content-type": "application/json", "x-forwarded-for": nextIp(), ...o.headers };
     if (o.declared !== undefined) headers["content-length"] = String(o.declared);
     const request = new NextRequest(`http://localhost${path}`, { method: "POST", headers, body: stream, duplex: "half" } as unknown as RequestInit);
     return { request, state };
@@ -465,6 +484,30 @@ async function main() {
       assert.notEqual(at.status, 413, "a body at the cap is not too big");
       const over = await (r.handler as (q: unknown) => Promise<Response>)(bytesBody(r.path, "{}", r.cap + 1));
       assert.equal(over.status, 413);
+    });
+  }
+
+  // The public booking routes read their body through lib/forms/public-booking.ts
+  // readPublicBookingJson, which was bounded before this change (8,000 bytes, a
+  // Content-Length fast path and a running count) and answers 400 invalid_json
+  // rather than 413. Left as it was; pinned here so it stays bounded.
+  const BOOKING_CAP = 8_000;
+  const sameOriginHeaders = { origin: "http://localhost", host: "localhost" };
+  for (const r of [
+    { name: "booking", path: "/api/forms/booking", handler: booking.POST },
+    { name: "booking/availability", path: "/api/forms/booking/availability", handler: bookingAvailability.POST },
+    { name: "booking/details-only", path: "/api/forms/booking/details-only", handler: bookingDetailsOnly.POST },
+  ] as const) {
+    await check(`${r.name} (bounded before this change, pinned): ${BOOKING_CAP + 1} bytes declared is refused unread, and a body that does not say is cut off at ${BOOKING_CAP}`, async () => {
+      const declared = streamed(r.path, { declared: BOOKING_CAP + 1, chunk: 1024, total: 64 * 1024, headers: sameOriginHeaders });
+      const refused = await r.handler(declared.request as never);
+      assert.equal(refused.status, 400);
+      assert.equal(((await refused.json()) as Json).error, "invalid_json");
+      assert.equal(declared.state.pulls, 0, "not one read of a body it was told was too big");
+      const silent = streamed(r.path, { chunk: 1024, total: 64 * 1024, headers: sameOriginHeaders });
+      const cut = await r.handler(silent.request as never);
+      assert.equal(cut.status, 400);
+      assert.ok(silent.state.pulled > BOOKING_CAP && silent.state.pulled <= BOOKING_CAP + 1024, `read ${silent.state.pulled} bytes of an ${BOOKING_CAP} byte cap`);
     });
   }
 
@@ -614,11 +657,11 @@ async function main() {
     assert.equal(longKey.json.error, "invalid_answers");
     assert.equal(await leads() - leadsBefore, 0, "no lead for either");
     assert.equal(await steps("form-bounded"), stepsBefore);
-    // The edges are inside: 200 keys, a 128-character key.
-    const edge = await post({ step_index: 0, anonymous_init: anon("bounded-form"), payload: { email: "edge-keys@example.com", ...keys(MIN_KEYS - 1), ["k".repeat(KEY_CHARS)]: "v" } });
-    assert.equal(edge.status, 400, "201 keys: 199 + email + the long key is 201");
-    const exactly = await post({ step_index: 0, anonymous_init: anon("bounded-form"), payload: { email: "exact-keys@example.com", ...keys(MIN_KEYS - 2), ["k".repeat(KEY_CHARS)]: "v" } });
-    assert.equal(exactly.status, 200, `200 keys with a 128-character key: ${exactly.text.slice(0, 200)}`);
+    // The limits themselves are inside: exactly 200 keys, one of them 128 characters long, is taken.
+    const atTheLimits = await post({ step_index: 0, anonymous_init: anon("bounded-form"), payload: { email: "exact-keys@example.com", ...keys(MIN_KEYS - 2), ["k".repeat(KEY_CHARS)]: "v" } });
+    assert.equal(atTheLimits.status, 200, `200 keys (email, 198, and the long one): ${atTheLimits.text.slice(0, 200)}`);
+    const oneOver = await post({ step_index: 0, anonymous_init: anon("bounded-form"), payload: { email: "edge-keys@example.com", ...keys(MIN_KEYS - 1), ["k".repeat(KEY_CHARS)]: "v" } });
+    assert.equal(oneOver.status, 400, "201 keys: the same payload with one more");
   });
 
   await check("the contact an upload-first form sends to get its link (initialize_only) is held to the same limits before it becomes the lead", async () => {
@@ -635,6 +678,37 @@ async function main() {
     });
     assert.equal(keys.status, 400, keys.text.slice(0, 200));
     assert.equal(keys.json.error, "invalid_answers");
+  });
+
+  await check("the support form, which stores the whole object it is sent, holds the same limits: a flood of keys is refused with no ticket, an undeclared answer past the limit is cut where it is stored", async () => {
+    const tickets = () => count("SELECT count(*) AS n FROM support_tickets");
+    const stored = (email: string) => count("SELECT count(*) AS n FROM form_submissions WHERE json_extract(payload, '$.email') = ?", [email]);
+    const ticket = (email: string, more: Json = {}) => ({ name: "Support Sam", email, category: "other", priority: "low", description: "It will not load.", ...more });
+    const before = await tickets();
+    const flood = await post({
+      step_index: 0,
+      anonymous_init: anon("support"),
+      payload: ticket("support-flood@example.test", Object.fromEntries(Array.from({ length: MIN_KEYS + 1 }, (_, i) => [`junk${i}`, "x"]))),
+    });
+    assert.equal(flood.status, 400, flood.text.slice(0, 200));
+    assert.equal(flood.json.error, "invalid_answers");
+    assert.equal(await tickets(), before, "no ticket for it");
+    assert.equal(await stored("support-flood@example.test"), 0, "nothing stored for it");
+
+    const long = await logged(() => post({ step_index: 0, anonymous_init: anon("support"), payload: ticket("support-cut@example.test", { junk_note: "j".repeat(50_000) }) }));
+    assert.equal(long.value.status, 200, long.value.text.slice(0, 200));
+    assert.equal(await tickets(), before + 1, "the ticket is made");
+    const row = (await seed.execute({ sql: "SELECT payload FROM form_submissions WHERE json_extract(payload, '$.email') = ?", args: ["support-cut@example.test"] })).rows[0];
+    const kept = JSON.parse(String(row.payload)) as Json;
+    assert.equal((kept.junk_note as string).length, TEXT_LIMIT, "the undeclared answer is cut where it is stored");
+    assert.match(String(kept.junk_note), /\[cut: this answer was longer than 10,000 characters\]$/);
+    assert.equal(kept.description, "It will not load.", "the declared answers are as they were");
+    assert.ok(long.lines.some((l) => l.includes("[support-intake] answers cut to their limit")), `logged: ${long.lines.join(" | ")}`);
+
+    const heavy = await post({ step_index: 0, anonymous_init: anon("support"), payload: ticket("support-heavy@example.test", { junk: { a: "x".repeat(COMPOUND_LIMIT) } }) });
+    assert.equal(heavy.status, 413, heavy.text.slice(0, 200));
+    assert.equal(heavy.json.error, "answer_too_large");
+    assert.equal(await tickets(), before + 1, "and no second ticket");
   });
 
   await check("a form wider than the real ones is never refused for width: twice its fields in keys are taken, one more is not", async () => {

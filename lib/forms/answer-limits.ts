@@ -1,9 +1,10 @@
 /**
  * lib/forms/answer-limits.ts - how long a public form's answers may be.
  *
- * Until now nothing on the server held an answer to a length, so a submitted
- * answer was bounded only by the platform's request limit. The limits, and what
- * happens past them:
+ * Nothing used to hold an answer to a length on the server, so a submitted answer
+ * was bounded only by the platform's request limit, and the support form stored
+ * whatever object it was sent. The limits, and what happens past them (the
+ * submit route and the support-form intake both apply them):
  *
  *   an answer in a text box   a field's own `maxLength` when its definition has
  *                             one (the box's `maxlength` attribute already stops
@@ -135,8 +136,19 @@ export function boundAnswers(payload: Record<string, unknown>, fields: readonly 
 }
 
 /** What the visitor is told about an answer that is too large to send: which one, and what to do. */
-export function answerTooLargeSentence(refusal: Extract<AnswerRefusal, { kind: "answer_too_large" }>): string {
+function answerTooLargeSentence(refusal: Extract<AnswerRefusal, { kind: "answer_too_large" }>): string {
   return refusal.signature
     ? `${refusal.label}: that signature is too detailed to send. Please clear it and sign again.`
     : `${refusal.label}: that is too large to send. Please shorten it and try again.`;
+}
+
+/**
+ * What a refusal is answered with, for every route that takes a public form's
+ * answers (the submit route and the support-form intake), so the two cannot
+ * drift: the status, the stable code, and for one answer its field and a
+ * sentence. Both codes have a sentence in components/forms/FormPublicClient.tsx.
+ */
+export function answerRefusal(refusal: AnswerRefusal): { status: 400 | 413; error: string; extra: Record<string, string> } {
+  if (refusal.kind === "invalid_answers") return { status: 400, error: "invalid_answers", extra: {} };
+  return { status: 413, error: "answer_too_large", extra: { field: refusal.field, message: answerTooLargeSentence(refusal) } };
 }

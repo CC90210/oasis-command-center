@@ -25,6 +25,14 @@ import { resolve } from "node:path";
 import { SUBMIT_ERROR_COPY, SUBMIT_ERROR_FALLBACK } from "../components/forms/FormPublicClient";
 
 const ROUTE = resolve(__dirname, "../app/api/forms/submit/route.ts");
+/**
+ * Where the route's rejections are written. The answer limits' two refusals
+ * (invalid_answers, answer_too_large) are built in lib/forms/answer-limits.ts,
+ * which the route and the support-form intake both answer through, so the scan
+ * reads it too: a code added there without a sentence breaks CI like one added
+ * to the route.
+ */
+const REJECTION_SOURCES = [ROUTE, resolve(__dirname, "../lib/forms/answer-limits.ts")];
 
 /**
  * Every `error: "..."` literal the route can send back to a browser.
@@ -36,9 +44,11 @@ const ROUTE = resolve(__dirname, "../app/api/forms/submit/route.ts");
  * converts an unknown into a false assurance.
  */
 function errorCodesInRoute(): string[] {
-  const src = readFileSync(ROUTE, "utf8");
   const found = new Set<string>();
-  for (const m of src.matchAll(/\berror:\s*"([a-z0-9_]+)"/g)) found.add(m[1]);
+  for (const file of REJECTION_SOURCES) {
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(/\berror:\s*"([a-z0-9_]+)"/g)) found.add(m[1]);
+  }
   return [...found].sort();
 }
 

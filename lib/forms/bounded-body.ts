@@ -13,7 +13,9 @@
  * A body inside the cap is decoded and parsed exactly as `req.json()` did
  * (UTF-8, BOM dropped, any JSON value), so a request that was fine stays fine.
  *
- * WHAT THE CAPS ARE (measured, with the method in tests/public-forms-bounded.test.ts):
+ * WHAT THE CAPS ARE (measured from the seeded forms, from form links signed as
+ * production signs them, and from signature PNGs drawn the way SignaturePad
+ * draws them; tests/public-forms-bounded.test.ts pins the numbers):
  *   - /api/forms/submit takes the 60 MiB of inline files the route has always
  *     accepted per request (PER_REQUEST_DECODED_CAP_BYTES), which is 80 MiB of
  *     base64, plus 8 MiB for the answers: 20 times the largest text-only request
@@ -21,8 +23,17 @@
  *     0.4 MB). No cap can sit under the files without refusing files the route
  *     takes today; the answers are bounded one by one instead
  *     (lib/forms/answer-limits.ts).
- *   - view and upload-url take a signed link (144 characters) and, for an
- *     upload, a file name and type: about 0.4 KB. 16 KiB is 40 times that.
+ *   - view and upload-url take a signed link (227 characters, 302 at the worst)
+ *     and, for an upload, a file name and type: 0.4 KB, or 1.15 KB with the
+ *     longest file name a browser allows. 16 KiB is 14 times the worst.
+ *
+ * WHY A NEW READER. The other readers of a public body here
+ * (lib/offer-pages/public-http.ts readCappedJson, lib/forms/public-booking.ts
+ * readPublicBookingJson) answer null or undefined for a body that is too big,
+ * not JSON or the wrong shape alike, so a route cannot tell a 413 from a 400
+ * with them. They were already bounded and stay as they are: the booking
+ * routes' bound (8,000 bytes, answered 400 invalid_json) is pinned in
+ * tests/public-forms-bounded.test.ts so it cannot quietly go.
  */
 import { NextResponse } from "next/server";
 

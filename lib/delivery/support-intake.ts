@@ -17,8 +17,9 @@
  *      else is not_found (same single answer the public resolver gives, so the
  *      route cannot be used to enumerate forms).
  *   2. Validates the answers: the form's own required fields, then the ticket
- *      rules (lib/delivery/rules.ts parseSupportSubmission). Then the rate
- *      limits, per IP and per address (see PER_IP below).
+ *      rules (lib/delivery/rules.ts parseSupportSubmission), then the limits
+ *      every public form's answers have (lib/forms/answer-limits.ts). Then the
+ *      rate limits, per IP and per address (see PER_IP below).
  *   3. Checks the optional attachment: allowlisted type, bytes that really are
  *      an allowed type (kept under the type the bytes prove), size cap.
  *      Nothing is uploaded yet.
@@ -49,6 +50,7 @@ import { getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
 import { parseFormSteps, FormDefinitionError, type FormField } from "@/lib/forms/types";
 import { isFieldVisible } from "@/lib/forms/visibility";
+import { answerRefusal, boundAnswers } from "@/lib/forms/answer-limits";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { parseSupportSubmission, type SupportSubmission } from "@/lib/delivery/rules";
@@ -360,6 +362,20 @@ async function handleDeskSubmission(
     });
   }
   const sub: SupportSubmission = parsed.value;
+  // The record below stores the whole object the visitor sent, so a key the form never declared, or
+  // a value far past any field, would be stored as it came. The declared fields have passed their
+  // own limits above (parseSupportSubmission); this holds the rest to the limits every public form
+  // has (lib/forms/answer-limits.ts): an answer over its limit is cut in place, a payload that
+  // cannot be cut is refused, and nothing is written, uploaded or sent for it.
+  const bounded = boundAnswers(payload, fields);
+  if (bounded.cuts.length > 0) {
+    console.warn("[support-intake] answers cut to their limit", { tenant: desk.tenantId, cuts: bounded.cuts });
+  }
+  if (bounded.refusal) {
+    console.warn("[support-intake] answers refused", { tenant: desk.tenantId, refusal: bounded.refusal });
+    const refused = answerRefusal(bounded.refusal);
+    return fail(refused.status, refused.error, refused.extra);
+  }
 
   // Per-address limit: the form must not become a way to mail-bomb someone
   // with confirmations by typing their address repeatedly.
