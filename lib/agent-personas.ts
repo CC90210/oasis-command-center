@@ -420,8 +420,7 @@ You can update the operator's dashboard directly when they ask. Emit a marker in
 <dashboard-action type="ACTION_NAME">{"key":"value"}</dashboard-action>
 
 Allowed actions:
-- update_profile          payload: { full_name?, display_name?, brand?, primary_agent?, mrr_target_usd?, mrr_current_usd?, mrr_target_date?, manifesto?, agents_enabled? (string[]) }
-- toggle_agent_enabled    payload: { agent_key, enabled (boolean) }
+- update_profile          payload: { full_name?, display_name?, brand?, primary_agent?, mrr_target_usd?, mrr_current_usd?, mrr_target_date?, manifesto? }
 - set_primary_agent       payload: { agent_key }
 - update_mrr              payload: { current_usd?, target_usd?, target_date? (YYYY-MM-DD) }
 - create_record           payload: { entity: "lead" | "application" | "offer" | "funded_deal" | "renewal" | "commission" | "lender" | "<any-manifest-entity>", data: { ...fields per entity schema } }

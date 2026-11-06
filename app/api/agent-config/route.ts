@@ -16,7 +16,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
-import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
+import {
+  getUserTenantChatAgentKeys,
+  isUserTenantChatAgent,
+} from "@/lib/manifest/tenant-scope";
 import { PROVIDER_MODELS } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
 import { canManageTeam, getSessionContext } from "@/lib/team";
@@ -27,20 +30,37 @@ export const runtime = "nodejs";
 async function resolveTenant(): Promise<{
   tenantId: string | null;
   userId: string | null;
+  userEmail: string | null;
+  profileEnabledAgents: string[];
   canManageTenant: boolean;
 }> {
   const ctx = await getSessionContext();
-  if (!ctx) return { tenantId: null, userId: null, canManageTenant: false };
+  if (!ctx) {
+    return {
+      tenantId: null,
+      userId: null,
+      userEmail: null,
+      profileEnabledAgents: [],
+      canManageTenant: false,
+    };
+  }
   return {
     tenantId: ctx.tenantId,
     userId: ctx.authUserId,
+    userEmail: ctx.email,
+    profileEnabledAgents: ctx.agentsEnabled,
     canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
   };
 }
 
 export async function GET(req: NextRequest) {
-  const { tenantId, userId } = await resolveTenant();
+  const { tenantId, userId, userEmail, profileEnabledAgents } = await resolveTenant();
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const allowedAgentKeys = new Set(await getUserTenantChatAgentKeys({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profileEnabledAgents,
+    userEmail,
+  }));
   // ?scope=user returns the operator's personal overrides; default is
   // tenant-scope (backwards compatible with the prior contract).
   // Phase B of the master multi-tenant infra plan (2026-05-17).
@@ -58,7 +78,7 @@ export async function GET(req: NextRequest) {
   }
   const { data, error } = await q;
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  const configs = (data || []).map((row) => ({
+  const configs = (data || []).filter((row) => allowedAgentKeys.has(String(row.agent_key).toLowerCase())).map((row) => ({
     agent_key: row.agent_key,
     provider: row.provider,
     model: row.model,
@@ -77,7 +97,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { tenantId, userId, canManageTenant } = await resolveTenant();
+  const { tenantId, userId, userEmail, profileEnabledAgents, canManageTenant } = await resolveTenant();
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
   let body: Record<string, unknown>;
@@ -88,7 +108,12 @@ export async function POST(req: NextRequest) {
   }
 
   const agentKey = String(body?.agent_key || "").toLowerCase();
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
+  if (!(await isUserTenantChatAgent({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profileEnabledAgents,
+    userEmail,
+    agentKey,
+  }))) {
     return NextResponse.json({ ok: false, error: `invalid_agent:${agentKey}` }, { status: 400 });
   }
   const provider = String(body?.provider || "");
@@ -204,12 +229,17 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const { tenantId, userId, canManageTenant } = await resolveTenant();
+  const { tenantId, userId, userEmail, profileEnabledAgents, canManageTenant } = await resolveTenant();
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const url = req.nextUrl;
   const scope = url.searchParams.get("scope") === "user" ? "user" : "tenant";
   const agentKey = (url.searchParams.get("agent_key") || "").toLowerCase();
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
+  if (!(await isUserTenantChatAgent({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profileEnabledAgents,
+    userEmail,
+    agentKey,
+  }))) {
     return NextResponse.json({ ok: false, error: `invalid_agent:${agentKey}` }, { status: 400 });
   }
   if (scope === "user" && !userId) {

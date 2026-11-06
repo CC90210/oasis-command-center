@@ -27,6 +27,7 @@ import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -127,6 +128,14 @@ export async function POST(req: NextRequest) {
   // ---- Agent allowlist (both gates: known-universe + tenant-specific) ------
   const agentCheck = validateBridgeAgent(agent, auth.tenantSlug);
   if (!agentCheck.ok) return jsonError(agentCheck.status, agentCheck.error);
+  if (!(await isUserTenantChatAgent({
+    userTenantId: auth.tenantId,
+    profileAgentsEnabled: auth.agentsEnabled,
+    userEmail: auth.email,
+    agentKey: agent,
+  }))) {
+    return jsonError(403, "agent_disabled");
+  }
 
   // ---- Per-tenant rate limit (same shape as /api/chat) ---------------------
   const limit = rateLimit({ key: `bridge-chat:${auth.tenantId}`, capacity: 30, refillPerSec: 1 / 15 });

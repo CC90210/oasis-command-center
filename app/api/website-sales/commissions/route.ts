@@ -4,6 +4,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const COMMISSION_PAGE_SIZE = 500;
 
 type CommissionRow = {
   id: string;
@@ -88,20 +89,27 @@ export async function GET() {
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
   const db = getServiceSupabase();
-  let commissionQuery = db
-    .from("website_sales_commissions")
-    .select(
-      "id,deal_id,rep_user_id,payment_reference,entry_type,party_role,basis_amount_cents,rate_bps,amount_cents,collected_setup_amount,rate,amount,status,approved_by,approved_at,paid_by,paid_at,payout_reference,voided_by,voided_at,void_reason,created_at",
-    )
-    .eq("tenant_id", session.tenantId)
-    .order("created_at", { ascending: false })
-    .limit(500);
-  if (!session.isAdmin) commissionQuery = commissionQuery.eq("rep_user_id", session.userId);
-  const commissionsResult = await commissionQuery;
-  if (commissionsResult.error) {
-    return NextResponse.json({ ok: false, error: commissionsResult.error.message }, { status: 500 });
+  const commissions: CommissionRow[] = [];
+  for (let offset = 0; ; offset += COMMISSION_PAGE_SIZE) {
+    // Stable order before range is load-bearing: equal timestamps must not let
+    // a row move between pages and disappear from the payout totals.
+    let commissionQuery = db
+      .from("website_sales_commissions")
+      .select(
+        "id,deal_id,rep_user_id,payment_reference,entry_type,party_role,basis_amount_cents,rate_bps,amount_cents,collected_setup_amount,rate,amount,status,approved_by,approved_at,paid_by,paid_at,payout_reference,voided_by,voided_at,void_reason,created_at",
+      )
+      .eq("tenant_id", session.tenantId)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
+    if (!session.isAdmin) commissionQuery = commissionQuery.eq("rep_user_id", session.userId);
+    const page = await commissionQuery.range(offset, offset + COMMISSION_PAGE_SIZE - 1);
+    if (page.error) {
+      return NextResponse.json({ ok: false, error: page.error.message }, { status: 500 });
+    }
+    const rows = (page.data ?? []) as CommissionRow[];
+    commissions.push(...rows);
+    if (rows.length < COMMISSION_PAGE_SIZE) break;
   }
-  const commissions = (commissionsResult.data ?? []) as CommissionRow[];
 
   const dealIds = [...new Set(commissions.map((row) => row.deal_id).filter(Boolean))];
   const dealsResult = dealIds.length

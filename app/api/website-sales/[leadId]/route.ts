@@ -134,10 +134,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     { id:row.id, data:current },
     session.userId,
   );
-  if (mayBeDeliveryOperator && (!builderMayRunDelivery || !builderOwnsDelivery)) {
+  // A builder can now hold two seats: sales on their own claimed book and
+  // delivery after a paid deal is assigned to them. Only enter the restricted
+  // delivery lane when the current stage is actually a delivery stage; the
+  // previous role-wide guard rejected every sales-stage action with 403.
+  if (mayBeDeliveryOperator && builderMayRunDelivery && !builderOwnsDelivery) {
     return NextResponse.json({
       ok:false,
-      error:builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only",
+      error:"builder_not_assigned_to_lead",
     },{status:403});
   }
   const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
@@ -238,7 +242,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             error:detail.split(":",1)[0],
             detail,
             stageUpdated:true,
-          },{status:detail.startsWith("booking_request_mismatch") ? 409 : 503});
+          },{status:["booking_request_mismatch","founder_slot_unavailable"].some((code) => detail.startsWith(code)) ? 409 : 503});
         }
         return NextResponse.json({
           ok:true,
@@ -432,7 +436,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       const code = detail.split(":",1)[0];
       const status = ["client_email_required","invalid_client_phone","invalid_client_website","client_agenda_required","handoff_note_required","sms_consent_requires_phone","meeting_must_be_in_future","booking_request_mismatch"].includes(code)
         ? 400
-        : ["google_calendar_not_connected","calendar_scope_required","calendar_organizer_mismatch"].includes(code)
+        : ["google_calendar_not_connected","calendar_scope_required","calendar_organizer_mismatch","founder_slot_unavailable"].includes(code)
           ? 409
           : 503;
       return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
@@ -611,6 +615,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             "meeting_transition_pending",
             "google_calendar_not_connected",
             "calendar_scope_required",
+            "founder_slot_unavailable",
           ].includes(code) ? 409 : 503;
           return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
         }
@@ -842,6 +847,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const paymentToken = typeof current.proposal_payment_token === "string" ? current.proposal_payment_token.trim() : "";
     const paymentPlanId = typeof current.payment_plan_id === "string" ? current.payment_plan_id.trim() : "";
     const alreadyCollected = Number(current.collected_setup_amount || 0);
+    const webhookPaymentReady = current.payment_plan_status === "paid_awaiting_builder";
     if (
       !WEBSITE_PACKAGES[packageId] ||
       !automationIds.every(isSellableAutomation) ||
@@ -849,10 +855,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       !Number.isFinite(monthlyAmount) ||
       setupAmount < 0 ||
       monthlyAmount < 0 ||
-      !isPositiveCentAmount(paymentDueAmount) ||
-      paymentDueAmount > setupAmount - alreadyCollected ||
       !UUID.test(paymentToken) ||
-      !UUID.test(paymentPlanId)
+      !UUID.test(paymentPlanId) ||
+      (!webhookPaymentReady && (
+        !isPositiveCentAmount(paymentDueAmount) ||
+        paymentDueAmount > setupAmount - alreadyCollected
+      )) ||
+      (webhookPaymentReady && (
+        paymentDueAmount !== 0 ||
+        Number(current.setup_balance_due) !== 0 ||
+        Math.round(alreadyCollected * 100) !== Math.round(setupAmount * 100)
+      ))
     ) {
       return NextResponse.json({ok:false,error:"stored_proposal_incomplete"},{status:409});
     }
@@ -861,140 +874,157 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     if (!websiteBuildBriefIsReady(current.build_brief)) {
       return NextResponse.json({ok:false,error:"builder_handoff_not_ready"},{status:409});
     }
-    const paymentProvider: WebsitePaymentProvider = body.paymentProvider === "manual" ? "manual" : "stripe";
-    const suppliedReference = typeof body.paymentReference === "string" ? body.paymentReference.trim() : "";
-    const proposalCheckout = storedCheckout(current);
-    if (paymentProvider === "stripe" && !proposalCheckout) {
-      return NextResponse.json({ok:false,error:"proposal_checkout_required"},{status:409});
-    }
-    if (paymentProvider === "stripe" && suppliedReference && suppliedReference !== proposalCheckout?.reference) {
-      return NextResponse.json({ok:false,error:"payment_reference_not_proposal_checkout"},{status:409});
-    }
-    if (paymentProvider === "manual" && (!suppliedReference || suppliedReference.length > 240)) {
-      return NextResponse.json({ok:false,error:"invalid_payment_reference"},{status:400});
-    }
-    const paymentReference = paymentProvider === "stripe" ? proposalCheckout!.reference : suppliedReference;
-    let verifiedPayment: VerifiedWebsitePayment;
-    try {
-      if (paymentProvider === "stripe") {
-        const secretKey = await getTenantIntegrationValue(session.tenantId, "stripe", "secret_key");
-        if (!secretKey) throw new Error("stripe_not_connected");
-        verifiedPayment = await verifyStripeWebsitePayment({
-          secretKey,
-          reference:paymentReference,
-          expectedAmountCents:Math.round(paymentDueAmount * 100),
-          expectedCurrency:currency,
-          expectedTenantId:session.tenantId,
-          expectedLeadId:leadId,
-          expectedPaymentToken:paymentToken,
-          expectedPaymentPlanId:paymentPlanId,
-        });
-      } else {
-        if (!session.isTrueAdmin) throw new Error("manual_payment_founder_only");
-        verifiedPayment = verifyManualWebsitePayment({
-          reference:paymentReference,
-          amountCents:Math.round(Number(body.paymentAmount) * 100),
-          currency:body.paymentCurrency === "USD" ? "USD" : "CAD",
-          expectedAmountCents:Math.round(paymentDueAmount * 100),
-          expectedCurrency:currency,
-          confirmed:body.manualPaymentConfirmed === true,
-        });
-      }
-    } catch (error) {
-      const code = error instanceof Error ? error.message : "payment_verification_failed";
-      const status = code === "stripe_not_connected" || code === "stripe_verification_failed" ? 503 : 409;
-      return NextResponse.json({ok:false,error:code},{status});
-    }
+    const paymentProvider: WebsitePaymentProvider = webhookPaymentReady
+      ? "stripe"
+      : body.paymentProvider === "manual"
+        ? "manual"
+        : "stripe";
+    let verifiedPaymentId = webhookPaymentReady && typeof current.latest_verified_payment_id === "string"
+      ? current.latest_verified_payment_id.trim()
+      : "";
+    let verifiedPaymentReference = "";
+    let verifiedPaymentAmountCents = 0;
 
-    const existingReceipt = await db
-      .from("website_sales_payment_receipts")
-      .select("id,lead_id,status,amount_cents,currency,payment_plan_id,payment_token,installment_kind")
-      .eq("tenant_id",session.tenantId)
-      .eq("provider",verifiedPayment.provider)
-      .eq("provider_reference",verifiedPayment.reference)
-      .maybeSingle();
-    if (existingReceipt.error) {
-      return NextResponse.json({ok:false,error:"payment_receipt_lookup_failed",detail:existingReceipt.error.message},{status:500});
-    }
-    let verifiedPaymentId: string;
-    if (existingReceipt.data) {
-      const receipt = existingReceipt.data as Record<string,unknown>;
-      if (
-        receipt.lead_id !== leadId ||
-        receipt.status !== "verified" ||
-        Number(receipt.amount_cents) !== verifiedPayment.amountCents ||
-        receipt.currency !== verifiedPayment.currency ||
-        receipt.payment_plan_id !== paymentPlanId ||
-        receipt.payment_token !== paymentToken
-      ) {
-        return NextResponse.json({ok:false,error:"payment_reference_already_used"},{status:409});
+    if (webhookPaymentReady) {
+      if (!UUID.test(verifiedPaymentId)) {
+        return NextResponse.json({ok:false,error:"verified_payment_required"},{status:409});
       }
-      verifiedPaymentId = String(receipt.id);
     } else {
-      verifiedPaymentId = crypto.randomUUID();
-      const insertedReceipt = await db.from("website_sales_payment_receipts").insert({
-        id:verifiedPaymentId,
-        tenant_id:session.tenantId,
-        lead_id:leadId,
-        provider:verifiedPayment.provider,
-        provider_reference:verifiedPayment.reference,
-        status:"verified",
-        amount_cents:verifiedPayment.amountCents,
-        currency:verifiedPayment.currency,
-        provider_status:verifiedPayment.providerStatus,
-        verification_source:verifiedPayment.verificationSource,
-        verified_by:session.userId,
-        verified_at:occurredAt,
-        payment_plan_id:paymentPlanId,
-        payment_token:paymentToken,
-        installment_kind:alreadyCollected > 0
-          ? "balance"
-          : verifiedPayment.amountCents === Math.round(setupAmount * 100)
-            ? "full"
-            : "deposit",
-        summary:verifiedPayment.summary,
-        created_at:occurredAt,
-        updated_at:occurredAt,
-      });
-      if (insertedReceipt.error) {
-        if (isUniqueViolationError(insertedReceipt.error)) {
-          const racedReceipt = await db
-            .from("website_sales_payment_receipts")
-            .select("id,lead_id,status,amount_cents,currency,payment_plan_id,payment_token")
-            .eq("tenant_id",session.tenantId)
-            .eq("provider",verifiedPayment.provider)
-            .eq("provider_reference",verifiedPayment.reference)
-            .maybeSingle();
-          const raced = racedReceipt.data as Record<string,unknown> | null;
-          if (
-            !racedReceipt.error &&
-            raced &&
-            raced.lead_id === leadId &&
-            raced.status === "verified" &&
-            Number(raced.amount_cents) === verifiedPayment.amountCents &&
-            raced.currency === verifiedPayment.currency &&
-            raced.payment_plan_id === paymentPlanId &&
-            raced.payment_token === paymentToken
-          ) {
-            verifiedPaymentId = String(raced.id);
-          } else {
-            return NextResponse.json({ok:false,error:"payment_reference_already_used"},{status:409});
-          }
+      const suppliedReference = typeof body.paymentReference === "string" ? body.paymentReference.trim() : "";
+      const proposalCheckout = storedCheckout(current);
+      if (paymentProvider === "stripe" && !proposalCheckout) {
+        return NextResponse.json({ok:false,error:"proposal_checkout_required"},{status:409});
+      }
+      if (paymentProvider === "stripe" && suppliedReference && suppliedReference !== proposalCheckout?.reference) {
+        return NextResponse.json({ok:false,error:"payment_reference_not_proposal_checkout"},{status:409});
+      }
+      if (paymentProvider === "manual" && (!suppliedReference || suppliedReference.length > 240)) {
+        return NextResponse.json({ok:false,error:"invalid_payment_reference"},{status:400});
+      }
+      const paymentReference = paymentProvider === "stripe" ? proposalCheckout!.reference : suppliedReference;
+      let verifiedPayment: VerifiedWebsitePayment;
+      try {
+        if (paymentProvider === "stripe") {
+          const secretKey = await getTenantIntegrationValue(session.tenantId, "stripe", "secret_key");
+          if (!secretKey) throw new Error("stripe_not_connected");
+          verifiedPayment = await verifyStripeWebsitePayment({
+            secretKey,
+            reference:paymentReference,
+            expectedAmountCents:Math.round(paymentDueAmount * 100),
+            expectedCurrency:currency,
+            expectedTenantId:session.tenantId,
+            expectedLeadId:leadId,
+            expectedPaymentToken:paymentToken,
+            expectedPaymentPlanId:paymentPlanId,
+          });
         } else {
-        return NextResponse.json(
-          {
-            ok:false,
-            error:"payment_receipt_insert_failed",
-            detail:insertedReceipt.error.message,
-          },
-          {status:500},
-        );
+          if (!session.isTrueAdmin) throw new Error("manual_payment_founder_only");
+          verifiedPayment = verifyManualWebsitePayment({
+            reference:paymentReference,
+            amountCents:Math.round(Number(body.paymentAmount) * 100),
+            currency:body.paymentCurrency === "USD" ? "USD" : "CAD",
+            expectedAmountCents:Math.round(paymentDueAmount * 100),
+            expectedCurrency:currency,
+            confirmed:body.manualPaymentConfirmed === true,
+          });
+        }
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "payment_verification_failed";
+        const status = code === "stripe_not_connected" || code === "stripe_verification_failed" ? 503 : 409;
+        return NextResponse.json({ok:false,error:code},{status});
+      }
+      verifiedPaymentReference = verifiedPayment.reference;
+      verifiedPaymentAmountCents = verifiedPayment.amountCents;
+
+      const existingReceipt = await db
+        .from("website_sales_payment_receipts")
+        .select("id,lead_id,status,amount_cents,currency,payment_plan_id,payment_token,installment_kind")
+        .eq("tenant_id",session.tenantId)
+        .eq("provider",verifiedPayment.provider)
+        .eq("provider_reference",verifiedPayment.reference)
+        .maybeSingle();
+      if (existingReceipt.error) {
+        return NextResponse.json({ok:false,error:"payment_receipt_lookup_failed",detail:existingReceipt.error.message},{status:500});
+      }
+      if (existingReceipt.data) {
+        const receipt = existingReceipt.data as Record<string,unknown>;
+        if (
+          receipt.lead_id !== leadId ||
+          receipt.status !== "verified" ||
+          Number(receipt.amount_cents) !== verifiedPayment.amountCents ||
+          receipt.currency !== verifiedPayment.currency ||
+          receipt.payment_plan_id !== paymentPlanId ||
+          receipt.payment_token !== paymentToken
+        ) {
+          return NextResponse.json({ok:false,error:"payment_reference_already_used"},{status:409});
+        }
+        verifiedPaymentId = String(receipt.id);
+      } else {
+        verifiedPaymentId = crypto.randomUUID();
+        const insertedReceipt = await db.from("website_sales_payment_receipts").insert({
+          id:verifiedPaymentId,
+          tenant_id:session.tenantId,
+          lead_id:leadId,
+          provider:verifiedPayment.provider,
+          provider_reference:verifiedPayment.reference,
+          status:"verified",
+          amount_cents:verifiedPayment.amountCents,
+          currency:verifiedPayment.currency,
+          provider_status:verifiedPayment.providerStatus,
+          verification_source:verifiedPayment.verificationSource,
+          verified_by:session.userId,
+          verified_at:occurredAt,
+          payment_plan_id:paymentPlanId,
+          payment_token:paymentToken,
+          installment_kind:alreadyCollected > 0
+            ? "balance"
+            : verifiedPayment.amountCents === Math.round(setupAmount * 100)
+              ? "full"
+              : "deposit",
+          summary:verifiedPayment.summary,
+          created_at:occurredAt,
+          updated_at:occurredAt,
+        });
+        if (insertedReceipt.error) {
+          if (isUniqueViolationError(insertedReceipt.error)) {
+            const racedReceipt = await db
+              .from("website_sales_payment_receipts")
+              .select("id,lead_id,status,amount_cents,currency,payment_plan_id,payment_token")
+              .eq("tenant_id",session.tenantId)
+              .eq("provider",verifiedPayment.provider)
+              .eq("provider_reference",verifiedPayment.reference)
+              .maybeSingle();
+            const raced = racedReceipt.data as Record<string,unknown> | null;
+            if (
+              !racedReceipt.error &&
+              raced &&
+              raced.lead_id === leadId &&
+              raced.status === "verified" &&
+              Number(raced.amount_cents) === verifiedPayment.amountCents &&
+              raced.currency === verifiedPayment.currency &&
+              raced.payment_plan_id === paymentPlanId &&
+              raced.payment_token === paymentToken
+            ) {
+              verifiedPaymentId = String(raced.id);
+            } else {
+              return NextResponse.json({ok:false,error:"payment_reference_already_used"},{status:409});
+            }
+          } else {
+            return NextResponse.json(
+              {
+                ok:false,
+                error:"payment_receipt_insert_failed",
+                detail:insertedReceipt.error.message,
+              },
+              {status:500},
+            );
+          }
         }
       }
     }
     const planReceipts = await db
       .from("website_sales_payment_receipts")
-      .select("id,amount_cents,currency,status")
+      .select("id,amount_cents,currency,status,provider,provider_reference")
       .eq("tenant_id",session.tenantId)
       .eq("lead_id",leadId)
       .eq("payment_plan_id",paymentPlanId)
@@ -1010,6 +1040,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       (total, receipt) => total + Number(receipt.amount_cents || 0),
       0,
     );
+    if (webhookPaymentReady) {
+      const webhookReceipt = activeReceipts.find(
+        (receipt) => receipt.id === verifiedPaymentId && receipt.provider === "stripe",
+      );
+      if (!webhookReceipt) {
+        return NextResponse.json({ok:false,error:"verified_payment_required"},{status:409});
+      }
+      verifiedPaymentReference = String(webhookReceipt.provider_reference || "");
+      verifiedPaymentAmountCents = Number(webhookReceipt.amount_cents || 0);
+    }
     const setupCents = Math.round(setupAmount * 100);
     if (!Number.isSafeInteger(collectedCents) || collectedCents > setupCents) {
       return NextResponse.json({
@@ -1037,7 +1077,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         stripe_checkout_created_at:null,
       };
       const depositContent = [
-        `${currency} ${verifiedPayment.amountCents / 100} setup deposit verified.`,
+        `${currency} ${verifiedPaymentAmountCents / 100} setup deposit verified.`,
         `${currency} ${balanceCents / 100} remains before the sale can close and fulfillment can open.`,
         transitionNote ? `Note: ${transitionNote}` : "",
       ].filter(Boolean).join(" ");
@@ -1058,9 +1098,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         p_metadata:{
           payment_plan_id:paymentPlanId,
           verified_payment_id:verifiedPaymentId,
-          provider_reference:verifiedPayment.reference,
+          provider_reference:verifiedPaymentReference,
           installment_kind:"deposit",
-          installment_amount_cents:verifiedPayment.amountCents,
+          installment_amount_cents:verifiedPaymentAmountCents,
           collected_setup_amount_cents:collectedCents,
           setup_balance_due_cents:balanceCents,
         },
@@ -1144,7 +1184,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       payment_plan_status:"paid_in_full",
       quoted_setup_amount:setupAmount,
       quoted_monthly_amount:monthlyAmount,
-      payment_provider:verifiedPayment.provider,
+      payment_provider:paymentProvider,
       verified_payment_id:verifiedPaymentId,
       assigned_to:builderUserId,
       fulfillment_owner_id:builderUserId,
@@ -1169,7 +1209,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       receipt_count:activeReceipts.length,
       monthly_amount:monthlyAmount,
       currency,
-      payment_provider:verifiedPayment.provider,
+      payment_provider:paymentProvider,
       verified_payment_id:verifiedPaymentId,
     };
     const result = await db.rpc("close_website_deal", {
@@ -1185,7 +1225,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       p_collected_amount:setupAmount,
       p_monthly_amount:monthlyAmount,
       p_payment_reference:`payment-plan:${paymentPlanId}`,
-      p_payment_provider:verifiedPayment.provider,
+      p_payment_provider:paymentProvider,
       p_verified_payment_id:verifiedPaymentId,
       p_payment_plan_id:paymentPlanId,
       p_closed_by_rep:closedByRep,

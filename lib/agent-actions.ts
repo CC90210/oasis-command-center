@@ -65,7 +65,6 @@ const ACTIONS: Record<string, Handler> = {
       "mrr_current_usd",
       "mrr_target_date",
       "manifesto",
-      "agents_enabled",
     ]);
     const update: Record<string, unknown> = {};
     const summaryParts: string[] = [];
@@ -80,14 +79,6 @@ const ACTIONS: Record<string, Handler> = {
         }
         update[k] = v;
         summaryParts.push(`primary agent → ${v}`);
-        continue;
-      }
-      if (k === "agents_enabled") {
-        if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !VALID_AGENT_KEYS.has(x))) {
-          return { ok: false, type: "update_profile", error: "agents_enabled must be array of valid agent keys" };
-        }
-        update[k] = v;
-        summaryParts.push(`agents enabled: ${(v as string[]).join(", ")}`);
         continue;
       }
       if (k === "mrr_target_usd" || k === "mrr_current_usd") {
@@ -134,35 +125,11 @@ const ACTIONS: Record<string, Handler> = {
     return { ok: true, type: "update_profile", summary: summaryParts.join(", ") };
   },
 
-  async toggle_agent_enabled(payload, ctx): Promise<ActionResult> {
-    const agentKey = String(payload.agent_key || "");
-    const enabled = payload.enabled === true;
-    if (!VALID_AGENT_KEYS.has(agentKey)) {
-      return { ok: false, type: "toggle_agent_enabled", error: `invalid agent_key: ${agentKey}` };
-    }
-    const db = getServiceSupabase();
-    const cur = await db
-      .from("user_profiles")
-      .select("agents_enabled")
-      .eq("auth_user_id", ctx.authUserId)
-      .eq("tenant_id", ctx.tenantId)
-      .maybeSingle();
-    if (cur.error || !cur.data) {
-      return { ok: false, type: "toggle_agent_enabled", error: cur.error?.message || "profile not found" };
-    }
-    const current = new Set<string>(((cur.data.agents_enabled as string[]) || []).filter(Boolean));
-    if (enabled) current.add(agentKey);
-    else current.delete(agentKey);
-    const next = Array.from(current);
-    const upd = await db
-      .from("user_profiles")
-      .update({ agents_enabled: next })
-      .eq("auth_user_id", ctx.authUserId);
-    if (upd.error) return { ok: false, type: "toggle_agent_enabled", error: upd.error.message };
+  async toggle_agent_enabled(): Promise<ActionResult> {
     return {
-      ok: true,
+      ok: false,
       type: "toggle_agent_enabled",
-      summary: `${enabled ? "enabled" : "disabled"} ${agentKey}`,
+      error: "agent roster is managed by workspace provisioning",
     };
   },
 

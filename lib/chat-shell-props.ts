@@ -23,10 +23,11 @@ import { getTenant, integrationsHealth } from "@/lib/queries";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { operatorNameOverride } from "@/lib/operator-name";
 import { resolveAgentKey } from "@/lib/agents";
+import { chatAgentKeys } from "@/lib/agent-personas";
 import {
   getTenantManifestForUser,
 } from "@/lib/manifest/tenant-scope";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
+import { resolveUserEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import type { IntegrationHealth } from "@/lib/supabase";
 
 export type ChatShellProps = {
@@ -87,11 +88,14 @@ export async function resolveChatShellProps(args: {
     safe("chatshell.tenant", getTenant(tenantId), null),
   ]);
 
-  // Manifest-first precedence; falls through to profile.agents_enabled, else
-  // empty (never silently "bravo" — that was the cross-tenant leak we sealed).
-  const enabledRaw = resolveEnabledAgentSlugs({
+  // Employee authorization is the intersection of the tenant manifest and
+  // this profile's allowlist. The platform operator is the one explicit
+  // full-fleet bypass; normal owners/admins retain whatever their profile
+  // intentionally grants, while sales seats remain Bravo-only.
+  const enabledRaw = resolveUserEnabledAgentSlugs({
     manifestAgents: manifest ? manifest.agents || [] : null,
-    legacyProfileAgents: profile?.agents_enabled ?? null,
+    profileAgents: profile?.agents_enabled ?? null,
+    operatorBypassAgents: isOperatorEmail(userEmail) ? chatAgentKeys() : null,
   });
   const enabled = enabledRaw.map(resolveAgentKey);
   if (enabled.length === 0) return null;

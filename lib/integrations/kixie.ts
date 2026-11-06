@@ -157,6 +157,8 @@ export type MakeCallArgs = {
   displayName?: string;
   /** Optional lead UUID echoed back via webhook customField1 for attribution. */
   leadId?: string;
+  /** Stable dashboard interaction UUID echoed back for one-row correlation. */
+  requestId?: string;
 };
 
 /**
@@ -181,6 +183,7 @@ export function makeCall(
     target: args.target,
     displayname: args.displayName || "Outbound call",
     ...(args.leadId ? { customField1: args.leadId } : {}),
+    ...(args.requestId ? { customField2: args.requestId } : {}),
   }, "make call");
 }
 

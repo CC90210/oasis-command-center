@@ -21,6 +21,7 @@ import { getAgentModelForUser } from "@/lib/agent-resolver";
 import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
 import { redactAll } from "@/lib/secret-redaction";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import {
   extractGmailTokens,
   GMAIL_VARIANTS_MAX,
@@ -93,6 +94,14 @@ export async function POST(
   }
   if (!canWriteCrm(sess.teamRole)) {
     return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
+  }
+  if (!(await isUserTenantChatAgent({
+    userTenantId: sess.tenantId,
+    profileAgentsEnabled: sess.agentsEnabled,
+    userEmail: sess.email,
+    agentKey: "solara",
+  }))) {
+    return NextResponse.json({ ok: false, error: "agent_disabled" }, { status: 403 });
   }
   if (!UUID_RE.test(id)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });

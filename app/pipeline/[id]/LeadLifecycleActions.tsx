@@ -47,6 +47,7 @@ type InitialOffer = {
   automationIds: string[];
   paymentDueAmount: number | null;
   collectedSetupAmount: number | null;
+  paymentPlanStatus: string | null;
   checkoutReference: string | null;
   checkoutUrl: string | null;
   builderUserId: string | null;
@@ -369,7 +370,9 @@ export function LeadLifecycleActions({
     (canRunDelivery && ["onboarding", "in_build", "client_review"].includes(currentStage));
   const disabled = busy || refreshPending;
   const checkoutHref = safeStripeCheckoutUrl(checkoutUrl);
+  const paymentAlreadyVerified = initialOffer?.paymentPlanStatus === "paid_awaiting_builder";
   const paymentCompletesSetup =
+    paymentAlreadyVerified ||
     collectedSetupAmount + Number(paymentDueAmount || 0) >= Number(setupAmount || 0);
   const showCallOutcomes = currentStage === "assigned" || currentStage === "attempting_contact";
   const mayScheduleFounderAudit = ["assigned", "attempting_contact", "connected", "qualified"].includes(
@@ -1240,17 +1243,23 @@ export function LeadLifecycleActions({
           <div className="space-y-4 rounded-xl border border-emerald-400/25 bg-emerald-400/[0.035] p-4">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-                Proposal frozen — waiting for collected payment
+                {paymentAlreadyVerified
+                  ? "Stripe payment verified — builder handoff required"
+                  : "Proposal frozen — waiting for collected payment"}
               </div>
               <div className="mt-2 text-sm font-semibold text-fg">
                 {WEBSITE_PACKAGES[packageId].name} · {currency} {Number(setupAmount).toLocaleString()} setup
                 {Number(monthlyAmount) > 0 ? ` + ${Number(monthlyAmount).toLocaleString()}/month` : ""}
               </div>
               <div className="mt-1 text-sm font-semibold text-emerald-200">
-                Amount due now: {currency} {Number(paymentDueAmount).toLocaleString()}
+                {paymentAlreadyVerified
+                  ? `Paid in full: ${currency} ${Number(setupAmount).toLocaleString()}`
+                  : `Amount due now: ${currency} ${Number(paymentDueAmount).toLocaleString()}`}
               </div>
               <p className="mt-1 text-xs leading-5 text-fg-muted">
-                {collectedSetupAmount > 0
+                {paymentAlreadyVerified
+                  ? "Stripe verified the full setup payment. Assign the delivery owner below to open fulfillment and accrue the commission once."
+                  : collectedSetupAmount > 0
                   ? `${currency} ${collectedSetupAmount.toLocaleString()} is already verified. This balance completes the setup collection.`
                   : "The first verified deposit is recorded without opening fulfillment or commission. The balance completes the sale."}
               </p>
@@ -1273,7 +1282,11 @@ export function LeadLifecycleActions({
                 )}
               </select>
             </label>
-            {canManage ? (
+            {paymentAlreadyVerified ? (
+              <div className="rounded-lg border border-emerald-400/30 bg-emerald-400/[0.06] px-3 py-2.5 text-xs leading-5 text-emerald-100">
+                Payment is already verified by the signed Stripe webhook. No payment link or receipt ID is needed again.
+              </div>
+            ) : canManage ? (
               <label className="block text-xs text-fg-muted">
                 Payment source
                 <select
@@ -1288,7 +1301,7 @@ export function LeadLifecycleActions({
             ) : (
               <div className="text-xs text-fg-muted">Stripe verification is required for closer-submitted payments.</div>
             )}
-            {paymentProvider === "stripe" ? (
+            {!paymentAlreadyVerified && (paymentProvider === "stripe" ? (
               <div className="space-y-3 rounded-lg border border-bg-border bg-bg-deep/60 p-3">
                 <div className="text-xs leading-5 text-fg-muted">
                   OASIS creates the live Checkout Session. It is locked to this lead, proposal,
@@ -1339,8 +1352,8 @@ export function LeadLifecycleActions({
                   className={`${INPUT} mt-1.5`}
                 />
               </label>
-            )}
-            {paymentProvider === "manual" && canManage && (
+            ))}
+            {!paymentAlreadyVerified && paymentProvider === "manual" && canManage && (
               <div className="space-y-3 rounded-lg border border-bg-border bg-bg-deep/60 p-3">
                 <div className="text-xs font-semibold text-fg">
                   Confirm collected amount: {currency} {Number(paymentDueAmount).toLocaleString()}
@@ -1362,9 +1375,9 @@ export function LeadLifecycleActions({
               disabled={
                 disabled ||
                 (paymentCompletesSetup && !builderUserId) ||
-                !paymentReference.trim() ||
-                (paymentProvider === "stripe" && !checkoutHref) ||
-                (paymentProvider === "manual" && (!canManage || !manualPaymentConfirmed))
+                (!paymentAlreadyVerified && !paymentReference.trim()) ||
+                (!paymentAlreadyVerified && paymentProvider === "stripe" && !checkoutHref) ||
+                (!paymentAlreadyVerified && paymentProvider === "manual" && (!canManage || !manualPaymentConfirmed))
               }
               onClick={() =>
                 patch(
@@ -1377,14 +1390,20 @@ export function LeadLifecycleActions({
                     manualPaymentConfirmed,
                     builderUserId,
                   },
-                  paymentCompletesSetup
+                  paymentAlreadyVerified
+                    ? "Payment confirmed. Commission accrued once and the builder handoff opened."
+                    : paymentCompletesSetup
                     ? "Setup paid in full. Commission accrued once and the builder handoff opened."
                     : "Deposit verified. The balance is ready, with commission and fulfillment still locked.",
                 )
               }
               className="btn-primary !px-4 !py-2 text-sm"
             >
-              {paymentCompletesSetup ? "Verify balance & start fulfillment" : "Verify setup deposit"}
+              {paymentAlreadyVerified
+                ? "Assign builder & start fulfillment"
+                : paymentCompletesSetup
+                  ? "Verify balance & start fulfillment"
+                  : "Verify setup deposit"}
             </button>
           </div>
         )}
@@ -1687,6 +1706,7 @@ function readableError(code: string): string {
     google_calendar_not_connected: "The selected host must connect their work Google account in Settings.",
     calendar_scope_required: "The selected host must reconnect Google once to approve Calendar access.",
     calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
+    founder_slot_unavailable: "That founder is already booked at this time. Choose another time or host.",
     google_meet_link_missing: "Google created the event but has not returned its Meet link yet. Retry this booking; it will reconcile the same event.",
     calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
     calendar_update_failed: "Google Calendar could not verify the new time, so the lead was not changed. Check the host connection and retry.",

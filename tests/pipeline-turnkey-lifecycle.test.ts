@@ -12,6 +12,7 @@ const claimOps = readFileSync("lib/web-leads/claim-ops.ts", "utf8");
 const assignRoute = readFileSync("app/api/leads/[id]/assign/route.ts", "utf8");
 const assignmentCore = readFileSync("lib/lifecycle-assignment.ts", "utf8");
 const kixieWebhook = readFileSync("app/api/webhooks/kixie/route.ts", "utf8");
+const kixieClient = readFileSync("lib/integrations/kixie.ts", "utf8");
 const webLeadOutcome = readFileSync("lib/web-leads/outcome.ts", "utf8");
 const emailRoute = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
 const textRoute = readFileSync("app/api/leads/[id]/texttorrent/route.ts", "utf8");
@@ -33,6 +34,7 @@ const paymentMigration = readFileSync("database/turso/160_website_sales_payment_
 const installmentMigration = readFileSync("database/turso/164_website_sales_installment_ledger.turso.sql", "utf8");
 const teamMembersRoute = readFileSync("app/api/team/members/route.ts", "utf8");
 const stageEventRoute = readFileSync("app/api/leads/[id]/stage-event/route.ts", "utf8");
+const commissionsRoute = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
 const setFieldRoute = readFileSync("app/api/leads/[id]/set-field/route.ts", "utf8");
 const cloudToolRunner = readFileSync("lib/cloud-tool-runner.ts", "utf8");
 const agentActions = readFileSync("lib/agent-actions.ts", "utf8");
@@ -147,6 +149,15 @@ assert(
   "only authorized sales roles can mutate lifecycle state, and assigned closers/builders receive deal controls (builder joined the closing seats 2026-08-25)",
 );
 assert(
+  workflowRoute.includes(
+    "if (mayBeDeliveryOperator && builderMayRunDelivery && !builderOwnsDelivery)",
+  ) &&
+    !workflowRoute.includes(
+      "if (mayBeDeliveryOperator && (!builderMayRunDelivery || !builderOwnsDelivery))",
+    ),
+  "a selling builder uses the sales lane on claimed sales stages; the delivery-only guard applies only after the lead reaches a delivery stage",
+);
+assert(
   workflowRoute.includes("p_opener_user_id") &&
     workflowRoute.includes("resolveWebsiteSalesCloseParties") &&
     rpcShim.includes("opener_does_not_match_frozen_attribution"),
@@ -191,6 +202,12 @@ assert(
   "the host picker exposes Google Calendar readiness while keeping the host's email tenant-scoped",
 );
 assert(
+  lifecycle.includes('founder_slot_unavailable: "That founder is already booked at this time.') &&
+    workflowRoute.includes('"calendar_organizer_mismatch","founder_slot_unavailable"') &&
+    workflowRoute.includes('"calendar_scope_required",\n            "founder_slot_unavailable"'),
+  "a busy founder slot returns a recoverable conflict and tells the rep to choose another time or host",
+);
+assert(
   buildBriefForm.includes("Closing-call build brief") &&
     workflowRoute.includes('body.action === "complete_audit"') &&
     workflowRoute.includes("normalizeWebsiteBuildBrief") &&
@@ -206,6 +223,7 @@ assert(
     workflowRoute.includes("payment_due_amount") &&
     workflowRoute.includes("payment_plan_id") &&
     workflowRoute.includes("payment_plan_status:\"deposit_collected\"") &&
+    workflowRoute.includes('current.payment_plan_status === "paid_awaiting_builder"') &&
     workflowRoute.includes("setup_balance_due") &&
     workflowRoute.includes("p_payment_plan_id:paymentPlanId") &&
     workflowRoute.includes("manual_payment_founder_only") &&
@@ -219,6 +237,14 @@ assert(
     rpcShim.includes("collected_amount_must_equal_quoted_setup") &&
     rpcShim.includes("SUM(amount_cents)"),
   "deposits and balances share one Turso payment plan; only the fully collected, live plan can open fulfillment and commission",
+);
+assert(
+  detail.includes("paymentPlanStatus: nonEmptyString(activeRecord.data.payment_plan_status)") &&
+    lifecycle.includes('paymentAlreadyVerified = initialOffer?.paymentPlanStatus === "paid_awaiting_builder"') &&
+    lifecycle.includes("Assign builder & start fulfillment") &&
+    workflowRoute.includes("webhookPaymentReady") &&
+    workflowRoute.includes("verified_payment_required"),
+  "a signed Stripe webhook can mark payment complete without opening commission; a human must then select the builder through the lead file",
 );
 assert(
   lifecycle.includes("builderUserId") &&
@@ -274,8 +300,11 @@ assert(
   "note writes use the same owned-lead access rule as the rest of the lead file",
 );
 assert(
-  claimOps.includes('from("lead_interactions")') && claimOps.includes("actor_user_id"),
-  "claiming a lead creates an attributed lifecycle touch",
+  claimOps.includes('rpc("claim_web_lead"') &&
+    rpcShim.includes("export async function claim_web_lead") &&
+    rpcShim.includes("'web_leads_claim'") &&
+    rpcShim.includes("actorUserId"),
+  "claiming a lead atomically creates an attributed lifecycle touch",
 );
 assert(
   assignmentCore.includes("last_contacted_at") && assignRoute.includes("actor_user_id"),
@@ -314,8 +343,26 @@ assert(
   "a dry-run call returns before the interaction ledger and cannot inflate touch metrics",
 );
 assert(
+  kixieClient.includes("customField2: args.requestId") &&
+    callRoute.includes("requestId: interactionId") &&
+    callRoute.indexOf('const interaction = await db.from("lead_interactions").insert') <
+      callRoute.indexOf("await makeCall") &&
+    callRoute.includes('.eq("id", interactionId)') &&
+    kixieWebhook.includes('.eq("id", dashboardInteractionId)') &&
+    kixieWebhook.includes('.eq("agent_source", "dashboard_drawer")') &&
+    kixieWebhook.indexOf("lead_interactions correlation failed") <
+      kixieWebhook.indexOf('upsert(patch, { onConflict: "kixie_call_id" })'),
+  "one dashboard dial reserves one correlated interaction, failed calls release it, and Kixie upgrades rather than duplicates that touch",
+);
+assert(
   bulkRoute.includes("use_individual_sales_workflow"),
   "bulk stage changes cannot bypass per-lead OASIS qualification, handoff, proposal, or close facts",
+);
+assert(
+  commissionsRoute.includes("COMMISSION_PAGE_SIZE") &&
+    commissionsRoute.includes(".range(offset, offset + COMMISSION_PAGE_SIZE - 1)") &&
+    !commissionsRoute.includes(".limit(500)"),
+  "commission totals page through the complete Turso ledger instead of silently truncating at 500 entries",
 );
 assert(
   pipeline.includes('variant === "oasis"') && pipeline.includes("? undefined"),

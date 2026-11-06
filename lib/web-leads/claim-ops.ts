@@ -77,8 +77,8 @@ export type ClaimResult = {
    *  `refused` because the rep DID try and the answer changed underneath them,
    *  which is a different sentence on screen. */
   lostRace: string[];
-  /** Claims that landed but whose interaction-ledger insert failed. Never
-   * hidden: the caller can surface the tracking problem to an operator. */
+  /** Legacy response field. Atomic Turso claims can no longer land without
+   * their interaction receipt, so new responses always return an empty list. */
   trackingFailed: string[];
   held: number;
   cap: number;
@@ -129,9 +129,11 @@ export async function claimLeads(
   const nowIso = new Date(now).toISOString();
   const claimed: string[] = [];
   const lostRace: string[] = [];
+  const atomicCapacityRefused: ClaimPlan["refused"] = [];
 
   // Chunked, not one Promise.all over 250: a rep claiming their whole cap at
-  // once would otherwise open 250 concurrent writes against the bridge.
+  // once would otherwise open 250 concurrent write transactions against the
+  // bridge. Each RPC commits ownership and its timeline touch together.
   const CHUNK = 12;
   for (let i = 0; i < plan.granted.length; i += CHUNK) {
     const chunk = plan.granted.slice(i, i + CHUNK);
@@ -139,128 +141,61 @@ export async function claimLeads(
       chunk.map((id) => {
         const source = byId.get(id);
         const raw = source?.data || {};
-        // The owner we OBSERVED, which is what the swap tests against.
         const prevOwner = factsFrom(raw).assignedTo;
-        let q = db
-          .from("tenant_records")
-          .update({ data: { ...raw, ...claimPatch(userId, nowIso) }, updated_at: nowIso })
-          .eq("id", id)
-          .eq("tenant_id", WEBDEV_TENANT_ID)
-          .eq("entity_type", "lead")
-          // The JSON document is replaced as a whole. Pin its row version as
-          // well as owner so a concurrent website/contact/enrichment edit is
-          // never overwritten by the snapshot this claim read moments ago.
-          .eq("updated_at", source?.updated_at || "");
-        // THE SWAP. One statement, so the test and the write cannot be
-        // separated by another request. `.is(col, null)` compiles to
-        // `IS NULL` on both backends; `.eq` to an equality on the extracted
-        // JSON value. Note this is deliberately NOT `.is(col, "not.null")` --
-        // that spelling works only against our Turso adapter and 500s on
-        // supabase-js (see scores.ts).
-        q = prevOwner === null
-          ? q.is("data->>assigned_to", null)
-          : q.eq("data->>assigned_to", prevOwner);
-        return q.select("id");
+        return db.rpc("claim_web_lead", {
+          p_tenant_id: WEBDEV_TENANT_ID,
+          p_lead_id: id,
+          p_actor_user_id: userId,
+          p_expected_updated_at: source?.updated_at || "",
+          p_expected_owner_id: prevOwner,
+          p_previous_stage: factsFrom(raw).stage,
+          p_occurred_at: nowIso,
+          p_interaction_id: crypto.randomUUID(),
+          // The complete document is intentional: contact, website, location
+          // and enrichment context survive the claim. The RPC pins updated_at
+          // and the observed owner before replacing it.
+          p_data: { ...raw, ...claimPatch(userId, nowIso) },
+        });
       }),
     );
+    const fatal: string[] = [];
     results.forEach((res, idx) => {
       const id = chunk[idx];
-      const won =
-        res.status === "fulfilled" &&
-        !res.value.error &&
-        ((res.value.data as unknown[] | null)?.length ?? 0) === 1;
-      // Zero rows updated means the owner changed between our read and our
-      // write. That is the whole point of the swap: the rep is told somebody
-      // else got there first, rather than being told they own a lead they do
-      // not. A genuine write error lands here too, which is correct -- an
-      // unconfirmed claim must never be reported as a claim.
-      if (won) claimed.push(id);
-      else lostRace.push(id);
+      if (res.status === "rejected") {
+        fatal.push(`${id}: ${res.reason instanceof Error ? res.reason.message : String(res.reason)}`);
+        return;
+      }
+      if (res.value.error) {
+        fatal.push(`${id}: ${res.value.error.message}`);
+        return;
+      }
+      const receipt = res.value.data as { ok?: unknown; error?: unknown } | null;
+      if (receipt?.ok === true) claimed.push(id);
+      else if (receipt?.error === "claim_conflict") lostRace.push(id);
+      else if (receipt?.error === "at_capacity") {
+        atomicCapacityRefused.push({ id, reason: "at_capacity" });
+      }
+      else fatal.push(`${id}: invalid claim receipt`);
     });
+    if (fatal.length > 0) {
+      console.error("[web-leads.claim] atomic claim transaction failed", {
+        userId,
+        failures: fatal,
+      });
+      throw new Error(`claim_write_failed: ${fatal.join("; ")}`);
+    }
   }
 
   // Ownership just changed, so the memoised lead list is stale on this
-  // instance. Dropped BEFORE the cap re-check below, which reads held counts
-  // back -- against a pre-write snapshot it would return the old number and
-  // either miss real overflow or invent some. See lib/web-leads/cache.ts.
+  // instance. Capacity itself was already enforced inside each serialized
+  // Turso claim transaction. See lib/web-leads/cache.ts.
   if (claimed.length > 0 || lostRace.length > 0) invalidate("web-leads:leads");
-
-  /**
-   * THE CAP, RE-CHECKED AFTER THE FACT.
-   *
-   * The per-lead swap makes each claim exclusive; it does nothing about the
-   * rep's own total. Two overlapping requests from one rep -- two browser tabs,
-   * a double submit -- both read heldCount = 200, both grant 50, and the rep
-   * ends with 300 against an advertised ceiling of 250. Codex caught it
-   * (2026-08-23).
-   *
-   * A truly atomic reservation needs a counter row or a transaction the bridge
-   * does not expose. What it does NOT need is to be left wrong: the cap is a
-   * business limit, not a security boundary, so the honest fix is to converge
-   * rather than to pretend. Re-count after writing, and if this request pushed
-   * the rep over, immediately release the excess -- the ones this request just
-   * took, newest first, so a concurrent request's leads are never the ones
-   * yanked -- and report them as capacity refusals, which is what they are.
-   *
-   * The rep sees the truth either way: "you now hold 250 of 250", and the
-   * leads they did not get named as over the limit.
-   */
-  let overflowRefused: ClaimPlan["refused"] = [];
-  if (claimed.length > 0) {
-    const after = await heldCount(userId);
-    const excess = after - MAX_LEADS_PER_REP;
-    if (excess > 0) {
-      const giveBack = claimed.slice(-excess);
-      await releaseLeads(userId, false, giveBack);
-      overflowRefused = giveBack.map((id) => ({ id, reason: "at_capacity" as const }));
-      for (const id of giveBack) {
-        const i = claimed.indexOf(id);
-        if (i >= 0) claimed.splice(i, 1);
-      }
-    }
-  }
-
-  let trackingFailed: string[] = [];
-  if (claimed.length > 0) {
-    const interactions = claimed.map((id) => {
-      const previousStage = factsFrom(byId.get(id)?.data || {}).stage;
-      const content = `Lead claimed and moved ${previousStage || "prospect pool"} → assigned.`;
-      return {
-        tenant_id: WEBDEV_TENANT_ID,
-        lead_id: id,
-        type: "stage_changed",
-        channel: "system",
-        direction: "internal",
-        agent_source: "web_leads_claim",
-        actor_user_id: userId,
-        subject: "Lead claimed",
-        content,
-        content_preview: content,
-        created_at: nowIso,
-        metadata: {
-          action: "claim",
-          from: previousStage,
-          to: "assigned",
-          assigned_to: userId,
-        },
-      };
-    });
-    const tracking = await db.from("lead_interactions").insert(interactions);
-    if (tracking.error) {
-      console.error("[web-leads.claim] claims saved but interaction tracking failed", {
-        leadIds: claimed,
-        userId,
-        error: tracking.error.message,
-      });
-      trackingFailed = [...claimed];
-    }
-  }
 
   return {
     claimed,
     refused: [
       ...plan.refused,
-      ...overflowRefused,
+      ...atomicCapacityRefused,
       // Surfaced with a reason the UI can render rather than swallowed. An id
       // that came back with no row does not exist or is outside this tenant --
       // a rep who selected 60 and is told about 59 has no way to find the
@@ -268,8 +203,10 @@ export async function claimLeads(
       ...missing.map((id) => ({ id, reason: "held" as const })),
     ],
     lostRace,
-    trackingFailed,
-    held: held + claimed.length,
+    // Kept in the response contract for older clients. The atomic RPC makes
+    // this state impossible: both ownership and tracking commit, or neither.
+    trackingFailed: [],
+    held: await heldCount(userId),
     cap: MAX_LEADS_PER_REP,
   };
 }

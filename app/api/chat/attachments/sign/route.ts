@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import {
   createChatAttachmentSignedUpload,
   MAX_CHAT_ATTACHMENTS_PER_TURN,
@@ -39,7 +40,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const agentKey = typeof payload?.agent_key === "string" ? payload.agent_key : null;
+  const agentKey = typeof payload?.agent_key === "string"
+    ? payload.agent_key.trim().toLowerCase()
+    : null;
+  if (agentKey && !(await isUserTenantChatAgent({
+    userTenantId: sess.tenantId,
+    profileAgentsEnabled: sess.agentsEnabled,
+    userEmail: sess.email,
+    agentKey,
+  }))) {
+    return NextResponse.json({ ok: false, error: "agent_disabled" }, { status: 403 });
+  }
   const sessionId = typeof payload?.session_id === "string" ? payload.session_id : null;
 
   try {

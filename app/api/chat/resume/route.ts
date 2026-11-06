@@ -40,7 +40,6 @@
 
 import { NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
 import { resolveChatContext } from "@/lib/chat-auth";
 import {
@@ -109,12 +108,8 @@ export async function POST(req: NextRequest) {
   }
   const { tenantId, provider, apiKey } = ctxResult;
 
-  // Manifest-aware agent validation — see /api/chat for full context.
-  // Custom tenant slugs are accepted here too, otherwise a multi-turn
-  // chat with a custom-slug agent would fail on the second turn.
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
-    return jsonError(400, `invalid_agent:${agentKey}`);
-  }
+  // resolveChatContext has already enforced the same per-user allowlist used
+  // for the original turn, before the signed resume state is accepted.
 
   // 2026-05-16 Codex finding #3: HMAC alone proves the state was server-
   // issued, but doesn't prove the resuming session has the right to it.

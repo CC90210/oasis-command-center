@@ -5,6 +5,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +20,6 @@ const EDITABLE = new Set([
   "mrr_target_date",
   "manifesto",
   "primary_agent",
-  "agents_enabled",
   "preferred_language",
   "prospect_focus",
   // Free-form per-user prefs blob (timezone, briefing_channel, photo url,
@@ -55,6 +55,9 @@ export async function PATCH(req: NextRequest) {
   } catch {
     return bad(400, "invalid JSON");
   }
+  if ("agents_enabled" in body) {
+    return bad(403, "agent_roster_managed_by_workspace");
+  }
 
   const update: Record<string, unknown> = {};
   for (const k of Object.keys(body)) {
@@ -63,6 +66,28 @@ export async function PATCH(req: NextRequest) {
   if (Object.keys(update).length === 0) return bad(400, "no editable fields provided");
 
   const db = getServiceSupabase();
+
+  if ("primary_agent" in update) {
+    const agentKey = typeof update.primary_agent === "string"
+      ? update.primary_agent.trim().toLowerCase()
+      : "";
+    const profile = await db
+      .from("user_profiles")
+      .select("tenant_id, agents_enabled")
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    if (profile.error) return bad(500, profile.error.message);
+    if (!profile.data?.tenant_id) return bad(403, "no_tenant");
+    if (!(await isUserTenantChatAgent({
+      userTenantId: profile.data.tenant_id,
+      profileAgentsEnabled: profile.data.agents_enabled as string[] | null,
+      userEmail: user.email,
+      agentKey,
+    }))) {
+      return bad(403, "agent_disabled");
+    }
+    update.primary_agent = agentKey;
+  }
 
   // 2026-06-06 — custom_fields is a shared JSONB blob (timezone,
   // briefing_channel, photo_url, quick_facts, plan_template_id, etc.).

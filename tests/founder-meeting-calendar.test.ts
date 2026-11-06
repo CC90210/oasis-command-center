@@ -26,6 +26,20 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function availabilityResponse(items: unknown[]): Response {
+  return jsonResponse({ kind: "calendar#events", items });
+}
+
+function isAvailabilityQuery(input: RequestInfo | URL, init?: RequestInit): boolean {
+  if (init?.method !== "GET") return false;
+  const url = new URL(String(input));
+  return (
+    url.pathname === "/calendar/v3/calendars/primary/events" &&
+    url.searchParams.has("timeMin") &&
+    url.searchParams.has("timeMax")
+  );
+}
+
 function deterministicEventId(
   requestId = BOOKING_REQUEST_ID,
   tenantId = TENANT_ID,
@@ -72,9 +86,15 @@ function freshBundle() {
 function baseDependencies(
   fetchImpl: GoogleCalendarDependencies["fetchImpl"],
   overrides: Partial<GoogleCalendarDependencies> = {},
+  availabilityFetch?: GoogleCalendarDependencies["fetchImpl"],
 ): GoogleCalendarDependencies {
   return {
-    fetchImpl,
+    fetchImpl: async (input, init) =>
+      isAvailabilityQuery(input, init)
+        ? availabilityFetch
+          ? availabilityFetch(input, init)
+          : availabilityResponse([])
+        : fetchImpl(input, init),
     getBundle: async () => freshBundle(),
     setValue: async () => ({ ok: true, id: "credential" }),
     now: () => NOW,
@@ -439,6 +459,127 @@ async function testFailsExplicitlyWhenMeetNeverAppears() {
   assert.equal(getCount, 2);
 }
 
+async function testRejectsOverlappingBusyFounderSlotBeforeCreate() {
+  let mutationCount = 0;
+  const busyEvent = {
+    id: "busy-founder-event",
+    status: "confirmed",
+    transparency: "opaque",
+    start: { dateTime: "2026-08-26T19:55:00.000Z" },
+    end: { dateTime: "2026-08-26T20:10:00.000Z" },
+  };
+
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () => {
+        mutationCount += 1;
+        return jsonResponse(eventResponse(deterministicEventId()));
+      }, {}, async () => availabilityResponse([busyEvent])),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "founder_slot_unavailable",
+  );
+  assert.equal(mutationCount, 0, "a busy founder slot must fail before Calendar insert");
+}
+
+async function testAllowsAdjacentAndNonBlockingEvents() {
+  const calls: FetchCall[] = [];
+  const eventId = deterministicEventId();
+  const adjacentAndNonBlockingEvents = [
+    {
+      id: "ends-at-slot-start",
+      status: "confirmed",
+      start: { dateTime: "2026-08-26T19:45:00.000Z" },
+      end: { dateTime: START_AT },
+    },
+    {
+      id: "starts-at-slot-end",
+      status: "confirmed",
+      start: { dateTime: "2026-08-26T20:15:00.000Z" },
+      end: { dateTime: "2026-08-26T20:30:00.000Z" },
+    },
+    {
+      id: "cancelled-overlap",
+      status: "cancelled",
+      start: { dateTime: START_AT },
+      end: { dateTime: "2026-08-26T20:15:00.000Z" },
+    },
+    {
+      id: "available-overlap",
+      status: "confirmed",
+      transparency: "transparent",
+      start: { dateTime: START_AT },
+      end: { dateTime: "2026-08-26T20:15:00.000Z" },
+    },
+  ];
+
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (request, init) => {
+      calls.push({ url: String(request), init });
+      return jsonResponse(eventResponse(eventId));
+    }, {}, async (request, init) => {
+      calls.push({ url: String(request), init });
+      return availabilityResponse(adjacentAndNonBlockingEvents);
+    }),
+  );
+
+  assert.equal(receipt.eventId, eventId);
+  const availabilityCalls = calls.filter((call) => isAvailabilityQuery(call.url, call.init));
+  assert.equal(availabilityCalls.length, 1);
+  const availabilityUrl = new URL(availabilityCalls[0].url);
+  assert.equal(availabilityUrl.searchParams.get("timeMin"), START_AT);
+  assert.equal(availabilityUrl.searchParams.get("timeMax"), "2026-08-26T20:15:00.000Z");
+  assert.equal(availabilityUrl.searchParams.get("singleEvents"), "true");
+  assert.equal(availabilityUrl.searchParams.get("showDeleted"), "false");
+  assert.equal(availabilityUrl.searchParams.get("orderBy"), "startTime");
+  assert.equal(calls.filter((call) => call.init?.method === "POST").length, 1);
+}
+
+async function testAvailabilityResponseMustBeCalendarEventList() {
+  let mutationCount = 0;
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () => {
+        mutationCount += 1;
+        return jsonResponse(eventResponse(deterministicEventId()));
+      }, {}, async () => jsonResponse({})),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "calendar_read_failed",
+  );
+  assert.equal(mutationCount, 0, "an invalid availability receipt must fail before Calendar insert");
+}
+
+async function testRescheduleExcludesItsOwnCalendarEvent() {
+  const calls: FetchCall[] = [];
+  const eventId = deterministicEventId();
+  const input = updateArgs(eventId);
+  const updatedEvent = {
+    ...eventResponse(eventId),
+    description:
+      "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nConfirm the revised audit time and review online enrolment.\n\nWebsite: https://lakesidemontessori.example/new-audit",
+    attendees: [{ email: "new-owner@example.com", responseStatus: "needsAction" }],
+    start: { dateTime: input.meetingAt, timeZone: input.timezone },
+    end: { dateTime: "2026-08-27T18:45:00.000Z", timeZone: input.timezone },
+  };
+
+  const receipt = await updateGoogleFounderMeeting(
+    input,
+    baseDependencies(async (request, init) => {
+      calls.push({ url: String(request), init });
+      return jsonResponse(updatedEvent);
+    }, {}, async (request, init) => {
+      calls.push({ url: String(request), init });
+      return availabilityResponse([updatedEvent]);
+    }),
+  );
+
+  assert.equal(receipt.eventId, eventId);
+  assert.equal(calls.filter((call) => isAvailabilityQuery(call.url, call.init)).length, 1);
+  assert.equal(calls.filter((call) => call.init?.method === "PATCH").length, 1);
+}
+
 async function testReschedulesExistingMeetAndSendsUpdatedInvite() {
   const calls: FetchCall[] = [];
   const eventId = deterministicEventId();
@@ -663,6 +804,10 @@ async function main() {
   await testAmbiguousCreateCarriesDeterministicEventIdForCompensation();
   await testPollsForMeetProvisioning();
   await testFailsExplicitlyWhenMeetNeverAppears();
+  await testRejectsOverlappingBusyFounderSlotBeforeCreate();
+  await testAllowsAdjacentAndNonBlockingEvents();
+  await testAvailabilityResponseMustBeCalendarEventList();
+  await testRescheduleExcludesItsOwnCalendarEvent();
   await testReschedulesExistingMeetAndSendsUpdatedInvite();
   await testRejectsMismatchedRescheduleReceipt();
   await testRescheduleFailsIfExistingMeetCannotBeVerified();

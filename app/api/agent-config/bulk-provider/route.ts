@@ -33,7 +33,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthedSupabase, getServiceSupabase } from "@/lib/supabase-server";
 import { PROVIDER_MODELS, PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
 import { encryptField } from "@/lib/field-encryption";
-import { getTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
+import { getUserTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { canManageTeam, getSessionContext } from "@/lib/team";
 import { resolveAgentKey } from "@/lib/agents";
 
@@ -43,12 +43,19 @@ export const runtime = "nodejs";
 async function resolveTenant(): Promise<{
   tenantId: string | null;
   userId: string | null;
+  userEmail: string | null;
   canManageTenant: boolean;
   profileEnabledAgents: string[];
 }> {
   const ctx = await getSessionContext();
   if (!ctx) {
-    return { tenantId: null, userId: null, canManageTenant: false, profileEnabledAgents: [] };
+    return {
+      tenantId: null,
+      userId: null,
+      userEmail: null,
+      canManageTenant: false,
+      profileEnabledAgents: [],
+    };
   }
   const db = getServiceSupabase();
   const { data } = await db
@@ -62,13 +69,14 @@ async function resolveTenant(): Promise<{
   return {
     tenantId: data?.tenant_id || ctx.tenantId || null,
     userId: ctx.authUserId,
+    userEmail: ctx.email,
     canManageTenant: ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess),
     profileEnabledAgents: enabled,
   };
 }
 
 export async function POST(req: NextRequest) {
-  const { tenantId, userId, canManageTenant, profileEnabledAgents } = await resolveTenant();
+  const { tenantId, userId, userEmail, canManageTenant, profileEnabledAgents } = await resolveTenant();
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
@@ -136,10 +144,13 @@ export async function POST(req: NextRequest) {
   // last-resort default (mid-onboarding tenants with no manifest); manifest-
   // declared custom slugs (e.g. "renewal_specialist") are accepted as
   // targets now. Codex Finding #2 (2026-05-22).
-  const tenantChatKeys = await getTenantChatAgentKeys(tenantId);
-  const fallbackAgents =
-    profileEnabledAgents.length > 0 ? profileEnabledAgents : tenantChatKeys;
-  const chatAllowed = new Set(tenantChatKeys);
+  const userChatKeys = await getUserTenantChatAgentKeys({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profileEnabledAgents,
+    userEmail,
+  });
+  const fallbackAgents = userChatKeys;
+  const chatAllowed = new Set(userChatKeys);
   const targetAgents = Array.from(
     new Set((requestedAgents || fallbackAgents).map((k) => resolveAgentKey(k))),
   ).filter((k) => chatAllowed.has(k));

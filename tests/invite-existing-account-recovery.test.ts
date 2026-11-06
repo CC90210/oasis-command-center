@@ -414,6 +414,14 @@ function testBrowserRecoveryPathKeepsTheInvite() {
 
   assert(signup.includes("invite_token: inviteToken"), "invite signup validates the raw invite");
   assert(
+    signup.includes("Command Center access is invite-only"),
+    "the public signup screen must explain that an admin-issued invite is required",
+  );
+  assert(
+    signupRoute.includes('code: "invite_required"'),
+    "the server boundary must fail closed when signup has no invite capability",
+  );
+  assert(
     signupRoute.includes("raw_user_meta_data"),
     "Turso signup persists the teammate's full name",
   );
@@ -461,7 +469,7 @@ function testSignupIdentityMetadataIsPreserved() {
   );
 }
 
-async function testTursoSignupActuallyPersistsFullName() {
+async function testTursoSignupRequiresInviteAndPersistsFullName() {
   const previous = {
     backend: process.env.EMPIRE_AUTH_BACKEND,
     secret: process.env.AUTH_SESSION_SECRET,
@@ -475,6 +483,11 @@ async function testTursoSignupActuallyPersistsFullName() {
   process.env.TURSO_AUTH_TOKEN = "local-test-token";
   const db = createClient({ url });
   try {
+    // Earlier cases use the same named in-memory cache so the route can open
+    // its own client. Reset only this ephemeral test database before recreating
+    // the signup boundary's minimum schema.
+    await db.execute(`DROP TABLE IF EXISTS "_supabase_auth_users"`);
+    await db.execute(`DROP TABLE IF EXISTS tenant_invites`);
     await db.execute(`CREATE TABLE "_supabase_auth_users" (
       id TEXT PRIMARY KEY,
       email TEXT NOT NULL UNIQUE,
@@ -485,7 +498,78 @@ async function testTursoSignupActuallyPersistsFullName() {
       session_version INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT
     )`);
+    await db.execute(`CREATE TABLE tenant_invites (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      email TEXT,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      redeemed_at TEXT,
+      revoked_at TEXT
+    )`);
+
+    const blockedEmail = `uninvited-${randomUUID()}@example.com`;
+    const blocked = await tursoSignup(new NextRequest("http://localhost/api/auth/turso-signup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": randomUUID() },
+      body: JSON.stringify({
+        email: blockedEmail,
+        password: "ProductionReady123",
+        full_name: "Uninvited User",
+      }),
+    }));
+    const blockedBody = await blocked.json() as { code?: string; error?: string };
+    assert.equal(blocked.status, 403, JSON.stringify(blockedBody));
+    assert.equal(
+      blockedBody.code,
+      "invite_required",
+      "public signup fails closed instead of minting an unverified session",
+    );
+    assert.equal(
+      blocked.headers.get("set-cookie"),
+      null,
+      "an uninvited request cannot receive an authenticated cookie",
+    );
+    const blockedRows = await db.execute({
+      sql: `SELECT id FROM "_supabase_auth_users" WHERE lower(email) = ?`,
+      args: [blockedEmail],
+    });
+    assert.equal(blockedRows.rows.length, 0, "an uninvited request creates no auth account");
+
     const email = `david-${randomUUID()}@oasisai.work`;
+    const rawInvite = `valid-signup-invite-${randomUUID()}-with-enough-entropy`;
+    await db.execute({
+      sql: `INSERT INTO tenant_invites
+              (id, tenant_id, email, token_hash, expires_at, redeemed_at, revoked_at)
+            VALUES (?, 'oasis-tenant', ?, ?, '2099-01-01T00:00:00.000Z', NULL, NULL)`,
+      args: [randomUUID(), email, hash(rawInvite)],
+    });
+
+    const mismatchedEmail = `not-david-${randomUUID()}@oasisai.work`;
+    const mismatched = await tursoSignup(new NextRequest("http://localhost/api/auth/turso-signup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": randomUUID() },
+      body: JSON.stringify({
+        email: mismatchedEmail,
+        password: "ProductionReady123",
+        full_name: "Not David",
+        invite_token: rawInvite,
+      }),
+    }));
+    const mismatchedBody = await mismatched.json() as { code?: string; error?: string };
+    assert.equal(mismatched.status, 400, JSON.stringify(mismatchedBody));
+    assert.equal(mismatchedBody.code, "invite_email_mismatch");
+    assert.equal(
+      mismatched.headers.get("set-cookie"),
+      null,
+      "an invite cannot authenticate a mailbox other than its server-side email pin",
+    );
+    const mismatchedRows = await db.execute({
+      sql: `SELECT id FROM "_supabase_auth_users" WHERE lower(email) = ?`,
+      args: [mismatchedEmail],
+    });
+    assert.equal(mismatchedRows.rows.length, 0, "a mismatched invite creates no auth account");
+
     const response = await tursoSignup(new NextRequest("http://localhost/api/auth/turso-signup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-forwarded-for": randomUUID() },
@@ -493,9 +577,15 @@ async function testTursoSignupActuallyPersistsFullName() {
         email,
         password: "ProductionReady123",
         full_name: "  David Smadja  ",
+        invite_token: rawInvite,
       }),
     }));
     assert.equal(response.status, 200, await response.text());
+    assert.match(
+      response.headers.get("set-cookie") ?? "",
+      /oasis_session=/,
+      "the valid email-pinned invite path establishes the session used to redeem the invite",
+    );
     const stored = await db.execute({
       sql: `SELECT raw_user_meta_data FROM "_supabase_auth_users" WHERE email = ?`,
       args: [email],
@@ -503,6 +593,29 @@ async function testTursoSignupActuallyPersistsFullName() {
     assert.deepEqual(JSON.parse(String(stored.rows[0]?.raw_user_meta_data)), {
       full_name: "David Smadja",
     });
+
+    const existing = await tursoSignup(new NextRequest("http://localhost/api/auth/turso-signup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": randomUUID() },
+      body: JSON.stringify({
+        email,
+        password: "AnotherProductionReady123",
+        full_name: "David Smadja",
+        invite_token: rawInvite,
+      }),
+    }));
+    const existingBody = await existing.json() as { code?: string; error?: string };
+    assert.equal(existing.status, 409, JSON.stringify(existingBody));
+    assert.equal(
+      existingBody.code,
+      "account_exists",
+      "an existing invited account stays on the sign-in/reset recovery path",
+    );
+    assert.equal(
+      existing.headers.get("set-cookie"),
+      null,
+      "the signup conflict never replaces the existing account's session",
+    );
   } finally {
     db.close();
     if (previous.backend === undefined) delete process.env.EMPIRE_AUTH_BACKEND;
@@ -524,7 +637,7 @@ async function main() {
   await testTwoTenantInvitesRaceForOneDetachedProfile();
   testBrowserRecoveryPathKeepsTheInvite();
   testSignupIdentityMetadataIsPreserved();
-  await testTursoSignupActuallyPersistsFullName();
+  await testTursoSignupRequiresInviteAndPersistsFullName();
   console.log("Existing-account invite recovery tests passed");
 }
 

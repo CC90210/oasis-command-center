@@ -20,6 +20,7 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
+import { randomUUID } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { getKixieCredentials, makeCall } from "@/lib/integrations/kixie";
@@ -187,32 +188,17 @@ export async function POST(
       message: `Dry-run: would ring ${agentEmail} and bridge to ${targetPhone}. No call was placed.`,
     });
   }
-  try {
-    await makeCall(creds, {
-      target: targetPhone,
-      agentEmail,
-      displayName,
-      leadId, // echoed back via customField1 on webhook events
-    });
-  } catch (err) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "kixie_call_failed",
-        message: err instanceof Error ? err.message : "Kixie call request failed.",
-      },
-      { status: 502 },
-    );
-  }
-
   const occurredAt = new Date().toISOString();
+  const interactionId = randomUUID();
 
-  // Log the initiation immediately so the drawer timeline reflects the
-  // pending call even before the startcall webhook arrives (~1-3s).
+  // Reserve one row before calling Kixie. customField2 carries this UUID back
+  // so provider webhooks upgrade this touch instead of inserting a duplicate.
   const trackingWarnings: string[] = [];
   let touchAt = occurredAt;
+  let interactionReserved = false;
   try {
     const interaction = await db.from("lead_interactions").insert({
+      id: interactionId,
       tenant_id: tenantId,
       lead_id: leadId,
       type: "call_initiated",
@@ -224,6 +210,7 @@ export async function POST(
       content_preview: `Call initiated by ${agentEmail}`,
       actor_user_id: user.id,
       metadata: {
+        dashboard_interaction_id: interactionId,
         kixie_agent_email: agentEmail,
         requested_by_email: fallbackEmail,
         display_name: displayName,
@@ -234,6 +221,7 @@ export async function POST(
       trackingWarnings.push("interaction_log_failed");
       console.error("[leads.call] initial lead_interactions insert failed", interaction.error);
     } else {
+      interactionReserved = true;
       const storedAt = (interaction.data as { created_at?: string | null } | null)?.created_at;
       if (typeof storedAt === "string" && Number.isFinite(Date.parse(storedAt))) {
         touchAt = new Date(storedAt).toISOString();
@@ -242,6 +230,41 @@ export async function POST(
   } catch (err) {
     trackingWarnings.push("interaction_log_failed");
     console.error("[leads.call] initial lead_interactions insert failed", err);
+  }
+
+  try {
+    await makeCall(creds, {
+      target: targetPhone,
+      agentEmail,
+      displayName,
+      leadId,
+      requestId: interactionId,
+    });
+  } catch (err) {
+    if (interactionReserved) {
+      try {
+        const released = await db
+          .from("lead_interactions")
+          .delete()
+          .eq("tenant_id", tenantId)
+          .eq("lead_id", leadId)
+          .eq("id", interactionId)
+          .eq("agent_source", "dashboard_drawer");
+        if (released.error) {
+          console.error("[leads.call] failed-call reservation cleanup failed", released.error);
+        }
+      } catch (cleanupError) {
+        console.error("[leads.call] failed-call reservation cleanup failed", cleanupError);
+      }
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "kixie_call_failed",
+        message: err instanceof Error ? err.message : "Kixie call request failed.",
+      },
+      { status: 502 },
+    );
   }
 
   try {

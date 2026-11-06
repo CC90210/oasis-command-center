@@ -28,7 +28,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
     if (ctx.reason === "no_session") return bad(401, "unauthorized");
     return bad(403, ctx.reason);
   }
-  const { userId, tenantId } = ctx;
+  const { userId, tenantId, email, agentsEnabled } = ctx;
 
   const url = req.nextUrl;
   const agentKey = (url.searchParams.get("agent") || "").toLowerCase();
@@ -63,7 +63,12 @@ export async function GET(req: NextRequest) {
   // same gate /api/chat uses. Custom marketplace agents are accepted via
   // the manifest path; unknown slugs return an empty list rather than
   // 400 so the UI degrades gracefully.
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
+  if (!(await isUserTenantChatAgent({
+    userTenantId: tenantId,
+    profileAgentsEnabled: agentsEnabled,
+    userEmail: email,
+    agentKey,
+  }))) {
     return NextResponse.json({ ok: true, sessions: [] });
   }
 

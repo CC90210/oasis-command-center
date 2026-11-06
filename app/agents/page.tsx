@@ -2,9 +2,10 @@ import { Card, PageHeader, Tag } from "@/components/Card";
 import ChatWidget from "@/components/ChatWidget";
 import { timeAgo } from "@/lib/fmt";
 import { agentStates, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner, getBridgeOnline } from "@/lib/queries";
-import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
+import { getAgentInfo } from "@/lib/agents";
+import { chatAgentKeys } from "@/lib/agent-personas";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
+import { resolveUserEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentStats } from "@/lib/agent-stats";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
@@ -55,13 +56,14 @@ export default async function AgentsPage() {
   // agentStates() by the tenant's enabled agents. agent_state_snapshot
   // has no tenant_id column yet — see queries.ts:agentStates() docstring.
   const manifestForAgents = await getTenantManifestForUser(profile?.tenant_id ?? null);
-  const manifestEnabledSlugs = resolveEnabledAgentSlugs({
+  const enabled = resolveUserEnabledAgentSlugs({
     manifestAgents: manifestForAgents ? manifestForAgents.agents || [] : null,
-    legacyProfileAgents: profile?.agents_enabled,
+    profileAgents: profile?.agents_enabled,
+    operatorBypassAgents: isAdmin ? chatAgentKeys() : null,
   });
 
   const [states, integrations, stats, noBridge, aiServices, tenantBridgeOwner, serverBridgeOnline] = await Promise.all([
-    agentStates(manifestEnabledSlugs),
+    agentStates(enabled),
     // recentEvents() removed 2026-06-06 with the Event Bus card. The same
     // feed renders on /operations as the Activity Tape, so this query was
     // burning Supabase round-trips for data the page no longer surfaced.
@@ -70,9 +72,9 @@ export default async function AgentsPage() {
       // Manifest-validated primary so a stale profile.primary_agent
       // ("bravo" left over from redeem defaults) doesn't pull empire-
       // wide stats for a SunBiz tenant.
-      manifestEnabledSlugs.find(
+      enabled.find(
         (s) => s === (profile?.primary_agent || "").toLowerCase()
-      ) || manifestEnabledSlugs[0] || profile?.primary_agent || "bravo"
+      ) || enabled[0] || "bravo"
     ),
     _tenantHasNoBridge(profile?.tenant_id || null),
     aiServicesWithKey(profile?.tenant_id || null),
@@ -95,22 +97,8 @@ export default async function AgentsPage() {
   const noCloudProvider = aiServices.size === 0;
   const showProviderNudge = noCloudProvider && noBridge && !isAdmin;
 
-  // Strict tenant scoping — manifest first, then per-user profile column.
-  // NEVER falls back to FAMILY_AGENT_KEYS — that previously leaked the
-  // empire-wide list (Bravo/Atlas/Maven/Aura/Hermes) to fresh tenants
-  // with empty manifests AND empty profile columns. Empty state is the
-  // correct UI for "no agents enabled yet"; the Family card just shows
-  // an empty-state message rather than every empire agent.
-  const familySet = new Set(FAMILY_AGENT_KEYS);
-  const enabledList = manifestEnabledSlugs.length > 0
-    ? manifestEnabledSlugs
-    : (profile?.agents_enabled || []);
-  // Intersect with the family registry only when the agents came from
-  // profile.agents_enabled (legacy column); manifest-declared slugs
-  // pass through verbatim so custom tenant-only agents render too.
-  const enabled = manifestEnabledSlugs.length > 0
-    ? enabledList
-    : enabledList.filter((k) => familySet.has(k));
+  // `enabled` is the employee allowlist intersected with the tenant manifest.
+  // Never replace it with a workspace/global roster on a user-facing surface.
   const byName = new Map(states.map((s) => [s.agent_name, s]));
   const integrationByName = new Map(integrations.map((i) => [i.service, i]));
 
@@ -223,11 +211,15 @@ export default async function AgentsPage() {
           </div>
         )}
         <ChatWidget
-          agentKeys={manifestEnabledSlugs.length > 0 ? manifestEnabledSlugs : enabled}
+          agentKeys={enabled}
           defaultAgent={
-            manifestForAgents?.agents.find((a) => a.primary && a.enabled)?.slug ||
-            profile?.primary_agent ||
-            manifestEnabledSlugs[0] ||
+            enabled.includes((profile?.primary_agent || "").toLowerCase())
+              ? (profile?.primary_agent || "").toLowerCase()
+              : enabled.find(
+                  (agent) =>
+                    agent === manifestForAgents?.agents.find((a) => a.primary && a.enabled)?.slug,
+                ) ||
+            enabled[0] ||
             "bravo"
           }
           isAdmin={isAdmin}

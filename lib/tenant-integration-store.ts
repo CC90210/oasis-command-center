@@ -115,6 +115,7 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   stripe: {
     secret_key: "STRIPE_SECRET_KEY",
     publishable_key: "STRIPE_PUBLISHABLE_KEY",
+    webhook_secret: "STRIPE_WEBHOOK_SECRET",
   },
   gws: {
     app_password: "GMAIL_APP_PASSWORD",

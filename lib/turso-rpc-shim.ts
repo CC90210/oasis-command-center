@@ -23,6 +23,7 @@ import {
   type PartyInput,
 } from "@/lib/website-sales-comp";
 import { buildBriefForOnboarding } from "@/lib/website-sales-build-brief";
+import { MAX_LEADS_PER_REP } from "@/lib/web-leads/claim";
 
 function driverError(error: unknown): DriverError {
   return error && typeof error === "object"
@@ -1669,6 +1670,173 @@ const PIPELINE_ONBOARDING_STATUSES = new Set([
 ]);
 
 /**
+ * Claim one Web Leads record and persist the ownership touch atomically.
+ *
+ * The previous implementation performed the compare-and-swap UPDATE first and
+ * inserted the timeline row afterwards. A ledger failure therefore left a
+ * lead assigned without the Last Touch evidence the pipeline metrics depend
+ * on. This Turso transaction makes those two facts indivisible.
+ */
+export async function claim_web_lead(
+  client: Client,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const requiredString = (name: string, maxLength: number): string => {
+    const value = typeof args[name] === "string" ? args[name].trim() : "";
+    if (!value || value.length > maxLength) {
+      throw new Error(`claim_web_lead: invalid ${name}`);
+    }
+    return value;
+  };
+  const tenantId = requiredString("p_tenant_id", 200);
+  const leadId = requiredString("p_lead_id", 200);
+  const actorUserId = requiredString("p_actor_user_id", 200);
+  const expectedUpdatedAt = requiredString("p_expected_updated_at", 100);
+  const interactionId = requiredString("p_interaction_id", 200);
+  const previousStage =
+    typeof args.p_previous_stage === "string" && args.p_previous_stage.trim()
+      ? args.p_previous_stage.trim().slice(0, 100)
+      : null;
+  const expectedOwnerId =
+    args.p_expected_owner_id === null || args.p_expected_owner_id === undefined
+      ? null
+      : requiredString("p_expected_owner_id", 200);
+
+  const occurredMs = Date.parse(
+    typeof args.p_occurred_at === "string" ? args.p_occurred_at : "",
+  );
+  if (!Number.isFinite(occurredMs)) {
+    throw new Error("claim_web_lead: invalid p_occurred_at");
+  }
+  const occurredAt = new Date(occurredMs).toISOString();
+
+  let nextData: unknown = args.p_data;
+  if (typeof nextData === "string") {
+    try {
+      nextData = JSON.parse(nextData);
+    } catch {
+      throw new Error("claim_web_lead: p_data must be a JSON object");
+    }
+  }
+  if (nextData === null || typeof nextData !== "object" || Array.isArray(nextData)) {
+    throw new Error("claim_web_lead: p_data must be a JSON object");
+  }
+  const claimedData = nextData as Record<string, unknown>;
+  if (
+    claimedData.assigned_to !== actorUserId ||
+    claimedData.stage !== "assigned" ||
+    claimedData.last_contacted_at !== occurredAt ||
+    claimedData.stage_entered_at !== occurredAt
+  ) {
+    throw new Error("claim_web_lead: p_data does not describe this canonical claim");
+  }
+
+  const tx = await beginTursoWriteTransaction(client);
+  try {
+    const replay = await tx.execute({
+      sql: `SELECT tenant_id, lead_id, actor_user_id, metadata
+              FROM lead_interactions
+             WHERE id = ?
+             LIMIT 1`,
+      args: [interactionId],
+    });
+    if (replay.rows.length > 0) {
+      const receipt = replay.rows[0] as Record<string, unknown>;
+      let metadata: Record<string, unknown> = {};
+      try {
+        metadata = JSON.parse(String(receipt.metadata ?? "{}")) as Record<string, unknown>;
+      } catch {
+        throw new Error("claim_web_lead: replay metadata is invalid JSON");
+      }
+      if (
+        String(receipt.tenant_id ?? "") !== tenantId ||
+        String(receipt.lead_id ?? "") !== leadId ||
+        String(receipt.actor_user_id ?? "") !== actorUserId ||
+        metadata.action !== "claim"
+      ) {
+        throw new Error("claim_web_lead: interaction_id_reused");
+      }
+      await tx.commit();
+      return { ok: true, idempotent: true, interaction_id: interactionId };
+    }
+
+    // BEGIN IMMEDIATE serializes this count with the claim write. Two browser
+    // tabs for the same rep can no longer both observe spare capacity and push
+    // the book above its hard ceiling.
+    const held = await tx.execute({
+      sql: `SELECT count(*) AS total
+              FROM tenant_records
+             WHERE tenant_id = ?
+               AND entity_type = 'lead'
+               AND lower(coalesce(json_extract(data, '$.assigned_to'), '')) = lower(?)`,
+      args: [tenantId, actorUserId],
+    });
+    if (Number(held.rows[0]?.total ?? 0) >= MAX_LEADS_PER_REP) {
+      await tx.rollback();
+      return { ok: false, error: "at_capacity" };
+    }
+
+    const update = await tx.execute({
+      sql: `UPDATE tenant_records
+               SET data = ?, updated_at = ?
+             WHERE id = ?
+               AND tenant_id = ?
+               AND entity_type = 'lead'
+               AND updated_at = ?
+               AND (
+                 (? IS NULL AND json_extract(data, '$.assigned_to') IS NULL)
+                 OR json_extract(data, '$.assigned_to') = ?
+               )`,
+      args: [
+        JSON.stringify(claimedData),
+        occurredAt,
+        leadId,
+        tenantId,
+        expectedUpdatedAt,
+        expectedOwnerId,
+        expectedOwnerId,
+      ],
+    });
+    if (update.rowsAffected !== 1) {
+      await tx.rollback();
+      return { ok: false, error: "claim_conflict" };
+    }
+
+    const content = `Lead claimed and moved ${previousStage || "prospect pool"} \u2192 assigned.`;
+    await tx.execute({
+      sql: `INSERT INTO lead_interactions
+              (id, tenant_id, lead_id, type, channel, direction, agent_source,
+               actor_user_id, subject, content, content_preview, metadata, created_at)
+            VALUES (?, ?, ?, 'stage_changed', 'system', 'internal',
+                    'web_leads_claim', ?, 'Lead claimed', ?, ?, ?, ?)`,
+      args: [
+        interactionId,
+        tenantId,
+        leadId,
+        actorUserId,
+        content,
+        content.slice(0, 1_024),
+        JSON.stringify({
+          action: "claim",
+          from: previousStage,
+          to: "assigned",
+          assigned_to: actorUserId,
+        }),
+        occurredAt,
+      ],
+    });
+
+    await tx.commit();
+    return { ok: true, idempotent: false, interaction_id: interactionId };
+  } catch (error) {
+    if (!tx.closed) await tx.rollback();
+    throw dbError("claim_web_lead", driverError(error));
+  } finally {
+    tx.close();
+  }
+}
+
+/**
  * Move one OASIS pipeline lead and write its timeline receipt in a single
  * Turso transaction.
  *
@@ -3274,6 +3442,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
 /**
  * MANIFEST
  *   approve_sunbiz_draft               ported-unverified  writes=True  confidence=high
+ *   claim_web_lead                      hand-ported + transaction-tested  writes=True  confidence=high
  *   close_website_deal                 hand-ported (147 comp v2)  writes=True  confidence=high
  *   consume_texttorrent_rate_token     ported-unverified  writes=True  confidence=high
  *   find_similar_merchants             ported-unverified  writes=False  confidence=high
@@ -3294,6 +3463,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
  */
 export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string, unknown>) => Promise<unknown>> = {
   approve_sunbiz_draft,
+  claim_web_lead,
   close_website_deal,
   refund_website_deal,
   consume_texttorrent_rate_token,

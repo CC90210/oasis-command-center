@@ -27,6 +27,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -79,6 +80,15 @@ export async function GET(
     created_at: string;
     updated_at: string | null;
   };
+
+  if (!(await isUserTenantChatAgent({
+    userTenantId: tenantId,
+    profileAgentsEnabled: ctx.agentsEnabled,
+    userEmail: ctx.email,
+    agentKey: session.agent_key,
+  }))) {
+    return bad(404, "session_not_found");
+  }
 
   const { data: messages, error: messagesErr } = await service
     .from("chat_messages")

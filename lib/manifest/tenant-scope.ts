@@ -29,9 +29,10 @@
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
+import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getManifest } from "./loader";
 import { getManifestRow, getManifestSlugForTenant } from "./persistence";
-import { resolveEnabledAgentSlugs } from "./agent-roster";
+import { resolveEnabledAgentSlugs, resolveUserEnabledAgentSlugs } from "./agent-roster";
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -173,32 +174,33 @@ export async function getTenantAwareEnabledAgents(args: {
 
 
 /**
- * The set of agent slugs THIS tenant is allowed to chat with — the union of
- * (a) their manifest's enabled agents (covers custom slugs like
- * "renewal_specialist" that the operator added through the manifest editor
- * but are not in the empire-wide AGENT_REGISTRY), and (b) the empire-wide
- * chat-agent list (so OASIS operators keep family-agent access even when
- * their manifest is sparse, e.g. mid-onboarding).
+ * The set of agent slugs THIS authenticated user may chat with.
  *
- * Used by /api/chat, /api/chat/resume, /api/agent-config, /api/agent-config/
- * bulk-provider to validate the operator's `agent_key`. Before this helper,
- * those routes called `chatAgentKeys()` directly and rejected any slug not
- * in AGENT_REGISTRY — manifest-declared custom agents rendered in the chat
- * picker but 400'd on first send. Codex review finding #2 (2026-05-22).
+ * Normal employees receive the intersection of their profile allowlist and
+ * their tenant manifest. Manifest custom agents still work when both lists
+ * name them. Only an authenticated platform-operator email receives the
+ * explicit global-fleet bypass.
  */
-export async function getTenantChatAgentKeys(
-  userTenantId: string | null
-): Promise<string[]> {
-  const manifestAgents = await getTenantEnabledAgents(userTenantId);
-  const empireAgents = chatAgentKeys();
-  return Array.from(new Set([...manifestAgents, ...empireAgents]));
+export async function getUserTenantChatAgentKeys(args: {
+  userTenantId: string | null;
+  profileAgentsEnabled: string[] | null | undefined;
+  userEmail: string | null | undefined;
+}): Promise<string[]> {
+  const manifest = await getTenantManifestForUser(args.userTenantId);
+  return resolveUserEnabledAgentSlugs({
+    manifestAgents: manifest ? manifest.agents || [] : null,
+    profileAgents: args.profileAgentsEnabled,
+    operatorBypassAgents: isOperatorEmail(args.userEmail) ? chatAgentKeys() : null,
+  });
 }
 
-/** True when `agentKey` is a chat target this tenant is allowed to use. */
-export async function isTenantChatAgent(
-  userTenantId: string | null,
-  agentKey: string,
-): Promise<boolean> {
-  const allowed = await getTenantChatAgentKeys(userTenantId);
-  return allowed.includes(agentKey.toLowerCase());
+/** True when `agentKey` is a chat target this exact user is allowed to use. */
+export async function isUserTenantChatAgent(args: {
+  userTenantId: string | null;
+  profileAgentsEnabled: string[] | null | undefined;
+  userEmail: string | null | undefined;
+  agentKey: string;
+}): Promise<boolean> {
+  const allowed = await getUserTenantChatAgentKeys(args);
+  return allowed.includes(args.agentKey.toLowerCase());
 }

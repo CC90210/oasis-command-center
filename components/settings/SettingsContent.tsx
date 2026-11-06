@@ -471,12 +471,14 @@ export async function SettingsContent({
               very important feature." Read-only operations view at the
               very bottom — daemons, sequences, employee activity in
               one place. Mutations live on the surfaces it tracks. */}
-          <SafeBoundary label="operations-tracker">
-            <OperationsTrackerPanel
-              tenantId={profile?.tenant_id ?? null}
-              tenantName={tenant?.name ?? null}
-            />
-          </SafeBoundary>
+          {canManageTenant && (
+            <SafeBoundary label="operations-tracker">
+              <OperationsTrackerPanel
+                tenantId={profile?.tenant_id ?? null}
+                tenantName={tenant?.name ?? null}
+              />
+            </SafeBoundary>
+          )}
         </>
       )}
     </div>

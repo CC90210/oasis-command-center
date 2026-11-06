@@ -21,7 +21,7 @@ import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { nonEmptyString, relTime } from "@/lib/format-helpers";
 import { BattleCard } from "@/components/web-leads/BattleCard";
-import { visibleToViewer } from "@/lib/web-leads/data";
+import { canViewerRead } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
@@ -137,10 +137,9 @@ export default async function PipelineLeadDetailPage({
    * the assignee OR anyone listed in `collaborators` -- that is what makes the
    * opener-to-closer handoff work, and the comp plan pays both people.
    *
-   * The battle card fetches /api/web-leads/[id]/battlecard, whose scoping runs
-   * through `visibleToViewer`, and that one accepts the assignee ONLY. It has
-   * no collaborator concept at all. So a collaborator opens this record and the
-   * card inside it 404s.
+   * The battle card fetches /api/web-leads/[id]/battlecard through the shared
+   * `canViewerRead` predicate. It accepts the assignee or a frozen collaborator,
+   * so the opener keeps the call context after a closer handoff.
    *
    * NOBODY IS LEFT WITH NOTHING, and that is why this is a gate rather than an
    * error left to happen: `LeadWebsiteAuditBand` renders UNCONDITIONALLY above,
@@ -149,17 +148,15 @@ export default async function PipelineLeadDetailPage({
    * business; asking the same function the API asks just means they are not
    * shown a panel that would only render an error.
    *
-   * ▶ FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
-   * collaborators so the two doors genuinely match rather than this page
-   * routing around the gap. That widens the boundary PR #237 established and
-   * deserves its own review.
+   * The collaborator follow-up is complete: the two doors use one predicate while
+   * unrelated reps remain outside the boundary established by PR #237.
    */
   const cardViewer =
     session.ok && session.userId
       ? { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin }
       : null;
   const willRenderBattleCard = Boolean(
-    webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
+    webLeadBusinessId && cardViewer && canViewerRead(activeRecord.data, cardViewer, Date.now()),
   );
 
   return (
@@ -223,6 +220,7 @@ export default async function PipelineLeadDetailPage({
             automationIds: stringArray(activeRecord.data.automation_interests),
             paymentDueAmount: numberValue(activeRecord.data.payment_due_amount),
             collectedSetupAmount: numberValue(activeRecord.data.collected_setup_amount),
+            paymentPlanStatus: nonEmptyString(activeRecord.data.payment_plan_status),
             checkoutReference: nonEmptyString(activeRecord.data.stripe_checkout_session_id),
             checkoutUrl: nonEmptyString(activeRecord.data.stripe_checkout_url),
             builderUserId: nonEmptyString(activeRecord.data.fulfillment_owner_id),

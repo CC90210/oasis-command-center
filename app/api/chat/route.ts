@@ -32,7 +32,6 @@ import {
 } from "@/lib/providers";
 import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
 import { operatorNameOverride } from "@/lib/operator-name";
-import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { composeDashboardContextV2 } from "@/lib/agent-context";
 import { markReadDb } from "@/lib/agent-inbox-db";
 import { rateLimit } from "@/lib/rate-limit";
@@ -157,14 +156,9 @@ export async function POST(req: NextRequest) {
   }
   const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope } = ctxResult;
 
-  // Manifest-aware agent validation. A tenant's manifest can declare custom
-  // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
-  // AGENT_REGISTRY — they render in the chat picker, so the validator MUST
-  // accept them. Falls through to chatAgentKeys() for OASIS operators whose
-  // manifest is sparse mid-onboarding. Codex review finding #2 (2026-05-22).
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
-    return jsonError(400, `invalid_agent:${agentKey}`);
-  }
+  // resolveChatContext has already enforced this employee's profile allowlist
+  // intersected with the tenant manifest. Do not replace that user-aware gate
+  // with a workspace-only persona check here.
   const service = getServiceSupabase();
   const attachmentIds = Array.isArray(payload.attachments)
     ? payload.attachments

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { visibleToViewer, isScopedContractor, type Viewer } from "../lib/web-leads/data";
+import { canViewerRead, visibleToViewer, isScopedContractor, type Viewer } from "../lib/web-leads/data";
 
 // Web Leads contractor scoping (fix for the branch that reopened #237,
 // 26ecc31a). `agent` is the commission-only OUTSIDE CONTRACTOR role added
@@ -58,6 +58,27 @@ assert.equal(
   visibleToViewer("  " + AGENT.userId + "  ", AGENT),
   true,
   "surrounding whitespace on the stored assigned_to must not defeat the match",
+);
+
+const activeHandoff = {
+  assigned_to: "44444444-4444-4444-4444-444444444444",
+  collaborators: [AGENT.userId],
+  stage: "founder_meeting_booked",
+  claimed_at: "2026-08-25T12:00:00.000Z",
+};
+assert.equal(
+  canViewerRead(activeHandoff, AGENT, Date.parse("2026-08-25T12:05:00.000Z")),
+  true,
+  "a frozen opener collaborator keeps BattleCard access after the closer owns the lead",
+);
+assert.equal(
+  canViewerRead(
+    activeHandoff,
+    { ...AGENT, userId: "55555555-5555-5555-5555-555555555555" },
+    Date.parse("2026-08-25T12:05:00.000Z"),
+  ),
+  false,
+  "collaborator access must not widen to an unrelated scoped rep",
 );
 
 console.log("web-leads-scope ok");

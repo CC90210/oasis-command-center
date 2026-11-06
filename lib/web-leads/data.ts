@@ -33,6 +33,7 @@ import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "
 import { memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
+import { normalizeCollaborators } from "@/lib/lead-scope";
 import { leadHours } from "./hours";
 import { isClaimable } from "./claim-ops";
 
@@ -615,6 +616,10 @@ export function canViewerRead(
   // Unscoped roles (admins and every established role) are unchanged.
   if (!isScopedContractor(viewer)) return true;
   if (isInBookOf(facts, viewer.userId)) return true;
+  const viewerId = viewer.userId.trim().toLowerCase();
+  if (normalizeCollaborators(data).some((userId) => userId.toLowerCase() === viewerId)) {
+    return true;
+  }
   return isClaimable(data, now);
 }
 

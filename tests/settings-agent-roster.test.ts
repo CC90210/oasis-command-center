@@ -115,8 +115,8 @@ assert.ok(
 
 for (const file of [join(ROOT, "app", "layout.tsx"), join(ROOT, "app", "agents", "page.tsx")]) {
   assert.ok(
-    readFileSync(file, "utf8").includes("resolveEnabledAgentSlugs"),
-    `${file} must resolve the same manifest-first roster`,
+    readFileSync(file, "utf8").includes("resolveUserEnabledAgentSlugs"),
+    `${file} must resolve the same per-user manifest intersection`,
   );
 }
 

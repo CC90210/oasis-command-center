@@ -5,15 +5,10 @@
  * Google callback only signs in accounts that already exist, and the signup page
  * fell back to Supabase entirely.
  *
- * On success the caller holds a session cookie, so it can go straight to
- * /api/auth/provision — getSessionUser() already reads Turso sessions, so tenant
- * provisioning needs no changes.
- *
- * No email-confirmation round trip. Supabase's confirmation gate exists to prove
- * the address is reachable; reproducing it would mean building a second token
- * flow before anyone can log in at all. Provisioning is idempotent and the
- * password-reset path already proves address ownership, so confirmation is
- * deliberately deferred rather than half-built.
+ * Account creation is invite-only. Possession of an active, email-pinned tenant
+ * invite is the existing proof-of-mailbox mechanism; without that capability we
+ * do not create an auth row and we never mint a session. Public workspace signup
+ * stays closed until a real email-verification flow exists.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@libsql/client";
@@ -63,19 +58,27 @@ export async function POST(req: NextRequest) {
   const db = createClient({ url, authToken });
 
   const inviteToken = typeof body.invite_token === "string" ? body.invite_token.trim() : "";
-  if (inviteToken) {
-    const invite = await validateActiveInviteForEmail(db, { rawToken: inviteToken, email });
-    if (!invite.ok) {
-      return NextResponse.json(
-        {
-          code: invite.error === "email_mismatch" ? "invite_email_mismatch" : "invite_invalid",
-          error: invite.error === "email_mismatch"
-            ? "this invite was sent to a different email address"
-            : "this invite is no longer active — ask your admin for a new link",
-        },
-        { status: 400 },
-      );
-    }
+  if (!inviteToken) {
+    return NextResponse.json(
+      {
+        code: "invite_required",
+        error: "Command Center access is invite-only — ask your workspace admin for a link",
+      },
+      { status: 403 },
+    );
+  }
+
+  const invite = await validateActiveInviteForEmail(db, { rawToken: inviteToken, email });
+  if (!invite.ok) {
+    return NextResponse.json(
+      {
+        code: invite.error === "email_mismatch" ? "invite_email_mismatch" : "invite_invalid",
+        error: invite.error === "email_mismatch"
+          ? "this invite was sent to a different email address"
+          : "this invite is no longer active — ask your admin for a new link",
+      },
+      { status: 400 },
+    );
   }
 
   const existing = await db.execute({

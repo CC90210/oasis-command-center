@@ -58,6 +58,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const WEBHOOK_SECRET_ENV = "KIXIE_WEBHOOK_SECRET";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 // Kixie's webhook payload is loose — different event types carry slightly
 // different field sets. Type as a permissive shape and pluck what we need.
@@ -285,6 +286,7 @@ async function persistLeadInteraction(
   // ─── Phone (call lifecycle) ────────────────────────────────────────
   const callId = evt.callid?.trim();
   if (!callId) return;
+  const dashboardInteractionId = evt.customField2?.trim() || "";
 
   // Build the patch — every event refines the row.
   const patch: Record<string, unknown> = {
@@ -302,7 +304,12 @@ async function persistLeadInteraction(
     // (which is the only branch that also sets metadata), so without this the
     // agent would be unknown for ordinary calls. The cisummary branch below
     // overrides metadata with a superset that still carries this field.
-    metadata: { kixie_agent_email: evt.email || null },
+    metadata: {
+      kixie_agent_email: evt.email || null,
+      ...(UUID_RE.test(dashboardInteractionId)
+        ? { dashboard_interaction_id: dashboardInteractionId }
+        : {}),
+    },
   };
 
   // Event-specific fields.
@@ -341,11 +348,29 @@ async function persistLeadInteraction(
 
   // ON CONFLICT (kixie_call_id) DO UPDATE — supported via PostgREST upsert
   // with onConflict pointing at the unique index from migration 093.
-  const { error } = await db
-    .from("lead_interactions")
-    .upsert(patch, { onConflict: "kixie_call_id" });
-  if (error) {
-    throw new Error(`lead_interactions upsert failed: ${error.message}`);
+  let correlated = false;
+  if (UUID_RE.test(dashboardInteractionId)) {
+    const linked = await db
+      .from("lead_interactions")
+      .update(patch)
+      .eq("tenant_id", tenantId)
+      .eq("lead_id", leadId)
+      .eq("id", dashboardInteractionId)
+      .eq("agent_source", "dashboard_drawer")
+      .select("id")
+      .maybeSingle();
+    if (linked.error) {
+      throw new Error(`lead_interactions correlation failed: ${linked.error.message}`);
+    }
+    correlated = Boolean(linked.data);
+  }
+  if (!correlated) {
+    const { error } = await db
+      .from("lead_interactions")
+      .upsert(patch, { onConflict: "kixie_call_id" });
+    if (error) {
+      throw new Error(`lead_interactions upsert failed: ${error.message}`);
+    }
   }
   const stored = await db
     .from("lead_interactions")

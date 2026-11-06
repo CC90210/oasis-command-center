@@ -300,6 +300,41 @@ export default function SignupPage() {
     }
   }
 
+  if (!inviteToken) {
+    return (
+      <div className="min-h-screen bg-bg flex items-center justify-center px-6 py-12">
+        <AuthRedirectGuard to="/" />
+        <div className="w-full max-w-md text-center">
+          <div className="inline-flex items-center gap-3 mb-5">
+            <OasisLogo size={44} priority />
+            <div className="text-fg font-bold tracking-tight text-lg">OASIS AI</div>
+          </div>
+          <div className="bg-bg-panel border border-bg-border rounded-xl p-7 shadow-card">
+            <h1 className="text-xl font-bold text-fg">Command Center access is invite-only</h1>
+            <p className="mt-3 text-sm leading-relaxed text-fg-muted">
+              Ask your workspace administrator for a fresh invite link sent to your work email.
+              If you already have an account, sign in or reset your password instead.
+            </p>
+            <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Link
+                href="/login"
+                className="rounded-md bg-accent px-3 py-2.5 text-sm font-bold text-bg hover:bg-accent-muted"
+              >
+                Sign in
+              </Link>
+              <Link
+                href="/forgot-password"
+                className="rounded-md border border-bg-border bg-bg-elev px-3 py-2.5 text-sm font-bold text-fg hover:border-accent/60"
+              >
+                Reset password
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-6 py-12">
       {/* Same defensive guard as /login and /welcome — an already-authed

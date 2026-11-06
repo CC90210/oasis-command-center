@@ -54,6 +54,8 @@ export type SessionContext =
       profileId: string | null;
       tenantId: string;
       email: string | null;
+      /** Per-user agent allowlist. Must be intersected with the manifest. */
+      agentsEnabled: string[];
       /** Team role from user_profiles. Drives per-agent lead scoping. */
       teamRole: string;
       /** owner | admin | admin_access-toggled → sees all leads / has admin
@@ -74,7 +76,7 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   const db = getServiceSupabase();
   const r = await db
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
+    .select("id, tenant_id, team_role, is_owner, admin_access, agents_enabled")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = r.data as
@@ -84,6 +86,7 @@ export async function resolveSessionContext(): Promise<SessionContext> {
         team_role: string | null;
         is_owner: boolean | null;
         admin_access: boolean | null;
+        agents_enabled: string[] | null;
       }
     | null;
   if (!profile) return { ok: false, reason: "no_profile" };
@@ -106,6 +109,9 @@ export async function resolveSessionContext(): Promise<SessionContext> {
     profileId: profile.id,
     tenantId: profile.tenant_id,
     email: user.email ?? null,
+    agentsEnabled: Array.isArray(profile.agents_enabled)
+      ? profile.agents_enabled.filter((agent): agent is string => typeof agent === "string")
+      : [],
     teamRole,
     // Capability admin = true admin OR toggled admin_access. Folds the grant
     // into every route that keys off session.isAdmin (records, leads, campaigns,

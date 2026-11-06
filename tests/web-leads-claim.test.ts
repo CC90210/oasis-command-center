@@ -335,22 +335,17 @@ assert.equal(
 
   assert.match(
     ops,
-    /\.is\("data->>assigned_to", null\)/,
-    "an unclaimed lead must be swapped on IS NULL, inside the same UPDATE that writes the claim",
+    /db\.rpc\("claim_web_lead"/,
+    "claiming must use the transaction that commits ownership and its touch together",
   );
   assert.match(
     ops,
-    /\.eq\("data->>assigned_to", prevOwner\)/,
-    "a recycled lead must be swapped on the owner we OBSERVED -- it still carries its previous owner, so a bare IS NULL would refuse exactly the leads the recycling rules just released",
-  );
-  assert.match(
-    ops,
-    /data:\s*\{\s*\.\.\.raw,\s*\.\.\.claimPatch\(userId, nowIso\)\s*\}/,
+    /p_data:\s*\{\s*\.\.\.raw,\s*\.\.\.claimPatch\(userId, nowIso\)\s*\}/,
     "claiming must merge lifecycle ownership onto the complete lead record so website, contacts, location and enrichment context survive intact",
   );
   assert.match(
     ops,
-    /\.eq\("updated_at", source\?\.updated_at \|\| ""\)/,
+    /p_expected_updated_at:\s*source\?\.updated_at \|\| ""/,
     "claiming must pin the full-record row version so a concurrent website/contact edit cannot be replaced by the older claim snapshot",
   );
   // The adapter-only spelling that 500s against real supabase-js (see
@@ -360,11 +355,17 @@ assert.equal(
     /\.is\([^)]*"not\.null"\)/,
     "adapter-only is.not.null syntax must not be used -- it breaks against real supabase-js",
   );
-  // An unconfirmed write is never reported as a claim.
+  // An unconfirmed write is never reported as a claim, and a database error
+  // is not disguised as an ordinary race.
   assert.match(
     ops,
-    /if \(won\) claimed\.push\(id\);\s*\n\s*else lostRace\.push\(id\);/,
-    "a write that did not return exactly one row must be reported as lost, never as claimed",
+    /receipt\?\.ok === true[\s\S]*receipt\?\.error === "claim_conflict"[\s\S]*claim_write_failed/,
+    "only a durable RPC receipt may report success; conflicts and infrastructure failures must remain distinct",
+  );
+  assert.match(
+    ops,
+    /receipt\?\.error === "at_capacity"[\s\S]*reason: "at_capacity"/,
+    "the transaction-level cap refusal must remain a visible capacity result, not a lost race",
   );
 }
 
@@ -428,25 +429,15 @@ assert.equal(
     "releasing must also pin the row version so it cannot erase a concurrent contact/context edit while the owner stays the same",
   );
 
-  // The per-lead swap says nothing about a rep's own total. Two overlapping
-  // requests from one rep both read the same held count and both grant the
-  // remaining room. The cap is a business limit, not a security boundary, so
-  // it converges after the fact rather than pretending to be atomic.
-  assert.match(
-    ops,
-    /const excess = after - MAX_LEADS_PER_REP;/,
-    "the cap must be re-checked after writing, not only before",
-  );
-  assert.match(
-    ops,
-    /const giveBack = claimed\.slice\(-excess\);/,
-    "overflow must be given back from the leads THIS request just took, newest first, so a concurrent request's leads are never the ones yanked",
-  );
-  assert.match(
-    ops,
-    /reason: "at_capacity" as const/,
-    "leads given back to the cap must be reported as capacity refusals, not silently dropped",
-  );
+  // Capacity is checked inside the same BEGIN IMMEDIATE transaction as the
+  // owner swap. Two tabs for one rep therefore serialize before either can
+  // cross the ceiling, and no false claim touch needs to be compensated later.
+  const shim = fs.readFileSync(path.join(process.cwd(), "lib/turso-rpc-shim.ts"), "utf8");
+  const atomicClaim = shim.match(/export async function claim_web_lead\([\s\S]*?\n\}/);
+  assert.ok(atomicClaim, "claim_web_lead must be findable");
+  assert.match(atomicClaim![0], /beginTursoWriteTransaction\(client\)/, "claim capacity and ownership must share one write transaction");
+  assert.match(atomicClaim![0], /SELECT count\(\*\) AS total[\s\S]*assigned_to/, "the transaction must count the rep's complete book");
+  assert.match(atomicClaim![0], />= MAX_LEADS_PER_REP[\s\S]*error: "at_capacity"/, "the hard cap must refuse before updating the lead");
 }
 
 // ---------------------------------------------------------------------------

@@ -180,6 +180,8 @@ export type BridgeAuthResult =
       tenantId: string;
       tenantSlug: string;
       userId: string;
+      email: string | null;
+      agentsEnabled: string[];
       teamRole: string;
       /** True for the empire operator (CC) bypassing the tenant gate — as
        *  opposed to an authenticated SunBiz tenant member. B4 (2026-07-23):
@@ -203,10 +205,11 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
   let tenantId = "";
   let teamRole = "read_only"; // fail-closed default (least privilege)
   let email: string | null = user.email ?? null;
+  let agentsEnabled: string[] = [];
   try {
     const opRow = await svc
       .from("user_profiles")
-      .select("tenant_id, team_role, is_owner, admin_access, email")
+      .select("tenant_id, team_role, is_owner, admin_access, email, agents_enabled")
       .eq("auth_user_id", user.id)
       .maybeSingle();
     const op = opRow.data as
@@ -216,6 +219,7 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
           is_owner: boolean | null;
           admin_access: boolean | null;
           email: string | null;
+          agents_enabled: string[] | null;
         }
       | null;
     if (!op) return { ok: false, status: 403, error: "no_profile" };
@@ -232,6 +236,9 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
       teamRole = "admin";
     }
     if (op.email) email = op.email;
+    agentsEnabled = Array.isArray(op.agents_enabled)
+      ? op.agents_enabled.filter((agent): agent is string => typeof agent === "string")
+      : [];
   } catch {
     return { ok: false, status: 403, error: "profile_lookup_failed" };
   }
@@ -262,6 +269,8 @@ export async function authorizeBridgeRequest(): Promise<BridgeAuthResult> {
     tenantId,
     tenantSlug: tenantRow.slug,
     userId: user.id,
+    email,
+    agentsEnabled,
     teamRole,
     isOperator,
   };

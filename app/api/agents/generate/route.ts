@@ -31,6 +31,7 @@ import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
 import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 
@@ -156,11 +157,17 @@ export async function POST(req: NextRequest) {
   const service = getServiceSupabase();
   const profileRes = await service
     .from("user_profiles")
-    .select("tenant_id, team_role, is_owner, admin_access")
+    .select("tenant_id, team_role, is_owner, admin_access, agents_enabled")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const profile = profileRes.data as
-    | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
+    | {
+        tenant_id: string | null;
+        team_role: string;
+        is_owner: boolean;
+        admin_access: boolean | null;
+        agents_enabled: string[] | null;
+      }
     | null;
   if (!profile?.tenant_id) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 403 });
@@ -173,6 +180,14 @@ export async function POST(req: NextRequest) {
     profile.admin_access !== true
   ) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
+  if (!(await isUserTenantChatAgent({
+    userTenantId: profile.tenant_id,
+    profileAgentsEnabled: profile.agents_enabled,
+    userEmail: user.email,
+    agentKey: "bravo",
+  }))) {
+    return NextResponse.json({ ok: false, error: "agent_disabled" }, { status: 403 });
   }
 
   // Provider resolution — same path the manifest editor uses: personal

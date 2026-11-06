@@ -20,7 +20,7 @@ import {
 } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
+import { resolveUserEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 import { matchesPathPrefix } from "@/lib/path-prefix";
@@ -175,18 +175,20 @@ export default async function RootLayout({
     // tenant's heartbeat — cross-tenant signal leak. Fall back to the
     // manifest's primary slug (or first enabled) when the column is invalid.
     const manifestForAgent = await getTenantManifestForUser(tenantId);
-    const manifestEnabledForAgent = resolveEnabledAgentSlugs({
+    const userEnabledForAgent = resolveUserEnabledAgentSlugs({
       manifestAgents: manifestForAgent ? manifestForAgent.agents || [] : null,
-      legacyProfileAgents: profile?.agents_enabled,
+      profileAgents: profile?.agents_enabled,
     });
     const requestedAgent = (profile?.primary_agent || "").toLowerCase();
     const manifestPrimary = manifestForAgent?.agents?.find(
       (a) => a.primary && a.enabled,
     )?.slug?.toLowerCase();
-    const agent = manifestEnabledForAgent.includes(requestedAgent)
+    const agent = userEnabledForAgent.includes(requestedAgent)
       ? requestedAgent
-      : (manifestPrimary || manifestEnabledForAgent[0] || requestedAgent || "bravo");
-    resolvedPrimaryAgent = agent;
+      : (manifestPrimary && userEnabledForAgent.includes(manifestPrimary)
+          ? manifestPrimary
+          : userEnabledForAgent[0] || "");
+    resolvedPrimaryAgent = agent || null;
 
     // Resolve the operator's tenant slug FIRST so the path-override gate
     // below can share the same access policy the /t/[slug] page uses
@@ -245,7 +247,7 @@ export default async function RootLayout({
     const [snapRes, bridgeOnlineResolved, chatPropsResolved, surfaceResolved] = await Promise.all([
       safe(
         "layout.agent_state_snapshot",
-        (async () => {
+        agent ? (async () => {
           const db = getServiceSupabase();
           const r = await db
             .from("agent_state_snapshot")
@@ -253,7 +255,7 @@ export default async function RootLayout({
             .eq("agent_name", agent)
             .maybeSingle();
           return { data: r.data as { last_tick_at?: string | null } | null };
-        })(),
+        })() : Promise.resolve(emptySnap),
         emptySnap
       ),
       safe("layout.bridge_online", getBridgeOnline(tenantId), false),
@@ -419,7 +421,7 @@ export default async function RootLayout({
                 // the operator is previewing a tenant they don't own.
                 (demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug))
                   ? (manifestPrimaryAgentSlug(manifest) ?? "bravo")
-                  : (resolvedPrimaryAgent || manifestPrimaryAgentSlug(manifest) || "bravo")
+                  : (resolvedPrimaryAgent || "unassigned")
               }
               primaryAgentLive={
                 // Suppress the live indicator in preview mode — it

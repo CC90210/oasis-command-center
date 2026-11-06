@@ -36,6 +36,7 @@ import type { Provider } from "./providers";
 import { getServiceSupabase } from "./supabase-server";
 import { decryptField } from "./field-encryption";
 import { isOperatorEmail, operatorPlatformFallback } from "./operator-credentials";
+import { isUserTenantChatAgent } from "./manifest/tenant-scope";
 
 export type ChatAuthContext = {
   tenantId: string;
@@ -77,8 +78,9 @@ export type ChatAuthResult =
  * Resolve the chat context for (authed user, agent_key). Returns a
  * structured result — callers map ok=false to a JSON error response.
  *
- * Caller must have already validated agent_key against chatAgentKeys();
- * this helper trusts the input and only handles the auth/tenant/key plumbing.
+ * This helper also enforces the employee-level agent allowlist before reading
+ * provider configuration, so every route that dispatches through it gets the
+ * same direct-API authorization boundary.
  */
 export async function resolveChatContext(
   user: { id: string; email: string | null | undefined },
@@ -88,12 +90,25 @@ export async function resolveChatContext(
 
   const { data: profileRow } = await service
     .from("user_profiles")
-    .select("tenant_id")
+    .select("tenant_id, agents_enabled")
     .eq("auth_user_id", user.id)
     .maybeSingle();
-  const tenantId = (profileRow as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  const profile = profileRow as {
+    tenant_id: string | null;
+    agents_enabled: string[] | null;
+  } | null;
+  const tenantId = profile?.tenant_id ?? null;
   if (!tenantId) {
     return { ok: false, status: 403, code: "no_tenant" };
+  }
+
+  if (!(await isUserTenantChatAgent({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profile?.agents_enabled,
+    userEmail: user.email,
+    agentKey,
+  }))) {
+    return { ok: false, status: 403, code: "agent_disabled" };
   }
 
   // Phase B (per-user agent config, 2026-05-17): prefer the user-scoped

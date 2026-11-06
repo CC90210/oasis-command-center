@@ -363,6 +363,15 @@ const operationsPanel = readFileSync(
   new URL("../components/settings/OperationsTrackerPanel.tsx", import.meta.url),
   "utf8",
 );
+const settingsContent = readFileSync(
+  new URL("../components/settings/SettingsContent.tsx", import.meta.url),
+  "utf8",
+);
+assert.match(
+  settingsContent,
+  /\{canManageTenant && \(\s*<SafeBoundary label="operations-tracker">/u,
+  "tenant-wide operations activity must only mount for an owner or admin",
+);
 assert.ok(
   !operationsPanel.includes(".limit(1_000)"),
   "seven-day rep totals must not silently stop at the first database page",

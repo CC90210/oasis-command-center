@@ -14,6 +14,7 @@
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import { validateBridgeAgent } from "@/lib/agent-roots";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -51,6 +52,17 @@ export async function POST(req: Request) {
   if (!agentCheck.ok) {
     return new Response(JSON.stringify({ ok: false, error: agentCheck.error }), {
       status: agentCheck.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (!(await isUserTenantChatAgent({
+    userTenantId: auth.tenantId,
+    profileAgentsEnabled: auth.agentsEnabled,
+    userEmail: auth.email,
+    agentKey: agent,
+  }))) {
+    return new Response(JSON.stringify({ ok: false, error: "agent_disabled" }), {
+      status: 403,
       headers: { "content-type": "application/json" },
     });
   }

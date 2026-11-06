@@ -40,6 +40,7 @@ export type GoogleCalendarErrorCode =
   | "calendar_cancel_failed"
   | "calendar_reconcile_failed"
   | "calendar_read_failed"
+  | "founder_slot_unavailable"
   | "google_meet_link_missing";
 
 export class GoogleCalendarIntegrationError extends Error {
@@ -150,6 +151,7 @@ export type FounderMeetingCalendarReceipt = {
 type GoogleCalendarEvent = {
   id?: string;
   status?: string;
+  transparency?: string;
   summary?: string;
   description?: string;
   attendees?: Array<{ email?: string; responseStatus?: string }>;
@@ -157,8 +159,8 @@ type GoogleCalendarEvent = {
   iCalUID?: string;
   hangoutLink?: string;
   organizer?: { email?: string };
-  start?: { dateTime?: string; timeZone?: string };
-  end?: { dateTime?: string; timeZone?: string };
+  start?: { dateTime?: string; date?: string; timeZone?: string };
+  end?: { dateTime?: string; date?: string; timeZone?: string };
   conferenceData?: {
     entryPoints?: Array<{ entryPointType?: string; uri?: string }>;
   };
@@ -688,6 +690,100 @@ function validatedEventId(eventId: string): string {
   return normalized;
 }
 
+function calendarBoundaryMilliseconds(
+  boundary: GoogleCalendarEvent["start"] | GoogleCalendarEvent["end"],
+): number {
+  const value = boundary?.dateTime || boundary?.date;
+  return value ? Date.parse(value) : Number.NaN;
+}
+
+/**
+ * Read the host's primary calendar before mutating it. Events.list accepts the
+ * existing calendar.events OAuth scope, expands recurring events, and returns
+ * only entries intersecting this interval. We still apply explicit half-open
+ * overlap logic so back-to-back calls remain bookable and malformed provider
+ * data fails closed instead of silently double-booking a founder.
+ */
+async function assertFounderSlotAvailable(args: {
+  authorizedFetch: AuthorizedCalendarFetch;
+  startAt: string;
+  endAt: string;
+  excludeEventId?: string;
+}): Promise<void> {
+  const requestedStart = Date.parse(args.startAt);
+  const requestedEnd = Date.parse(args.endAt);
+  let pageToken: string | undefined;
+
+  do {
+    const listUrl = new URL(
+      `${CALENDAR_API}/calendars/${encodeURIComponent(PRIMARY_CALENDAR_ID)}/events`,
+    );
+    listUrl.searchParams.set("timeMin", args.startAt);
+    listUrl.searchParams.set("timeMax", args.endAt);
+    listUrl.searchParams.set("singleEvents", "true");
+    listUrl.searchParams.set("showDeleted", "false");
+    listUrl.searchParams.set("maxResults", "2500");
+    listUrl.searchParams.set("orderBy", "startTime");
+    if (pageToken) listUrl.searchParams.set("pageToken", pageToken);
+
+    const response = await args.authorizedFetch(
+      listUrl.toString(),
+      { method: "GET", headers: { accept: "application/json" } },
+      "calendar_read_failed",
+    );
+    if (!response.ok) {
+      throw new GoogleCalendarIntegrationError(
+        "calendar_read_failed",
+        `Google Calendar could not verify founder availability: ${await responseText(response)}`,
+        { httpStatus: response.status },
+      );
+    }
+    const payload = await responseJson<{
+      kind?: string;
+      items?: GoogleCalendarEvent[];
+      nextPageToken?: string;
+    }>(response, "calendar_read_failed");
+    if (
+      payload.kind !== "calendar#events" ||
+      (payload.items !== undefined && !Array.isArray(payload.items))
+    ) {
+      throw new GoogleCalendarIntegrationError(
+        "calendar_read_failed",
+        "Google Calendar returned an invalid availability response",
+      );
+    }
+
+    for (const event of payload.items || []) {
+      if (
+        event.status === "cancelled" ||
+        event.transparency === "transparent" ||
+        (args.excludeEventId && event.id === args.excludeEventId)
+      ) {
+        continue;
+      }
+      const eventStart = calendarBoundaryMilliseconds(event.start);
+      const eventEnd = calendarBoundaryMilliseconds(event.end);
+      if (!Number.isFinite(eventStart) || !Number.isFinite(eventEnd) || eventEnd <= eventStart) {
+        throw new GoogleCalendarIntegrationError(
+          "calendar_read_failed",
+          "Google Calendar returned an event with an invalid time interval",
+          { eventId: event.id },
+        );
+      }
+      if (eventStart < requestedEnd && eventEnd > requestedStart) {
+        throw new GoogleCalendarIntegrationError(
+          "founder_slot_unavailable",
+          "the selected founder already has a busy Calendar event during this time",
+          { eventId: event.id },
+        );
+      }
+    }
+    pageToken = typeof payload.nextPageToken === "string" && payload.nextPageToken
+      ? payload.nextPageToken
+      : undefined;
+  } while (pageToken);
+}
+
 /**
  * Create and verify a client-visible founder-audit event.
  *
@@ -712,6 +808,14 @@ export async function createFounderMeetingCalendarEvent(
     args.organizerUserId,
     args.bookingRequestId,
   );
+  await assertFounderSlotAvailable({
+    authorizedFetch,
+    startAt: normalized.startAt,
+    endAt: normalized.endAt,
+    // A retry may see its own deterministic event before the POST returns 409;
+    // reconciliation below still verifies that event's full identity.
+    excludeEventId: eventId,
+  });
   const eventUrl = `${CALENDAR_API}/calendars/${encodeURIComponent(
     PRIMARY_CALENDAR_ID,
   )}/events/${eventId}`;
@@ -946,6 +1050,13 @@ export async function updateGoogleFounderMeeting(
     organizerUserId: input.hostUserId,
     expectedOrganizerEmail: input.expectedOrganizerEmail,
     dependencyOverrides,
+  });
+
+  await assertFounderSlotAvailable({
+    authorizedFetch,
+    startAt: normalized.startAt,
+    endAt: normalized.endAt,
+    excludeEventId: eventId,
   });
 
   const eventUrl = `${CALENDAR_API}/calendars/${encodeURIComponent(

@@ -16,7 +16,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
 import { isOperatorEmail } from "@/lib/operator-credentials";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getUserTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
   daemonBackedCronForName,
@@ -71,10 +71,14 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("id, tenant_id")
+    .select("id, tenant_id, agents_enabled")
     .eq("auth_user_id", user.id)
     .maybeSingle();
-  const profileRow = profile.data as { id: string | null; tenant_id: string | null } | null;
+  const profileRow = profile.data as {
+    id: string | null;
+    tenant_id: string | null;
+    agents_enabled: string[] | null;
+  } | null;
   const tenantId = profileRow?.tenant_id ?? null;
   // The bridge writes its pm2 snapshot to integrations_health keyed by
   // profile_id (same scope the background-workers route reads). Needed below
@@ -102,7 +106,14 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
     return NextResponse.json({ ok: false, error: tenantQuery.error.message }, { status: 500 });
   }
-  const tenantJobs = (tenantQuery.data || []).map((j) => ({ ...j, source: "tenant" as const }));
+  const allowedAgentKeys = new Set(await getUserTenantChatAgentKeys({
+    userTenantId: tenantId,
+    profileAgentsEnabled: profileRow?.agents_enabled,
+    userEmail: user.email,
+  }));
+  const tenantJobs = (tenantQuery.data || [])
+    .filter((job) => allowedAgentKeys.has(String(job.agent_key).toLowerCase()))
+    .map((job) => ({ ...job, source: "tenant" as const }));
 
   // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
   // 084), so the operator's tenantId is the canonical filter. Pre-084 we
@@ -268,8 +279,12 @@ export async function POST(req: NextRequest) {
   // maps agent_key → repo root via SIBLING_ROOT_BY_AGENT_KEY, so an
   // unfiltered agent_key lets a tenant operator pick which sibling
   // repo runs.
-  const allowedAgents = await getTenantEnabledAgents(tenantId);
-  if (allowedAgents.length > 0 && !allowedAgents.includes(agentKey)) {
+  const allowedAgents = await getUserTenantChatAgentKeys({
+    userTenantId: tenantId,
+    profileAgentsEnabled: ctx.agentsEnabled,
+    userEmail: ctx.email,
+  });
+  if (!allowedAgents.includes(agentKey)) {
     return NextResponse.json(
       {
         ok: false,

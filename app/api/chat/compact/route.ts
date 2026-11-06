@@ -28,7 +28,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage } from "@/lib/providers";
 import { resolveChatContext } from "@/lib/chat-auth";
-import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -101,11 +100,9 @@ export async function POST(req: NextRequest) {
   if (!ctxResult.ok) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey } = ctxResult;
+  const { provider, model, apiKey } = ctxResult;
 
-  if (!(await isTenantChatAgent(tenantId, agentKey))) {
-    return jsonError(400, `invalid_agent:${agentKey}`);
-  }
+  // resolveChatContext already applied the employee-specific agent gate.
 
   // Build the compaction prompt: one user turn carrying the transcript,
   // one system turn carrying the rules. The model never sees the raw

@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isOperatorEmail } from "@/lib/operator-credentials";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { getUserTenantChatAgentKeys } from "@/lib/manifest/tenant-scope";
 import { daemonToggleRefusal, type CronNameLookup } from "@/lib/automations/daemon-cron-guard";
 
 export const runtime = "nodejs";
@@ -107,8 +107,12 @@ export async function PATCH(
   }
   if (typeof body.agent_key === "string") {
     const nextAgentKey = body.agent_key.toLowerCase();
-    const allowedAgents = await getTenantEnabledAgents(tenantId);
-    if (allowedAgents.length > 0 && !allowedAgents.includes(nextAgentKey)) {
+    const allowedAgents = await getUserTenantChatAgentKeys({
+      userTenantId: tenantId,
+      profileAgentsEnabled: session.agentsEnabled,
+      userEmail: session.email,
+    });
+    if (!allowedAgents.includes(nextAgentKey)) {
       return NextResponse.json(
         {
           ok: false,

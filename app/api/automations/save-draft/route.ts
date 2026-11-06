@@ -26,6 +26,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import type { AutomationDraft } from "@/lib/ai-automation-drafter";
+import { isUserTenantChatAgent } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,6 +77,15 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  const agentKey = draft.agent_key!.toLowerCase();
+  if (!(await isUserTenantChatAgent({
+    userTenantId: ctx.tenantId,
+    profileAgentsEnabled: ctx.agentsEnabled,
+    userEmail: ctx.email,
+    agentKey,
+  }))) {
+    return NextResponse.json({ ok: false, error: "agent_disabled" }, { status: 403 });
+  }
 
   // Insert the cron row first so the bridge file-write can include the
   // cron_id as a breadcrumb in the script header (lets operators trace
@@ -83,7 +93,7 @@ export async function POST(req: NextRequest) {
   const db = getServiceSupabase();
   const cronPayload = {
     tenant_id: ctx.tenantId,
-    agent_key: draft.agent_key!.toLowerCase(),
+    agent_key: agentKey,
     name: draft.suggested_name!,
     description: draft.suggested_description || "",
     schedule: draft.schedule!.trim(),

@@ -121,10 +121,11 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
   {
     service: "stripe",
     label: "Stripe",
-    description: "Subscription billing + ARR widget.",
+    description: "Verified website payments, Checkout completion, subscription billing, and the ARR widget.",
     fields: [
       { key: "secret_key", label: "Secret Key", sensitive: true, hint: "starts with sk_live_ or sk_test_" },
       { key: "publishable_key", label: "Publishable Key", sensitive: false, hint: "starts with pk_" },
+      { key: "webhook_secret", label: "Checkout Webhook Secret", sensitive: true, hint: "Stripe Workbench → Webhooks. Starts with whsec_. Required for automatic payment confirmation." },
     ],
   },
   {

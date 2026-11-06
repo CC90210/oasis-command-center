@@ -192,6 +192,9 @@ export type SessionContext = {
   authUserId: string;
   profileId: string;
   tenantId: string;
+  email: string | null;
+  /** Per-user agent allowlist; authorization intersects it with the manifest. */
+  agentsEnabled: string[];
   teamRole: TeamRole;
   isOwner: boolean;
   /** admin_access toggle grant — an admin flipped this agent to full admin.
@@ -260,7 +263,7 @@ export async function getSessionContext(): Promise<SessionContext | null> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
+    .select("id, tenant_id, team_role, is_owner, admin_access, agents_enabled")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   if (error || !data || !data.tenant_id) return null;
@@ -268,6 +271,10 @@ export async function getSessionContext(): Promise<SessionContext | null> {
     authUserId: user.id,
     profileId: data.id,
     tenantId: data.tenant_id,
+    email: user.email ?? null,
+    agentsEnabled: Array.isArray(data.agents_enabled)
+      ? data.agents_enabled.filter((agent: unknown): agent is string => typeof agent === "string")
+      : [],
     teamRole: (data.team_role as TeamRole) ?? "member",
     isOwner: !!data.is_owner,
     adminAccess: data.admin_access === true,
