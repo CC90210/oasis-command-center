@@ -7,9 +7,13 @@
  *
  * Same gate as /api/automations/background-workers, in the same order: a signed-in
  * viewer, on an OASIS surface, whose persona may see system surfaces, AND the
- * workspace's agents owner. These texts are CC's own alerts (lead names, email
- * subjects, his money), so an OASIS admin who is not the agents owner gets an
- * explicit empty scope, not CC's inbox.
+ * agents owner. These texts are CC's own alerts (lead names, email subjects, his
+ * money), so an OASIS admin who is not the agents owner gets an explicit empty
+ * scope, not CC's inbox.
+ *
+ * The owner checked is WEBDEV_TENANT_ID's, the tenant the notices are read from,
+ * never the viewer's own workspace: an agents owner of another OASIS workspace is
+ * not thereby CC (CodeRabbit, OCC #806). CC still sees them from any OASIS surface.
  */
 
 import { NextResponse } from "next/server";
@@ -44,7 +48,7 @@ export const GET = jsonRoute("api/automations/notifications GET", async (req: Re
   if (!capabilitiesFor(persona, tenantSlug).canSeeSystemSurfaces) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  if (!(await isAgentsOwner(session.tenantId, session.userId))) {
+  if (!(await isAgentsOwner(WEBDEV_TENANT_ID, session.userId))) {
     return NextResponse.json({ ok: true, notifications: [], scope: "not_yours" });
   }
   if (!tursoConfigured()) {

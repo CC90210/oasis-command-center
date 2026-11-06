@@ -148,6 +148,20 @@ async function run() {
   assert.equal(deliveryLine({ agent: "command_center", bridge: "command_center", delivered: true, detail: null }),
     "Sent by the Command Center");
 
+  // --- the read gate is bound to the tenant the notices come from ------------
+  // An agents owner of ANOTHER OASIS workspace is not CC (CodeRabbit, #806): the
+  // owner check must name WEBDEV_TENANT_ID, the tenant readRecentNotifications reads.
+  {
+    const route = readFileSync("app/api/automations/notifications/route.ts", "utf8");
+    assert.match(route, /isAgentsOwner\(WEBDEV_TENANT_ID, session\.userId\)/);
+    assert.doesNotMatch(route, /isAgentsOwner\(session\.tenantId/);
+    assert.match(route, /readRecentNotifications\(getTursoClient\(\), WEBDEV_TENANT_ID,/);
+    // The panel drops an answer that is no longer the newest request's.
+    const panel = readFileSync("components/automations/NotificationLogPanel.tsx", "utf8");
+    assert.match(panel, /const seq = \+\+latest\.current;\n(?:\s*\/\/[^\n]*\n)*\s*const qs = /);
+    assert.match(panel, /\{ retries: 2 \}\);\n\s*if \(seq !== latest\.current\) return;\n/);
+  }
+
   console.log("notification-log: all assertions passed");
 }
 

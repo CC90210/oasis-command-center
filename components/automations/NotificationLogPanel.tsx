@@ -9,7 +9,7 @@
  * scope "not_yours" and this renders nothing, like the Background workers panel).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Bell } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { timeAgo } from "@/lib/devices/presence";
@@ -78,10 +78,15 @@ export function NotificationLogPanel() {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  // Only the newest request may write state: a slow answer for the previous
+  // filter (fetchJson retries) must not land under the new filter's chip.
+  const latest = useRef(0);
 
   const refresh = useCallback(async () => {
+    const seq = ++latest.current;
     const qs = filter === "all" ? "" : `?agent=${filter}`;
     const result = await fetchJson<ApiResponse>(`/api/automations/notifications${qs}`, undefined, { retries: 2 });
+    if (seq !== latest.current) return;
     if (!result.ok) {
       setError(result.error);
       return;
