@@ -13,8 +13,8 @@
 -- address is REQUIRED, so it is NOT NULL and non-blank here as well as in the
 -- app.
 --
--- ONE ROW PER WORKSPACE (tenant_id is the key). Written only by the Settings >
--- Brand save (app/settings/brand/actions.ts) for the signed-in owner's or
+-- ONE ROW PER WORKSPACE (tenant_id is the key). Written only by
+-- POST /api/settings/sender (Settings > Brand) for the signed-in owner's or
 -- admin's own workspace (lib/email/tenant-sender.ts saveTenantSender), in one
 -- batch with its tenant_audit_log row. OASIS's own workspaces and the retired
 -- client keep the fixed identities in lib/email/brands.ts; the save refuses to
@@ -22,14 +22,27 @@
 --
 -- VERIFIED IS DECIDED LIVE, NOT STORED. from_address counts only while it is a
 -- mailbox this workspace proved it controls: its Google Workspace mailbox
--- (tenant_integration_credentials service 'gws') whose last Test passed, or an
--- active member's own Google account (user_integration_credentials service
--- 'gmail_oauth'). Every read re-checks that against the live rows, and only
--- that check can make the identity usable. verified_via and verified_at record
--- what the check found when the identity was last saved, for the audit trail.
+-- (tenant_integration_credentials service 'gws') with a passing Test bound to
+-- its current credential (tenant_mailbox_tests, below), or an active member's
+-- own Google account (user_integration_credentials service 'gmail_oauth').
+-- Every read re-checks that against the live rows, and only that check can
+-- make the identity usable. verified_via and verified_at record what the check
+-- found when the identity was last saved, for the audit trail.
 --
 -- verified_via  'gws' | 'gmail_oauth' | NULL (not verified when last saved).
 -- sending_domain  the domain of from_address, lower case (DKIM alignment).
+--
+-- tenant_mailbox_tests: the last PASSING Test of a workspace's Google
+-- Workspace mailbox, bound to exactly what was tested. A Test reads the stored
+-- address and app password once, probes those values, and records the pass
+-- only if the stored ciphertexts are still the ones it read (a compare-and-set
+-- in the same statement). credential_fingerprint is the sha256 of those two
+-- ciphertexts; every save re-encrypts with a fresh IV, so ANY edit, even
+-- re-saving the same value, makes the stored credential a new version that no
+-- earlier pass describes. Without it, a pass that finished after the address
+-- was changed stamped the new address as tested (the per-field last_test_ok
+-- the Connections card shows is stamped on whatever rows exist when the probe
+-- returns). A failed Test removes the pass for the version it tested.
 --
 -- CONVENTIONS (bravo__187, bravo__194): tenant_id TEXT NOT NULL and the key;
 -- timestamps are ISO-8601 UTC strings written by the app; the WHERE tenant_id
@@ -62,4 +75,22 @@ BEFORE UPDATE OF tenant_id ON tenant_sender
 WHEN NEW.tenant_id IS NOT OLD.tenant_id
 BEGIN
   SELECT RAISE(ABORT, 'tenant_sender.tenant_id is immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS tenant_mailbox_tests (
+  tenant_id               TEXT NOT NULL,
+  service                 TEXT NOT NULL CHECK (service = 'gws'),
+  from_address            TEXT NOT NULL CHECK (instr(from_address, '@') > 1),
+  credential_fingerprint  TEXT NOT NULL CHECK (length(credential_fingerprint) = 64),
+  tested_at               TEXT NOT NULL,
+  tested_by               TEXT,
+  PRIMARY KEY (tenant_id, service)
+);
+
+-- A proof never moves to another workspace.
+CREATE TRIGGER IF NOT EXISTS tenant_mailbox_tests_tenant_immutable
+BEFORE UPDATE OF tenant_id ON tenant_mailbox_tests
+WHEN NEW.tenant_id IS NOT OLD.tenant_id
+BEGIN
+  SELECT RAISE(ABORT, 'tenant_mailbox_tests.tenant_id is immutable');
 END;

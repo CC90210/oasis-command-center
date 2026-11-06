@@ -30,6 +30,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolveTrackingBase } from "./tracking-base";
 import { unsubscribeMailto } from "./sending-identity";
 import { brandFooter } from "./brand-shell";
+import { workspaceSuppressionBrand } from "./support-mailbox";
 import type { BrandKey } from "./brands";
 
 // The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
@@ -221,6 +222,23 @@ export function listUnsubscribeHeader(
   // mailto pointing at a different domain than the visible sender is both a
   // deliverability signal and a dead end once the old mailbox is retired.
   return `<${unsubscribeApiUrl(email, brand, base)}>, <${unsubscribeMailto()}>`;
+}
+
+/**
+ * A client workspace's opt-out for ONE recipient: the footer link (the page,
+ * which asks before it records) and the one-click List-Unsubscribe header, both
+ * filed under that workspace by id (support-mailbox.ts
+ * workspaceSuppressionBrand), which is where every send of that workspace
+ * checks (checkEmailSuppressed). The header carries the link only: a mailto
+ * would land in the client's inbox, where nothing records it.
+ */
+export function workspaceOptOut(
+  email: string,
+  tenantId: string,
+  base: string = platformTrackingBase(),
+): { url: string; header: string } {
+  const brand = workspaceSuppressionBrand(tenantId);
+  return { url: unsubscribeUrl(email, brand, base), header: `<${unsubscribeApiUrl(email, brand, base)}>` };
 }
 
 export type UnsubMode = "footer" | "none";

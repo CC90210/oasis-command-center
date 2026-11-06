@@ -11,6 +11,16 @@ export function gmailMessageIdForIdempotencyKey(idempotencyKey: string): string 
   return `<oasis-${digest}@oasisai.work>`;
 }
 
+/**
+ * The same stable id for a client workspace's own mail, on ITS sending domain.
+ * That mail names no other company anywhere, its headers included, and a
+ * Message-ID on a domain that is not the sender's is scored against.
+ */
+export function workspaceMessageIdForIdempotencyKey(idempotencyKey: string, domain: string): string {
+  const digest = createHash("sha256").update(idempotencyKey, "utf8").digest("hex");
+  return `<${digest}@${domain.trim().toLowerCase()}>`;
+}
+
 type SmtpErrorLike = {
   code?: unknown;
   command?: unknown;

@@ -15,9 +15,11 @@
  * VERIFIED MEANS PROVEN, CHECKED LIVE EVERY TIME. A from address counts only
  * while it is a mailbox this workspace controls, proven one of two ways:
  *   - "gws": the workspace's Google Workspace mailbox (Settings > Connections >
- *     Google Workspace) IS that address and its last Test passed. Saving a
- *     key clears its test result, so a passing result also means the mailbox
- *     has not changed since it was tested.
+ *     Google Workspace) IS that address and a passing Test is bound to its
+ *     stored credential exactly as it is now (tenant_mailbox_tests: the address
+ *     and a fingerprint of the stored ciphertexts, recorded by compare-and-set;
+ *     see recordMailboxTest). Any edit to the mailbox makes it a new version
+ *     that no earlier pass describes.
  *   - "gmail_oauth": an ACTIVE member of this workspace connected their own
  *     Google account, with permission to send, and that account IS that
  *     address. Google confirmed the address when they connected it.
@@ -34,20 +36,27 @@
  * TENANT ISOLATION. Every statement names the tenant in its WHERE clause, and
  * callers pass the tenant from the signed-in session, never from a request
  * body. OASIS's own workspaces and the retired client keep their fixed brands
- * (lib/email/brands.ts); the Brand page's save (app/settings/brand/actions.ts)
- * refuses to store a row for them, and brandForTenant ignores one if it exists.
+ * (lib/email/brands.ts); POST /api/settings/sender refuses to store a row for
+ * them, and brandForTenant ignores one if it exists.
+ *
+ * EVERY SEND PATH ASKS resolveSendingBrand (below), which answers the fixed
+ * brand exactly as before, the workspace's own verified brand, or a refusal in
+ * plain words. A workspace's brand is sent only through its own mailboxes
+ * (lib/email/workspace-send.ts), never through OASIS's.
  *
  * Not to be confused with lib/email/sending-identity.ts, the environment-set
  * identity of OASIS's own drip mail.
  */
 
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { decryptField } from "@/lib/field-encryption";
 import { storedTestResult } from "@/lib/tenant-integration-store";
 import { memberStanding } from "@/lib/team";
-import { isReservedSendingDomain } from "./brand-for-tenant";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import type { BrandKey } from "./brands";
+import { brandForTenant, isReservedSendingDomain, type TenantBrand } from "./brand-for-tenant";
 
 export type SenderVia = "gws" | "gmail_oauth";
 
@@ -239,7 +248,11 @@ export function validateSenderInput(body: unknown): Validated {
 /** The workspace's Google Workspace mailbox ('gws'), as its stored rows describe it. */
 export type WorkspaceMailbox =
   | { saved: false }
-  /** tested: true = the last Test passed and nothing changed since; false = it failed; null = not tested since saved. */
+  /**
+   * tested: true = a passing Test is bound to exactly the stored credential
+   * (tenant_mailbox_tests); false = its last Test failed; null = no Test
+   * describes the credential as it is stored now.
+   */
   | { saved: true; address: string; tested: boolean | null };
 
 export type MailboxFacts = {
@@ -269,33 +282,198 @@ export function decideVerification(fromAddress: string, facts: MailboxFacts): Se
 const GWS_FIELDS = ["app_password", "from_address"] as const;
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 
+// --- the workspace mailbox, and the Test that proves it ---------------------
+//
+// WHY A PROOF BOUND TO THE CREDENTIAL (Codex review, 2026-10-08). The Test
+// route reads the mailbox, waits on Google's SMTP check, then stamps
+// last_test_ok on whatever rows exist when it returns. Change the address
+// while a Test of the old one is in flight and the late pass marks the NEW
+// address as tested: an address Google never authenticated would count as
+// verified. So a pass is recorded here instead, bound to exactly what was
+// tested, and "tested" means only that.
+
+const MAILBOX_TESTS_MISSING = /no such table:\s*tenant_mailbox_tests\b/i;
+
+/** The workspace mailbox's stored credential, read in one statement. */
+export type MailboxSnapshot = {
+  fromAddress: string;
+  appPassword: string;
+  /** sha256 of the two stored ciphertexts: the credential's version. */
+  fingerprint: string;
+  fromCiphertext: string;
+  passwordCiphertext: string;
+};
+
 /**
- * The workspace mailbox, from ONE read of its stored rows, so the address and
- * its test result describe the same moment. Stored rows only: a client
- * workspace never resolves OASIS's environment mailbox, and a saved value with
- * no test result means it changed after the last Test (the same rule the
- * Connections card reads, lib/os/connectors.ts keyedStatus). A row that will
- * not decrypt throws: that is "could not check", never "not connected".
+ * Every save re-encrypts with a fresh IV (lib/field-encryption), so the two
+ * ciphertexts change on ANY edit, even re-saving the same value: a pass
+ * recorded for one version can never describe the next.
+ */
+export function credentialFingerprint(fromCiphertext: string, passwordCiphertext: string): string {
+  return createHash("sha256").update(`gws\n${fromCiphertext}\n${passwordCiphertext}`, "utf8").digest("hex");
+}
+
+const GWS_ROWS_SQL =
+  "SELECT field_key, encrypted_value, last_tested_at, last_test_ok FROM tenant_integration_credentials WHERE tenant_id = ? AND service = 'gws'";
+const PROOF_SQL =
+  "SELECT from_address, credential_fingerprint FROM tenant_mailbox_tests WHERE tenant_id = ? AND service = 'gws'";
+
+/**
+ * The stored rows and the recorded pass, in ONE read transaction, so the two
+ * describe the same moment. Before bravo__202 there can be no recorded pass.
+ */
+async function readMailboxRows(
+  db: Client,
+  tenantId: string,
+): Promise<{ rows: Record<string, unknown>[]; proof: Record<string, unknown> | null }> {
+  try {
+    const [rows, proof] = await db.batch(
+      [
+        { sql: GWS_ROWS_SQL, args: [tenantId] },
+        { sql: PROOF_SQL, args: [tenantId] },
+      ],
+      "read",
+    );
+    return { rows: rowsOf(rows), proof: rowsOf(proof)[0] ?? null };
+  } catch (error) {
+    if (!MAILBOX_TESTS_MISSING.test(error instanceof Error ? error.message : String(error))) throw error;
+    return { rows: rowsOf(await db.execute({ sql: GWS_ROWS_SQL, args: [tenantId] })), proof: null };
+  }
+}
+
+function ciphertexts(rows: Record<string, unknown>[]): { from: string; password: string } | null {
+  const byField = new Map(rows.map((r) => [text(r.field_key), text(r.encrypted_value)]));
+  const from = byField.get("from_address") || "";
+  const password = byField.get("app_password") || "";
+  return from && password ? { from, password } : null;
+}
+
+/** Was the stored credential, exactly as it is now, the one a passing Test probed? */
+function provenBy(proof: Record<string, unknown> | null, fingerprint: string, address: string): boolean {
+  return !!proof && text(proof.credential_fingerprint) === fingerprint && same(text(proof.from_address), address);
+}
+
+/**
+ * The workspace mailbox for verification. Stored rows only: a client workspace
+ * never resolves OASIS's environment mailbox. A row that will not decrypt
+ * throws: that is "could not check", never "not connected".
  */
 async function readWorkspaceMailbox(db: Client, tenantId: string): Promise<WorkspaceMailbox> {
-  const rows = rowsOf(
-    await db.execute({
-      sql: `SELECT field_key, encrypted_value, last_tested_at, last_test_ok
-            FROM tenant_integration_credentials
-            WHERE tenant_id = ? AND service = 'gws'`,
-      args: [tenantId],
-    }),
-  );
-  const byField = new Map(rows.map((r) => [text(r.field_key), r]));
-  const required = GWS_FIELDS.map((f) => byField.get(f));
-  if (required.some((r) => !r || !text(r.encrypted_value))) return { saved: false };
-  const address = decryptField(text(byField.get("from_address")!.encrypted_value)).trim().toLowerCase();
+  const { rows, proof } = await readMailboxRows(db, tenantId);
+  const ct = ciphertexts(rows);
+  if (!ct) return { saved: false };
+  const address = decryptField(ct.from).trim().toLowerCase();
   if (!address) return { saved: false };
-  // A value saved after the last Test means that Test no longer describes the
-  // mailbox, whatever it found; only then does a failure count.
-  const results = required.map((r) => (text(r!.last_tested_at) ? storedTestResult(r!.last_test_ok) : null));
-  const tested = results.some((t) => t === null) ? null : results.some((t) => t === false) ? false : true;
-  return { saved: true, address, tested };
+  if (provenBy(proof, credentialFingerprint(ct.from, ct.password), address)) return { saved: true, address, tested: true };
+  // No pass describes this credential. The per-field results the Connections
+  // card shows only choose the words: a failure still recorded on both rows
+  // says the last Test failed; anything else asks for a Test.
+  const results = GWS_FIELDS.map((f) => rows.find((r) => text(r.field_key) === f)).map((r) =>
+    r && text(r.last_tested_at) ? storedTestResult(r.last_test_ok) : null,
+  );
+  return { saved: true, address, tested: results.every((t) => t !== null) && results.some((t) => t === false) ? false : null };
+}
+
+/**
+ * For a Test (app/api/integrations/keys/test): the stored address and app
+ * password, read once, which are exactly what it must probe. Null when the
+ * workspace has not stored both (OASIS's own environment mailbox is never
+ * here, so its Test keeps working as before).
+ */
+export async function readMailboxForTest(db: Client, tenantId: string): Promise<MailboxSnapshot | null> {
+  if (!tenantId) throw new Error("readMailboxForTest: tenantId is required");
+  const ct = ciphertexts(rowsOf(await db.execute({ sql: GWS_ROWS_SQL, args: [tenantId] })));
+  if (!ct) return null;
+  const fromAddress = decryptField(ct.from).trim().toLowerCase();
+  // Google shows an app password as four spaced groups; SMTP wants it without.
+  const appPassword = decryptField(ct.password).replace(/\s+/g, "");
+  if (!fromAddress || !appPassword) return null;
+  return {
+    fromAddress,
+    appPassword,
+    fingerprint: credentialFingerprint(ct.from, ct.password),
+    fromCiphertext: ct.from,
+    passwordCiphertext: ct.password,
+  };
+}
+
+/**
+ * Record a Test of `snapshot`. A pass is written only if the stored
+ * ciphertexts are STILL the ones probed, in the same statement (compare-and-
+ * set): a credential changed mid-Test gets no pass. A failure removes the pass
+ * for the version it tested, and only that one.
+ *
+ *   proven      the pass is recorded for this exact credential
+ *   changed     the credential changed while the Test ran: nothing recorded
+ *   cleared     the Test failed: any pass for this version is gone
+ *   not_set_up  the migration is not applied yet: nothing recorded
+ */
+export async function recordMailboxTest(
+  db: Client,
+  args: { tenantId: string; snapshot: MailboxSnapshot; ok: boolean; testedBy: string | null; now: Date },
+): Promise<"proven" | "changed" | "cleared" | "not_set_up"> {
+  const { tenantId, snapshot } = args;
+  if (!tenantId) throw new Error("recordMailboxTest: tenantId is required");
+  try {
+    if (!args.ok) {
+      await db.execute({
+        sql: "DELETE FROM tenant_mailbox_tests WHERE tenant_id = ? AND service = 'gws' AND credential_fingerprint = ?",
+        args: [tenantId, snapshot.fingerprint],
+      });
+      return "cleared";
+    }
+    const rs = await db.execute({
+      sql: `INSERT INTO tenant_mailbox_tests (tenant_id, service, from_address, credential_fingerprint, tested_at, tested_by)
+            SELECT ?, 'gws', ?, ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM tenant_integration_credentials
+                          WHERE tenant_id = ? AND service = 'gws' AND field_key = 'from_address' AND encrypted_value = ?)
+              AND EXISTS (SELECT 1 FROM tenant_integration_credentials
+                          WHERE tenant_id = ? AND service = 'gws' AND field_key = 'app_password' AND encrypted_value = ?)
+            ON CONFLICT (tenant_id, service) DO UPDATE SET
+              from_address = excluded.from_address,
+              credential_fingerprint = excluded.credential_fingerprint,
+              tested_at = excluded.tested_at,
+              tested_by = excluded.tested_by`,
+      args: [
+        tenantId,
+        snapshot.fromAddress,
+        snapshot.fingerprint,
+        args.now.toISOString(),
+        args.testedBy,
+        tenantId,
+        snapshot.fromCiphertext,
+        tenantId,
+        snapshot.passwordCiphertext,
+      ],
+    });
+    return rs.rowsAffected > 0 ? "proven" : "changed";
+  } catch (error) {
+    if (MAILBOX_TESTS_MISSING.test(error instanceof Error ? error.message : String(error))) return "not_set_up";
+    throw error;
+  }
+}
+
+/**
+ * For a send through the workspace mailbox (lib/email/workspace-send.ts): the
+ * stored credential and whether a passing Test is bound to exactly it, from
+ * one read. The sender refuses unless it is proven AND is the brand's address.
+ */
+export async function readMailboxForSend(
+  db: Client,
+  tenantId: string,
+): Promise<{ snapshot: MailboxSnapshot; proven: boolean } | null> {
+  if (!tenantId) throw new Error("readMailboxForSend: tenantId is required");
+  const { rows, proof } = await readMailboxRows(db, tenantId);
+  const ct = ciphertexts(rows);
+  if (!ct) return null;
+  const fromAddress = decryptField(ct.from).trim().toLowerCase();
+  const appPassword = decryptField(ct.password).replace(/\s+/g, "");
+  if (!fromAddress || !appPassword) return null;
+  const fingerprint = credentialFingerprint(ct.from, ct.password);
+  return {
+    snapshot: { fromAddress, appPassword, fingerprint, fromCiphertext: ct.from, passwordCiphertext: ct.password },
+    proven: provenBy(proof, fingerprint, fromAddress),
+  };
 }
 
 /**

@@ -80,12 +80,39 @@ export const OASIS_SUPPRESSION_BRAND = "OASIS AI";
 export const OASIS_SUPPRESSION_TENANT_ID = DELIVERY_TENANT_ID;
 
 /**
+ * The suppression brand on a CLIENT WORKSPACE's own mail (a TenantBrand,
+ * lib/email/workspace-send.ts): "workspace:<tenant id>".
+ *
+ * Pinned by id for the same reason as OASIS's above, only more so: a client's
+ * business name is whatever its owner typed, and a name lookup could file the
+ * opt-out under a stranger with the same name, where no sender of this
+ * workspace ever looks. With OASIS_UNSUBSCRIBE_HMAC_SECRET set the link is
+ * signed over this exact string, so nobody can re-point it at another
+ * workspace.
+ */
+const WORKSPACE_SUPPRESSION_PREFIX = "workspace:";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function workspaceSuppressionBrand(tenantId: string): string {
+  return `${WORKSPACE_SUPPRESSION_PREFIX}${tenantId.trim().toLowerCase()}`;
+}
+
+/** The workspace a "workspace:<id>" brand names, or null for any other brand. */
+export function workspaceOfSuppressionBrand(brand: string): string | null {
+  const b = brand.trim().toLowerCase();
+  if (!b.startsWith(WORKSPACE_SUPPRESSION_PREFIX)) return null;
+  const id = b.slice(WORKSPACE_SUPPRESSION_PREFIX.length);
+  return UUID.test(id) ? id : null;
+}
+
+/**
  * The workspace an opt-out with this brand is filed under, for a brand that
  * must never be resolved by name; null for every other brand, which keeps the
  * name lookup.
  */
 export function pinnedSuppressionTenant(brand: string): string | null {
-  return brand.trim().toLowerCase() === OASIS_SUPPRESSION_BRAND.toLowerCase() ? OASIS_SUPPRESSION_TENANT_ID : null;
+  if (brand.trim().toLowerCase() === OASIS_SUPPRESSION_BRAND.toLowerCase()) return OASIS_SUPPRESSION_TENANT_ID;
+  return workspaceOfSuppressionBrand(brand);
 }
 
 /**
