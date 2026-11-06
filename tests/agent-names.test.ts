@@ -18,19 +18,31 @@
  *   /t/<own>/marketplace           cards Atlas, Aura, Bravo, Maven
  *   /t/<own>/marketplace/<house>   (one click from those cards) and the
  *   /t/<own>/agent/<house>         legacy chat: the persona's page and prompt
- *   /t/<own>/editor                "Rename the Bravo agent to 'Ops Lead'."
+ *   /api/agents[/<house>]          the same library as JSON, names and prompts
+ *   /t/<own>/editor                "Rename the Bravo agent to 'Ops Lead'.", the
+ *                                  editor AI's own example and its change list
  *   /t/oasis-ai-cc/reasoning       groups headed Bravo, Atlas, Maven
  *   /playbook/prompts              five descriptions naming Atlas, Bravo ...
  *   /playbook/client-deploy        "Atlas runs the math, Maven audits ..."
- *   /playbook/10-oasis-loop        "Last updated ... by Maven via ..."
- *   /settings/privacy              "Conaugh McKenna": NOT a leak. Quebec's Law
- *                                  25 requires the person in charge of personal
- *                                  information to be published, and CC holds the
+ *   /playbook/10-oasis-loop        "Last updated ... by Maven via ...", and a
+ *                                  first step that is the prompts library: a
+ *                                  founders' page now, with its business
+ *                                  document twin (/playbook/business/oasis-loop)
+ *   /settings/privacy and          "Conaugh McKenna": NOT a leak. Quebec's Law
+ *   /playbook/business/            25 requires the person in charge of personal
+ *     privacy-policy               information to be published, and CC holds the
  *                                  role (lib/legal/constants.ts PRIVACY_OFFICER).
- *                                  It is the one sanctioned name, checked as such.
- * plus /t/<slug> with no root page and a workspace dashboard's "Your agents"
- * card, for a stored manifest that binds the house agents under their persona
- * names, as two live self-signup workspaces do.
+ *                                  It is the one sanctioned name, checked as such
+ *                                  on every business document a rep can open.
+ * plus /t/<slug> with no root page, a workspace dashboard's "Your agents" card
+ * and the Reasoning page, for a stored manifest that binds the house agents
+ * under their persona names, as two live self-signup workspaces do. Outside
+ * OASIS those bindings do nothing (components/os/department/config.ts
+ * workspaceBindings), so these pages do not list them at all.
+ *
+ * Fail closed: with the profile read failing, nobody reads the internal names,
+ * the founders' pages are the 404 and the Reasoning page says it could not
+ * check (review of #551: no check exercised that branch).
  *
  * THE NAMES are the crawl's seven (scripts/qa/crawl-lib.mjs on the crawl
  * branch: Bravo, Maven, Atlas, Aura, Hermes, Lex, Conaugh), matched as whole
@@ -48,7 +60,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
@@ -124,6 +136,10 @@ stubFile("components/manifest/ManifestEditorChat.tsx", { ManifestEditorChat });
 stubFile("components/agents/AgentChat.tsx", { AgentChat });
 stubFile("components/marketplace/AgentSubscriptionPanel.tsx", { AgentSubscriptionPanel });
 stubFile("components/playbook/PromptsLibraryFilter.tsx", { PromptsLibraryFilter });
+// A business document's Copy/Download bar and the incident register: the page
+// hands them the text it also draws as markdown, which is what is checked.
+stubFile("app/playbook/business/[slug]/DocActions.tsx", { DocActions: Mounted("DocActions") });
+stubFile("app/playbook/business/[slug]/IncidentRegister.tsx", { IncidentRegister: Mounted("IncidentRegister") });
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
@@ -274,7 +290,8 @@ async function main() {
   // The self-signup binds the house agents under their persona names and has
   // no root page, so /t/selfsignup draws the generic summary. One entity, so a
   // dashboard over it draws its "Your agents" card (an empty data model draws
-  // only an empty-state card).
+  // only an empty-state card). Its own teammate, Front Desk, is what those
+  // pages list: the house bindings do nothing outside OASIS.
   const signupManifest = {
     ...clientManifest,
     tenant_slug: "selfsignup",
@@ -284,6 +301,7 @@ async function main() {
       { slug: "bravo", display_name: "Bravo", enabled: true, primary: true },
       { slug: "atlas", display_name: "Atlas", enabled: true },
       { slug: "maven", display_name: "Maven", enabled: true },
+      { slug: "front-desk", display_name: "Front Desk", enabled: true },
     ],
   };
 
@@ -475,10 +493,37 @@ async function main() {
     // The editor's AI knows a binding by its stored name, so a binding shown
     // only by its department ("Chief of Staff" for one stored as a persona) is
     // never the example: the command would not resolve (Codex review on #551).
-    assert.ok(!readable(html.signup).includes("Rename the "), "the self-signup was offered a rename its editor cannot resolve");
+    // The self-signup's own teammate is.
+    assert.ok(!readable(html.signup).includes(example("Chief of Staff")), "the self-signup was offered a rename its editor cannot resolve");
+    assert.ok(readable(html.signup).includes(example("Front Desk")), "the self-signup's example names its own teammate");
     assert.match(readable(html.signup), /Chief of Staff \(primary\), Finance, Marketing/, "the snapshot names the self-signup's bindings by department");
     assert.match(readable(html.signupForFounder), /Bravo \(primary\), Atlas, Maven/, "control: the bindings carry the persona names the rule removes");
     assert.ok(readable(html.signupForFounder).includes(example("Bravo")), "control: a founder's example uses the stored name");
+  });
+  await check("the editor's AI is taught on a neutral teammate, and its change list names agents by the rule", async () => {
+    // The model's instructions are the same for every workspace: their worked
+    // example renamed Bravo (review of #551).
+    const { buildManifestEditorPrompt } = await import("../lib/manifest/ai-prompt");
+    noName(buildManifestEditorPrompt({ tenantSlug: "client-co", manifest: clientManifest }), "the editor AI's instructions for a client");
+    // A rename of a binding stored under a persona's name, as the change list
+    // shows it (lib/manifest/diff.ts writes the stored names).
+    const { diffManifests } = await import("../lib/manifest/diff");
+    const before = parseManifest(signupManifest);
+    const renamed = { ...before, agents: before.agents.map((a) => (a.slug === "bravo" ? { ...a, display_name: "Ops Lead" } : a)) };
+    const relabelled = { ...before, nav: before.nav.map((n, i) => (i === 0 ? { ...n, label: "Atlas" } : n)) };
+    const [rename] = diffManifests(before, renamed);
+    assert.ok(rename && rename.path.startsWith("agent[") && /\bBravo\b/.test(rename.summary), `the fixture's change names the stored persona: ${rename?.summary}`);
+    assert.ok(names.changeSummaryFor(rename, false).includes("Chief of Staff"), names.changeSummaryFor(rename, false));
+    noName(names.changeSummaryFor(rename, false), "the self-signup's change list");
+    assert.equal(names.changeSummaryFor(rename, true), rename.summary, "a founder reads the change as written");
+    const [navChange] = diffManifests(before, relabelled);
+    assert.ok(navChange, "the nav fixture produced no change");
+    assert.equal(names.changeSummaryFor(navChange, false), navChange.summary, "a workspace's own words (a nav label) are never rewritten");
+    // The change list renders after a model call, which a static render cannot
+    // reach: the component must print every summary through the rule.
+    const src = readFileSync(join(ROOT, "components", "manifest", "ManifestEditorChat.tsx"), "utf8");
+    assert.ok(/\{changeSummaryFor\(d, internalNames\)\}/.test(src), "the editor's change list does not name agents through the rule");
+    assert.ok(!/\{\s*d\.summary\s*\}/.test(src), "the editor prints a raw change summary");
   });
 
   // -- the Reasoning quick actions --
@@ -504,12 +549,62 @@ async function main() {
     assert.deepEqual([...new Set(teams)], ["chief-of-staff"], "the rep is handed an ask into a department they cannot open");
     for (const href of page.hrefs) noName(decodeURIComponent(href), "a prompt the rep is handed");
   });
-  await check("/t/selfsignup/reasoning, its owner: the bound house agents are departments there too", async () => {
+  await check("/t/selfsignup/reasoning, its owner: the bound house agents do nothing here, so none of their actions is offered", async () => {
     const signup = await getManifest("selfsignup");
     const { grid, page } = await reasoningAs("signup", signup);
-    assert.ok(grid, "no quick actions; the check would be vacuous");
-    noName(page.text.join(" "), "the self-signup's Reasoning");
-    for (const href of page.hrefs) noName(decodeURIComponent(href), "a prompt the owner is handed");
+    assert.equal(grid, undefined, "a house agent's actions were offered where it does not run");
+    const text = page.text.join(" ");
+    noName(text, "the self-signup's Reasoning");
+    assert.match(text, /No quick actions for Front Desk yet/, "the page names the teammate this workspace runs");
+    assert.match(text, /\b0\s+actions\s+\S+\s+1\s+agents/, "the count is the agents that run here");
+    for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(!text.includes(dept), `${dept} is listed for a binding that does not run here`);
+  });
+
+  // A stored OASIS manifest that binds house agents under their persona names
+  // (OASIS's own workspace runs them, so they are listed, named by the rule).
+  const oasisWith = (agents: Array<{ slug: string; display_name: string; primary?: boolean }>) =>
+    ({ ...oasisManifest, agents: agents.map((a) => ({ enabled: true, ...a })) }) as typeof oasisManifest;
+  const { departmentProfile } = await import("../components/os/department/config");
+  await check("/t/oasis-ai-cc/reasoning, the rep: two agents of one department share its one heading; CC still reads them by name", async () => {
+    const both = oasisWith([{ slug: "bravo", display_name: "Bravo", primary: true }, { slug: "aura", display_name: "Aura" }]);
+    const rep = await reasoningAs("closer", both);
+    assert.ok(rep.grid, "no quick actions; the check would be vacuous");
+    const text = rep.page.text.join(" ");
+    noName(text, "the rep's Reasoning");
+    const purpose = departmentProfile("chief_of_staff").purpose;
+    assert.equal(rep.page.text.filter((t) => t === purpose).length, 1, "the Chief of Staff heading is drawn more than once");
+    assert.match(text, /Run the daily briefing/, "Bravo's actions are under it");
+    assert.match(text, /Morning briefing/, "Aura's actions are under it");
+    const ccText = (await reasoningAs("cc", both)).page.text.join(" ");
+    assert.ok(/\bBravo\b/.test(ccText) && /\bAura\b/.test(ccText), "control: a founder's groups are the agents");
+  });
+  await check("the Reasoning page's empty state says why, in department words: none written yet, none the role opens, or could not check", async () => {
+    // Lex has no quick actions: the empty state names the binding, by the rule.
+    const lexOnly = await reasoningAs("closer", oasisWith([{ slug: "lex", display_name: "Lex", primary: true }]));
+    assert.equal(lexOnly.grid, undefined);
+    const lexText = lexOnly.page.text.join(" ");
+    noName(lexText, "the rep's empty Reasoning");
+    assert.match(lexText, /No quick actions for Chief of Staff yet/);
+    // Finance and Marketing are not the rep's to open: every action is filtered
+    // out, and the page says so instead of that none exist.
+    const closed = await reasoningAs("closer", oasisWith([{ slug: "atlas", display_name: "Atlas", primary: true }, { slug: "maven", display_name: "Maven" }]));
+    assert.equal(closed.grid, undefined, "the rep was offered actions into departments they cannot open");
+    const closedText = closed.page.text.join(" ");
+    noName(closedText, "the rep's filtered Reasoning");
+    assert.match(closedText, /The quick actions for Finance, Marketing go to departments your role can't open\./);
+    assert.ok(!/yet/.test(closedText), "a role's filter is reported as actions not written yet");
+    // The workspace could not be read: the rail cannot say what the rep opens.
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      await raw.execute("ALTER TABLE tenants RENAME TO tenants_offline");
+      const unchecked = await reasoningAs("closer", oasisManifest);
+      assert.equal(unchecked.grid, undefined);
+      assert.match(unchecked.page.text.join(" "), /Couldn't check which departments you can open/);
+    } finally {
+      console.error = quiet;
+      await raw.execute("ALTER TABLE tenants_offline RENAME TO tenants");
+    }
   });
   await check("/t/oasis-ai-cc/reasoning, CC: the founders' own names and every department", async () => {
     const { page } = await reasoningAs("cc", oasisManifest);
@@ -524,37 +619,56 @@ async function main() {
   const prompts = (await import("../app/playbook/prompts/page")).default;
   const clientDeploy = (await import("../app/playbook/client-deploy/page")).default;
   const drills = (await import("../app/playbook/drills/page")).default;
+  const businessDoc = (await import("../app/playbook/business/[slug]/page")).default;
+  const { isFounderPlaybookHref } = await import("../lib/playbook-access");
   const docParams = { params: Promise.resolve({ slug: "10-oasis-loop" }) };
-  await check("the Playbook, the rep: the founders' pages are the 404 and are linked nowhere; the manual names departments", async () => {
+  const businessParams = (slug: string) => ({ params: Promise.resolve({ slug }) });
+  await check("the Playbook, the rep: the founders' pages, the OASIS Loop among them, are the 404, linked and pointed at nowhere", async () => {
     await login("closer");
     assert.equal(await outcome(() => prompts()), "404", "the prompts library");
     assert.equal(await outcome(() => clientDeploy()), "404", "the client-deploy runbook");
+    // The OASIS Loop's first step is the prompts library's Prompt translator,
+    // which a rep cannot open (review of #551): the manual and its business
+    // document twin are the founders' too.
+    assert.equal(await outcome(() => playbookDoc(docParams)), "404", "the OASIS Loop manual");
+    assert.equal(await outcome(() => businessDoc(businessParams("oasis-loop"))), "404", "the OASIS Loop's business document");
     const index = draw(await playbookIndex());
-    noName(index.text.join(" "), "the rep's Playbook index");
-    assert.ok(!index.hrefs.includes("/playbook/prompts"), "the index links the rep to the prompts library");
+    const indexText = index.text.join(" ");
+    noName(indexText, "the rep's Playbook index");
+    assert.deepEqual(index.hrefs.filter((h) => isFounderPlaybookHref(h)), [], "the index links the rep to a founders' page");
+    assert.ok(!/Prompts? Library|Prompt translator/i.test(indexText), "the index points the rep at the prompts library");
     assert.ok(index.hrefs.includes("/playbook/script"), "the rep keeps the call script");
+    // Every manual the index lists for the rep: no internal name, no link to a
+    // founders' page.
+    const manuals = index.hrefs.filter((h) => /^\/playbook\/\d/.test(h));
+    assert.ok(manuals.length > 0, "the rep's operating manual lists nothing; the check would be vacuous");
+    for (const href of manuals) {
+      const page = draw(await playbookDoc({ params: Promise.resolve({ slug: href.split("/").pop()! }) }));
+      noName(page.text.join(" "), `the rep's ${href}`);
+      assert.deepEqual(page.hrefs.filter((h) => isFounderPlaybookHref(h)), [], `${href} links the rep to a founders' page`);
+    }
     const drillPage = draw(await drills());
-    noName(drillPage.text.join(" "), "the rep's drills");
+    const drillText = drillPage.text.join(" ");
+    noName(drillText, "the rep's drills");
     assert.ok(drillPage.hrefs.length > 0 && !drillPage.hrefs.includes("/playbook/client-deploy"), "the drills link the rep to the runbook");
-    const docPage = draw(await playbookDoc(docParams));
-    const doc = docPage.text.join(" ");
-    noName(doc, "the rep's OASIS Loop");
-    assert.match(doc, /Last updated: 2026-07-11 by Marketing via Antigravity IDE\./, "the manual itself still renders");
-    // The manual links the prompts library: for a rep the words stay and the
-    // link to a 404 goes (Codex review on #551).
-    assert.ok(doc.includes("Prompts Library"), "the manual's sentence lost its words");
-    assert.ok(!docPage.hrefs.includes("/playbook/prompts"), "the manual links the rep to a page that is a 404 for them");
-    assert.ok(docPage.hrefs.includes("/oasis-loop/index.html"), "the manual's other links are untouched");
+    // Drill 06 told everyone to "verify against the canonical runbook", a page
+    // the rep cannot open.
+    assert.ok(!/runbook/i.test(drillText), "a drill sends the rep to the runbook");
+    assert.match(drillText, /against the client's live project/);
   });
-  await check("the Playbook, CC: the prompts library, the runbook and the manual as written", async () => {
+  await check("the Playbook, CC: the prompts library, the runbook and the OASIS Loop as written", async () => {
     await login("cc");
     assert.equal(await outcome(() => prompts()), "rendered");
     assert.equal(await outcome(() => clientDeploy()), "rendered");
-    assert.ok(draw(await playbookIndex()).hrefs.includes("/playbook/prompts"), "CC lost the prompts card");
-    assert.ok(draw(await drills()).hrefs.includes("/playbook/client-deploy"), "CC lost the drills' runbook link");
+    const index = draw(await playbookIndex()).hrefs;
+    assert.ok(index.includes("/playbook/prompts") && index.includes("/playbook/10-oasis-loop"), "CC lost the prompts or the OASIS Loop card");
+    const drillPage = draw(await drills());
+    assert.ok(drillPage.hrefs.includes("/playbook/client-deploy"), "CC lost the drills' runbook link");
+    assert.ok(drillPage.text.includes("Deployment runbook"), "CC lost the drills' runbook label");
     const docPage = draw(await playbookDoc(docParams));
     assert.match(docPage.text.join(" "), /by Maven via Antigravity IDE/);
     assert.ok(docPage.hrefs.includes("/playbook/prompts"), "CC lost the manual's link to the prompts library");
+    assert.equal(await outcome(() => businessDoc(businessParams("oasis-loop"))), "rendered", "CC lost the OASIS Loop's business document");
   });
   await check("the Playbook, a client owner: every page is the 404 (another workspace)", async () => {
     await login("client");
@@ -573,40 +687,143 @@ async function main() {
       noName(text.split(PRIVACY_OFFICER.name).join(" "), `${who}'s Data & privacy`);
     });
   }
+  // -- Business documents: the same one name, on every document a rep opens --
+  await check("/playbook/business/<doc>, the rep: no document names an internal agent; the privacy policy names only its officer", async () => {
+    await login("closer");
+    const { resolveDocsViewer } = await import("../lib/playbook/viewer");
+    const docs = await import("../lib/playbook/documents");
+    const v = await resolveDocsViewer();
+    assert.ok(v.ok && !v.founder, "the rep's documents viewer did not resolve");
+    const slugs = (await docs.listDocs(v, docs.docsDb(), new Date())).rows.map((r) => r.doc.slug);
+    assert.ok(slugs.includes("privacy-policy") && !slugs.includes("oasis-loop"), `the rep's documents: ${slugs.join(", ")}`);
+    for (const slug of slugs) {
+      const text = draw(await businessDoc(businessParams(slug))).text.join(" ");
+      if (slug === "privacy-policy") assert.ok(text.includes(PRIVACY_OFFICER.name), "the privacy policy does not publish its officer");
+      noName(text.split(PRIVACY_OFFICER.name).join(" "), `the rep's /playbook/business/${slug}`);
+    }
+  });
 
   // -- /t/<slug> with no root page --
+  // The house agents a self-signup binds do nothing outside OASIS
+  // (components/os/department/config.ts workspaceBindings): the summary lists
+  // the teammate that runs there, not a believable team that does not.
   const tenantRoot = (await import("../app/t/[slug]/page")).default;
-  await check("/t/selfsignup, its owner: the summary names the bound house agents by department", async () => {
+  const { Card } = await import("../components/Card");
+  await check("/t/selfsignup, its owner: the summary lists the teammate that runs there, and no house agent under any name", async () => {
     await login("signup");
-    const text = draw(await tenantRoot({ params: Promise.resolve({ slug: "selfsignup" }) })).text.join(" ");
+    const root = (await tenantRoot({ params: Promise.resolve({ slug: "selfsignup" }) })) as ReactNS.ReactElement;
+    const summary = (root.type as (p: unknown) => unknown)(root.props);
+    const card = elementsOf(summary, Card).find((el) => (el.props as { title?: unknown }).title === "Agents");
+    assert.ok(card, "the summary drew no Agents card");
+    const text = draw(card).text.join(" ");
     noName(text, "the self-signup's summary");
-    for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(text.includes(dept), `${dept} is not on the summary`);
+    assert.match(text, /1 enabled/);
+    assert.ok(text.includes("Front Desk"), "the teammate that runs here is not listed");
+    for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(!text.includes(dept), `${dept} is listed for a binding that does not run here`);
   });
 
   // -- a workspace dashboard's "Your agents" card --
   const { ManifestDashboard } = await import("../components/manifest/ManifestDashboard");
-  const { Card } = await import("../components/Card");
   const signupStored = await getManifest("selfsignup");
-  const agentsCard = async (who: Who) => {
+  const agentsCard = async (who: Who, manifest = signupStored, tenantId = SIGNUP) => {
     await login(who);
-    const tree = await ManifestDashboard({ manifest: signupStored, tenantId: SIGNUP });
+    const tree = await ManifestDashboard({ manifest, tenantId });
     const card = elementsOf(tree, Card).find((el) => (el.props as { title?: unknown }).title === "Your agents");
     assert.ok(card, "the dashboard drew no agents card");
-    return draw(card).text.join(" ");
+    return draw(card);
   };
-  await check("a dashboard's agents card, the self-signup's owner: the bound house agents by department", async () => {
-    const text = await agentsCard("signup");
-    noName(text, "the self-signup's agents card");
+  for (const who of ["signup", "cc"] as const) {
+    await check(`a dashboard's agents card over the self-signup, ${who}: its own teammate only; the house bindings do not run there`, async () => {
+      const text = (await agentsCard(who)).text.join(" ");
+      noName(text, `${who}'s agents card over the self-signup`);
+      assert.match(text, /One agent on this workspace\./);
+      assert.ok(text.includes("Front Desk"), "the teammate that runs here is not listed");
+      for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(!text.includes(dept), `${dept} is listed for a binding that does not run here`);
+    });
+  }
+  // OASIS's own workspace runs its house agents: a stored binding under a
+  // persona's name is listed, and named by the rule; its Chat goes only to a
+  // department the viewer may open (a rep's Finance was "Page not found").
+  const oasisPersonas = oasisWith([
+    { slug: "bravo", display_name: "Bravo", primary: true },
+    { slug: "atlas", display_name: "Atlas" },
+    { slug: "maven", display_name: "Maven" },
+  ]);
+  await check("a dashboard's agents card in OASIS, the rep: departments, and a Chat link only into a department they may open", async () => {
+    const card = await agentsCard("closer", oasisPersonas, OASIS);
+    const text = card.text.join(" ");
+    noName(text, "the rep's agents card");
     for (const dept of ["Chief of Staff", "Finance", "Marketing"]) assert.ok(text.includes(dept), `${dept} is not on the card`);
+    assert.deepEqual(card.hrefs, ["/team/chief-of-staff"], "the rep was handed a Chat link into a department that is a 404 for them");
   });
-  await check("a dashboard's agents card, CC (control): the stored persona names are what the rule removes", async () => {
-    assert.match(await agentsCard("cc"), /\bBravo\b.*\bAtlas\b.*\bMaven\b/);
+  await check("a dashboard's agents card in OASIS, CC (control): the stored persona names, and every department's Chat", async () => {
+    const card = await agentsCard("cc", oasisPersonas, OASIS);
+    assert.match(card.text.join(" "), /\bBravo\b.*\bAtlas\b.*\bMaven\b/);
+    assert.deepEqual(card.hrefs, ["/team/chief-of-staff", "/team/finance", "/team/marketing"]);
+  });
+
+  // -- fail closed: the profile read fails --
+  await check("with the profile read failing, nobody reads the internal names, the founders' pages are the 404, and Reasoning says it could not check", async () => {
+    const { viewerReadsInternalAgentNames } = await import("../lib/os/agent-names-session");
+    const { readOpenAskDepartments } = await import("../lib/playbook/ask-access");
+    const logged: string[] = [];
+    const quiet = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      await raw.execute("ALTER TABLE user_profiles RENAME TO user_profiles_offline");
+      for (const who of ["closer", "cc"] as const) {
+        await login(who);
+        assert.equal(await viewerReadsInternalAgentNames(), false, `${who} read the internal names while the profile read was failing`);
+      }
+      assert.ok(logged.some((l) => l.includes("[agent-names.viewer]") && /profile resolution unavailable/.test(l)), "the failed read was not logged with its cause");
+      await login("closer");
+      assert.equal(await outcome(() => prompts()), "404", "the prompts library opened during the outage");
+      assert.equal(await outcome(() => clientDeploy()), "404", "the client-deploy runbook opened during the outage");
+      assert.equal(await readOpenAskDepartments(), null, "a failed read was reported as departments the viewer may open");
+      const reasoning = await reasoningAs("closer", oasisManifest);
+      assert.equal(reasoning.grid, undefined);
+      assert.match(reasoning.page.text.join(" "), /Couldn't check which departments you can open/);
+    } finally {
+      console.error = quiet;
+      await raw.execute("ALTER TABLE user_profiles_offline RENAME TO user_profiles");
+    }
+  });
+
+  // -- the agent library's API --
+  // The same rule as the marketplace page: a house agent's name and prompt are
+  // OASIS's founders' alone (review of #551 found the JSON still carried them).
+  const { NextRequest } = await import("next/server");
+  const agentsApi = await import("../app/api/agents/route");
+  const agentApi = await import("../app/api/agents/[slug]/route");
+  const getOne = (slug: string) => agentApi.GET(new NextRequest(`https://oasisai.work/api/agents/${slug}`), { params: Promise.resolve({ slug }) });
+  for (const who of ["client", "closer"] as const) {
+    await check(`/api/agents, ${who}: no house agent in the list, and a house agent's own read is the 404`, async () => {
+      await login(who);
+      const res = await agentsApi.GET(new NextRequest("https://oasisai.work/api/agents"));
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { agents: Array<{ slug: string; name: string }> };
+      const slugs = body.agents.map((a) => a.slug.toLowerCase());
+      assert.ok(slugs.includes("sdr"), "the library returned no templates; the check would be vacuous");
+      assert.deepEqual(slugs.filter((s) => !names.libraryOffersAgent(s, false)), [], "a house agent is in the list");
+      noName(JSON.stringify(body.agents), `${who}'s /api/agents`);
+      for (const slug of ["bravo", "atlas", "maven", "sunbiz"]) assert.equal((await getOne(slug)).status, 404, `/api/agents/${slug}`);
+      assert.equal((await getOne("sdr")).status, 200, "a template's own read stays open");
+    });
+  }
+  await check("/api/agents, CC (control): the house agents, by name", async () => {
+    await login("cc");
+    const body = (await (await agentsApi.GET(new NextRequest("https://oasisai.work/api/agents"))).json()) as { agents: Array<{ slug: string }> };
+    assert.ok(body.agents.some((a) => a.slug === "bravo"), "CC lost the house agents");
+    const one = (await (await getOne("bravo")).json()) as { agent?: { name: string } };
+    assert.equal(one.agent?.name, "Bravo");
   });
 
   // -- a founders' page link, wherever it is written --
   await check("a link to a founders' page is caught with a query, a fragment or a sub-path, and nothing else is", async () => {
     const { isFounderPlaybookHref } = await import("../lib/playbook-access");
-    for (const href of ["/playbook/prompts", "/playbook/prompts#translator", "/playbook/prompts?q=x", "/playbook/client-deploy", "/PLAYBOOK/PROMPTS"]) {
+    for (const href of ["/playbook/prompts", "/playbook/prompts#translator", "/playbook/prompts?q=x", "/playbook/client-deploy", "/PLAYBOOK/PROMPTS", "/playbook/10-oasis-loop"]) {
       assert.equal(isFounderPlaybookHref(href), true, href);
     }
     for (const href of ["/playbook", "/playbook/promptsx", "/playbook/script", "/oasis-loop/index.html", "", null]) {

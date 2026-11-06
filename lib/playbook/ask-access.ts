@@ -20,8 +20,26 @@ import { departmentGate } from "@/components/os/department/gate";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { AskDepartmentSlug } from "@/lib/os/chat-href";
 
+/**
+ * The departments the viewer may open, or null when that could not be checked
+ * (signed out, a workspace that could not be read, or a read that failed,
+ * logged). A page that would otherwise tell the viewer "none of these is open
+ * to you" says it could not check instead: an absent answer is not a zero.
+ */
+export async function readOpenAskDepartments(): Promise<AskDepartmentSlug[] | null> {
+  let os: Awaited<ReturnType<typeof resolveOsViewer>>;
+  try {
+    os = await resolveOsViewer();
+  } catch (err) {
+    console.error("[playbook.ask-access]", err);
+    return null;
+  }
+  if (!os.ok) return null;
+  const { navInput } = os;
+  return OS_DEPARTMENTS.filter((d) => departmentGate(d.slug, navInput) !== null).map((d) => d.slug as AskDepartmentSlug);
+}
+
+/** readOpenAskDepartments for a page that only builds links: could not check is none. */
 export async function openAskDepartments(): Promise<AskDepartmentSlug[]> {
-  const os = await resolveOsViewer();
-  if (!os.ok) return [];
-  return OS_DEPARTMENTS.filter((d) => departmentGate(d.slug, os.navInput) !== null).map((d) => d.slug as AskDepartmentSlug);
+  return (await readOpenAskDepartments()) ?? [];
 }

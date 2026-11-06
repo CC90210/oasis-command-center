@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import type { QuickAction } from "@/lib/quick-actions";
 import { getAgentInfo } from "@/lib/agents";
-import { askDepartment, departmentForAgent } from "@/lib/os/chat-href";
+import { askDepartment, departmentForAgent, departmentLabel, type AskDepartmentSlug } from "@/lib/os/chat-href";
 
 const ICON_MAP = {
   Sparkles, Target, Mail, FileText, TrendingUp, Activity,
@@ -23,22 +23,30 @@ export type QuickActionHeading = { label: string; tagline: string };
  * `?ask=`. The department's composer prefills it once and cleans the URL; the
  * person reviews it and presses Send. Nothing is sent on their behalf.
  *
- * `headings`, by agent slug, is what the page decided this viewer calls each
- * agent (lib/os/agent-names.ts: its department, for anyone but OASIS's
+ * `headings` is what the page decided this viewer calls each group, by agent
+ * slug (lib/os/agent-names.ts: its department, for anyone but OASIS's
  * founders). Without it a group is headed by the agent's own name, which only
- * the operator's /reasoning page leaves it to do.
+ * the operator's /reasoning page leaves it to do. With `byDepartment` the
+ * groups are the departments the actions open, and `headings` is keyed by
+ * department slug: a page that heads its groups with departments would
+ * otherwise draw one heading twice for two agents of the same department.
  */
 export function QuickActionsGrid({
   actions,
   headings,
+  byDepartment = false,
 }: {
   actions: QuickAction[];
   headings?: Readonly<Record<string, QuickActionHeading>>;
+  byDepartment?: boolean;
 }) {
-  // Group by agent so the page reads as "what each agent can do for you"
+  // Group by agent so the page reads as "what each agent can do for you", or
+  // by the department each action opens.
+  const groupOf = (agent: string): string => (byDepartment ? departmentForAgent(agent) : agent);
   const byAgent = actions.reduce<Record<string, QuickAction[]>>((acc, q) => {
-    if (!acc[q.agent]) acc[q.agent] = [];
-    acc[q.agent].push(q);
+    const group = groupOf(q.agent);
+    if (!acc[group]) acc[group] = [];
+    acc[group].push(q);
     return acc;
   }, {});
 
@@ -49,15 +57,17 @@ export function QuickActionsGrid({
   const seen = new Set<string>();
   const agentOrder: string[] = [];
   for (const slug of PREFERRED_ORDER) {
-    if (byAgent[slug]?.length && !seen.has(slug)) {
-      agentOrder.push(slug);
-      seen.add(slug);
+    const group = groupOf(slug);
+    if (byAgent[group]?.length && !seen.has(group)) {
+      agentOrder.push(group);
+      seen.add(group);
     }
   }
   for (const q of actions) {
-    if (!seen.has(q.agent)) {
-      agentOrder.push(q.agent);
-      seen.add(q.agent);
+    const group = groupOf(q.agent);
+    if (!seen.has(group)) {
+      agentOrder.push(group);
+      seen.add(group);
     }
   }
 
@@ -66,8 +76,10 @@ export function QuickActionsGrid({
       {agentOrder
         .filter((slug) => byAgent[slug]?.length)
         .map((slug) => {
-          const info = getAgentInfo(slug as string);
-          const heading = headings?.[slug] ?? { label: info.label, tagline: info.tagline };
+          const info = getAgentInfo(byAgent[slug][0].agent);
+          const heading =
+            headings?.[slug] ??
+            (byDepartment ? { label: departmentLabel(slug as AskDepartmentSlug), tagline: "" } : { label: info.label, tagline: info.tagline });
           return (
             <div key={slug as string}>
               <div className="flex items-baseline gap-2 mb-2.5">
@@ -82,7 +94,7 @@ export function QuickActionsGrid({
                   const href = askDepartment(departmentForAgent(q.agent), q.prompt);
                   return (
                     <Link
-                      key={q.title}
+                      key={`${q.agent}:${q.title}`}
                       href={href}
                       className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3"
                     >

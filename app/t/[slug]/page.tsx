@@ -17,6 +17,8 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
 import { agentNameFor } from "@/lib/os/agent-names";
 import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
+import { workspaceBindings } from "@/components/os/department/config";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export const dynamic = "force-dynamic";
 
@@ -174,7 +176,10 @@ function GenericSummary({
   /** The viewer reads OASIS's internal agent names (lib/os/agent-names.ts). */
   internalNames: boolean;
 }) {
-  const enabledAgents = manifest.agents.filter((a) => a.enabled);
+  // The agents that run here. Outside OASIS's own workspace a house agent's
+  // binding does nothing (decision 21, components/os/department/config.ts
+  // workspaceBindings), so the summary does not list it under any name.
+  const enabledAgents = workspaceBindings({ oasis: isOasisSurfaceTenant(manifest.tenant_slug), manifest }).filter((a) => a.enabled);
   const navGroups = Array.from(new Set(manifest.nav.map((n) => n.group)));
 
   return (

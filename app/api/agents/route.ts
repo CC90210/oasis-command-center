@@ -29,6 +29,8 @@ import {
 } from "@/lib/agents/persistence";
 import { resolveAgentKey } from "@/lib/agents";
 import { changeAgentLineup } from "@/lib/manifest/agent-bindings";
+import { libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,7 +58,13 @@ export async function GET(req: NextRequest) {
     .maybeSingle();
   const tenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id || null;
 
-  const agents = await listAgents({ category, tenant_id: tenantId, include_customs: includeCustoms });
+  // OASIS's house agents are in the library for OASIS's founders only, as on
+  // the marketplace page (lib/os/agent-names.ts libraryOffersAgent): nobody
+  // else is handed their names or prompts here either.
+  const internalNames = await viewerReadsInternalAgentNames();
+  const agents = (await listAgents({ category, tenant_id: tenantId, include_customs: includeCustoms })).filter((a) =>
+    libraryOffersAgent(a.slug, internalNames),
+  );
   return NextResponse.json({ ok: true, agents, categories: CATEGORY_LABELS });
 }
 

@@ -11,6 +11,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getAgentBySlug } from "@/lib/agents/loader";
+import { libraryOffersAgent } from "@/lib/os/agent-names";
+import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
 import {
   AgentPersistenceError,
   deleteCustomAgent,
@@ -56,7 +58,12 @@ export async function GET(
   const { slug } = await ctx.params;
   const profile = await resolveProfile(user.id);
   const agent = await getAgentBySlug(slug, profile?.tenant_id);
-  if (!agent) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  // A house agent is offered to OASIS's founders only (lib/os/agent-names.ts
+  // libraryOffersAgent), as its marketplace page is: for anyone else it is the
+  // same 404 as an agent that does not exist.
+  if (!agent || !libraryOffersAgent(agent.slug, await viewerReadsInternalAgentNames())) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   return NextResponse.json({ ok: true, agent });
 }
 

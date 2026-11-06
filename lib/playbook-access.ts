@@ -59,10 +59,14 @@ export async function requirePlaybookReader(): Promise<void> {
  * library and the client-deploy runbook. Their copy is OASIS's own agent
  * harness at work: the agents by name, and in the commands and paths they
  * carry ("agent_inbox.py --to bravo", ".bravo/profiles"), which no renaming can
- * make true for anyone else (lib/os/agent-names.ts). The index and the drills
- * link them for the founders only.
+ * make true for anyone else (lib/os/agent-names.ts). And the OASIS Loop manual,
+ * whose first step is the prompts library's Prompt translator: for anyone who
+ * cannot open the library, step 1 is an instruction they cannot follow (review
+ * of #551). The index, the drills and the manuals link them for the founders
+ * only; its business document twin is founders-only too
+ * (lib/playbook/catalog.ts "oasis-loop").
  */
-export const FOUNDER_PLAYBOOK_PATHS: readonly string[] = ["/playbook/prompts", "/playbook/client-deploy"];
+export const FOUNDER_PLAYBOOK_PATHS: readonly string[] = ["/playbook/prompts", "/playbook/client-deploy", "/playbook/10-oasis-loop"];
 
 /** True for a link to one of FOUNDER_PLAYBOOK_PATHS (with or without a query, a fragment or a sub-path). */
 export function isFounderPlaybookHref(href: string | null | undefined): boolean {

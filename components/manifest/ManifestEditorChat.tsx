@@ -12,7 +12,7 @@ import {
 import type { DiffEntry } from "@/lib/manifest/diff";
 import type { MutationArgs } from "@/lib/manifest/mutators";
 import type { TenantManifest } from "@/lib/manifest/schema";
-import { agentNameFor } from "@/lib/os/agent-names";
+import { agentNameFor, changeSummaryFor } from "@/lib/os/agent-names";
 
 type ChatTurn =
   | { role: "user"; content: string }
@@ -321,7 +321,7 @@ export function ManifestEditorChat({ slug, initialManifest, initialVersion, inte
                       >
                         {d.op === "add" ? "+" : d.op === "remove" ? "−" : "~"}
                       </span>
-                      <span className="leading-snug">{d.summary}</span>
+                      <span className="leading-snug">{changeSummaryFor(d, internalNames)}</span>
                     </li>
                   ))}
                 </ul>

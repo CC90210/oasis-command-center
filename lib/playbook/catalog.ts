@@ -244,7 +244,9 @@ export const CATALOG: readonly CatalogDoc[] = [
     required: true, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "07-new-client-onboarding" }, reviewEveryDays: QUARTER, legal: false, needsFromCc: null,
   },
   {
-    slug: "oasis-loop", title: "The OASIS Loop", kind: "runbook", category: "sales_delivery", visibility: "team",
+    // Founders only, as its manual is (lib/playbook-access.ts
+    // FOUNDER_PLAYBOOK_PATHS): its first step is the founders' prompts library.
+    slug: "oasis-loop", title: "The OASIS Loop", kind: "runbook", category: "sales_delivery", visibility: "founders",
     summary: "The closed-loop method for getting production-grade output from an AI system: prime, translate, execute, reflect.",
     required: false, requiredBy: null, owner: "ops", source: { kind: "bundled", playbookSlug: "10-oasis-loop" }, reviewEveryDays: YEAR, legal: false, needsFromCc: null,
   },

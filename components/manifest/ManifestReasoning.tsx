@@ -2,12 +2,13 @@ import { Card, EmptyState, Tag } from "@/components/Card";
 import { QuickActionsGrid, type QuickActionHeading } from "@/components/reasoning/QuickActionsGrid";
 import { quickActionsFor } from "@/lib/quick-actions";
 import type { TenantManifest } from "@/lib/manifest/schema";
-import { departmentProfile } from "@/components/os/department/config";
-import { departmentForAgent } from "@/lib/os/chat-href";
+import { departmentProfile, workspaceBindings } from "@/components/os/department/config";
+import { departmentForAgent, departmentLabel, type AskDepartmentSlug } from "@/lib/os/chat-href";
 import { departmentBySlug } from "@/lib/os/departments";
-import { agentNameFor, agentTextFor, houseAgentDepartmentSlug } from "@/lib/os/agent-names";
+import { agentNameFor, agentTextFor } from "@/lib/os/agent-names";
 import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
-import { openAskDepartments } from "@/lib/playbook/ask-access";
+import { readOpenAskDepartments } from "@/lib/playbook/ask-access";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 /**
  * Manifest-aware Reasoning surface for /t/<slug>/reasoning. Filters the
@@ -22,6 +23,10 @@ import { openAskDepartments } from "@/lib/playbook/ask-access";
  * only the departments they may open: a rep was shown Bravo, Atlas and Maven
  * here, and an "Ask" into Finance or Marketing that answers them with a 404.
  *
+ * WHICH AGENTS. Only the ones that run here: outside OASIS's own workspace a
+ * house agent's binding does nothing (decision 21, components/os/department/
+ * config.ts workspaceBindings), so its actions are not offered under any name.
+ *
  * No client component needed — QuickActionsGrid is "use client" and handles
  * its own interactivity.
  */
@@ -32,17 +37,33 @@ export async function ManifestReasoning({
   tenantSlug: string;
 }) {
   const internalNames = await viewerReadsInternalAgentNames();
-  const enabledAgents = manifest.agents.filter((a) => a.enabled);
+  const enabledAgents = workspaceBindings({ oasis: isOasisSurfaceTenant(manifest.tenant_slug), manifest }).filter((a) => a.enabled);
   const enabled = enabledAgents.map((a) => a.slug.toLowerCase());
-  const open = internalNames ? null : await openAskDepartments();
-  const actions = quickActionsFor(enabled)
-    .filter((q) => open === null || open.includes(departmentForAgent(q.agent)))
-    .map((q) =>
-      internalNames
-        ? q
-        : { ...q, title: agentTextFor(q.title, false), description: agentTextFor(q.description, false), prompt: agentTextFor(q.prompt, false) },
-    );
-  const headings = internalNames ? undefined : Object.fromEntries(actions.map((q) => [q.agent, departmentHeading(q.agent)]));
+  const written = quickActionsFor(enabled);
+  // A founder may open every department. Anyone else is offered the actions
+  // whose department the rail opens for them; null: that could not be checked.
+  const open = internalNames ? null : await readOpenAskDepartments();
+  const actions = (internalNames ? written : written.filter((q) => open !== null && open.includes(departmentForAgent(q.agent)))).map((q) =>
+    internalNames
+      ? q
+      : { ...q, title: agentTextFor(q.title, false), description: agentTextFor(q.description, false), prompt: agentTextFor(q.prompt, false) },
+  );
+  // Departments head the groups for anyone but a founder, so the groups are
+  // departments too: two agents of one department share one heading.
+  const headings = internalNames
+    ? undefined
+    : Object.fromEntries(actions.map((q) => [departmentForAgent(q.agent), departmentHeading(departmentForAgent(q.agent))]));
+  const names = enabledAgents.map((a) => agentNameFor({ slug: a.slug, name: a.display_name }, internalNames)).join(", ");
+  // Why the list is empty, said as it is: none written yet, none this viewer's
+  // role may open, or the check itself failed (an absent answer is not a zero).
+  const empty =
+    enabled.length === 0
+      ? `No agents enabled yet. Switch one on from Settings → Agents.`
+      : written.length === 0
+        ? `No quick actions for ${names} yet — they'll appear here as we add more.`
+        : open === null
+          ? "Couldn't check which departments you can open, so no quick actions are shown. Reload to try again."
+          : `The quick actions for ${names} go to departments your role can't open.`;
 
   return (
     <Card
@@ -55,27 +76,19 @@ export async function ManifestReasoning({
       }
     >
       {actions.length === 0 ? (
-        <EmptyState
-          message={
-            enabled.length === 0
-              ? `No agents enabled yet. Switch one on from Settings → Agents.`
-              : `No quick actions for ${enabledAgents.map((a) => agentNameFor({ slug: a.slug, name: a.display_name }, internalNames)).join(", ")} yet — they'll appear here as we add more.`
-          }
-        />
+        <EmptyState message={empty} />
       ) : (
-        <QuickActionsGrid actions={actions} headings={headings} />
+        <QuickActionsGrid actions={actions} headings={headings} byDepartment={!internalNames} />
       )}
     </Card>
   );
 }
 
 /**
- * A group's heading for anyone but a founder: the department that answers for
- * the agent, and that department's own one-line purpose (its tab's subtitle).
+ * A group's heading for anyone but a founder: the department, and its own
+ * one-line purpose (its tab's subtitle).
  */
-function departmentHeading(agent: string): QuickActionHeading {
-  const dept = departmentBySlug(houseAgentDepartmentSlug(agent));
-  return dept
-    ? { label: dept.label, tagline: departmentProfile(dept.key).purpose }
-    : { label: agentNameFor({ slug: agent }, false), tagline: "" };
+function departmentHeading(slug: AskDepartmentSlug): QuickActionHeading {
+  const dept = departmentBySlug(slug);
+  return { label: departmentLabel(slug), tagline: dept ? departmentProfile(dept.key).purpose : "" };
 }

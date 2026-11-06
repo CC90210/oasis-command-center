@@ -149,7 +149,9 @@ const DRILLS: Drill[] = [
     category: "sales",
     intensity: "advanced",
     body:
-      "Pick one active client. State their current workflows, owner, next milestone, risk, and promised outcome without opening five documents. Then verify against the canonical runbook and correct only the gaps.",
+      // Checked against the client's live project, as the Ask below does: the
+      // deployment runbook it named is a founders' page (review of #551).
+      "Pick one active client. State their current workflows, owner, next milestone, risk, and promised outcome without opening five documents. Then check each answer against the client's live project and correct only the gaps.",
     output: "Day 30 → client context is crisp, current, and recoverable from one source.",
     chat: {
       agent: "bravo",

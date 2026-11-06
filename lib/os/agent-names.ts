@@ -115,3 +115,14 @@ export function agentTextFor(text: string, internal: boolean): string {
 export function libraryOffersAgent(slug: string, internal: boolean): boolean {
   return internal || houseAgentKey(slug) === null;
 }
+
+/**
+ * A manifest change (lib/manifest/diff.ts DiffEntry) as `internal` may read its
+ * summary. A change to an agent binding names the agent by the rule above, so
+ * the editor's change list agrees with its snapshot ("agent renamed: Chief of
+ * Staff -> Ops Lead", never the stored persona). Every other change is the
+ * workspace's own words (a nav label, a field) and is left as written.
+ */
+export function changeSummaryFor(change: { path: string; summary: string }, internal: boolean): string {
+  return change.path.startsWith("agent[") ? agentTextFor(change.summary, internal) : change.summary;
+}

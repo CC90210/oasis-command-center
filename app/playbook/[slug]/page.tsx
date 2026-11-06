@@ -25,6 +25,10 @@ export default async function PlaybookSlugPage({
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
   const { slug } = await params;
+  // A founders' manual (lib/playbook-access.ts FOUNDER_PLAYBOOK_PATHS: the OASIS
+  // Loop) is the same 404 as a page that does not exist for everyone else.
+  const internalNames = await viewerReadsInternalAgentNames();
+  if (!internalNames && isFounderPlaybookHref(`/playbook/${slug}`)) notFound();
   let file: PlaybookFile;
   try {
     file = loadPlaybook(slug);
@@ -36,9 +40,7 @@ export default async function PlaybookSlugPage({
   }
   // The manual is written by and for OASIS's founders: anyone else reads each
   // agent named as its department (lib/os/agent-names.ts), and a link to a
-  // founders' page (the OASIS Loop links the prompts library) as its words, not
-  // a link to a 404.
-  const internalNames = await viewerReadsInternalAgentNames();
+  // founders' page as its words, not a link to a 404.
   const components: Components | undefined = internalNames
     ? undefined
     : {

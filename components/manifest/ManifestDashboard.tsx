@@ -12,9 +12,12 @@ import { pipelineRowHref } from "@/lib/pipeline-display";
 import { formatMoney, timeAgo } from "@/lib/fmt";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
-import { staticLeadSlug } from "@/components/os/department/config";
+import { staticLeadSlug, workspaceBindings } from "@/components/os/department/config";
 import { agentNameFor } from "@/lib/os/agent-names";
 import { viewerReadsInternalAgentNames } from "@/lib/os/agent-names-session";
+import { teamSlugOf } from "@/lib/os/chat-href";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 
 /**
  * Where an agent's "Chat" goes: the department channel it answers in
@@ -68,7 +71,10 @@ type Props = {
  */
 export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, assignedScope }: Props) {
   const entities = manifest.data_model || [];
-  const enabledAgents = manifest.agents.filter((a) => a.enabled);
+  // The agents that run here. Outside OASIS's own workspace a house agent's
+  // binding does nothing (decision 21, components/os/department/config.ts
+  // workspaceBindings), so the card does not list it under any name.
+  const enabledAgents = workspaceBindings({ oasis: isOasisSurfaceTenant(manifest.tenant_slug), manifest }).filter((a) => a.enabled);
   const isSunBizShape =
     entities.some((e) => e.name === "lead") &&
     entities.some((e) => e.name === "application");
@@ -106,8 +112,11 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
   // The workspace's owners and admins only; empty for everyone else, unread.
   const openAlerts = await loadDashboardAlerts(tenantId);
   // How the agents card names each agent (lib/os/agent-names.ts): a stored
-  // manifest can bind a house agent under its persona's name.
+  // manifest can bind a house agent under its persona's name. And the
+  // departments this viewer may open (the rail's gate): an agent's Chat link is
+  // drawn only where it opens, never as a link to "Page not found".
   const internalNames = enabledAgents.length > 0 && (await viewerReadsInternalAgentNames());
+  const openDepartments: readonly string[] = enabledAgents.length > 0 ? await openAskDepartments() : [];
 
   const slug = manifest.tenant_slug;
 
@@ -172,31 +181,36 @@ export async function ManifestDashboard({ manifest, tenantId, demoRowsByEntity, 
           }
         >
           <ul className="grid gap-2 sm:grid-cols-2">
-            {enabledAgents.map((agent) => (
-              <li
-                key={agent.slug}
-                className="group flex items-center justify-between rounded-lg border border-bg-border bg-bg-elev/40 hover:bg-bg-elev/70 transition-colors px-3 py-2.5"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="rounded-md bg-accent/15 border border-accent/30 p-1.5">
-                    <Bot className="h-4 w-4 text-accent" aria-hidden />
-                  </div>
-                  <div>
-                    <div className="font-semibold text-sm text-fg">{agentNameFor({ slug: agent.slug, name: agent.display_name }, internalNames)}</div>
-                    <div className="text-[10px] uppercase tracking-wider text-fg-dim">
-                      {agent.primary ? "primary agent" : "sub-agent"}
+            {enabledAgents.map((agent) => {
+              const chatHref = departmentHrefForAgent(agent.slug, agent);
+              return (
+                <li
+                  key={agent.slug}
+                  className="group flex items-center justify-between rounded-lg border border-bg-border bg-bg-elev/40 hover:bg-bg-elev/70 transition-colors px-3 py-2.5"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <div className="rounded-md bg-accent/15 border border-accent/30 p-1.5">
+                      <Bot className="h-4 w-4 text-accent" aria-hidden />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-sm text-fg">{agentNameFor({ slug: agent.slug, name: agent.display_name }, internalNames)}</div>
+                      <div className="text-[10px] uppercase tracking-wider text-fg-dim">
+                        {agent.primary ? "primary agent" : "sub-agent"}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <Link
-                  href={departmentHrefForAgent(agent.slug, agent)}
-                  className="inline-flex items-center gap-1 text-xs font-bold text-accent hover:text-accent/80 opacity-80 group-hover:opacity-100 transition-opacity"
-                >
-                  <MessageSquare className="w-3 h-3" />
-                  Chat
-                </Link>
-              </li>
-            ))}
+                  {openDepartments.includes(teamSlugOf(chatHref) ?? "") && (
+                    <Link
+                      href={chatHref}
+                      className="inline-flex items-center gap-1 text-xs font-bold text-accent hover:text-accent/80 opacity-80 group-hover:opacity-100 transition-opacity"
+                    >
+                      <MessageSquare className="w-3 h-3" />
+                      Chat
+                    </Link>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </Card>
       )}

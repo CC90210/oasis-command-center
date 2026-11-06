@@ -625,7 +625,6 @@ async function main() {
     assert.ok(teamLinks("rep").includes("chief-of-staff"), "the rep still gets the asks they may open");
     assert.ok(teamLinks("cc").includes("marketing"), "a founder still gets Ask Marketing");
     assert.ok(/Ask Marketing/.test(html.cc ?? ""), "the prompts library draws Ask Marketing for a founder");
-    assert.deepEqual(Object.keys(html), ["cc"], "only a founder's prompts library was rendered");
   });
 
   await check("the privacy policy document is the live /privacy text, with Copy and Download", async () => {

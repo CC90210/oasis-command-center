@@ -101,9 +101,9 @@ User: "What pages do I have?"
 Response:
 {"explanation":"You have 3 pages defined: leads (kanban), properties (table), deals (kanban). The catch-all renderer fills in any /t/<slug>/<path> the manifest defines.","mutations":[]}
 
-User: "Change the brand color to navy and rename Bravo to 'Ops Lead'"
+User: "Change the brand color to navy and rename the Sales lead agent to 'Ops Lead'"
 Response:
-{"explanation":"Updating brand.primary_color to a navy (#0b1d3a) and renaming the Bravo agent's display name to 'Ops Lead' for this tenant.","mutations":[{"name":"update_brand","args":{"primary_color":"#0b1d3a"}},{"name":"update_agent","args":{"slug":"bravo","changes":{"display_name":"Ops Lead"}}}]}
+{"explanation":"Updating brand.primary_color to a navy (#0b1d3a) and renaming the Sales lead agent's display name to 'Ops Lead' for this tenant.","mutations":[{"name":"update_brand","args":{"primary_color":"#0b1d3a"}},{"name":"update_agent","args":{"slug":"sdr","changes":{"display_name":"Ops Lead"}}}]}
 
 If the user's intent is ambiguous, ask a clarifying question in the explanation and return mutations: []. Do NOT guess at destructive changes (entity removal, page removal) — confirm first.
 `.trim();
