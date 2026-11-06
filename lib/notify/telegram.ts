@@ -223,6 +223,54 @@ export async function sendTelegram(
   text: string,
   target: TelegramTarget,
 ): Promise<{ ok: boolean; reason?: string; degraded?: boolean }> {
+  const result = await deliver(text, target);
+  await recordOasisNotice(text, target, result);
+  return result;
+}
+
+/** CC's own lanes. A client workspace's bot (an explicit target) is that workspace's record, not CC's. */
+const OASIS_LANES: ReadonlySet<TelegramLane> = new Set<TelegramLane>(["operator", "sales"]);
+
+/**
+ * Put a Command Center notice to CC in notification_log, which the Automations
+ * page lists beside Bravo's, Maven's and Atlas's (CC, 2026-11-05: every automation
+ * notification also shows in the Command Center). Best-effort: a failed record
+ * never changes what the send reported.
+ */
+async function recordOasisNotice(
+  text: string,
+  target: TelegramTarget,
+  result: { ok: boolean; reason?: string; degraded?: boolean },
+): Promise<void> {
+  if (!("lane" in target) || !OASIS_LANES.has(target.lane)) return;
+  try {
+    const { getTursoClient, tursoConfigured } = await import("@/lib/turso");
+    if (!tursoConfigured()) return;
+    const { recordNotification, splitNotice } = await import("@/lib/notify/notification-log");
+    const { WEBDEV_TENANT_ID } = await import("@/lib/oasis-tenant");
+    const { title, body } = splitNotice(text);
+    await recordNotification(getTursoClient(), {
+      tenantId: WEBDEV_TENANT_ID,
+      agent: "command_center",
+      category: target.lane,
+      title,
+      body,
+      bridge: "command_center",
+      delivered: result.ok,
+      detail: result.ok
+        ? result.degraded ? `delivered to the lane's second chat (${result.reason ?? "primary refused"})` : null
+        : (result.reason ?? "not sent"),
+      source: "command-center",
+    });
+  } catch (err) {
+    console.error("[telegram] notification record failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+async function deliver(
+  text: string,
+  target: TelegramTarget,
+): Promise<{ ok: boolean; reason?: string; degraded?: boolean }> {
   const r = resolve(target);
   if (!r.ok) return { ok: false, reason: r.reason };
 

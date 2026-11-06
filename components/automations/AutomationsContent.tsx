@@ -19,6 +19,7 @@
 import { PageHeader } from "@/components/Card";
 import { CronJobsManager } from "@/components/automations/CronJobsManager";
 import { BackgroundWorkersPanel } from "@/components/automations/BackgroundWorkersPanel";
+import { NotificationLogPanel } from "@/components/automations/NotificationLogPanel";
 import { CronFlowCards } from "@/components/automations/CronFlowCards";
 import { BreezeDealsPanel } from "@/components/automations/BreezeDealsPanel";
 import { DescribeAutomationFlow } from "@/components/automations/DescribeAutomationFlow";
@@ -286,6 +287,8 @@ export async function AutomationsContent({
         <>
           <CronFlowCards canToggle={cloudJobsSwitchable} />
           <BackgroundWorkersPanel />
+          {/* Everything the agents told CC, and which bot carried it (CC, 2026-11-05). */}
+          <NotificationLogPanel />
         </>
       )}
       {isClientAutomationSurface && (

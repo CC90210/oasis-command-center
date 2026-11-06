@@ -35,6 +35,7 @@ import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { runConnectionHealthPass } from "@/lib/connections/health";
 import { purgeSlackRetention } from "@/lib/slack/retention";
 import { purgeClientErrorReports } from "@/lib/client-errors/retention";
+import { purgeNotificationLog } from "@/lib/notify/notification-log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -71,9 +72,24 @@ async function handle(req: NextRequest) {
       clientErrorRetention = { error: "client_error_retention_failed" };
       retentionFailed = true;
     }
+    // The agents' notification log keeps 90 days (lib/notify/notification-log.ts).
+    let notificationRetention: Record<string, unknown>;
+    try {
+      notificationRetention = { ...(await purgeNotificationLog(db, new Date())) };
+    } catch (err) {
+      console.error("[cron.connection-health.notification-retention]", err instanceof Error ? err.stack : err);
+      notificationRetention = { error: "notification_retention_failed" };
+      retentionFailed = true;
+    }
     const ok = result.errors.length === 0 && !retentionFailed;
     return NextResponse.json(
-      { ok, ...result, slack_retention: slackRetention, client_error_retention: clientErrorRetention },
+      {
+        ok,
+        ...result,
+        slack_retention: slackRetention,
+        client_error_retention: clientErrorRetention,
+        notification_retention: notificationRetention,
+      },
       { status: ok ? 200 : 500 },
     );
   } catch (err) {
