@@ -1,0 +1,77 @@
+import "server-only";
+import {
+  readGoogleFounderMeetingResponse,
+  type FounderMeetingAttendeeResponse,
+  type ReadFounderMeetingResponseInput,
+} from "@/lib/integrations/google-calendar";
+
+/**
+ * Has the lead declined the invite, on Google's own word?
+ *
+ * 2026-11-07: a lead declined an audit at 05:11 and was still sent the 60-, 30-
+ * and 15-minute reminders, the founder got "In 15 minutes", and at the meeting
+ * time the lead got "Sorry we missed each other" while the founder was told
+ * "Missed". Nothing read the RSVP. The invite's answer is the lead's latest
+ * word, so it is read at the moment it matters (before a reminder, before the
+ * founder's heads-up, at the no-show check), never cached across runs: a lead
+ * who declines and then accepts again is reminded again.
+ *
+ * Fails OPEN: no event, a read error, or an event that is gone reads as "not
+ * declined", so an unknown answer never stops a reminder that would have gone.
+ */
+export type DeclineCheckAppointment = {
+  id: string;
+  tenant_id: string;
+  assigned_to: string | null;
+  google_event_id: string | null;
+  organizer_email_snapshot: string | null;
+  client_email_snapshot: string | null;
+};
+
+export type ReadAttendeeResponse = (input: ReadFounderMeetingResponseInput) => Promise<FounderMeetingAttendeeResponse>;
+
+export async function leadDeclinedInvite(
+  appointment: DeclineCheckAppointment,
+  read: ReadAttendeeResponse = readGoogleFounderMeetingResponse,
+): Promise<boolean> {
+  if (
+    !appointment.google_event_id ||
+    !appointment.assigned_to ||
+    !appointment.organizer_email_snapshot ||
+    !appointment.client_email_snapshot
+  ) {
+    return false;
+  }
+  try {
+    const answer = await read({
+      tenantId: appointment.tenant_id,
+      hostUserId: appointment.assigned_to,
+      eventId: appointment.google_event_id,
+      expectedOrganizerEmail: appointment.organizer_email_snapshot,
+      attendeeEmail: appointment.client_email_snapshot,
+    });
+    return answer === "declined";
+  } catch (error) {
+    console.warn("[lead-declined] RSVP read failed; treated as not declined", {
+      appointment: appointment.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+/** One read per appointment per run: several rows of one meeting can fall due together. */
+export function declineCheckForRun(
+  read: ReadAttendeeResponse = readGoogleFounderMeetingResponse,
+): (appointment: DeclineCheckAppointment) => Promise<boolean> {
+  const seen = new Map<string, Promise<boolean>>();
+  return (appointment) => {
+    const key = `${appointment.tenant_id}:${appointment.id}`;
+    let answer = seen.get(key);
+    if (!answer) {
+      answer = leadDeclinedInvite(appointment, read);
+      seen.set(key, answer);
+    }
+    return answer;
+  };
+}

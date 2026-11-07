@@ -1591,6 +1591,63 @@ export async function updateGoogleFounderMeeting(
   };
 }
 
+export type ReadFounderMeetingResponseInput = {
+  tenantId: string;
+  hostUserId: string;
+  eventId: string;
+  expectedOrganizerEmail: string;
+  /** The lead's address on the invite. */
+  attendeeEmail: string;
+};
+
+/** The lead's own answer on the invite, or "missing" when the event is gone. */
+export type FounderMeetingAttendeeResponse = "accepted" | "declined" | "tentative" | "needsAction" | "missing";
+
+/**
+ * What the lead answered on the invite, read from Google: the system of record
+ * for an RSVP (2026-11-07: a lead declined at 05:11 and was sent three
+ * reminders and a "Sorry we missed each other"). An attendee not on the event
+ * reads "needsAction". Throws GoogleCalendarIntegrationError on a failed read;
+ * callers treat that as "unknown" and carry on as before.
+ */
+export async function readGoogleFounderMeetingResponse(
+  input: ReadFounderMeetingResponseInput,
+  dependencyOverrides: Partial<GoogleCalendarDependencies> = {},
+): Promise<FounderMeetingAttendeeResponse> {
+  if (!input.tenantId.trim() || !input.hostUserId.trim() || !input.attendeeEmail.trim()) {
+    throw new GoogleCalendarIntegrationError(
+      "invalid_request",
+      "tenantId, hostUserId and attendeeEmail are required",
+    );
+  }
+  const eventId = validatedEventId(input.eventId);
+  const { authorizedFetch, calendarId } = await openAuthorizedCalendarSession({
+    tenantId: input.tenantId,
+    organizerUserId: input.hostUserId,
+    expectedOrganizerEmail: input.expectedOrganizerEmail,
+    dependencyOverrides,
+  });
+  const response = await authorizedFetch(
+    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${eventId}`,
+    { method: "GET", headers: { accept: "application/json" } },
+    "calendar_read_failed",
+  );
+  if (response.status === 404 || response.status === 410) return "missing";
+  if (!response.ok) {
+    throw new GoogleCalendarIntegrationError(
+      "calendar_read_failed",
+      `Google Calendar event read failed: ${await responseText(response)}`,
+      { httpStatus: response.status, eventId },
+    );
+  }
+  const event = await responseJson<GoogleCalendarEvent>(response, "calendar_read_failed", eventId);
+  if (event.status === "cancelled") return "missing";
+  const wanted = input.attendeeEmail.trim().toLowerCase();
+  const attendee = (event.attendees || []).find((a) => a.email?.trim().toLowerCase() === wanted);
+  const status = attendee?.responseStatus;
+  return status === "accepted" || status === "declined" || status === "tentative" ? status : "needsAction";
+}
+
 export function cancelGoogleFounderMeeting(
   input: CancelGoogleFounderMeetingInput,
 ): Promise<void>;

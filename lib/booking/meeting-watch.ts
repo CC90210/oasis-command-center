@@ -16,6 +16,8 @@
  *        - lead joined, no host      -> an apology (CC chose auto-apologise)
  *        - nobody joined             -> "we missed each other"
  *        - both joined               -> held: nothing automatic, the founder records it
+ *        - lead declined the invite and never joined -> "another time?", and
+ *          the founder is told "Declined", not "Missed" (lib/booking/lead-declined.ts)
  *      A meeting with no Oasis Meet room (a Google Meet link) has no join data,
  *      so it is left for the founder: the Today page asks for its outcome.
  *
@@ -29,6 +31,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { leadDeclinedInvite, type DeclineCheckAppointment } from "@/lib/booking/lead-declined";
 import { markFounderMeetingNoShow, type NoShowWho } from "@/lib/booking/no-show";
 import { loadRebookLead, REBOOK_LEAD_STAGE } from "@/lib/booking/rebook";
 import { REBOOK_TOKEN_TTL_S, rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
@@ -163,6 +166,8 @@ export function buildNoShowMessages(input: {
   missedAt: string;
   rebookUrl: string;
   who: NoShowWho;
+  /** The lead declined the invite and did not join: they told us, so nobody "missed" anyone. */
+  declined?: boolean;
 }): {
   email: { subject: string; body: string };
   sms: string;
@@ -175,7 +180,21 @@ export function buildNoShowMessages(input: {
     input.rebookUrl,
   ].join("\n");
   const apology = input.who === "host_absent";
-  const email = apology
+  const declined = Boolean(input.declined) && leadStayedAway(input.who);
+  const email = declined
+    ? {
+        subject: `Another time for your ${offer}?`,
+        body: [
+          hi,
+          "",
+          `I saw you couldn't make our ${offer} on ${when(input.missedAt)}. No problem at all.`,
+          "",
+          link,
+          "",
+          "Or reply with a couple of times that suit you and I'll make one of them work.",
+        ].join("\n"),
+      }
+    : apology
     ? {
         subject: "I'm sorry I missed our call",
         body: [
@@ -200,7 +219,9 @@ export function buildNoShowMessages(input: {
           "Or reply with a couple of times that suit you and I'll make one of them work.",
         ].join("\n"),
       };
-  const sms = apology
+  const sms = declined
+    ? `OASIS AI: No problem about your ${offer}. If you'd like another time, pick one here: ${input.rebookUrl}`
+    : apology
     ? `OASIS AI: Sorry I missed our ${offer}. Pick a new time here: ${input.rebookUrl}`
     : `OASIS AI: Sorry we missed each other for your ${offer}. Pick a new time here: ${input.rebookUrl}`;
   const followUps = [
@@ -228,6 +249,11 @@ export function buildNoShowMessages(input: {
     },
   ];
   return { email, sms, followUps };
+}
+
+/** The lead never came into the room (whatever the host did): a decline explains that. */
+function leadStayedAway(who: NoShowWho): boolean {
+  return who === "lead_absent" || who === "both_absent";
 }
 
 /** The founder's urgent note: the lead is in the room and nobody from OASIS is. */
@@ -272,10 +298,11 @@ type WatchedAppointment = {
   google_meet_link: string | null;
   organizer_email_snapshot: string | null;
   offer_label: string | null;
+  google_event_id: string | null;
 };
 
 const WATCH_COLUMNS =
-  "id,tenant_id,lead_id,scheduled_for,duration_minutes,revision,assigned_to,meet_room_id,sms_consent,client_name_snapshot,company_snapshot,client_email_snapshot,client_phone_snapshot,google_meet_link,organizer_email_snapshot,offer_label";
+  "id,tenant_id,lead_id,scheduled_for,duration_minutes,revision,assigned_to,meet_room_id,sms_consent,client_name_snapshot,company_snapshot,client_email_snapshot,client_phone_snapshot,google_meet_link,organizer_email_snapshot,offer_label,google_event_id";
 
 export type WatchDependencies = {
   db: SupabaseClient;
@@ -288,6 +315,8 @@ export type WatchDependencies = {
   alert?: typeof pushWorkspaceAlert;
   /** A card in the Command Center that stays open whatever its push does. Default: lib/notify/agent-alert. */
   card?: typeof writeAgentAlert;
+  /** Did the lead decline the invite (Google's answer)? Default: lib/booking/lead-declined. */
+  declined?: (appointment: DeclineCheckAppointment) => Promise<boolean>;
   /** Wall-clock milliseconds one pass may take before it leaves the rest to the next run. Default 30 s. */
   budgetMs?: number;
 };
@@ -683,6 +712,9 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         !!lead &&
         lead.stage === REBOOK_LEAD_STAGE &&
         lead.calendar_appointment_id === appointment.id;
+      // The lead told us: they declined the invite and stayed away. Not a
+      // "missed each other" for them, nor a "Missed" for the founder (2026-11-07).
+      const declined = leadStayedAway(verdict) && (await (deps.declined ?? leadDeclinedInvite)(appointment));
       if (reachable) {
         const rebookUrl = signedRebookUrl(deps, appointment, nowMs);
         const messages = buildNoShowMessages({
@@ -692,6 +724,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
           missedAt: appointment.scheduled_for,
           rebookUrl,
           who: verdict,
+          declined,
         });
         const base = {
           tenant_id: appointment.tenant_id,
@@ -754,9 +787,14 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       );
       result.noShows += 1;
       if (closed.alreadyClosed) continue; // told the founder when it was closed
-      const sent = reachable ? " Their rebook link is going out now." : " The lead has moved on in the Pipeline, so nothing was sent.";
-      const who =
-        verdict === "host_absent"
+      const sent = reachable
+        ? declined
+          ? " A link to pick another time is going out now."
+          : " Their rebook link is going out now."
+        : " The lead has moved on in the Pipeline, so nothing was sent.";
+      const who = declined
+        ? `They declined the invitation, so the call did not happen.${sent}`
+        : verdict === "host_absent"
           ? `The lead joined and nobody opened the call for them.${reachable ? " An apology with their rebook link is going out now." : sent}`
           : verdict === "lead_absent"
             ? `You joined and the lead did not.${sent}`
@@ -766,7 +804,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
       await alert(
         appointment.tenant_id,
         [
-          `<b>Missed: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
+          `<b>${declined ? "Declined" : "Missed"}: ${escapeTelegramHtml(appointment.client_name_snapshot || "a lead")}${appointment.company_snapshot ? ` - ${escapeTelegramHtml(appointment.company_snapshot)}` : ""}</b>`,
           `Booked for ${escapeTelegramHtml(when(appointment.scheduled_for))}.`,
           who,
           `<a href="${pipelineLeadUrl(appointment.lead_id)}">Open the lead in Command Center</a>`,
