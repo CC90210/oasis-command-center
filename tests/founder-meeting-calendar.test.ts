@@ -8,6 +8,7 @@ import {
   operatorCalendarStatus,
   hasRequiredScope,
   listGoogleCalendarBusy,
+  readGoogleFounderMeetingResponse,
   updateGoogleFounderMeeting,
   type GoogleCalendarDependencies,
 } from "../lib/integrations/google-calendar";
@@ -627,6 +628,53 @@ async function testCancelSendsUpdatesAndTreatsMissingEventAsSuccess() {
   }
 }
 
+// 2026-11-07: a lead declined at 05:11 and was reminded three times. The RSVP
+// lives on the Google event; this reads the lead's own answer from it.
+async function testReadsTheLeadsOwnAnswerFromTheInvite() {
+  const eventId = deterministicEventId();
+  const input = {
+    tenantId: TENANT_ID,
+    hostUserId: ORGANIZER_USER_ID,
+    expectedOrganizerEmail: "founder@oasisai.work",
+    eventId,
+    attendeeEmail: " Owner@Example.com ",
+  };
+  const withAttendees = (attendees: Array<{ email: string; responseStatus: string }>, status = "confirmed") =>
+    ({ ...eventResponse(eventId), status, attendees });
+  const calls: FetchCall[] = [];
+  const answer = await readGoogleFounderMeetingResponse(
+    input,
+    baseDependencies(async (request, init) => {
+      calls.push({ url: String(request), init });
+      return jsonResponse(withAttendees([
+        { email: "founder@oasisai.work", responseStatus: "accepted" },
+        { email: "owner@example.com", responseStatus: "declined" },
+      ]));
+    }),
+  );
+  assert.equal(answer, "declined", "the lead's answer, not the organizer's");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init?.method, "GET");
+  assert.match(new URL(calls[0].url).pathname, new RegExp(`/events/${eventId}$`));
+  for (const [status, expected] of [["accepted", "accepted"], ["tentative", "tentative"], ["needsAction", "needsAction"]] as const) {
+    assert.equal(await readGoogleFounderMeetingResponse(input, baseDependencies(async () =>
+      jsonResponse(withAttendees([{ email: "owner@example.com", responseStatus: status }])))), expected);
+  }
+  assert.equal(await readGoogleFounderMeetingResponse(input, baseDependencies(async () =>
+    jsonResponse(withAttendees([{ email: "someone@else.com", responseStatus: "declined" }])))), "needsAction",
+    "another guest declining is not the lead declining");
+  assert.equal(await readGoogleFounderMeetingResponse(input, baseDependencies(async () =>
+    jsonResponse(withAttendees([], "cancelled")))), "missing");
+  for (const status of [404, 410]) {
+    assert.equal(await readGoogleFounderMeetingResponse(input, baseDependencies(async () =>
+      new Response(null, { status }))), "missing");
+  }
+  await assert.rejects(
+    readGoogleFounderMeetingResponse(input, baseDependencies(async () => new Response("boom", { status: 500 }))),
+    (error: unknown) => error instanceof GoogleCalendarIntegrationError && error.code === "calendar_read_failed",
+  );
+}
+
 async function testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope() {
   const eventId = deterministicEventId();
   const calls: FetchCall[] = [];
@@ -960,6 +1008,7 @@ async function main() {
   await testRejectsMismatchedRescheduleReceipt();
   await testRescheduleFailsIfExistingMeetCannotBeVerified();
   await testCancelSendsUpdatesAndTreatsMissingEventAsSuccess();
+  await testReadsTheLeadsOwnAnswerFromTheInvite();
   await testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope();
   await testAvailabilityReadsTheFoundersOwnCalendarAndNeverFallsBack();
 await testAvailabilityUsesTheWorkspaceCredentialOnlyWhenItIsTheFoundersOwnAccount();
