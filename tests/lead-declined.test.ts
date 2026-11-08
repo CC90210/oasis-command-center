@@ -81,6 +81,23 @@ async function main() {
   assert.equal(await declineCheckForRun(counting)(BOOKED), true);
   assert.equal(reads, 3, "a new run asks Google again: the lead may have changed their answer");
 
+  // A hung Google costs a run ONE budget, not one per meeting (CodeRabbit, #808).
+  console.warn = () => undefined;
+  try {
+    let hungReads = 0;
+    const hung = () => {
+      hungReads += 1;
+      return new Promise<"declined">(() => undefined);
+    };
+    const slowRun = declineCheckForRun(hung, 20);
+    assert.equal(await slowRun(BOOKED), false);
+    assert.equal(await slowRun({ ...BOOKED, id: "appt-2" }), false);
+    assert.equal(await slowRun({ ...BOOKED, id: "appt-3" }), false);
+    assert.equal(hungReads, 1, "after one timeout the run stops asking Google");
+  } finally {
+    console.warn = quiet;
+  }
+
   console.log("lead-declined: OK");
 }
 

@@ -42,6 +42,8 @@ export async function leadDeclinedInvite(
   appointment: DeclineCheckAppointment,
   read: ReadAttendeeResponse = readGoogleFounderMeetingResponse,
   budgetMs: number = RSVP_READ_BUDGET_MS,
+  /** Told when the read ran past its budget (declineCheckForRun stops asking Google). */
+  onTimeout?: () => void,
 ): Promise<boolean> {
   if (
     !appointment.google_event_id ||
@@ -66,6 +68,7 @@ export async function leadDeclinedInvite(
       }),
     ]);
     if (answer === "too_slow") {
+      onTimeout?.();
       console.warn("[lead-declined] RSVP read over budget; treated as not declined", {
         appointment: appointment.id,
         budgetMs,
@@ -84,16 +87,27 @@ export async function leadDeclinedInvite(
   }
 }
 
-/** One read per appointment per run: several rows of one meeting can fall due together. */
+/**
+ * One read per appointment per run: several rows of one meeting can fall due
+ * together. And at most ONE budget per run: once Google has been too slow,
+ * the rest of the run's meetings read "not declined" without asking, so a
+ * hung Google costs the dispatcher 4 s, not 4 s per meeting (CodeRabbit, #808).
+ */
 export function declineCheckForRun(
   read: ReadAttendeeResponse = readGoogleFounderMeetingResponse,
+  budgetMs: number = RSVP_READ_BUDGET_MS,
 ): (appointment: DeclineCheckAppointment) => Promise<boolean> {
   const seen = new Map<string, Promise<boolean>>();
+  let googleIsSlow = false;
   return (appointment) => {
     const key = `${appointment.tenant_id}:${appointment.id}`;
     let answer = seen.get(key);
     if (!answer) {
-      answer = leadDeclinedInvite(appointment, read);
+      answer = googleIsSlow
+        ? Promise.resolve(false)
+        : leadDeclinedInvite(appointment, read, budgetMs, () => {
+            googleIsSlow = true;
+          });
       seen.set(key, answer);
     }
     return answer;
