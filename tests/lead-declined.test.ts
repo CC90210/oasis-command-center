@@ -46,6 +46,20 @@ async function main() {
     console.warn = quiet;
   }
 
+  // A slow Google never holds up the reminder run: past the budget it reads "not declined".
+  console.warn = () => undefined;
+  try {
+    const started = Date.now();
+    const never = () => new Promise<"declined">(() => undefined);
+    assert.equal(await leadDeclinedInvite(BOOKED, never, 30), false);
+    assert.ok(Date.now() - started < 1_000, "answered within its budget, not Google's 15 s");
+    const late = () => new Promise<"declined">((resolve) => setTimeout(() => resolve("declined"), 200));
+    assert.equal(await leadDeclinedInvite(BOOKED, late, 20), false, "a late 'declined' is not waited for");
+    assert.equal(await leadDeclinedInvite(BOOKED, late, 2_000), true, "inside the budget it counts");
+  } finally {
+    console.warn = quiet;
+  }
+
   // Nothing to read: no Google call at all.
   let reads = 0;
   const counting = async () => {

@@ -30,9 +30,18 @@ export type DeclineCheckAppointment = {
 
 export type ReadAttendeeResponse = (input: ReadFounderMeetingResponseInput) => Promise<FounderMeetingAttendeeResponse>;
 
+/**
+ * How long the reminder run waits for Google's answer. A Google call may take
+ * 15 s (30 s with a token refresh), and the dispatcher's whole run has 45 s:
+ * a slow RSVP read must never hold up every other reminder, so past this it
+ * reads as "not declined" and the reminder goes as before.
+ */
+export const RSVP_READ_BUDGET_MS = 4_000;
+
 export async function leadDeclinedInvite(
   appointment: DeclineCheckAppointment,
   read: ReadAttendeeResponse = readGoogleFounderMeetingResponse,
+  budgetMs: number = RSVP_READ_BUDGET_MS,
 ): Promise<boolean> {
   if (
     !appointment.google_event_id ||
@@ -42,14 +51,27 @@ export async function leadDeclinedInvite(
   ) {
     return false;
   }
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const answer = await read({
-      tenantId: appointment.tenant_id,
-      hostUserId: appointment.assigned_to,
-      eventId: appointment.google_event_id,
-      expectedOrganizerEmail: appointment.organizer_email_snapshot,
-      attendeeEmail: appointment.client_email_snapshot,
-    });
+    const answer = await Promise.race([
+      read({
+        tenantId: appointment.tenant_id,
+        hostUserId: appointment.assigned_to,
+        eventId: appointment.google_event_id,
+        expectedOrganizerEmail: appointment.organizer_email_snapshot,
+        attendeeEmail: appointment.client_email_snapshot,
+      }),
+      new Promise<"too_slow">((resolve) => {
+        timer = setTimeout(() => resolve("too_slow"), budgetMs);
+      }),
+    ]);
+    if (answer === "too_slow") {
+      console.warn("[lead-declined] RSVP read over budget; treated as not declined", {
+        appointment: appointment.id,
+        budgetMs,
+      });
+      return false;
+    }
     return answer === "declined";
   } catch (error) {
     console.warn("[lead-declined] RSVP read failed; treated as not declined", {
@@ -57,6 +79,8 @@ export async function leadDeclinedInvite(
       error: error instanceof Error ? error.message : String(error),
     });
     return false;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
