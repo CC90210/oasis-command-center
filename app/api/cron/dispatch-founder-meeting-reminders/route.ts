@@ -18,6 +18,7 @@ import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import { countSegments } from "@/lib/sms-segments";
 import { leadStillWaiting, meetingHeldAfterAll, recoverFounderMeetings, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
+import { declineCheckForRun, type DeclineCheckAppointment } from "@/lib/booking/lead-declined";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { clipText } from "@/lib/notify/telegram-format";
@@ -94,6 +95,8 @@ type AppointmentState = {
   updated_at: string;
   notification_lease_token: string | null;
   notification_lease_expires_at: string | null;
+  google_event_id: string | null;
+  assigned_to: string | null;
 };
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -200,6 +203,8 @@ type SenderPass = {
     fromNumber: string | null;
     promise: Promise<{ ready: boolean; reason: string }>;
   }>;
+  /** The lead's answer on the invite, read from Google once per meeting per pass. */
+  declined: (appointment: DeclineCheckAppointment) => Promise<boolean>;
 };
 
 function quoIntakeForPass(
@@ -535,7 +540,7 @@ async function processRow(
   senderPass: SenderPass,
 ): Promise<"sent" | "skipped" | "failed" | "held"> {
   const appointmentResult = await db.from("call_appointments")
-    .select("id,scheduled_for,status,calendar_status,workflow_status,revision,sms_consent,client_phone_snapshot,client_email_snapshot,client_name_snapshot,company_snapshot,client_agenda,offer_label,duration_minutes,timezone,google_meet_link,organizer_email_snapshot,pending_started_at,updated_at,notification_lease_token,notification_lease_expires_at")
+    .select("id,scheduled_for,status,calendar_status,workflow_status,revision,sms_consent,client_phone_snapshot,client_email_snapshot,client_name_snapshot,company_snapshot,client_agenda,offer_label,duration_minutes,timezone,google_meet_link,organizer_email_snapshot,pending_started_at,updated_at,notification_lease_token,notification_lease_expires_at,google_event_id,assigned_to")
     .eq("tenant_id", row.tenant_id)
     .eq("id", row.appointment_id)
     .maybeSingle();
@@ -633,6 +638,14 @@ async function processRow(
       }
       if (!isKnownReminderTier(tier)) {
         await mark(db, row, "skipped", { error: "reminder_tier_invalid" });
+        return "skipped";
+      }
+      // The lead said no on the invite (lib/booking/lead-declined.ts): no
+      // reminder for them, no "In 15 minutes" for the founder. Read fresh each
+      // time, so a lead who accepts again is reminded again; an unreadable
+      // answer sends as before.
+      if (await senderPass.declined({ ...appointment, tenant_id: row.tenant_id })) {
+        await mark(db, row, "skipped", { error: "lead_declined_invite" });
         return "skipped";
       }
       if (row.kind === "host_15") {
@@ -1237,7 +1250,7 @@ async function handle(req: NextRequest) {
   let sent = 0;
   let skipped = 0;
   let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0) + watch.errors.length;
-  const senderPass: SenderPass = { standings: new Map(), withheld: [], quoIntake: new Map() };
+  const senderPass: SenderPass = { standings: new Map(), withheld: [], quoIntake: new Map(), declined: declineCheckForRun() };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
     const claimed = await db.from("website_sales_meeting_notifications")

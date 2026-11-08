@@ -123,6 +123,16 @@ stubModule(require.resolve("../lib/leads/canonical-touch"), {
     return undefined;
   },
 });
+// The lead's answer on the invite (lib/booking/lead-declined.ts), as Google would give it.
+const declinedOnInvite = new Set<string>();
+const inviteReads: string[] = [];
+stubModule(require.resolve("../lib/booking/lead-declined"), {
+  leadDeclinedInvite: async (appointment: { id: string }) => declinedOnInvite.has(appointment.id),
+  declineCheckForRun: () => async (appointment: { id: string }) => {
+    inviteReads.push(appointment.id);
+    return declinedOnInvite.has(appointment.id);
+  },
+});
 stubModule(require.resolve("../lib/website-sales-founder-meeting"), {
   reconcileFounderMeetingSagas: async () => ({
     considered: 0, activated: 0, cancelled: 0, compensated: 0, released: 0, failed: 0, errors: [],
@@ -936,6 +946,34 @@ async function main() {
     const lease = source.indexOf("const leaseToken = await acquireAppointmentLease(");
     const spacing = source.indexOf("const wait = await followUpNotBefore(db, row);");
     assert.ok(lease > 0 && spacing > lease, "the spacing check comes after the lease is taken");
+  });
+
+  // 2026-11-07: a lead declined on the invite at 05:11 and still got the 60-,
+  // 30- and 15-minute reminders; the founder got "In 15 minutes" for them.
+  await appointment("appt-declined", 15);
+  await queue("declined-email-15", "appt-declined", "reminder_15", 15, "email", "taylor@example.com");
+  await queue("declined-sms-15", "appt-declined", "reminder_15", 15, "sms", PHONE);
+  await queue("declined-host-15", "appt-declined", "host_15", 15, "email", HOST_EMAIL);
+  declinedOnInvite.add("appt-declined");
+  const sendsBefore = sharedSends.length + quoSends.length;
+  inviteReads.length = 0;
+  await dispatch();
+  await check("a lead who declined the invite gets no reminder, and the founder no heads-up", async () => {
+    for (const id of ["declined-email-15", "declined-sms-15", "declined-host-15"]) {
+      const row = await rowOf(id);
+      assert.equal(row.status, "skipped", id);
+      assert.equal(row.last_error, "lead_declined_invite", id);
+    }
+    assert.equal(sharedSends.length + quoSends.length, sendsBefore, "nothing went out for the declined meeting");
+    assert.equal(inviteReads.filter((id) => id === "appt-declined").length, 3,
+      "the run's checker is asked for every due row (it reads Google once per meeting: tests/lead-declined.test.ts)");
+  });
+  // They accept again: the next reminder goes, because the answer is read every time.
+  declinedOnInvite.delete("appt-declined");
+  await queue("declined-email-5", "appt-declined", "reminder_5", 5, "email", "taylor@example.com");
+  await dispatch();
+  await check("a lead who accepts again is reminded again", async () => {
+    assert.equal((await rowOf("declined-email-5")).status, "sent");
   });
 
   if (failures) {

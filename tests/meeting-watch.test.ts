@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
+import { leadDeclinedInvite } from "../lib/booking/lead-declined";
 import {
   attendanceFrom,
   buildGuestWaitingAlert,
@@ -140,6 +141,17 @@ function testMessages() {
     assert.ok(!/[–—]/.test(text), "no dashes CC does not write");
     assert.ok(text.includes(url), "every message carries the lead's own link");
   }
+  // A lead who declined the invite and stayed away told us: nobody "missed" anyone (2026-11-07).
+  const declined = buildNoShowMessages({ firstName: "Robin", offerLabel: "AI automation audit", durationMinutes: 15, missedAt: START, rebookUrl: url, who: "both_absent", declined: true });
+  assert.equal(declined.email.subject, "Another time for your AI automation audit?");
+  assert.match(declined.email.body, /^Hi Robin,\n\nI saw you couldn't make our AI automation audit on .*\. No problem at all\./);
+  assert.ok(!/missed/i.test(declined.email.body + declined.sms), "a decline is never a 'missed'");
+  assert.match(declined.sms, /^OASIS AI: No problem about your AI automation audit\. If you'd like another time, pick one here: /);
+  for (const text of [declined.email.body, declined.sms]) assert.ok(text.includes(url) && !/[–—]/.test(text));
+  const missedRobin = buildNoShowMessages({ firstName: "Robin", offerLabel: "AI automation audit", durationMinutes: 15, missedAt: START, rebookUrl: url, who: "both_absent" });
+  assert.deepEqual(declined.followUps, missedRobin.followUps, "the follow-ups were already neutral");
+  const declinedButCame = buildNoShowMessages({ firstName: "Uwem", offerLabel: "AI automation audit", durationMinutes: 15, missedAt: START, rebookUrl: url, who: "host_absent", declined: true });
+  assert.equal(declinedButCame.email.subject, "I'm sorry I missed our call", "a lead who came anyway still gets the apology");
   const waiting = buildGuestWaitingAlert({
     name: "Vivian", company: "Salon", phone: "+2349065082127", email: "v@example.com",
     meetLink: "https://oasisai.work/meet/rut-imtb-oqz", startsAt: START, leadId: "lead-v",
@@ -488,10 +500,102 @@ async function testWatch() {
   }
 }
 
+/**
+ * 2026-11-07: a lead declined their audit on the invite at 05:11 and stayed away.
+ * At the meeting time they got "Sorry we missed each other" and the founder got
+ * "Missed: ... Nobody opened the call". The watcher now asks the invite.
+ */
+async function testADeclinedLeadIsOfferedAnotherTimeAndTheFounderToldDeclined() {
+  const raw = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "meeting-watch-declined-")), "db.sqlite")}` });
+  await raw.executeMultiple(`
+    CREATE TABLE call_appointments (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, lead_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL DEFAULT 'lead', scheduled_for TEXT NOT NULL, assigned_to TEXT,
+      status TEXT NOT NULL DEFAULT 'scheduled', pre_call_note TEXT, outcome_note TEXT,
+      created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT
+    );
+    CREATE TABLE lead_interactions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      tenant_id TEXT, lead_id TEXT, type TEXT, channel TEXT, direction TEXT, agent_source TEXT,
+      to_phone TEXT, to_email TEXT, subject TEXT, content TEXT, content_preview TEXT,
+      actor_user_id TEXT, metadata TEXT, created_at TEXT);
+    CREATE TABLE meet_participants (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))), tenant_id TEXT NOT NULL, room_id TEXT NOT NULL,
+      role TEXT NOT NULL, user_id TEXT, joined_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, left_at TEXT, removed_at TEXT
+    );
+    CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL, data TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE meet_rooms (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL);
+    ${readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8")}
+    ${readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__250_founder_meeting_reminder_ladder.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__224_public_booking_offer_label.sql", "utf8")}
+    ${readFileSync("database/turso/bravo__232_booking_meet_room.sql", "utf8")}
+  `);
+  const db = createTursoPostgrest(raw) as never;
+  for (const id of ["declined", "came-anyway", "unreadable"]) {
+    await raw.execute({ sql: "INSERT INTO meet_rooms (id, tenant_id) VALUES (?, ?)", args: [`room-${id}`, TENANT] });
+    await raw.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+      args: [`lead-${id}`, TENANT, JSON.stringify({ stage: "founder_meeting_booked", calendar_appointment_id: id })],
+    });
+    await raw.execute({
+      sql: `INSERT INTO call_appointments (id, tenant_id, lead_id, scheduled_for, assigned_to, created_by, meeting_kind,
+              duration_minutes, timezone, client_name_snapshot, company_snapshot, client_email_snapshot,
+              google_meet_link, calendar_status, organizer_email_snapshot, revision, workflow_status, sms_consent, offer_label,
+              meet_room_id, google_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, 'founder_audit', 15, 'America/Toronto', ?, 'Harbour Studio', ?,
+              'https://oasisai.work/meet/vbj-mhtn-ndp', 'verified', 'conaugh@oasisai.work', 1, 'active', 0, 'AI automation audit', ?, ?)`,
+      args: [id, TENANT, `lead-${id}`, START, HOST, HOST, `Lead ${id}`, `${id}@example.com`, `room-${id}`, `oasis${"ab".repeat(32)}`],
+    });
+  }
+  // The lead who declined still came into the room: the apology stands.
+  await raw.execute({
+    sql: "INSERT INTO meet_participants (tenant_id, room_id, role, user_id, joined_at, last_seen_at, left_at) VALUES (?, 'room-came-anyway', 'guest', NULL, ?, ?, ?)",
+    args: [TENANT, "2026-10-28T16:01:00.000Z", "2026-10-28T16:11:00.000Z", "2026-10-28T16:11:00.000Z"],
+  });
+  const alerts: string[] = [];
+  const asked: string[] = [];
+  await watchFounderMeetings({
+    db,
+    now: () => NOW,
+    origin: "https://oasisai.work",
+    env: { FORM_LINK_HMAC_KEY: KEY },
+    isTeammate: async (_tenant: string, userId: string) => userId === HOST,
+    markNoShow: (async (input: { appointmentId: string }) => {
+      await raw.execute({ sql: "UPDATE call_appointments SET status='no_answer', workflow_status='no_show' WHERE id=?", args: [input.appointmentId] });
+      return { alreadyClosed: false, leadUpdated: true, leadStage: "founder_meeting_booked" };
+    }) as never,
+    alert: (async (_tenant: string, text: string) => {
+      alerts.push(text);
+      return { delivered: true, outcome: "sent" };
+    }) as never,
+    declined: async (appointment) => {
+      asked.push(appointment.id);
+      // The real check fails open: an unreadable answer is "not declined".
+      return appointment.id === "unreadable"
+        ? leadDeclinedInvite(appointment, async () => { throw new Error("calendar_read_failed"); })
+        : true;
+    },
+  });
+  const subjects = async (id: string) =>
+    (await raw.execute({ sql: "SELECT subject FROM website_sales_meeting_notifications WHERE appointment_id = ? AND kind = 'no_show_rebook'", args: [id] })).rows.map((r) => String(r.subject));
+  assert.deepEqual(await subjects("declined"), ["Another time for your AI automation audit?"]);
+  assert.deepEqual(await subjects("came-anyway"), ["I'm sorry I missed our call"]);
+  assert.deepEqual(await subjects("unreadable"), ["Sorry we missed each other"], "an unknown answer changes nothing");
+  assert.deepEqual(asked.sort(), ["declined", "unreadable"], "only a lead who stayed away is asked about");
+  const alertFor = (id: string) => alerts.find((a) => a.includes(`Lead ${id}`)) || "";
+  assert.match(alertFor("declined"), /^<b>Declined: Lead declined - Harbour Studio<\/b>/);
+  assert.match(alertFor("declined"), /They declined the invitation, so the call did not happen\. A link to pick another time is going out now\./);
+  assert.match(alertFor("came-anyway"), /^<b>Missed: Lead came-anyway/);
+  assert.match(alertFor("unreadable"), /^<b>Missed: Lead unreadable/);
+}
+
 async function main() {
   testAttendance();
   testMessages();
   await testWatch();
+  await testADeclinedLeadIsOfferedAnotherTimeAndTheFounderToldDeclined();
   console.log("meeting-watch: OK");
 }
 
