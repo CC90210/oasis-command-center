@@ -288,7 +288,10 @@ async function main() {
   await check("runHealthChecks: control — the same failing check for OASIS persists and pages", async () => {
     const summary = await runHealthChecks(OASIS, { checks: [synthetic], sendTelegramImpl: send as never });
     assert.equal(summary.ran, 1);
-    assert.deepEqual(summary.alerted, [synthetic.id]);
+    assert.deepEqual(summary.alerted, [], "a first failure is unconfirmed until the next run (two-strike)");
+    assert.equal(await countFor("health_alert_state", OASIS), 1, "the unconfirmed episode is persisted");
+    const confirmed = await runHealthChecks(OASIS, { checks: [synthetic], sendTelegramImpl: send as never });
+    assert.deepEqual(confirmed.alerted, [synthetic.id]);
     assert.ok(await countFor("health_check_runs", OASIS) >= 2, "result + run summary rows");
     assert.equal(await countFor("health_alert_state", OASIS), 1);
     assert.equal(pages.length, 1);

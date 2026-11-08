@@ -34,6 +34,7 @@ import { DEPLOY_CHECKS } from "../lib/health/deploy-checks";
 import { evaluate } from "../lib/health/checks-core";
 import { healthAlertStateKey } from "../lib/health/alert-state-key";
 import { WORKER_REPORTER_OFFLINE_REASON } from "../lib/automations/worker-status";
+import { WEBDEV_TENANT_ID } from "../lib/oasis-tenant";
 
 const RUNNER = readFileSync("lib/health/runner.ts", "utf8");
 
@@ -285,6 +286,12 @@ async function main() {
     const calendarChecks: never[] = [];
     const failingCheck = { id: "synthetic.mixed", severity: "critical" as const, lane: "operator" as const,
       rule: { kind: "must_be_zero" as const }, observe: async () => 1, describe: () => "fixture failed" };
+    // Two-strike (2026-11-06): the previous run saw this failure once, so this
+    // run is the one that confirms it and tries to page.
+    const mixedKey = healthAlertStateKey(WEBDEV_TENANT_ID, failingCheck.id);
+    memory.states.set(mixedKey, { alert_key: mixedKey, tenant_id: WEBDEV_TENANT_ID,
+      last_signature: "unconfirmed:synthetic.mixed:failing", last_alerted_at: null, repeat_n: 0,
+      first_failed_at: new Date(NOW - 15 * 60_000).toISOString(), updated_at: new Date(NOW - 15 * 60_000).toISOString() });
     let requests = 0; let sends = 0;
     const mock = (path: string, exports: object) => {
       const id = require.resolve(path); require.cache[id] = { id, filename: id, loaded: true, exports } as NodeModule;
@@ -477,16 +484,20 @@ async function main() {
       return { ok: true };
     };
 
-    for (const tenantId of [tenantA, tenantB]) {
-      await runHealthChecks(tenantId, {
-        nowMs: NOW,
-        checks: [sharedCheck],
-        db: memory.db as never,
-        sendTelegramImpl: send as never,
-      });
+    // Two runs each: the first opens an unconfirmed episode, the second pages.
+    for (const at of [NOW, NOW + 5 * 60_000]) {
+      for (const tenantId of [tenantA, tenantB]) {
+        await runHealthChecks(tenantId, {
+          nowMs: at,
+          checks: [sharedCheck],
+          db: memory.db as never,
+          sendTelegramImpl: send as never,
+        });
+      }
+      if (at === NOW) assert.equal(deliveries.length, 0, "a first failure is unconfirmed and pages nobody");
     }
 
-    assert.equal(deliveries.length, 2, "each tenant's first failure must page independently");
+    assert.equal(deliveries.length, 2, "each tenant's confirmed failure must page independently");
     assert.deepEqual(
       [...memory.states.keys()].sort(),
       [
@@ -522,6 +533,46 @@ async function main() {
       null,
       "tenant A recovery closed tenant B's episode",
     );
+  }
+
+  // TWO-STRIKE (2026-11-06): the shared calendar check failed once at 13:45Z
+  // and passed at 14:00Z, and CC got FAILING then RECOVERED for a blip. A blip
+  // now pages nobody and announces no recovery; a confirmed failure pages once
+  // and recovers once.
+  {
+    const tenant = "33333333-3333-4333-8333-333333333333";
+    const memory = tenantIsolationDb();
+    let failing = true;
+    const check = { id: "synthetic.blip", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => (failing ? 1 : 0), describe: () => "calendar proof failed" };
+    const messages: string[] = [];
+    const send = async (message: string) => { messages.push(message); return { ok: true }; };
+    const run = (minutes: number) => runHealthChecks(tenant, { checks: [check], db: memory.db as never,
+      nowMs: NOW + minutes * 60_000, sendTelegramImpl: send as never });
+    const key = healthAlertStateKey(tenant, check.id);
+
+    const blip = await run(0);
+    assert.deepEqual(blip.alerted, [], "one failing run pages nobody");
+    assert.match(String(memory.states.get(key)?.last_signature), /^unconfirmed:/);
+    failing = false;
+    const passed = await run(15);
+    assert.deepEqual(passed.recovered, [], "nothing was said, so nothing recovered");
+    assert.deepEqual(messages, []);
+    assert.equal(memory.states.get(key)?.first_failed_at, null, "the blip's episode is closed");
+
+    failing = true;
+    await run(30);
+    const confirmed = await run(45);
+    assert.deepEqual(confirmed.alerted, [check.id], "the second consecutive failure pages");
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /FAILING/);
+    const repeat = await run(60);
+    assert.deepEqual(repeat.alerted, [], "the decay ladder still holds a confirmed episode");
+    failing = false;
+    const healed = await run(75);
+    assert.deepEqual(healed.recovered, [check.id]);
+    assert.equal(messages.length, 2);
+    assert.match(messages[1], /RECOVERED/);
   }
 }
 assert.match(

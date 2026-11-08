@@ -135,6 +135,26 @@ export function pendingRecoveryLanes(signature: string | null | undefined): Tele
   return lanes.length ? lanes : null;
 }
 
+/**
+ * TWO-STRIKE CONFIRMATION (2026-11-06). A check that fails ONCE opens its
+ * episode quietly: last_signature = UNCONFIRMED + signature, no message. The
+ * next run, 15 minutes later, either confirms it (still failing: alert now) or
+ * closes it with no message (ok: nothing was said, so nothing "recovered").
+ *
+ * On 2026-11-06 the shared calendar check failed at 13:45Z and passed at
+ * 14:00Z, and CC got 🔴 FAILING and 🟢 RECOVERED for a blip he could not and
+ * did not need to act on. CC: "a lot of major issues with repetitive messages."
+ *
+ * Known limit: a check that flaps fail/ok on alternate runs never confirms.
+ * Every verdict is still written to health_check_runs, where the health page
+ * shows it.
+ */
+const UNCONFIRMED = "unconfirmed:";
+
+export function isUnconfirmed(signature: string | null | undefined): boolean {
+  return Boolean(signature && signature.startsWith(UNCONFIRMED));
+}
+
 const SEV_ICON: Record<string, string> = {
   failing: "🔴",
   degraded: "🟠",
@@ -256,6 +276,15 @@ export async function runHealthChecks(
       // prove an earlier reporting outage recovered. Keep that episode open
       // until the same paired computer comes back with a healthy report.
       if (result.id === `fleet.worker_status_reporter` && result.reason === WORKER_REPORTER_OFFLINE_REASON) continue;
+      // Failed once, never confirmed, never told: close the episode silently.
+      if (state?.first_failed_at && isUnconfirmed(state.last_signature)) {
+        await db.from("health_alert_state").upsert({
+          alert_key: key, tenant_id: tenantId,
+          last_signature: null, last_alerted_at: state.last_alerted_at, repeat_n: 0,
+          first_failed_at: null, updated_at: new Date(nowMs).toISOString(),
+        }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+        continue;
+      }
       // Announce recovery once, then clear the episode so the next failure
       // starts a fresh ladder rather than inheriting a 24h window.
       if (state?.first_failed_at) {
@@ -314,9 +343,26 @@ export async function runHealthChecks(
     }
 
     const signature = alertSignature(result.id, result.verdict);
+    // Two-strike: a failure with no open episode is recorded, not sent. The
+    // next run confirms it or closes it silently (see UNCONFIRMED).
+    if (!state?.first_failed_at) {
+      await db.from("health_alert_state").upsert({
+        alert_key: key, tenant_id: tenantId,
+        last_signature: `${UNCONFIRMED}${signature}`,
+        last_alerted_at: state?.last_alerted_at ?? null,
+        repeat_n: 0,
+        first_failed_at: new Date(nowMs).toISOString(),
+        updated_at: new Date(nowMs).toISOString(),
+      }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+      continue;
+    }
+    // A confirmed episode alerts as a first alert; after that, the decay ladder.
+    const confirming = isUnconfirmed(state.last_signature);
     const decision = shouldAlert(
       signature,
-      { lastSignature: state?.last_signature, lastAlertedAt: state?.last_alerted_at, repeatN: state?.repeat_n },
+      confirming
+        ? { lastSignature: null, lastAlertedAt: null, repeatN: 0 }
+        : { lastSignature: state.last_signature, lastAlertedAt: state.last_alerted_at, repeatN: state.repeat_n },
       new Date(nowMs),
     );
     if (!decision.send) continue;
