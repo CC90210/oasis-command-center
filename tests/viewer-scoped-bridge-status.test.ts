@@ -228,7 +228,7 @@ async function main() {
     assert.equal(describeBackground(partial, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, null,
       "unreported cloud bots beside reported units: unknown, not 0");
     const complete = new Map(partial);
-    for (const service of ["vps.atlas-telegram", "vps.maven-telegram"]) {
+    for (const { service } of remote) {
       complete.set(service, { service, status: "healthy", last_ping_at: now.toISOString(), metadata: {} });
     }
     assert.equal(describeBackground(complete, offlinePc, now.getTime(), { authUserId: CC, isAgentsOwner: true }).workersDown, 0,
