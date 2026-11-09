@@ -65,6 +65,17 @@ async function outcomes() {
   assert.equal(result.get("notification_delivery")?.observed, 1);
   assert.equal(result.get("business_outcomes")?.observed, 2, "exit-zero delivered red digest still has failed business outcome");
   assert.equal(result.get("weekly_system_gate")?.observed, 1, "delivering a report cannot make RED green");
+  for (const delivered of [false, true]) {
+    f.rows.weekly[0].metadata = JSON.stringify({ overall: "WARN", checked_at: iso(), report_delivered: delivered });
+    const warning = (await f.read()).get("weekly_system_gate");
+    assert.equal(warning?.observed, 1, "the Python WARN verdict is a known degraded result regardless of report delivery");
+    assert.match(warning?.reason ?? "", /Weekly system verdict: WARN/);
+  }
+  f.rows.weekly[0].metadata = JSON.stringify({ overall: "WARN", checked_at: iso(8 * 24 * 60) });
+  assert.equal((await f.read()).get("weekly_system_gate")?.observed, null, "an expired WARN report remains unverified");
+  f.rows.weekly[0].metadata = JSON.stringify({ overall: "UNKNOWN", checked_at: iso() });
+  assert.equal((await f.read()).get("weekly_system_gate")?.observed, null, "unrecognized verdicts do not become healthy");
+  f.rows.weekly[0].metadata = JSON.stringify({ overall: "RED", checked_at: iso(), report_delivered: true });
   f.rows.automation_occurrences[0].scheduled_at = iso(2 * 24 * 60);
   assert.equal((await f.read()).get("business_outcomes")?.observed, 2, "a weekly failed outcome remains visible beyond24hours");
   f.rows.cron_jobs.at(-1)!.is_active = 0;

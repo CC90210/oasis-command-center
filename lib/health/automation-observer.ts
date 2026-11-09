@@ -136,7 +136,9 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
     const parsed = JSON.parse(String(data.weekly?.[0]?.metadata || "{}"));
     if (parsed && typeof parsed === "object") weekly = parsed;
   } catch { /* explicit unverified */ }
-  const weeklyKnown = ["GREEN", "AMBER", "RED"].includes(weekly.overall ?? "") && Number.isFinite(at(weekly.checked_at));
+  // The Python publisher emits WARN for a completed, degraded check. Keep its
+  // verdict visible instead of treating that valid report as missing evidence.
+  const weeklyKnown = ["GREEN", "WARN", "AMBER", "RED"].includes(weekly.overall ?? "") && Number.isFinite(at(weekly.checked_at));
   const weeklyStale = now - at(weekly.checked_at) > (7 * 24 + 2) * 60 * MINUTE;
   add("weekly_system_gate", !weeklyKnown || weeklyStale ? null : weekly.overall === "GREEN" ? 0 : 1,
     !weeklyKnown || weeklyStale ? "Weekly system gate is missing, unverified, or overdue." : `Weekly system verdict: ${weekly.overall}. Report delivery is recorded separately and is not proof of a healthy system.`);
