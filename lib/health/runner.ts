@@ -17,7 +17,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
+import { sendTelegram, type TelegramLane, type TelegramDelivery } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
@@ -33,6 +33,7 @@ import { healthAlertStateKey } from "./alert-state-key";
 import { isRetiredTenant } from "@/lib/tenant/retired";
 
 import { computeCoverage } from "./coverage";
+import { incidentWindow } from "./incident-window";
 
 /**
  * Every check this run evaluates.
@@ -136,7 +137,7 @@ export function pendingRecoveryLanes(signature: string | null | undefined): Tele
 }
 
 /**
- * TWO-STRIKE CONFIRMATION (2026-11-06). A check that fails ONCE opens its
+ * FAILURE CONFIRMATION. A check that fails ONCE opens its
  * episode quietly: last_signature = UNCONFIRMED + signature, no message. The
  * next run, 15 minutes later, either confirms it (still failing: alert now) or
  * closes it with no message (ok: nothing was said, so nothing "recovered").
@@ -145,9 +146,8 @@ export function pendingRecoveryLanes(signature: string | null | undefined): Tele
  * 14:00Z, and CC got 🔴 FAILING and 🟢 RECOVERED for a blip he could not and
  * did not need to act on. CC: "a lot of major issues with repetitive messages."
  *
- * Known limit: a check that flaps fail/ok on alternate runs never confirms.
- * Every verdict is still written to health_check_runs, where the health page
- * shows it.
+ * Two consecutive failures or three failures in six observations confirm the
+ * episode. Two real successful observations are required to close it.
  */
 const UNCONFIRMED = "unconfirmed:";
 
@@ -209,6 +209,8 @@ export async function runHealthChecks(
     db?: Db;
     /** Test seam for proving delivery decisions without sending Telegram messages. */
     sendTelegramImpl?: typeof sendTelegram;
+    /** Completion clock for injected senders. Production receipts carry an absolute deadline. */
+    deliveryNowMs?: () => number;
   } = {},
 ): Promise<RunSummary> {
   // A retired tenant has no outcomes left to grade, and every row this writes
@@ -220,6 +222,7 @@ export async function runHealthChecks(
   const db = opts.db ?? getServiceSupabase();
   const send = opts.sendTelegramImpl ?? sendTelegram;
   const nowMs = opts.nowMs ?? Date.now();
+  const deliveryNowMs = opts.deliveryNowMs ?? Date.now;
   const notify = opts.notify !== false;
   const results: CheckResult[] = [];
   const alerted: string[] = [];
@@ -244,7 +247,7 @@ export async function runHealthChecks(
     results.push(result);
 
     // Persist first, so a later notify failure cannot lose the observation.
-    await db.from("health_check_runs").insert({
+    const persisted = await db.from("health_check_runs").insert({
       tenant_id: tenantId,
       check_id: result.id,
       surface: "oasis",
@@ -253,7 +256,8 @@ export async function runHealthChecks(
       baseline: result.baseline,
       reason: result.reason.slice(0, 500),
       ran_at: new Date(nowMs).toISOString(),
-    }).then(() => undefined, () => undefined);
+    });
+    if (persisted.error) throw new Error("health_observation_write_failed");
 
     if (!notify) continue;
 
@@ -268,21 +272,68 @@ export async function runHealthChecks(
       .eq("alert_key", key)
       .maybeSingle();
     const state = stateRow.data as
-      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null }
+      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null; recent_verdicts_json?: unknown; delivery_status?: string | null; delivery_claim_token?: string | null; delivery_receipts_json?: unknown; delivery_retry_at?: string | null }
       | null;
+    if (stateRow.error) throw new Error("health_incident_state_read_failed");
+    // Intentional offline is not an observation of recovery. Do not add it to
+    // the success window, otherwise one live success would close the episode.
+    if (result.id === "fleet.worker_status_reporter" && result.reason === WORKER_REPORTER_OFFLINE_REASON) continue;
+    const window = incidentWindow(state?.recent_verdicts_json, result.verdict, Boolean(state?.first_failed_at));
+    const observationState = { recent_verdicts_json: window.serialized };
+    const observed = await db.from("health_alert_state").upsert({
+      alert_key: key, tenant_id: tenantId,
+      ...observationState, updated_at: new Date(nowMs).toISOString(),
+    }, { onConflict: "alert_key" });
+    if (observed.error) throw new Error("health_incident_state_write_failed");
+    let claimToken = state?.delivery_claim_token ?? null;
+    const writeState = async (values: Record<string, unknown>): Promise<boolean> => {
+      let mutation = db.from("health_alert_state").update(values).eq("tenant_id", tenantId).eq("alert_key", key);
+      mutation = claimToken === null ? mutation.is("delivery_claim_token", null) : mutation.eq("delivery_claim_token", claimToken);
+      const written = await mutation.select("alert_key");
+      if (written.error) throw new Error("health_incident_state_write_failed");
+      return written.data?.length === 1;
+    };
+    const claimDelivery = async (): Promise<boolean> => {
+      const token = crypto.randomUUID();
+      if (!await writeState({ delivery_status: "dispatching", delivery_claim_token: token, delivery_updated_at: new Date(nowMs).toISOString() })) return false;
+      claimToken = token;
+      return true;
+    };
+    let receipts: Record<string, { phase: string; providerMessageId: number }> = {};
+    try {
+      const raw = state?.delivery_receipts_json;
+      const saved = typeof raw === "string" ? JSON.parse(raw || "{}") : raw;
+      if (saved && typeof saved === "object" && !Array.isArray(saved)) receipts = saved;
+    } catch { /* prior version had no provider receipts */ }
+    // A killed send or ambiguous acknowledgment requires reconciliation.
+    // Neither a fresh check nor a recovery is permission to replay that effect.
+    if (["dispatching", "unknown", "permanent_failure"].includes(state?.delivery_status ?? "")) {
+      telegramFailures++;
+      continue;
+    }
+    // This deadline is stored with the refused receipt, not in process memory.
+    // Fresh observations (including after a restart) cannot bypass provider backoff.
+    // An unannounced episode may still close silently after two healthy checks.
+    const silentClosure = result.verdict === "ok" && window.recovered && isUnconfirmed(state?.last_signature);
+    const retryAt = state?.delivery_retry_at ? Date.parse(state.delivery_retry_at) : null;
+    if (!silentClosure && retryAt !== null && (!Number.isFinite(retryAt) || retryAt > nowMs)) {
+      telegramFailures++;
+      continue;
+    }
 
     if (result.verdict === "ok") {
       // A PC being off makes its local reporter not applicable; it does not
       // prove an earlier reporting outage recovered. Keep that episode open
       // until the same paired computer comes back with a healthy report.
-      if (result.id === `fleet.worker_status_reporter` && result.reason === WORKER_REPORTER_OFFLINE_REASON) continue;
+      if (state?.first_failed_at && !window.recovered) continue;
       // Failed once, never confirmed, never told: close the episode silently.
       if (state?.first_failed_at && isUnconfirmed(state.last_signature)) {
-        await db.from("health_alert_state").upsert({
+        await writeState({
           alert_key: key, tenant_id: tenantId,
+          ...observationState,
           last_signature: null, last_alerted_at: state.last_alerted_at, repeat_n: 0,
-          first_failed_at: null, updated_at: new Date(nowMs).toISOString(),
-        }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+          first_failed_at: null, delivery_status: "none", delivery_retry_at: null, updated_at: new Date(nowMs).toISOString(),
+        });
         continue;
       }
       // Announce recovery once, then clear the episode so the next failure
@@ -299,24 +350,36 @@ export async function runHealthChecks(
         // the original alert. Do not re-page audiences that already accepted it.
         const owed = (pendingRecoveryLanes(state.last_signature) ?? currentLanes).filter(lane => currentLanes.includes(lane));
         const stillOwed: TelegramLane[] = [];
+        let unknownReceipt = false;
+        let permanentFailure = false;
+        let retryAtMs = 0;
         const recoveryLine = recoveryDetail(check, result);
+        if (!await claimDelivery()) continue;
         for (const lane of owed) {
-          const r = await send(
+          const r: TelegramDelivery = await send(
             `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(recoveryLine)}`,
             { lane },
-          ).catch(() => ({ ok: false }));
+          ).catch(() => ({ ok: false, delivery: "unknown" as const }));
           if (!r.ok) stillOwed.push(lane);
+          if (!r.ok && r.delivery !== "rejected") unknownReceipt = true;
+          if (!r.ok && r.permanent) permanentFailure = true;
+          if (!r.ok && r.retryAfterMs) retryAtMs = Math.max(retryAtMs, r.retryAtMs ?? deliveryNowMs() + r.retryAfterMs);
+          if (r.ok && r.providerMessageId) receipts[lane] = { phase: "recovery", providerMessageId: r.providerMessageId };
         }
         // The episode stays OPEN while a lane is still owed the news, so the
         // next run retries it. Closing it here would strand that lane's
         // operators on a red alert with nothing left to resolve it.
-        await db.from("health_alert_state").upsert({
+        if (!await writeState({
           alert_key: key, tenant_id: tenantId,
+          ...observationState,
+          delivery_status: unknownReceipt ? "unknown" : permanentFailure ? "permanent_failure" : stillOwed.length ? "rejected" : "delivered",
+          delivery_retry_at: retryAtMs ? new Date(retryAtMs).toISOString() : null,
+          delivery_updated_at: new Date(nowMs).toISOString(), delivery_receipts_json: JSON.stringify(receipts),
           last_signature: stillOwed.length ? `${RECOVERY_PENDING}${stillOwed.join(",")}` : null,
           last_alerted_at: state.last_alerted_at, repeat_n: 0,
           first_failed_at: stillOwed.length ? state.first_failed_at : null,
           updated_at: new Date(nowMs).toISOString(),
-        }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+        })) throw new Error("health_recovery_claim_lost");
 
         if (stillOwed.length) {
           // Same principle as an undeliverable alert: record it in the
@@ -345,24 +408,26 @@ export async function runHealthChecks(
     const signature = alertSignature(result.id, result.verdict);
     // Two-strike: a failure with no open episode is recorded, not sent. The
     // next run confirms it or closes it silently (see UNCONFIRMED).
-    if (!state?.first_failed_at) {
-      await db.from("health_alert_state").upsert({
+    if (!state?.first_failed_at && !window.confirm) {
+      await writeState({
         alert_key: key, tenant_id: tenantId,
+        ...observationState,
         last_signature: `${UNCONFIRMED}${signature}`,
         last_alerted_at: state?.last_alerted_at ?? null,
         repeat_n: 0,
         first_failed_at: new Date(nowMs).toISOString(),
         updated_at: new Date(nowMs).toISOString(),
-      }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+      });
       continue;
     }
+    if (isUnconfirmed(state?.last_signature) && !window.confirm) continue;
     // A confirmed episode alerts as a first alert; after that, the decay ladder.
-    const confirming = isUnconfirmed(state.last_signature);
+    const confirming = !state?.first_failed_at || isUnconfirmed(state.last_signature);
     const decision = shouldAlert(
       signature,
       confirming
         ? { lastSignature: null, lastAlertedAt: null, repeatN: 0 }
-        : { lastSignature: state.last_signature, lastAlertedAt: state.last_alerted_at, repeatN: state.repeat_n },
+        : { lastSignature: state!.last_signature, lastAlertedAt: state!.last_alerted_at, repeatN: state!.repeat_n },
       new Date(nowMs),
     );
     if (!decision.send) continue;
@@ -376,25 +441,36 @@ export async function runHealthChecks(
     // that, and the delivery self-test is what catches a dead channel.
     let sent: { ok: boolean } = { ok: false };
     const rejected: TelegramLane[] = [];
+    let unknownReceipt = false;
+    let permanentFailure = false;
+    let retryAtMs = 0;
+    if (!await claimDelivery()) continue;
     for (const lane of lanesFor(check)) {
-      const r = await send(body, { lane }).catch(() => ({ ok: false }));
+      const r: TelegramDelivery = await send(body, { lane }).catch(() => ({ ok: false, delivery: "unknown" as const }));
       if (r.ok) sent = { ok: true };
       else rejected.push(lane);
+      if (!r.ok && r.delivery !== "rejected") unknownReceipt = true;
+      if (!r.ok && r.permanent) permanentFailure = true;
+      if (!r.ok && r.retryAfterMs) retryAtMs = Math.max(retryAtMs, r.retryAtMs ?? deliveryNowMs() + r.retryAfterMs);
+      if (r.ok && r.providerMessageId) receipts[lane] = { phase: "alert", providerMessageId: r.providerMessageId };
     }
 
-    // Record the alert attempt regardless of delivery. If Telegram is down we
-    // must not spin re-sending every 15 minutes; the delivery self-test is the
-    // separate mechanism that catches a dead channel.
-    alerted.push(result.id);
-    await db.from("health_alert_state").upsert({
+    // Only a confirmed receipt advances suppression. Definitive refusals stay
+    // retryable; unknown acknowledgment is held by its durable delivery latch.
+    if (sent.ok) alerted.push(result.id);
+    if (!await writeState({
       alert_key: key,
       tenant_id: tenantId,
-      last_signature: signature,
-      last_alerted_at: new Date(nowMs).toISOString(),
-      repeat_n: decision.nextRepeatN,
+      ...observationState,
+      delivery_status: unknownReceipt ? "unknown" : permanentFailure ? "permanent_failure" : rejected.length ? "rejected" : "delivered",
+      delivery_retry_at: retryAtMs ? new Date(retryAtMs).toISOString() : null,
+      delivery_updated_at: new Date(nowMs).toISOString(), delivery_receipts_json: JSON.stringify(receipts),
+      last_signature: sent.ok ? signature : state?.last_signature ?? null,
+      last_alerted_at: sent.ok ? new Date(nowMs).toISOString() : state?.last_alerted_at ?? null,
+      repeat_n: sent.ok ? decision.nextRepeatN : state?.repeat_n ?? 0,
       first_failed_at: state?.first_failed_at ?? new Date(nowMs).toISOString(),
       updated_at: new Date(nowMs).toISOString(),
-    }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+    })) throw new Error("health_alert_claim_lost");
 
     // RECORDED WHENEVER A LANE REFUSED, not only when EVERY lane refused.
     //

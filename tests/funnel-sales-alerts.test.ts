@@ -39,7 +39,7 @@ function stubFetch(failing: Set<string>): { sent: Sent[]; restore: () => void } 
         status: 403,
       });
     }
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length } }), { status: 200 });
   }) as typeof fetch;
   return { sent, restore: () => { globalThis.fetch = real; } };
 }

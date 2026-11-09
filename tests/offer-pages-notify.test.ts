@@ -45,7 +45,7 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as { chat_id?: string; text?: string };
     calls.push({ token: m[1], chatId: String(body.chat_id), text: String(body.text) });
     if (failingChats.has(String(body.chat_id))) return new Response(JSON.stringify({ ok: false, description: "chat not found" }), { status: 400 });
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: calls.length } }), { status: 200 });
   }
   return new Response("{}", { status: 404 });
 }) as typeof fetch;

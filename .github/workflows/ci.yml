@@ -102,6 +102,9 @@ jobs:
           # unknown-is-not-zero) and none of them had a CI entry: every OS PR
           # before this one deployed on typecheck + build alone.
           npm run test:os
+          # Independent observer, retained receipts and strict dedicated auth.
+          # RSVP/calendar/health recovery remain in their existing mandatory groups.
+          npm run test:automation-reliability
           # Cloud replacement for the PC dashboard-email drain: exact email
           # lanes, CAS claims, receipt reconciliation, and operator health.
           npm run test:dashboard-email-sender

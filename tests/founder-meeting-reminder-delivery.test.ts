@@ -125,12 +125,13 @@ stubModule(require.resolve("../lib/leads/canonical-touch"), {
 });
 // The lead's answer on the invite (lib/booking/lead-declined.ts), as Google would give it.
 const declinedOnInvite = new Set<string>();
+const unknownOnInvite = new Map<string, string>();
 const inviteReads: string[] = [];
 stubModule(require.resolve("../lib/booking/lead-declined"), {
-  leadDeclinedInvite: async (appointment: { id: string }) => declinedOnInvite.has(appointment.id),
   declineCheckForRun: () => async (appointment: { id: string }) => {
     inviteReads.push(appointment.id);
-    return declinedOnInvite.has(appointment.id);
+    if (unknownOnInvite.has(appointment.id)) return { status: "unknown", reason: "rsvp_timeout", retryAt: unknownOnInvite.get(appointment.id) };
+    return { status: declinedOnInvite.has(appointment.id) ? "declined" : "not_declined", reason: "fixture_verified" };
   },
 });
 stubModule(require.resolve("../lib/website-sales-founder-meeting"), {
@@ -976,6 +977,24 @@ async function main() {
     assert.equal((await rowOf("declined-email-5")).status, "sent");
   });
 
+  await appointment("appt-unverified", 15);
+  await queue("unverified-email", "appt-unverified", "reminder_15", 15, "email", "unknown@example.com");
+  unknownOnInvite.set("appt-unverified", new Date(Date.now() + 60_000).toISOString());
+  await dispatch();
+  await check("unknown RSVP defers the reminder without sending", async () => {
+    const row = await rowOf("unverified-email");
+    assert.equal(row.status, "pending");
+    assert.equal(row.last_error, "rsvp_timeout");
+  });
+  await appointment("appt-expiring", 1);
+  await queue("expiring-email", "appt-expiring", "reminder_5", 5, "email", "expired@example.com");
+  unknownOnInvite.set("appt-expiring", new Date(Date.now() + 5 * 60_000).toISOString());
+  await dispatch();
+  await check("an unknown RSVP reminder expires before a stale send", async () => {
+    const row = await rowOf("expiring-email");
+    assert.equal(row.status, "skipped");
+    assert.equal(row.last_error, "rsvp_unverified_reminder_expired");
+  });
   if (failures) {
     console.error(`founder-meeting-reminder-delivery: ${failures} failure(s)`);
     process.exit(1);

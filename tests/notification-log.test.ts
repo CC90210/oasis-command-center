@@ -100,7 +100,7 @@ async function run() {
     let status = 200;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       sent.push(String(init?.body ?? ""));
-      return new Response(JSON.stringify(status === 200 ? { ok: true } : { ok: false, description: "chat not found" }),
+      return new Response(JSON.stringify(status === 200 ? { ok: true, result: { message_id: 1 } } : { ok: false, description: "chat not found" }),
         { status, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 

@@ -219,10 +219,23 @@ function resolve(target: TelegramTarget):
   };
 }
 
+export type TelegramDelivery = { ok: boolean; reason?: string; degraded?: boolean; delivery?: "delivered" | "rejected" | "unknown"; providerMessageId?: number; retryAfterMs?: number; retryAtMs?: number; permanent?: boolean };
+
+/** A rate-limit response may specify both delays; neither permits an earlier retry. */
+export function parseRetryAfter(body: unknown, header: string | null, nowMs = Date.now()): number {
+  const seconds = (body as { parameters?: { retry_after?: unknown } } | null)?.parameters?.retry_after;
+  const bodyMs = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+  const value = header?.trim() ?? "";
+  const headerMs = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 1000
+    : value ? Math.max(0, Date.parse(value) - nowMs) : 0;
+  const delay = Math.max(bodyMs || 0, Number.isFinite(headerMs) ? headerMs : 0, 60_000);
+  return Number.isFinite(delay) && Number.isFinite(new Date(nowMs + delay).getTime()) ? delay : 60_000;
+}
+
 export async function sendTelegram(
   text: string,
   target: TelegramTarget,
-): Promise<{ ok: boolean; reason?: string; degraded?: boolean }> {
+): Promise<TelegramDelivery> {
   const result = await deliver(text, target);
   await recordOasisNotice(text, target, result);
   return result;
@@ -270,18 +283,22 @@ async function recordOasisNotice(
 async function deliver(
   text: string,
   target: TelegramTarget,
-): Promise<{ ok: boolean; reason?: string; degraded?: boolean }> {
+): Promise<TelegramDelivery> {
   const r = resolve(target);
-  if (!r.ok) return { ok: false, reason: r.reason };
+  if (!r.ok) return { ok: false, reason: r.reason, delivery: "rejected", permanent: true };
 
   const primary = await postMessage(r.token, r.chatId, text);
-  if (primary.ok) return { ok: true };
+  if (primary.ok) return primary;
+  if (primary.delivery === "unknown") return primary;
+  // Rate limits and an invalid bot token apply to both addresses. A chat-specific
+  // 403 may still reach the explicitly configured second address once.
+  if (primary.retryAfterMs || primary.reason?.startsWith("telegram_http_401")) return primary;
 
   // The primary address refused. Before giving up, try the lane's SECOND
   // address — same audience, different chat. Silence is the failure mode that
   // cost five days on the SMS outage; a message landing in the other of Adon's
   // two chats is not a failure at all.
-  if (!r.fallbackChatId) return { ok: false, reason: primary.reason };
+  if (!r.fallbackChatId) return primary;
 
   const note =
     `⚠️ Primary alert channel unreachable (${primary.reason}). ` +
@@ -291,9 +308,9 @@ async function deliver(
     // ok:true because a human WAS reached; degraded:true because the channel
     // they are supposed to use is broken. Collapsing the two into a bare
     // ok:true is how a dead group stays dead — nothing would ever report it.
-    return { ok: true, degraded: true, reason: primary.reason };
+    return { ...second, degraded: true, reason: primary.reason };
   }
-  return { ok: false, reason: `${primary.reason}; fallback also failed: ${second.reason}` };
+  return { ...second, reason: `${primary.reason}; fallback also failed: ${second.reason}` };
 }
 
 /**
@@ -304,7 +321,7 @@ async function postMessage(
   token: string,
   chatId: string,
   text: string,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<TelegramDelivery> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
@@ -333,15 +350,27 @@ async function postMessage(
       // actionable rather than just present.
       const detail = await res.text().catch(() => "");
       let desc = "";
+      let body: unknown;
       try {
-        desc = String(JSON.parse(detail)?.description ?? "");
+        body = JSON.parse(detail);
+        desc = String((body as { description?: unknown } | null)?.description ?? "");
       } catch {
         desc = detail.slice(0, 200);
       }
-      return { ok: false, reason: `telegram_http_${res.status}${desc ? `: ${desc}` : ""}` };
+      const receivedAt = Date.now();
+      const retryAfterMs = res.status === 429 ? parseRetryAfter(body, res.headers.get("retry-after"), receivedAt) : undefined;
+      return { ok: false, reason: `telegram_http_${res.status}${desc ? `: ${desc}` : ""}`, delivery: res.status >= 500 || res.status === 408 ? "unknown" : "rejected",
+        ...(retryAfterMs ? { retryAfterMs, retryAtMs: receivedAt + retryAfterMs } : {}),
+        ...([401, 403].includes(res.status) ? { permanent: true } : {}) };
     }
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : "telegram_error" };
+    const receipt = await res.json() as { ok?: boolean; result?: { message_id?: number } };
+    if (receipt.ok === true && Number.isSafeInteger(receipt.result?.message_id) && receipt.result!.message_id! > 0) {
+      return { ok: true, delivery: "delivered", providerMessageId: receipt.result!.message_id };
+    }
+    return { ok: false, reason: "telegram_ack_unverified", delivery: "unknown" };
+  } catch {
+    // Transport exceptions may contain the credential-bearing URL. Persist a
+    // fixed code, and never retry an unknown acknowledgment automatically.
+    return { ok: false, reason: "telegram_ack_unverified", delivery: "unknown" };
   }
 }

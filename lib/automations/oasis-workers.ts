@@ -200,6 +200,24 @@ export const OASIS_WORKERS: OasisWorker[] = [
     manageable_via_pm2: false,
   },
   {
+    service: "vps.oasis-scheduler-slow",
+    label: "Longer jobs (daemon VPS)",
+    purpose: "Runs longer Empire jobs separately so they cannot hold up the inbox and routine checks.",
+    runtime: "remote", control_mode: "server_switch", status_source: "integrations_health", manageable_via_pm2: false,
+  },
+  {
+    service: "vps.oasis-notification-drain",
+    label: "Bravo notification delivery (daemon VPS)",
+    purpose: "Delivers queued notifications, checks provider receipts and holds uncertain sends for review.",
+    runtime: "remote", control_mode: "server_switch", status_source: "integrations_health", manageable_via_pm2: false,
+  },
+  {
+    service: "vps.atlas-financial-notifications",
+    label: "Atlas notification delivery (daemon VPS)",
+    purpose: "Delivers completed financial processing notices independently of document processing.",
+    runtime: "remote", control_mode: "server_switch", status_source: "integrations_health", manageable_via_pm2: false,
+  },
+  {
     service: "vps.oasis-headless-bridge",
     label: "Cloud chat runner (daemon VPS)",
     purpose: "Runs queued agent chats on the server using its connected AI account, without this computer.",

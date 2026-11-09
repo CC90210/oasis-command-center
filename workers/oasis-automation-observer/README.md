@@ -1,0 +1,20 @@
+# Independent automation observer
+
+This Worker runs each minute independently of the business cron Worker and VPS. It calls the authenticated Command Center observer, whose outcomes appear in the existing Health and Operations panels. Its Durable Object retains incident and delivery state when the app/database cannot be reached. Two consecutive failures or three in six samples open an incident; two complete successful observations recover it.
+
+Release dependencies, in order:
+
+1. Apply inbox255, notification256, occurrence257 and OCC258 migrations using the existing migration ledger. OCC258 adds RSVP facts, health confirmation/delivery state and minute claims. The one-time ALTER statements must not be reapplied outside the migration ledger.
+2. Deploy the app and the BEA durable inbox/outbox/occurrence producers. Verify tenant-scoped read-only evidence. Missing observation sources remain explicitly unverified.
+3. Deploy this Worker with its OBSERVER Durable Object binding and v1 migration. Configure APP_ORIGIN, CRON_SECRET, AUTOMATION_OBSERVER_ATTEST_SECRET, OASIS_TELEGRAM_BOT_TOKEN and OASIS_TELEGRAM_CHAT_ID through the approved secret loader. Mint the dedicated observer attestation secret and install it on both this Worker and the app; do not rotate the business cron attestation secret. The endpoint requires the existing CRON_SECRET bearer plus x-oasis-observer-attest on every deployment, with no Vercel-header or local bypass. Set OBSERVER_ENABLED=on only after the endpoint and source data are verified. No former-partner credentials or lanes are used.
+4. Verify scheduled invocation, a persisted minute result, the Health panel and an approved synthetic canary. Observe at least two scheduled slots before treating the observer as installed. Do not infer installation from a successful deployment alone.
+
+The app grades enabled schedules, last HTTP dispatch result, real job occurrences and business_status, inbox ten-minute processing, Atlas thirty-minute handoffs, notification receipts, worker progress and the weekly system gate. Disabled workers/jobs are excluded. Delivery of a report cannot change its business verdict. Weekly evidence uses integrations_health service automation.weekly_full_truth, metadata {overall,checked_at,report_delivered}; freshness is one weekly period plus two hours.
+
+Telegram success requires a provider message_id. A timeout or lost response is delivery_unknown. Neither this Worker nor health alerts replay an uncertain send automatically. Reconcile the existing provider/operator evidence before clearing that durable state; never clear it just to obtain green. The Worker passes its delivery state back to the app so a restored app exposes it in the same health panel. When the app is down, Worker logs and its Durable Object retain the independent evidence. This does not provide protection from a simultaneous Cloudflare and Telegram outage.
+
+The Durable Object retains alert and recovery provider IDs, including after incident closure. HTTP429 respects both Telegram retry_after and Retry-After before another attempt. Other definitive HTTP4xx refusals stop automatic attempts and remain visible as permanent_failure; repair the connection and explicitly reconcile/reset that delivery state before retrying. A successful app check does not clear a permanent delivery failure.
+
+Routine calendar health is read-only. POST /api/internal/calendar-write-canary is an explicit, authenticated check that requires GOOGLE_CALENDAR_CANARY_ID to identify a separate calendar (never the production ID or primary). It is not scheduled and must not be called as part of a generic production diagnostic.
+
+Rollback: switch this Worker's OBSERVER_ENABLED off, then roll the app back if necessary. Preserve its Durable Object, RSVP facts, occurrence rows, inbox state and outbox; schema is additive and must remain. Old application code can read the old columns. Never restore an older state backup over new receipts or replay business sends during rollback.

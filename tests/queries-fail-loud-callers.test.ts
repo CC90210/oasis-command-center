@@ -416,6 +416,20 @@ async function main() {
     "write",
   );
 
+  const { AUTOMATION_OBSERVER_CHECK_IDS } = await import("../lib/health/automation-observer");
+  await check("required observer checks with no recorded result remain visible on both pages", async () => {
+    const ops = (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
+    assert.match(ops, new RegExp(`Outcome checks: ${AUTOMATION_OBSERVER_CHECK_IDS.length} need`));
+    assert.doesNotMatch(ops, /All clear/);
+    assert.match((await render(await HealthPage())).text, /No run has been recorded/);
+  });
+  // The controls below isolate founder-booking and read failures. Supply actual
+  // persisted success evidence for the independent observer's required checks.
+  await db.batch(AUTOMATION_OBSERVER_CHECK_IDS.map((checkId, index) => ({
+    sql: "INSERT INTO health_check_runs (id, tenant_id, check_id, verdict, reason, ran_at) VALUES (?, ?, ?, 'ok', NULL, ?)",
+    args: [`observer-ok-${index}`, OASIS, checkId, now],
+  })), "write");
+
   await check("control: readable tables bring back the real empty and offline states", async () => {
     assert.match((await render(await TracePage())).text, /No agent has changed your data yet/);
     assert.match((await render(await ReasoningPage())).text, /No decisions yet/);

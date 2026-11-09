@@ -39,6 +39,7 @@ import { isValidCronExpression, isValidTimeZone } from "../workers/oasis-cc-cron
 // eighteen crons die invisibly the first time.
 const vercelJson = JSON.parse(readFileSync("config/cron-registry.json", "utf8")) as {
   crons?: Array<{ path: string; schedule: string; timeZone?: string }>;
+  independentCrons?: Array<{ path: string; schedule: string; worker: string; config: string; enableFlag: string }>;
 };
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 const workerConfig = readFileSync("workers/oasis-cc-cron/wrangler.jsonc", "utf8");
@@ -229,7 +230,18 @@ const UNSCHEDULED_BY_DESIGN: Record<string, string> = {
   // The cron Worker's own report of each tick (POST, 2026-10-28): it is called BY the Worker, never on a schedule.
   runs: "the cron Worker's run report (POST /api/cron/runs), never scheduled itself",
 };
-const registeredRoutes = new Set(crons.map((c) => basePathOf(c.path).replace(/^\/api\/cron\//, "")));
+const independent = vercelJson.independentCrons ?? [];
+for (const entry of independent) {
+  assert.ok(!crons.some((c) => c.path === entry.path), "independent monitor must not depend on the business driver");
+  assert.ok(isValidCronExpression(entry.schedule));
+  const config = JSON.parse(readFileSync(entry.config, "utf8"));
+  assert.equal(config.name, entry.worker);
+  assert.deepEqual(config.triggers.crons, [entry.schedule]);
+  const implementation = readFileSync(entry.config.replace(/wrangler\.jsonc$/, "src/index.ts"), "utf8");
+  assert.ok(implementation.includes(entry.path), "registered independent route must be called by its worker");
+  assert.equal(entry.enableFlag, "OBSERVER_ENABLED=on");
+}
+const registeredRoutes = new Set([...crons, ...independent].map((c) => basePathOf(c.path).replace(/^\/api\/cron\//, "")));
 const onDisk = readdirSync("app/api/cron", { withFileTypes: true })
   .filter((d) => d.isDirectory())
   .map((d) => d.name)

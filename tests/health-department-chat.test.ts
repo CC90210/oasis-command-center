@@ -104,7 +104,9 @@ async function main() {
     CREATE TABLE health_check_runs (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT,
       check_id TEXT, surface TEXT, verdict TEXT, observed REAL, baseline REAL, reason TEXT, ran_at TEXT);
     CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, last_signature TEXT,
-      last_alerted_at TEXT, repeat_n INTEGER, first_failed_at TEXT, updated_at TEXT);
+      last_alerted_at TEXT, repeat_n INTEGER, first_failed_at TEXT, updated_at TEXT,
+      recent_verdicts_json TEXT, delivery_status TEXT, delivery_updated_at TEXT,
+      delivery_claim_token TEXT, delivery_receipts_json TEXT, delivery_retry_at TEXT);
   `);
   await db.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'client-co', 'Client Co')", args: [CLIENT] });
 
@@ -495,13 +497,13 @@ async function main() {
     const pages: Array<{ text: string; lane: string }> = [];
     const send = async (text: string, opts: { lane: string }) => {
       pages.push({ text, lane: opts.lane });
-      return { ok: true };
+      return { ok: true, delivery: "delivered", providerMessageId: pages.length };
     };
     const first = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW, sendTelegramImpl: send as never });
     assert.deepEqual(first.alerted, [], "one failing run is unconfirmed until the next run (two-strike, 2026-11-06)");
     assert.equal(pages.length, 0);
     const confirmed = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 5 * MIN, sendTelegramImpl: send as never });
-    assert.deepEqual(confirmed.alerted, ["department_chat_outcomes"]);
+    assert.deepEqual(confirmed.alerted, ["department_chat_outcomes"], "the second failing observation must confirm the incident");
     assert.equal(pages.length, 1);
     assert.equal(pages[0].lane, "operator");
     assert.match(pages[0].text, /FAILING/);
@@ -519,8 +521,11 @@ async function main() {
 
     await seed({ dept: "sales", minsAgo: -16 }); // a good Sales turn 1 minute after the second run's start
     await seed({ dept: "sales", minsAgo: -17 }, { dept: "sales", minsAgo: -18 });
-    const healed = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 40 * MIN, sendTelegramImpl: send as never });
-    assert.deepEqual(healed.recovered, ["department_chat_outcomes"]);
+    const recovering = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 40 * MIN, sendTelegramImpl: send as never });
+    assert.deepEqual(recovering.recovered, [], "one successful check cannot close a confirmed incident");
+    assert.equal(pages.length, 1);
+    const healed = await runHealthChecks(OASIS, { checks: DEPARTMENT_CHAT_CHECKS, nowMs: NOW + 45 * MIN, sendTelegramImpl: send as never });
+    assert.deepEqual(healed.recovered, ["department_chat_outcomes"], "the second successful observation must recover the incident");
     assert.match(pages[pages.length - 1].text, /RECOVERED/);
   });
 

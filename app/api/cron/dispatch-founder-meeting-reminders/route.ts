@@ -18,7 +18,7 @@ import { memberStanding, type MemberStanding } from "@/lib/team";
 import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import { countSegments } from "@/lib/sms-segments";
 import { leadStillWaiting, meetingHeldAfterAll, recoverFounderMeetings, watchFounderMeetings, type WatchResult } from "@/lib/booking/meeting-watch";
-import { declineCheckForRun, type DeclineCheckAppointment } from "@/lib/booking/lead-declined";
+import { declineCheckForRun, type DeclineCheckAppointment, type InviteDecision } from "@/lib/booking/lead-declined";
 import { pipelineLeadUrl } from "@/lib/forms/lead-link";
 import { SITE_ORIGIN } from "@/lib/marketing/routes";
 import { clipText } from "@/lib/notify/telegram-format";
@@ -204,7 +204,7 @@ type SenderPass = {
     promise: Promise<{ ready: boolean; reason: string }>;
   }>;
   /** The lead's answer on the invite, read from Google once per meeting per pass. */
-  declined: (appointment: DeclineCheckAppointment) => Promise<boolean>;
+  declined: (appointment: DeclineCheckAppointment) => Promise<InviteDecision>;
 };
 
 function quoIntakeForPass(
@@ -642,11 +642,21 @@ async function processRow(
       }
       // The lead said no on the invite (lib/booking/lead-declined.ts): no
       // reminder for them, no "In 15 minutes" for the founder. Read fresh each
-      // time, so a lead who accepts again is reminded again; an unreadable
-      // answer sends as before.
-      if (await senderPass.declined({ ...appointment, tenant_id: row.tenant_id })) {
+      // time, so a lead who accepts again is reminded again. An unreadable
+      // answer is held with a durable retry deadline, never assumed accepted.
+      const rsvp = await senderPass.declined({ ...appointment, tenant_id: row.tenant_id });
+      if (rsvp.status === "declined") {
         await mark(db, row, "skipped", { error: "lead_declined_invite" });
         return "skipped";
+      }
+      if (rsvp.status === "unknown") {
+        const retryAt = rsvp.retryAt || new Date(Date.now() + 60_000).toISOString();
+        if (Date.parse(retryAt) >= Date.parse(appointment.scheduled_for)) {
+          await mark(db, row, "skipped", { error: "rsvp_unverified_reminder_expired" });
+          return "skipped";
+        }
+        await deferRow(db, row, retryAt, rsvp.reason);
+        return "held";
       }
       if (row.kind === "host_15") {
         // The founder's heads-up: who, company, how to reach them, the room.

@@ -16,7 +16,9 @@ import {
  * proved, the monitor must not tell operators that bookings work.
  */
 
-const check = CALENDAR_CHECKS.find((c) => c.id === "calendar.workspace_credential_usable");
+const routine = CALENDAR_CHECKS.find((c) => c.id === "calendar.workspace_credential_usable");
+assert.ok(routine);
+const check = createCalendarChecks(probeCalendarWriteRoundTrip, "write_canary")[0];
 assert.ok(check, "the workspace credential check must be registered");
 assert.equal(check.severity, "critical", "nobody being able to book is critical");
 
@@ -28,6 +30,7 @@ const ENV_KEYS = [
   "GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN",
   "GOOGLE_SYSTEM_CALENDAR_ADDRESS",
   "GOOGLE_CALENDAR_ID",
+  "GOOGLE_CALENDAR_CANARY_ID",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
 ] as const;
@@ -50,6 +53,7 @@ function configure() {
   process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "workspace-refresh";
   process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "operator@oasisai.work";
   process.env.GOOGLE_CALENDAR_ID = "shared-calendar";
+  process.env.GOOGLE_CALENDAR_CANARY_ID = "dedicated-test-calendar";
 }
 
 const realFetch = globalThis.fetch;
@@ -115,7 +119,7 @@ async function run() {
       ...args,
       meetPollAttempts: 0,
       sleepImpl: async () => { missingMeetSleepCalls += 1; },
-    }))[0];
+    }), "write_canary")[0];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).includes("oauth2.googleapis.com/token")) {
         return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
@@ -235,8 +239,25 @@ async function run() {
     globalThis.fetch = (async () => {
       throw new Error("no network call should happen off production");
     }) as typeof globalThis.fetch;
-    assert.equal(await observe(), 0, "previews legitimately run without a workspace credential");
+    assert.equal(await routine.observe(null as never, "tenant", Date.now()), 0, "previews legitimately run without a workspace credential");
 
+    configure();
+    const readMethods: string[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      readMethods.push(init?.method || "GET");
+      return new Response(JSON.stringify(init?.method === "POST" ? { access_token: "synthetic" } : { items: [] }), { status: 200 });
+    }) as typeof globalThis.fetch;
+    assert.equal(await routine.observe(null as never, "tenant", Date.now()), 0);
+    assert.deepEqual(readMethods, ["POST", "GET"], "routine production check never creates or deletes calendar events");
+    stubFetch(() => new Response("upstream", { status: 503 }));
+    const unverified = await routine.observeDetailed!(null as never, "tenant", Date.now());
+    assert.equal(unverified.observed, 6);
+    assert.match(unverified.reason, /code=6/);
+    process.env.GOOGLE_CALENDAR_CANARY_ID = "shared-calendar";
+    let writes = 0;
+    globalThis.fetch = (async () => { writes++; throw new Error("must not write production calendar"); }) as typeof globalThis.fetch;
+    assert.equal(await observe(), 1);
+    assert.equal(writes, 0);
     console.log("calendar-health-check: OK");
   } finally {
     globalThis.fetch = realFetch;
@@ -269,7 +290,7 @@ run().catch((error) => {
   assert.match(say(3), /invalid_client/i, "3 must retain the redacted client-mismatch code");
   assert.match(say(1), /NOT CONFIGURED/i, "1 must always read as unconfigured");
   assert.match(say(2), /REJECTED BY GOOGLE/i, "and again, after describing a different mode");
-  assert.match(say(0), /is live/i, "0 must always read as healthy");
+  assert.match(say(0), /read access are verified/i, "0 must always read as healthy");
   assert.ok(
     !say(1).includes("REJECTED BY GOOGLE") && !say(2).includes("NOT CONFIGURED"),
     "the two remedies must never bleed into each other",
@@ -323,8 +344,8 @@ run().catch((error) => {
   assert.match(page, /loadWorkspaceOutcome\(tenantId, profileSlug, now\)/, "the OASIS health page must load its own outcomes through the attention loader");
   assert.match(
     attention,
-    /tenantId === WEBDEV_TENANT_ID\s*\?\s*\{ includeCheckIds: calendarCheckIds \}/,
-    "OASIS must render only its calendar check",
+    /tenantId === WEBDEV_TENANT_ID\s*\?\s*\{ includeCheckIds: \[\.\.\.calendarCheckIds, \.\.\.AUTOMATION_OBSERVER_CHECK_IDS\] \}/,
+    "OASIS must render its calendar and independent automation outcomes",
   );
   assert.match(
     attention,
@@ -333,7 +354,7 @@ run().catch((error) => {
   );
   assert.match(panelData, /allowsCheck\(id, filter\)/, "persisted run rows must respect the tenant-visible check set");
   assert.match(panelData, /allowsCheck\(checkId, filter\)/, "open alerts must respect the same check set");
-  assert.match(page, /OASIS founder-booking health/, "the calendar check needs an operator-visible card, not SunBiz copy");
+  assert.match(page, /OASIS automation and booking health/, "the checks need an operator-visible card");
 
   const readAt = verifier.indexOf("probeCalendarEventsList");
   const writeAt = verifier.indexOf("createGoogleFounderMeeting(");

@@ -130,7 +130,7 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
   if (refusingChats.has(chatId)) {
     return new Response(JSON.stringify({ ok: false, description: `Bad Request: chat not found (bot${token})` }), { status: 400 });
   }
-  return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
 }) as typeof fetch;
 
 function stubModule(path: string, exports: Record<string, unknown>) {
@@ -277,6 +277,7 @@ const LANE_ALLOWED: Readonly<Record<string, string>> = {
   "lib/health/guard-audit.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/form-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/calendar-checks.ts": "estate health checks, run only under OASIS's own workspace",
+  "lib/health/automation-observer.ts": "independent automation health, authenticated route fixed to OASIS's own tenant and operator lane",
   "lib/health/worker-reporter-checks.ts": "estate health checks, run only under OASIS's own workspace",
   "lib/health/department-chat-checks.ts": "department-chat health checks; the route pages only a workspace alertAudienceFor() resolves to OASIS's operator chat, every other workspace is recorded without a page",
   "lib/health/drip-checks.ts": "estate health checks, run only under OASIS's own workspace",
