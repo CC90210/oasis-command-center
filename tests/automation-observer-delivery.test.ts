@@ -6,6 +6,8 @@ async function main() {
   let clock = Date.parse("2026-11-09T12:00:00Z");
   let healthy = false;
   let calls = 0;
+  let probeDelay = 0;
+  let sendDelay = 0;
   let reply = () => Response.json({ ok: true, result: { message_id: calls } });
   const data = new Map<string, unknown>();
   const env = { CRON_SECRET: "synthetic", AUTOMATION_OBSERVER_ATTEST_SECRET: "dedicated", OASIS_TELEGRAM_BOT_TOKEN: "synthetic", OASIS_TELEGRAM_CHAT_ID: "fixture" } as Env;
@@ -16,7 +18,8 @@ async function main() {
     Date.now = () => clock;
     console.log = () => undefined;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input).includes("api.telegram.org")) { calls++; return reply(); }
+      if (String(input).includes("api.telegram.org")) { calls++; clock += sendDelay; return reply(); }
+      clock += probeDelay;
       const headers = init?.headers as Record<string, string>;
       assert.equal(headers["x-oasis-observer-attest"], "dedicated");
       assert.equal(headers["x-oasis-cron-attest"], undefined);
@@ -41,11 +44,13 @@ async function main() {
     }
 
     data.clear(); healthy = false;
+    probeDelay = 20_000; sendDelay = 5_000;
     reply = () => Response.json({ ok: false, error_code: 429, parameters: { retry_after: 900 } }, { status: 429, headers: { "retry-after": "1200" } });
     const before = calls;
     await tick(); await tick();
     assert.equal(incident().delivery, "refused");
     assert.equal(incident().retryAt, clock + 1200_000);
+    probeDelay = 0; sendDelay = 0;
     await tick(1199); assert.equal(calls, before + 1);
     reply = () => Response.json({ ok: true, result: { message_id: calls } });
     await tick(1); assert.equal(calls, before + 2);

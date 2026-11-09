@@ -669,6 +669,62 @@ async function main() {
     const row = memory.states.get(healthAlertStateKey(tenant, check.id)) as unknown as { delivery_status: string; first_failed_at: string | null };
     assert.equal(sends, 1); assert.equal(row.first_failed_at, null); assert.equal(row.delivery_status, "none", "a known unreceived blip closes without a permanent delivery alarm");
   }
+  for (const phase of ["alert", "recovery"]) {
+    let memory = tenantIsolationDb();
+    let observed = 1;
+    let sends = 0;
+    let limited = phase === "alert";
+    const check = { id: `synthetic.rate_limit.${phase}`, severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => observed, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(WEBDEV_TENANT_ID, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      deliveryNowMs: () => NOW + minute * 60_000,
+      sendTelegramImpl: (async () => { sends++; return limited ? { ok: false, delivery: "rejected", retryAfterMs: 600_000 }
+        : { ok: true, delivery: "delivered", providerMessageId: sends }; }) as never });
+    const key = healthAlertStateKey(WEBDEV_TENANT_ID, check.id);
+    await run(0); await run(1);
+    if (phase === "recovery") { observed = 0; limited = true; await run(2); await run(3); }
+    const start = phase === "alert" ? 1 : 3;
+    const attempts = sends;
+    const persisted = JSON.parse(JSON.stringify(memory.states.get(key)));
+    assert.equal(persisted.delivery_retry_at, new Date(NOW + (start + 10) * 60_000).toISOString());
+    memory = tenantIsolationDb(); memory.states.set(key, persisted); // Restart: only durable state survives.
+    for (const minute of [start + 1, start + 2, start + 9]) {
+      assert.equal((await run(minute)).failedAlerts, 1, "a backoff remains a visible delivery failure");
+    }
+    assert.equal(sends, attempts, "three fresh processes/checks cannot ignore Telegram's ten-minute delay");
+    limited = false; await run(start + 10);
+    assert.equal(sends, attempts + 1, "a confirmed refusal becomes retryable when its deadline is due");
+    assert.equal((memory.states.get(key) as unknown as { delivery_retry_at: string | null }).delivery_retry_at, null);
+  }
+  {
+    const memory = tenantIsolationDb();
+    let clock = NOW;
+    let sends = 0;
+    const check = { id: "synthetic.slow_rate_limit", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => { clock += 20_000; return 1; }, describe: () => "synthetic" };
+    const run = (minute: number) => {
+      clock = NOW + minute * 60_000;
+      return runHealthChecks(WEBDEV_TENANT_ID, { nowMs: clock, checks: [check], db: memory.db as never, deliveryNowMs: () => clock,
+        sendTelegramImpl: (async () => { sends++; clock += 5_000; return { ok: false, delivery: "rejected", retryAfterMs: 600_000 }; }) as never });
+    };
+    await run(0); await run(1);
+    const row = memory.states.get(healthAlertStateKey(WEBDEV_TENANT_ID, check.id)) as unknown as { delivery_retry_at: string };
+    assert.equal(row.delivery_retry_at, new Date(NOW + 685_000).toISOString(), "delay starts after the slow check and response, not at run start");
+    await run(11); assert.equal(sends, 1, "the old run-start deadline is too early");
+    await run(12); assert.equal(sends, 2);
+  }
+  {
+    const memory = tenantIsolationDb();
+    let observed = 1;
+    let sends = 0;
+    const check = { id: "synthetic.auth_rejected", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => observed, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(WEBDEV_TENANT_ID, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      sendTelegramImpl: (async () => { sends++; return { ok: false, delivery: "rejected", permanent: true }; }) as never });
+    await run(0); await run(1); await run(2); observed = 0; await run(3); await run(4); await run(1440);
+    assert.equal(sends, 1, "permanent authorization refusal requires repair, not periodic retries or recovery sends");
+    assert.equal((memory.states.get(healthAlertStateKey(WEBDEV_TENANT_ID, check.id)) as unknown as { delivery_status: string }).delivery_status, "permanent_failure");
+  }
 }
 assert.match(
   DEPLOY_CHECKS_SRC,

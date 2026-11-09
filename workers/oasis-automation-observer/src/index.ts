@@ -59,10 +59,11 @@ export class ObserverIncident {
             if (response.ok && receipt?.ok === true && Number.isSafeInteger(receipt.result?.message_id) && receipt.result!.message_id! > 0) {
               delivery = "delivered"; providerMessageId = receipt.result!.message_id; deliveryError = null;
             } else if (code === 429) {
+              const receivedAt = Date.now();
               const header = response.headers.get("retry-after");
-              const parsedHeader = header && /^\d+$/.test(header) ? Number(header) : header ? (Date.parse(header) - now) / 1000 : 0;
+              const parsedHeader = header && /^\d+$/.test(header) ? Number(header) : header ? (Date.parse(header) - receivedAt) / 1000 : 0;
               const seconds = Math.max(300, Number(receipt?.parameters?.retry_after) || 0, Number.isFinite(parsedHeader) ? parsedHeader : 0);
-              retryAt = now + (Number.isFinite(seconds) ? seconds : 300) * 1000;
+              retryAt = receivedAt + (Number.isFinite(seconds) ? seconds : 300) * 1000;
               delivery = "refused"; deliveryError = "telegram_rate_limited";
             } else if (code >= 400 && code < 500 && code !== 408) {
               delivery = "permanent_failure"; deliveryError = `telegram_http_${code}`;

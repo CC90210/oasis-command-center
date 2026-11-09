@@ -219,7 +219,18 @@ function resolve(target: TelegramTarget):
   };
 }
 
-export type TelegramDelivery = { ok: boolean; reason?: string; degraded?: boolean; delivery?: "delivered" | "rejected" | "unknown"; providerMessageId?: number };
+export type TelegramDelivery = { ok: boolean; reason?: string; degraded?: boolean; delivery?: "delivered" | "rejected" | "unknown"; providerMessageId?: number; retryAfterMs?: number; retryAtMs?: number; permanent?: boolean };
+
+/** A rate-limit response may specify both delays; neither permits an earlier retry. */
+export function parseRetryAfter(body: unknown, header: string | null, nowMs = Date.now()): number {
+  const seconds = (body as { parameters?: { retry_after?: unknown } } | null)?.parameters?.retry_after;
+  const bodyMs = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+  const value = header?.trim() ?? "";
+  const headerMs = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 1000
+    : value ? Math.max(0, Date.parse(value) - nowMs) : 0;
+  const delay = Math.max(bodyMs || 0, Number.isFinite(headerMs) ? headerMs : 0, 60_000);
+  return Number.isFinite(delay) && Number.isFinite(new Date(nowMs + delay).getTime()) ? delay : 60_000;
+}
 
 export async function sendTelegram(
   text: string,
@@ -274,11 +285,14 @@ async function deliver(
   target: TelegramTarget,
 ): Promise<TelegramDelivery> {
   const r = resolve(target);
-  if (!r.ok) return { ok: false, reason: r.reason, delivery: "rejected" };
+  if (!r.ok) return { ok: false, reason: r.reason, delivery: "rejected", permanent: true };
 
   const primary = await postMessage(r.token, r.chatId, text);
   if (primary.ok) return primary;
   if (primary.delivery === "unknown") return primary;
+  // Rate limits and an invalid bot token apply to both addresses. A chat-specific
+  // 403 may still reach the explicitly configured second address once.
+  if (primary.retryAfterMs || primary.reason?.startsWith("telegram_http_401")) return primary;
 
   // The primary address refused. Before giving up, try the lane's SECOND
   // address — same audience, different chat. Silence is the failure mode that
@@ -336,15 +350,21 @@ async function postMessage(
       // actionable rather than just present.
       const detail = await res.text().catch(() => "");
       let desc = "";
+      let body: unknown;
       try {
-        desc = String(JSON.parse(detail)?.description ?? "");
+        body = JSON.parse(detail);
+        desc = String((body as { description?: unknown } | null)?.description ?? "");
       } catch {
         desc = detail.slice(0, 200);
       }
-      return { ok: false, reason: `telegram_http_${res.status}${desc ? `: ${desc}` : ""}`, delivery: res.status >= 500 ? "unknown" : "rejected" };
+      const receivedAt = Date.now();
+      const retryAfterMs = res.status === 429 ? parseRetryAfter(body, res.headers.get("retry-after"), receivedAt) : undefined;
+      return { ok: false, reason: `telegram_http_${res.status}${desc ? `: ${desc}` : ""}`, delivery: res.status >= 500 || res.status === 408 ? "unknown" : "rejected",
+        ...(retryAfterMs ? { retryAfterMs, retryAtMs: receivedAt + retryAfterMs } : {}),
+        ...([401, 403].includes(res.status) ? { permanent: true } : {}) };
     }
     const receipt = await res.json() as { ok?: boolean; result?: { message_id?: number } };
-    if (receipt.ok === true && Number.isInteger(receipt.result?.message_id)) {
+    if (receipt.ok === true && Number.isSafeInteger(receipt.result?.message_id) && receipt.result!.message_id! > 0) {
       return { ok: true, delivery: "delivered", providerMessageId: receipt.result!.message_id };
     }
     return { ok: false, reason: "telegram_ack_unverified", delivery: "unknown" };

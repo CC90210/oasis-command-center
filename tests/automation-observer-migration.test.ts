@@ -8,6 +8,7 @@ async function main() {
     await db.executeMultiple(readFileSync("database/turso/bravo__258_automation_observer_rsvp.sql", "utf8"));
     const columns = (await db.execute("PRAGMA table_info(health_alert_state)")).rows.map((r) => r.name);
     assert.ok(columns.includes("recent_verdicts_json") && columns.includes("delivery_status"));
+    assert.ok(columns.includes("delivery_retry_at"), "provider retry deadlines must survive a process restart");
     const sql = `INSERT INTO founder_meeting_rsvp_state(tenant_id,appointment_id,revision,event_id,response,observed_at,failures,retry_at)
       VALUES(?,?,?,?,?,?,0,NULL) ON CONFLICT(tenant_id,appointment_id,revision,event_id) DO UPDATE SET
       response=excluded.response,observed_at=excluded.observed_at WHERE founder_meeting_rsvp_state.observed_at<excluded.observed_at`;

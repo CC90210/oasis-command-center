@@ -179,7 +179,7 @@ async function main() {
     CREATE TABLE health_alert_state (alert_key TEXT PRIMARY KEY, tenant_id TEXT, last_signature TEXT,
       last_alerted_at TEXT, repeat_n INTEGER, first_failed_at TEXT, updated_at TEXT,
       recent_verdicts_json TEXT, delivery_status TEXT, delivery_updated_at TEXT,
-      delivery_claim_token TEXT, delivery_receipts_json TEXT);
+      delivery_claim_token TEXT, delivery_receipts_json TEXT, delivery_retry_at TEXT);
     CREATE TABLE sms_delivery_receipts (id TEXT PRIMARY KEY DEFAULT ${ID_SQL}, tenant_id TEXT,
       drip_run_id TEXT, carrier_status TEXT, sent_at TEXT, purpose TEXT);
     CREATE TABLE drip_runs (id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, status TEXT);

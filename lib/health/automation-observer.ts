@@ -46,7 +46,7 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
     outbox: { sql: "SELECT status,MIN(created_at) AS oldest,COUNT(*) AS n FROM automation_notification_outbox WHERE tenant_id=? AND status<>'delivered' GROUP BY status", args: [tenantId] },
     occurrences: { sql: "SELECT job_id,scheduled_at,state,lease_expires_at,deadline_at,result_json,updated_at FROM automation_occurrences o WHERE tenant_id=? AND (state IN ('claimed','running','delivery_unknown') OR scheduled_at=(SELECT MAX(scheduled_at) FROM automation_occurrences latest WHERE latest.tenant_id=o.tenant_id AND latest.job_id=o.job_id))", args: [tenantId] },
     weekly: { sql: "SELECT status,last_ping_at,metadata FROM integrations_health WHERE tenant_id=? AND service='automation.weekly_full_truth' ORDER BY last_ping_at DESC LIMIT 1", args: [tenantId] },
-    healthDelivery: { sql: "SELECT alert_key,delivery_status FROM health_alert_state WHERE tenant_id=? AND delivery_status IN ('dispatching','unknown','rejected')", args: [tenantId] },
+    healthDelivery: { sql: "SELECT alert_key,delivery_status FROM health_alert_state WHERE tenant_id=? AND delivery_status IN ('dispatching','unknown','rejected','permanent_failure')", args: [tenantId] },
   };
   const entries = await Promise.all(Object.entries(queries).map(async ([key, query]) => {
     try { return [key, (await db.execute(query)).rows as unknown as Row[]] as const; }

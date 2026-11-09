@@ -17,6 +17,7 @@ ALTER TABLE health_alert_state ADD COLUMN delivery_status TEXT;
 ALTER TABLE health_alert_state ADD COLUMN delivery_updated_at TEXT;
 ALTER TABLE health_alert_state ADD COLUMN delivery_claim_token TEXT;
 ALTER TABLE health_alert_state ADD COLUMN delivery_receipts_json TEXT;
+ALTER TABLE health_alert_state ADD COLUMN delivery_retry_at TEXT;
 
 -- Claim the minute before reporting. The next minute supersedes a crashed pass.
 CREATE TABLE IF NOT EXISTS automation_observer_ticks (

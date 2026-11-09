@@ -56,12 +56,12 @@ async function check(name: string, fn: () => Promise<void> | void) {
   }
 }
 
-/** Telegram answers every send with `status` (200 = delivered). */
+/** Telegram answers successful sends with a provider receipt. */
 function stubTelegram(status: number, description = "Unauthorized"): () => void {
   const real = globalThis.fetch;
   globalThis.fetch = (async () =>
     status === 200
-      ? new Response(JSON.stringify({ ok: true }), { status: 200 })
+      ? new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 })
       : new Response(JSON.stringify({ ok: false, description }), { status })) as typeof fetch;
   return () => {
     globalThis.fetch = real;

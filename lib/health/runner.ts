@@ -209,6 +209,8 @@ export async function runHealthChecks(
     db?: Db;
     /** Test seam for proving delivery decisions without sending Telegram messages. */
     sendTelegramImpl?: typeof sendTelegram;
+    /** Completion clock for injected senders. Production receipts carry an absolute deadline. */
+    deliveryNowMs?: () => number;
   } = {},
 ): Promise<RunSummary> {
   // A retired tenant has no outcomes left to grade, and every row this writes
@@ -220,6 +222,7 @@ export async function runHealthChecks(
   const db = opts.db ?? getServiceSupabase();
   const send = opts.sendTelegramImpl ?? sendTelegram;
   const nowMs = opts.nowMs ?? Date.now();
+  const deliveryNowMs = opts.deliveryNowMs ?? Date.now;
   const notify = opts.notify !== false;
   const results: CheckResult[] = [];
   const alerted: string[] = [];
@@ -269,7 +272,7 @@ export async function runHealthChecks(
       .eq("alert_key", key)
       .maybeSingle();
     const state = stateRow.data as
-      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null; recent_verdicts_json?: unknown; delivery_status?: string | null; delivery_claim_token?: string | null; delivery_receipts_json?: unknown }
+      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null; recent_verdicts_json?: unknown; delivery_status?: string | null; delivery_claim_token?: string | null; delivery_receipts_json?: unknown; delivery_retry_at?: string | null }
       | null;
     if (stateRow.error) throw new Error("health_incident_state_read_failed");
     // Intentional offline is not an observation of recovery. Do not add it to
@@ -304,7 +307,16 @@ export async function runHealthChecks(
     } catch { /* prior version had no provider receipts */ }
     // A killed send or ambiguous acknowledgment requires reconciliation.
     // Neither a fresh check nor a recovery is permission to replay that effect.
-    if (["dispatching", "unknown"].includes(state?.delivery_status ?? "")) {
+    if (["dispatching", "unknown", "permanent_failure"].includes(state?.delivery_status ?? "")) {
+      telegramFailures++;
+      continue;
+    }
+    // This deadline is stored with the refused receipt, not in process memory.
+    // Fresh observations (including after a restart) cannot bypass provider backoff.
+    // An unannounced episode may still close silently after two healthy checks.
+    const silentClosure = result.verdict === "ok" && window.recovered && isUnconfirmed(state?.last_signature);
+    const retryAt = state?.delivery_retry_at ? Date.parse(state.delivery_retry_at) : null;
+    if (!silentClosure && retryAt !== null && (!Number.isFinite(retryAt) || retryAt > nowMs)) {
       telegramFailures++;
       continue;
     }
@@ -320,7 +332,7 @@ export async function runHealthChecks(
           alert_key: key, tenant_id: tenantId,
           ...observationState,
           last_signature: null, last_alerted_at: state.last_alerted_at, repeat_n: 0,
-          first_failed_at: null, delivery_status: "none", updated_at: new Date(nowMs).toISOString(),
+          first_failed_at: null, delivery_status: "none", delivery_retry_at: null, updated_at: new Date(nowMs).toISOString(),
         });
         continue;
       }
@@ -339,6 +351,8 @@ export async function runHealthChecks(
         const owed = (pendingRecoveryLanes(state.last_signature) ?? currentLanes).filter(lane => currentLanes.includes(lane));
         const stillOwed: TelegramLane[] = [];
         let unknownReceipt = false;
+        let permanentFailure = false;
+        let retryAtMs = 0;
         const recoveryLine = recoveryDetail(check, result);
         if (!await claimDelivery()) continue;
         for (const lane of owed) {
@@ -348,6 +362,8 @@ export async function runHealthChecks(
           ).catch(() => ({ ok: false, delivery: "unknown" as const }));
           if (!r.ok) stillOwed.push(lane);
           if (!r.ok && r.delivery !== "rejected") unknownReceipt = true;
+          if (!r.ok && r.permanent) permanentFailure = true;
+          if (!r.ok && r.retryAfterMs) retryAtMs = Math.max(retryAtMs, r.retryAtMs ?? deliveryNowMs() + r.retryAfterMs);
           if (r.ok && r.providerMessageId) receipts[lane] = { phase: "recovery", providerMessageId: r.providerMessageId };
         }
         // The episode stays OPEN while a lane is still owed the news, so the
@@ -356,7 +372,8 @@ export async function runHealthChecks(
         if (!await writeState({
           alert_key: key, tenant_id: tenantId,
           ...observationState,
-          delivery_status: unknownReceipt ? "unknown" : stillOwed.length ? "rejected" : "delivered",
+          delivery_status: unknownReceipt ? "unknown" : permanentFailure ? "permanent_failure" : stillOwed.length ? "rejected" : "delivered",
+          delivery_retry_at: retryAtMs ? new Date(retryAtMs).toISOString() : null,
           delivery_updated_at: new Date(nowMs).toISOString(), delivery_receipts_json: JSON.stringify(receipts),
           last_signature: stillOwed.length ? `${RECOVERY_PENDING}${stillOwed.join(",")}` : null,
           last_alerted_at: state.last_alerted_at, repeat_n: 0,
@@ -425,12 +442,16 @@ export async function runHealthChecks(
     let sent: { ok: boolean } = { ok: false };
     const rejected: TelegramLane[] = [];
     let unknownReceipt = false;
+    let permanentFailure = false;
+    let retryAtMs = 0;
     if (!await claimDelivery()) continue;
     for (const lane of lanesFor(check)) {
       const r: TelegramDelivery = await send(body, { lane }).catch(() => ({ ok: false, delivery: "unknown" as const }));
       if (r.ok) sent = { ok: true };
       else rejected.push(lane);
       if (!r.ok && r.delivery !== "rejected") unknownReceipt = true;
+      if (!r.ok && r.permanent) permanentFailure = true;
+      if (!r.ok && r.retryAfterMs) retryAtMs = Math.max(retryAtMs, r.retryAtMs ?? deliveryNowMs() + r.retryAfterMs);
       if (r.ok && r.providerMessageId) receipts[lane] = { phase: "alert", providerMessageId: r.providerMessageId };
     }
 
@@ -441,7 +462,8 @@ export async function runHealthChecks(
       alert_key: key,
       tenant_id: tenantId,
       ...observationState,
-      delivery_status: unknownReceipt ? "unknown" : rejected.length ? "rejected" : "delivered",
+      delivery_status: unknownReceipt ? "unknown" : permanentFailure ? "permanent_failure" : rejected.length ? "rejected" : "delivered",
+      delivery_retry_at: retryAtMs ? new Date(retryAtMs).toISOString() : null,
       delivery_updated_at: new Date(nowMs).toISOString(), delivery_receipts_json: JSON.stringify(receipts),
       last_signature: sent.ok ? signature : state?.last_signature ?? null,
       last_alerted_at: sent.ok ? new Date(nowMs).toISOString() : state?.last_alerted_at ?? null,
