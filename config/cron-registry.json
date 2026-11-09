@@ -101,5 +101,14 @@
       "path": "/api/cron/ai-audit-tick",
       "schedule": "*/5 * * * *"
     }
+  ],
+  "independentCrons": [
+    {
+      "path": "/api/cron/automation-observer",
+      "schedule": "* * * * *",
+      "worker": "oasis-automation-observer",
+      "config": "workers/oasis-automation-observer/wrangler.jsonc",
+      "enableFlag": "OBSERVER_ENABLED=on"
+    }
   ]
 }

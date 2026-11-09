@@ -90,7 +90,7 @@ async function main() {
     assert.ok(Date.parse(String(atlas.last_scheduled_for)) >= activationStarted,
       "reactivation fences missed occurrences during the hold");
     assert.ok(Date.parse(String(atlas.last_scheduled_for)) <= Date.now());
-    assert.deepEqual(JSON.parse(String(atlas.action_payload)).args, ["once","--limit","1","--max-seconds","240","--summary-json"]);
+    assert.deepEqual(JSON.parse(String(atlas.action_payload)).args, ["once","--limit","10","--max-seconds","240","--summary-json"]);
     await migrateCloudSchedules("--apply-lease-schema", db);
     assert.equal((await db.execute("SELECT count(*) n FROM tenant_cron_execution_leases")).rows[0].n, 0);
     await db.execute("UPDATE tenant_cron_jobs SET owner_user_id='wrong-person'");

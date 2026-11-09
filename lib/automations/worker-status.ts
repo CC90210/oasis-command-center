@@ -33,7 +33,14 @@ export const VPS_ONESHOT_SERVICES: ReadonlySet<string> = new Set([
   "vps.oasis-inbox-sweep",
   "vps.oasis-ai-audit-runner",
   "vps.oasis-meet-runner",
+  "vps.oasis-notification-drain",
+  "vps.atlas-financial-notifications",
 ]);
+
+/** Notification drain evidence expires after two missed minute passes. */
+export function workerEvidenceStaleMs(service: string): number {
+  return service === "vps.oasis-notification-drain" || service === "vps.atlas-financial-notifications" ? 120_000 : 300_000;
+}
 
 /**
  * The daemon VPS workers whose Stop or Restart takes something CC relies on offline, with what goes
@@ -44,6 +51,9 @@ export const VPS_CRITICAL_WORKERS: ReadonlyMap<string, string> = new Map([
   ["vps.oasis-telegram-bridge", "Bravo stops answering you on Telegram."],
   ["vps.oasis-headless-bridge", "agent chats and Telegram replies that run on the server wait until it is back."],
   ["vps.oasis-scheduler", "the Empire schedules (the Brief, backups, health checks) stop running."],
+  ["vps.oasis-scheduler-slow", "the longer Empire jobs wait until the slow scheduler is back."],
+  ["vps.oasis-notification-drain", "queued Bravo notifications wait for delivery."],
+  ["vps.atlas-financial-notifications", "queued Atlas financial notifications wait for delivery."],
   ["vps.oasis-workspace-scheduler", "workspace scripts, including Atlas's inbox consumer, stop running."],
   ["vps.atlas-telegram", "Atlas stops answering you on Telegram."],
   ["vps.maven-telegram", "Maven stops answering you on Telegram."],

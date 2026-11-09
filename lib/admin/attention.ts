@@ -49,9 +49,11 @@ import {
   pickLocalWorkerPairing,
   reporterPairingId,
   reportedWorkerStatus,
+  workerEvidenceStaleMs,
   type StatusReporter,
 } from "@/lib/automations/worker-status";
 import { loadOutcomeChecks, type OutcomeCheckData } from "@/lib/health/outcome-panel-data";
+import { AUTOMATION_OBSERVER_CHECK_IDS } from "@/lib/health/automation-observer";
 import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { machineState, type MachineState } from "@/lib/devices/presence";
@@ -167,7 +169,7 @@ export function describeWorker(
   const host = worker.service.startsWith("vps.") ? "the daemon VPS" : "your computer";
   if (!row) return { ...base, state: "no_report", sentence: `No report from ${host} yet.` };
   const pinged = row.last_ping_at ? Date.parse(row.last_ping_at) : NaN;
-  if (!Number.isFinite(pinged) || now - pinged > DAEMON_HEALTH_STALE_MS) {
+  if (!Number.isFinite(pinged) || now - pinged > workerEvidenceStaleMs(worker.service)) {
     return {
       ...base,
       state: "stale",
@@ -607,7 +609,7 @@ export async function loadWorkspaceOutcome(
   const calendarCheckIds = CALENDAR_CHECKS.map((check) => check.id);
   const filter =
     tenantId === WEBDEV_TENANT_ID
-      ? { includeCheckIds: calendarCheckIds }
+      ? { includeCheckIds: [...calendarCheckIds, ...AUTOMATION_OBSERVER_CHECK_IDS] }
       : profileSlug === "sun"
         ? { excludeCheckIds: calendarCheckIds }
         : null;

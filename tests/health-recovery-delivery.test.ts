@@ -221,10 +221,11 @@ type AlertStateRow = {
   repeat_n: number | null;
   first_failed_at: string | null;
   updated_at: string;
+  recent_verdicts_json?: string;
 };
 
 /** Minimal in-memory adapter that drives the runner's actual state machine. */
-function tenantIsolationDb() {
+function tenantIsolationDb(afterUpdate?: (values: Record<string, unknown>) => void) {
   const states = new Map<string, AlertStateRow>();
   const stateReadFilters: Array<Record<string, string>> = [];
   const runRows: Array<Record<string, unknown>> = [];
@@ -264,8 +265,23 @@ function tenantIsolationDb() {
           if (existing && existing.tenant_id !== row.tenant_id) {
             return Promise.reject(new Error("cross-tenant alert-state overwrite"));
           }
-          states.set(row.alert_key, { ...row });
+          states.set(row.alert_key, { ...existing, ...row });
           return Promise.resolve({ data: null, error: null });
+        },
+        update(values: Record<string, unknown>) {
+          const filters: Record<string, unknown> = {};
+          const query = {
+            eq(column: string, value: unknown) { filters[column] = value; return query; },
+            is(column: string, value: unknown) { filters[column] = value; return query; },
+            async select(_columns: string) {
+              const row = states.get(String(filters.alert_key));
+              if (!row || !Object.entries(filters).every(([key, value]) => ((row as unknown as Record<string, unknown>)[key] ?? null) === value)) return { data: [], error: null };
+              states.set(row.alert_key, { ...row, ...values } as AlertStateRow);
+              afterUpdate?.(values);
+              return { data: [{ alert_key: row.alert_key }], error: null };
+            },
+          };
+          return query;
         },
       };
     },
@@ -302,7 +318,7 @@ async function main() {
       runHealthChecks: async (tenant: string, opts: { checks: readonly unknown[] }) => {
         if (failedComponent === "calendar" && opts.checks === calendarChecks && requests === 1) throw new Error("fixture_calendar_exception");
         return realRun(tenant, { ...opts, checks: opts.checks as never, db: memory.db as never, nowMs: NOW,
-          sendTelegramImpl: (async () => { sends++; return { ok: false }; }) as never });
+          sendTelegramImpl: (async () => { sends++; return { ok: false, delivery: "rejected" }; }) as never });
       },
     });
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- preserve the real brokenSummary while injecting discovery failure
@@ -347,8 +363,8 @@ async function main() {
       const retry = await GET(new NextRequest("https://fixture.invalid/api/cron/health-check", { headers: {
         authorization: `Bearer ${process.env.CRON_SECRET}`, "x-oasis-cron-attest": process.env.CRON_ATTEST_SECRET,
       } }));
-      assert.equal(retry.status, 200, "a retry would find the persisted alert decay and hide the original failure");
-      assert.equal(sends, 1);
+      assert.equal(retry.status, 409, "a definitive refusal remains visible instead of being hidden by decay");
+      assert.equal(sends, 2, "known rejected sends remain retryable without suppressing them as delivered");
     } finally { globalThis.fetch = original.fetch; console.log = original.log; console.error = original.error; }
   }
 
@@ -364,10 +380,10 @@ async function main() {
       rule: { kind: "must_be_zero" as const }, observe: async () => 0, describe: () => "recovered" };
     const key = healthAlertStateKey(tenant, check.id);
     const seed = (lanes: string) => memory.states.set(key, { alert_key: key, tenant_id: tenant,
-      last_signature: `recovery-pending:${lanes}`, last_alerted_at: new Date(NOW - 60_000).toISOString(), repeat_n: 0,
+      last_signature: `recovery-pending:${lanes}`, recent_verdicts_json: JSON.stringify(["ok", "ok"]), last_alerted_at: new Date(NOW - 60_000).toISOString(), repeat_n: 0,
       first_failed_at: new Date(NOW - 120_000).toISOString(), updated_at: new Date(NOW).toISOString() });
     const delivered: string[] = [];
-    const send = async (_message: string, options: { lane: string }) => { delivered.push(options.lane); return { ok: false }; };
+    const send = async (_message: string, options: { lane: string }) => { delivered.push(options.lane); return { ok: false, delivery: "rejected" }; };
     seed("sunbiz-ops");
     let summary = await runHealthChecks(tenant, { checks: [check], db: memory.db as never, nowMs: NOW, sendTelegramImpl: send as never });
     assert.deepEqual(delivered, []); assert.equal(summary.failedAlerts, 0);
@@ -402,6 +418,9 @@ async function main() {
     assert.deepEqual(messages, []);
     assert.ok(memory.states.get(key)?.first_failed_at, "offline did not clear the failure episode");
     offline = false;
+    const firstRestored = await runHealthChecks(tenant, { checks: [check], db: memory.db as never,
+      nowMs: NOW + 30_000, sendTelegramImpl: send as never });
+    assert.deepEqual(firstRestored.recovered, [], "one real success after offline is insufficient");
     const restored = await runHealthChecks(tenant, { checks: [check], db: memory.db as never,
       nowMs: NOW + 60_000, sendTelegramImpl: send as never });
     assert.deepEqual(restored.recovered, [id]);
@@ -516,6 +535,7 @@ async function main() {
     );
 
     observed.set(tenantA, 0);
+    await runHealthChecks(tenantA, { nowMs: NOW + 10 * 60_000, checks: [sharedCheck], db: memory.db as never, sendTelegramImpl: send as never });
     await runHealthChecks(tenantA, {
       nowMs: NOW + 15 * 60_000,
       checks: [sharedCheck],
@@ -558,7 +578,8 @@ async function main() {
     const passed = await run(15);
     assert.deepEqual(passed.recovered, [], "nothing was said, so nothing recovered");
     assert.deepEqual(messages, []);
-    assert.equal(memory.states.get(key)?.first_failed_at, null, "the blip's episode is closed");
+    await run(20);
+    assert.equal(memory.states.get(key)?.first_failed_at, null, "two successes close the unannounced blip");
 
     failing = true;
     await run(30);
@@ -569,10 +590,84 @@ async function main() {
     const repeat = await run(60);
     assert.deepEqual(repeat.alerted, [], "the decay ladder still holds a confirmed episode");
     failing = false;
-    const healed = await run(75);
+    const firstSuccess = await run(75);
+    assert.deepEqual(firstSuccess.recovered, []);
+    const healed = await run(90);
     assert.deepEqual(healed.recovered, [check.id]);
     assert.equal(messages.length, 2);
     assert.match(messages[1], /RECOVERED/);
+  }
+  {
+    const tenant = "44444444-4444-4444-8444-444444444444";
+    const memory = tenantIsolationDb();
+    let observed = 1;
+    let attempts = 0;
+    const check = { id: "synthetic.unknown_receipt", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => observed, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(tenant, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      sendTelegramImpl: (async () => { attempts++; return { ok: false, delivery: "unknown" }; }) as never });
+    await run(0); await run(1);
+    assert.equal(attempts, 1);
+    observed = 0;
+    const held = await run(2); await run(3);
+    assert.equal(attempts, 1, "unknown provider acknowledgment cannot be replayed as an alert or recovery");
+    assert.equal(held.failedAlerts, 1, "a new complete observation cannot hide an undelivered alert");
+    assert.ok(memory.states.get(healthAlertStateKey(tenant, check.id))?.first_failed_at);
+  }
+  {
+    const tenant = "55555555-5555-4555-8555-555555555555";
+    const memory = tenantIsolationDb();
+    let attempts = 0;
+    let rejected = true;
+    const check = { id: "synthetic.concurrent", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => 1, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(tenant, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      sendTelegramImpl: (async () => { attempts++; return rejected ? { ok: false, delivery: "rejected" } : { ok: true, delivery: "delivered" }; }) as never });
+    await run(0);
+    await Promise.all([run(1), run(1)]);
+    assert.equal(attempts, 1, "concurrent passes cannot both claim the same health notification");
+    const key = healthAlertStateKey(tenant, check.id);
+    assert.equal(memory.states.get(key)?.last_alerted_at, null, "rejection must not advance delivery suppression");
+    rejected = false;
+    await run(2);
+    assert.equal(attempts, 2, "a definitive rejection remains retryable");
+    assert.ok(memory.states.get(key)?.last_alerted_at);
+  }
+  {
+    const tenant = "66666666-6666-4666-8666-666666666666";
+    let crashAfterCommit = false;
+    const memory = tenantIsolationDb((values) => {
+      if (crashAfterCommit && values.delivery_status === "delivered") {
+        crashAfterCommit = false; throw new Error("commit acknowledgment lost");
+      }
+    });
+    let observed = 1;
+    let sends = 0;
+    const check = { id: "synthetic.commit_loss", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => observed, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(tenant, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      sendTelegramImpl: (async () => ({ ok: true, delivery: "delivered", providerMessageId: ++sends })) as never });
+    await run(0); crashAfterCommit = true;
+    await assert.rejects(run(1), /commit acknowledgment lost/);
+    await run(2); assert.equal(sends, 1, "accepted alert and suppression commit together despite lost DB acknowledgment");
+    observed = 0; await run(3); crashAfterCommit = true;
+    await assert.rejects(run(4), /commit acknowledgment lost/);
+    await run(5); assert.equal(sends, 2, "accepted recovery and episode closure commit together");
+    const row = memory.states.get(healthAlertStateKey(tenant, check.id)) as unknown as { delivery_receipts_json: string };
+    assert.equal(JSON.parse(row.delivery_receipts_json).operator.providerMessageId, 2);
+  }
+  {
+    const tenant = "77777777-7777-4777-8777-777777777777";
+    const memory = tenantIsolationDb();
+    let observed = 1;
+    let sends = 0;
+    const check = { id: "synthetic.refused_blip", severity: "critical" as const, lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const }, observe: async () => observed, describe: () => "synthetic" };
+    const run = (minute: number) => runHealthChecks(tenant, { nowMs: NOW + minute * 60_000, checks: [check], db: memory.db as never,
+      sendTelegramImpl: (async () => { sends++; return { ok: false, delivery: "rejected" }; }) as never });
+    await run(0); await run(1); observed = 0; await run(2); await run(3);
+    const row = memory.states.get(healthAlertStateKey(tenant, check.id)) as unknown as { delivery_status: string; first_failed_at: string | null };
+    assert.equal(sends, 1); assert.equal(row.first_failed_at, null); assert.equal(row.delivery_status, "none", "a known unreceived blip closes without a permanent delivery alarm");
   }
 }
 assert.match(

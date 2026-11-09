@@ -38,6 +38,7 @@ assert.equal(freshness({ ranAt: null, nowMs: 1_000 }), "never_run");
 assert.equal(freshness({ ranAt: 0, nowMs: 2 * 60 * 60 * 1000 }), "stale");
 assert.equal(freshness({ ranAt: 0, nowMs: 5 * 60 * 1000 }), "fresh");
 assert.equal(freshness({ ranAt: Number.NaN, nowMs: 0 }), "never_run");
+assert.equal(toPanelRows([{ checkId: "automation.inbox_completion", verdict: "ok", observed: 0, baseline: 0, reason: "synthetic", ranAt: "2026-11-09T12:00:00Z" }], Date.parse("2026-11-09T12:06:00Z"))[0].needsAttention, true, "minute observer evidence becomes stale after five minutes");
 
 {
   const filled = ensureExpectedChecks([], ["calendar.workspace_credential_usable"]);

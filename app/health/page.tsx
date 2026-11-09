@@ -127,7 +127,7 @@ export default async function HealthPage() {
       </section>
 
       {outcome && (
-        <Card title={isOasisTenant ? "OASIS founder-booking health" : "Are merchants actually being reached?"}>
+        <Card title={isOasisTenant ? "OASIS automation and booking health" : "Are merchants actually being reached?"}>
           <OutcomeChecksPanel
             rows={outcome.rows}
             openAlerts={outcome.openAlerts}

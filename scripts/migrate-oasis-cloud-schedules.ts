@@ -46,8 +46,9 @@ export async function migrateCloudSchedules(mode = "--preview", client = getTurs
   if (payload.script !== "tools/financial_handoff_consumer.py" || (payload.root && payload.root !== "atlas")) {
     throw new Error("Atlas runtime changed; cutover refused");
   }
-  const safeArgs = ["once", "--limit", "1", "--max-seconds", "240", "--summary-json"];
-  if (![JSON.stringify(["once", "--limit", "5"]), JSON.stringify(safeArgs)].includes(JSON.stringify(payload.args))) {
+  const safeArgs = ["once", "--limit", "10", "--max-seconds", "240", "--summary-json"];
+  const priorCloudArgs = ["once", "--limit", "1", "--max-seconds", "240", "--summary-json"];
+  if (![JSON.stringify(["once", "--limit", "5"]), JSON.stringify(priorCloudArgs), JSON.stringify(safeArgs)].includes(JSON.stringify(payload.args))) {
     throw new Error("Atlas arguments changed; cutover refused");
   }
   if (mode === "--apply-lease-schema") {

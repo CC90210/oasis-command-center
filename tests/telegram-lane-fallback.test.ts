@@ -27,7 +27,7 @@ function stubFetch(): { sent: Sent[]; restore: () => void } {
     const token = String(url).match(/\/bot([^/]+)\//)?.[1] ?? "";
     const body = JSON.parse(String(init?.body ?? "{}")) as { chat_id?: string; text?: string };
     sent.push({ chatId: String(body.chat_id ?? ""), token, text: String(body.text ?? "") });
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
   }) as typeof fetch;
   return { sent, restore: () => { globalThis.fetch = real; } };
 }

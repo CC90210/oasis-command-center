@@ -220,7 +220,7 @@ async function main(): Promise<void> {
     }
     // The audit PDF and Meet transcription runners are bounded passes too: a long
     // transcription is pending work, never green and never an outage.
-    for (const service of ["vps.oasis-ai-audit-runner", "vps.oasis-meet-runner"]) {
+    for (const service of ["vps.oasis-ai-audit-runner", "vps.oasis-meet-runner", "vps.oasis-notification-drain", "vps.atlas-financial-notifications"]) {
       assert.equal((await call(signed({ ...pending, services: [{ service, status: "running", detail: "pass running" }] }))).status, 200);
       const row = (await rows()).find((r) => r.service === service)!;
       assert.equal(reportedWorkerStatus(service, row.status, JSON.parse(String(row.metadata))), "pending");

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
-import { leadDeclinedInvite } from "../lib/booking/lead-declined";
+
 import {
   attendanceFrom,
   buildGuestWaitingAlert,
@@ -221,6 +221,7 @@ async function testWatch() {
   const cards: Array<Record<string, unknown>> = [];
   const failCloseOnce = new Set<string>(["flaky"]);
   const deps = {
+    declined: async () => ({ status: "not_declined" as const, reason: "fixture_verified" }),
     db,
     now: () => NOW,
     origin: "https://oasisai.work",
@@ -572,23 +573,23 @@ async function testADeclinedLeadIsOfferedAnotherTimeAndTheFounderToldDeclined() 
     }) as never,
     declined: async (appointment) => {
       asked.push(appointment.id);
-      // The real check fails open: an unreadable answer is "not declined".
+      // Provider uncertainty must never become a no-show accusation.
       return appointment.id === "unreadable"
-        ? leadDeclinedInvite(appointment, async () => { throw new Error("calendar_read_failed"); })
-        : true;
+        ? { status: "unknown" as const, reason: "rsvp_provider_unavailable" }
+        : { status: "declined" as const, reason: "rsvp_verified" };
     },
   });
   const subjects = async (id: string) =>
     (await raw.execute({ sql: "SELECT subject FROM website_sales_meeting_notifications WHERE appointment_id = ? AND kind = 'no_show_rebook'", args: [id] })).rows.map((r) => String(r.subject));
   assert.deepEqual(await subjects("declined"), ["Another time for your AI automation audit?"]);
   assert.deepEqual(await subjects("came-anyway"), ["I'm sorry I missed our call"]);
-  assert.deepEqual(await subjects("unreadable"), ["Sorry we missed each other"], "an unknown answer changes nothing");
+  assert.deepEqual(await subjects("unreadable"), [], "an unknown answer cannot queue a no-show message");
   assert.deepEqual(asked.sort(), ["declined", "unreadable"], "only a lead who stayed away is asked about");
   const alertFor = (id: string) => alerts.find((a) => a.includes(`Lead ${id}`)) || "";
   assert.match(alertFor("declined"), /^<b>Declined: Lead declined - Harbour Studio<\/b>/);
   assert.match(alertFor("declined"), /They declined the invitation, so the call did not happen\. A link to pick another time is going out now\./);
   assert.match(alertFor("came-anyway"), /^<b>Missed: Lead came-anyway/);
-  assert.match(alertFor("unreadable"), /^<b>Missed: Lead unreadable/);
+  assert.equal(alertFor("unreadable"), "", "no uncertain no-show alert");
 }
 
 async function main() {

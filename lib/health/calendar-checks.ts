@@ -15,15 +15,16 @@
  * a confident yes over a dead credential, which is exactly what the handoff
  * banner did for two days (#322, then again at the workspace level in #331).
  *
- * So this check spends it and proves the target calendar accepts both event
- * creation and cleanup. The token exchange and redacted diagnostics stay in
- * the shared probe module so every surface classifies Google the same way.
+ * Routine production checks exchange the credential and read the calendar.
+ * Write/Meet readiness is an explicitly invoked canary on a separate calendar.
+ * Both use the shared redacted provider diagnostics.
  */
 
 import "server-only";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import {
   probeCalendarWriteRoundTrip,
+  probeCalendarEventsList,
   type GoogleProbeErrorCode,
 } from "@/lib/integrations/google-token-probe";
 import type { DripCheck } from "./drip-checks";
@@ -69,10 +70,11 @@ function rejectedObservation(code: GoogleProbeErrorCode | null): number {
 
 /** Dependency injection keeps the readiness behavior testable without real polling sleeps. */
 export function createCalendarChecks(
-  probe: typeof probeCalendarWriteRoundTrip = probeCalendarWriteRoundTrip,
+  probe: typeof probeCalendarWriteRoundTrip = probeCalendarEventsList,
+  mode: "read" | "write_canary" = "read",
 ): DripCheck[] {
-  return [{
-    id: "calendar.workspace_credential_usable",
+  const check: DripCheck = {
+    id: mode === "read" ? "calendar.workspace_credential_usable" : "calendar.dedicated_canary_write",
     severity: "critical",
     // OASIS's booking chain, so CC's lane -- not the SunBiz ops channel every
     // other check in this runner uses. Adon operates SunBiz; nobody there can
@@ -85,7 +87,7 @@ export function createCalendarChecks(
       // credential. Previews and local dev legitimately run without one, and
       // grading those would be a standing false alarm that gets the whole
       // channel muted — the same reasoning as deploy.prod_serves_main.
-      if (!isProductionRuntime()) return OK;
+      if (mode === "read" && !isProductionRuntime()) return OK;
 
       const config = systemCalendarConfig();
       // Not a degraded state: with no workspace credential, EVERY host whose
@@ -93,22 +95,25 @@ export function createCalendarChecks(
       // the fallback that exists to cover them cannot run at all.
       const configuredCalendarId = (process.env.GOOGLE_CALENDAR_ID || "").trim();
       if (!config || !config.organizerEmail || !configuredCalendarId) return UNCONFIGURED;
+      const canaryId = (process.env.GOOGLE_CALENDAR_CANARY_ID || "").trim();
+      if (mode === "write_canary" && (!canaryId || canaryId === config.calendarId || canaryId === "primary")) return UNCONFIGURED;
 
       const result = await probe({
         refreshToken: config.refreshToken,
         clientId: config.clientId,
         clientSecret: config.clientSecret,
-        calendarId: config.calendarId,
+        calendarId: mode === "write_canary" ? canaryId : config.calendarId,
         attendeeEmail: config.organizerEmail,
       });
-      // This check makes a positive booking-readiness claim. Anything short of
-      // a confirmed create/delete round trip is therefore non-green; an
-      // upstream timeout is uncertainty, not evidence that booking works.
+      // An upstream timeout is uncertainty, never evidence that the configured
+      // access worked. Only the dedicated canary makes a write-readiness claim.
       return result.verdict === "live" ? OK : rejectedObservation(result.errorCode);
     },
     describe: (r) => {
       if (r.observed === OK) {
-        return "the shared OASIS calendar is live — its create/Meet/delete check passed and founder audits can be booked.";
+        return mode === "read"
+          ? "The shared calendar credential and read access are verified. Write readiness is measured by the separate dedicated-calendar canary."
+          : "The dedicated test calendar create/Meet/delete canary passed.";
       }
       if (r.observed === UNCONFIGURED) {
         return (
@@ -140,7 +145,7 @@ export function createCalendarChecks(
         );
       }
       if (r.observed === CALENDAR_WRITE_REJECTED) {
-        return (
+        return mode === "read" ? "The shared calendar read was rejected [calendar_access_rejected]. Check access to the configured calendar; the production health probe made no event changes." : (
           "THE SHARED OASIS CALENDAR WRITE CHECK FAILED [calendar_write_rejected] — the refresh " +
           "grant worked, but Google denied creating an event on the target calendar. Grant Calendar " +
           "events write scope and confirm GOOGLE_SYSTEM_CALENDAR_ADDRESS can edit " +
@@ -156,7 +161,7 @@ export function createCalendarChecks(
         );
       }
       if (r.observed === CALENDAR_PROBE_UNVERIFIED) {
-        return (
+        return mode === "read" ? "The shared calendar read could not be verified [calendar_read_unverified; code=6]. A timeout or incomplete provider response is unknown, not a revoked credential." : (
           "THE SHARED OASIS CALENDAR COULD NOT BE VERIFIED [calendar_write_unverified] — Google " +
           "did not complete the create/delete proof, so the system will not claim bookings are ready. " +
           "The monitor will retry on its next scheduled run."
@@ -169,7 +174,15 @@ export function createCalendarChecks(
         "verifier. Rotate only if the canonical bundle itself fails direct provider verification."
       );
     },
-  }];
+  };
+  check.observeDetailed = async (db, tenantId, now) => {
+    const observed = await check.observe(db, tenantId, now);
+    return { observed, reason: check.describe({ id: check.id, verdict: observed === 0 ? "ok" : "failing", observed: observed ?? NaN, baseline: 0, reason: "" }) };
+  };
+  return [check];
 }
 
 export const CALENDAR_CHECKS: DripCheck[] = createCalendarChecks();
+
+/** Explicitly invoked only; never included in the routine production checks. */
+export const CALENDAR_WRITE_CANARY_CHECKS: DripCheck[] = createCalendarChecks(probeCalendarWriteRoundTrip, "write_canary");

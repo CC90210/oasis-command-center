@@ -91,7 +91,9 @@ export function toPanelRows(checks: PanelCheck[], nowMs: number): PanelRow[] {
   return checks
     .map((c) => {
       const tone = verdictTone(c.verdict);
-      const fresh = freshness({ ranAt: c.ranAt ? Date.parse(c.ranAt) : null, nowMs });
+      const fresh = freshness({ ranAt: c.ranAt ? Date.parse(c.ranAt) : null, nowMs,
+        ...(c.checkId.startsWith("automation.") ? { staleAfterMs: 5 * 60_000 } : {}),
+      });
       return {
         ...c,
         tone,

@@ -31,7 +31,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { leadDeclinedInvite, type DeclineCheckAppointment } from "@/lib/booking/lead-declined";
+import { declineCheckForRun, type DeclineCheckAppointment, type InviteDecision } from "@/lib/booking/lead-declined";
 import { markFounderMeetingNoShow, type NoShowWho } from "@/lib/booking/no-show";
 import { loadRebookLead, REBOOK_LEAD_STAGE } from "@/lib/booking/rebook";
 import { REBOOK_TOKEN_TTL_S, rebookUrl, signRebookToken } from "@/lib/booking/rebook-token";
@@ -316,7 +316,7 @@ export type WatchDependencies = {
   /** A card in the Command Center that stays open whatever its push does. Default: lib/notify/agent-alert. */
   card?: typeof writeAgentAlert;
   /** Did the lead decline the invite (Google's answer)? Default: lib/booking/lead-declined. */
-  declined?: (appointment: DeclineCheckAppointment) => Promise<boolean>;
+  declined?: (appointment: DeclineCheckAppointment) => Promise<InviteDecision>;
   /** Wall-clock milliseconds one pass may take before it leaves the rest to the next run. Default 30 s. */
   budgetMs?: number;
 };
@@ -598,6 +598,7 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
   const markNoShow = deps.markNoShow ?? markFounderMeetingNoShow;
   const alert = deps.alert ?? pushWorkspaceAlert;
   const overBudget = budget(deps);
+  const inviteDecision = deps.declined ?? declineCheckForRun({ now: deps.now });
 
   // Meetings in their slot now, or past it within the lookback: OASIS's own
   // workspace only (founder meetings are its program; a retired workspace is
@@ -714,7 +715,18 @@ export async function watchFounderMeetings(deps: WatchDependencies): Promise<Wat
         lead.calendar_appointment_id === appointment.id;
       // The lead told us: they declined the invite and stayed away. Not a
       // "missed each other" for them, nor a "Missed" for the founder (2026-11-07).
-      const declined = leadStayedAway(verdict) && (await (deps.declined ?? leadDeclinedInvite)(appointment));
+      const rsvp = leadStayedAway(verdict) ? await inviteDecision(appointment) : null;
+      if (rsvp?.status === "unknown") {
+        result.partial = true;
+        if (rsvp.needsReview) await (deps.card ?? writeAgentAlert)({
+          tenantId: appointment.tenant_id, alertType: "founder_meeting_rsvp_unverified",
+          subjectType: "appointment", subjectId: appointment.id, severity: "warn",
+          title: "Meeting outcome needs review", body: "Google's invitation response could not be verified. No no-show message was sent.",
+          payload: { appointment_id: appointment.id, reason: rsvp.reason }, telegramOncePerOpen: true,
+        });
+        continue;
+      }
+      const declined = rsvp?.status === "declined";
       if (reachable) {
         const rebookUrl = signedRebookUrl(deps, appointment, nowMs);
         const messages = buildNoShowMessages({
