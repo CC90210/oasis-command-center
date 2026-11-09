@@ -269,7 +269,7 @@ export async function runHealthChecks(
       .eq("alert_key", key)
       .maybeSingle();
     const state = stateRow.data as
-      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null; recent_verdicts_json?: string | null; delivery_status?: string | null; delivery_claim_token?: string | null; delivery_receipts_json?: string | null }
+      | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null; recent_verdicts_json?: unknown; delivery_status?: string | null; delivery_claim_token?: string | null; delivery_receipts_json?: unknown }
       | null;
     if (stateRow.error) throw new Error("health_incident_state_read_failed");
     // Intentional offline is not an observation of recovery. Do not add it to
@@ -298,7 +298,8 @@ export async function runHealthChecks(
     };
     let receipts: Record<string, { phase: string; providerMessageId: number }> = {};
     try {
-      const saved = JSON.parse(state?.delivery_receipts_json || "{}");
+      const raw = state?.delivery_receipts_json;
+      const saved = typeof raw === "string" ? JSON.parse(raw || "{}") : raw;
       if (saved && typeof saved === "object" && !Array.isArray(saved)) receipts = saved;
     } catch { /* prior version had no provider receipts */ }
     // A killed send or ambiguous acknowledgment requires reconciliation.

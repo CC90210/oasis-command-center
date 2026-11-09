@@ -4,6 +4,7 @@
   "private": true,
   "description": "OASIS AI Agent Command Center \u2014 the operating system for AI agents. Multi-agent, profile-driven, real-time.",
   "scripts": {
+    "test:automation-reliability": "node --conditions=react-server --import ./tests/helpers/deny-network.mjs --import tsx tests/automation-observer.test.ts && node --conditions=react-server --import ./tests/helpers/deny-network.mjs --import tsx tests/automation-observer-migration.test.ts && node --conditions=react-server --import ./tests/helpers/deny-network.mjs --import tsx tests/automation-observer-auth.test.ts && node --conditions=react-server --import ./tests/helpers/deny-network.mjs --import tsx tests/automation-observer-delivery.test.ts && node --conditions=react-server --import ./tests/helpers/deny-network.mjs --import tsx tests/telegram-receipts.test.ts",
     "test:website-sales-contract": "node --conditions=react-server --import tsx tests/website-sales-contract.test.ts && node --conditions=react-server --import tsx tests/contracts-match-engine.test.ts",
     "dev": "next dev --port 3100",
     "postinstall": "node scripts/patch-opennext-manifests.mjs",

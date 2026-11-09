@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { checkCronAuth } from "@/lib/cron-auth";
+import { checkAutomationObserverAuth } from "@/lib/automation-observer-auth";
 import { getTursoClient } from "@/lib/turso";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
 import { observeAutomations, observerChecks } from "@/lib/health/automation-observer";
@@ -11,7 +11,7 @@ export const maxDuration = 30;
 
 /** Dedicated observer Worker calls this; the business cron driver never does. */
 export async function GET(req: NextRequest) {
-  const denied = checkCronAuth(req);
+  const denied = checkAutomationObserverAuth(req);
   if (denied) return denied;
   const now = Date.now();
   const tick = new Date(Math.floor(now / 60_000) * 60_000).toISOString();
@@ -27,10 +27,11 @@ export async function GET(req: NextRequest) {
     const findings = await observeAutomations(db, WEBDEV_TENANT_ID, now);
     const independentDelivery = req.headers.get("x-oasis-observer-delivery");
     findings.push({ id: "automation.independent_observer_delivery",
-      observed: ["sending", "refused", "delivery_unknown"].includes(independentDelivery ?? "") ? 1 : ["none", "delivered"].includes(independentDelivery ?? "") ? 0 : null,
+      observed: ["sending", "refused", "permanent_failure", "delivery_unknown"].includes(independentDelivery ?? "") ? 1 : ["none", "delivered"].includes(independentDelivery ?? "") ? 0 : null,
       reason: independentDelivery === "delivery_unknown" || independentDelivery === "sending"
         ? "Independent observer alert acknowledgment is unknown; its durable incident remains open for reconciliation."
-        : independentDelivery === "refused" ? "Independent observer alert was refused; its bounded retry remains pending."
+        : independentDelivery === "permanent_failure" ? "Independent observer alert delivery needs connection repair and explicit incident reconciliation; automatic retries are stopped."
+          : independentDelivery === "refused" ? "Independent observer alert was rate limited; provider backoff remains pending."
           : "Independent observer delivery state was supplied by the authenticated worker." });
     const summary = await runHealthChecks(WEBDEV_TENANT_ID, { nowMs: now, checks: observerChecks(findings) });
     const deliveryUnverified = findings.some((f) => f.id === "automation.health_alert_delivery" && f.observed !== 0);

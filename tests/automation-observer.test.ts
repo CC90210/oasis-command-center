@@ -91,6 +91,8 @@ async function independent() {
   for (const verdict of ["failing", "ok", "failing", "ok"] as const) window = incidentWindow(window, verdict).serialized;
   assert.equal(incidentWindow(window, "failing").confirm, true);
   assert.equal(incidentWindow('["failing","ok"]', "ok").recovered, true);
+  assert.equal(incidentWindow(["failing", "ok"], "ok", true).recovered, true, "Turso adapter returns decoded arrays");
+  assert.equal(incidentWindow(["failing", "ok", "failing", "ok"], "failing").confirm, true, "decoded history retains flap detection");
 
   const realFetch = globalThis.fetch;
   const realNow = Date.now;
@@ -102,7 +104,7 @@ async function independent() {
   const data = new Map<string, unknown>();
   let sends = 0;
   const headers: string[] = [];
-  const env = { CRON_SECRET: "synthetic-secret", CRON_ATTEST_SECRET: "synthetic-attest", OASIS_TELEGRAM_BOT_TOKEN: "synthetic-token", OASIS_TELEGRAM_CHAT_ID: "synthetic-chat" } as Env;
+  const env = { CRON_SECRET: "synthetic-secret", AUTOMATION_OBSERVER_ATTEST_SECRET: "synthetic-attest", OASIS_TELEGRAM_BOT_TOKEN: "synthetic-token", OASIS_TELEGRAM_CHAT_ID: "synthetic-chat" } as Env;
   const worker = new ObserverIncident({ storage: { get: async <T>(key: string) => data.get(key) as T | undefined, put: async (key, value) => { data.set(key, value); } }, blockConcurrencyWhile: async (work) => work() }, env);
   try {
     Date.now = () => time;
