@@ -85,6 +85,11 @@ assert.ok(n.who_buys.includes("No prices are shown"));
 assert.ok(n.fixes_intro.includes(`${w.total}/100`));
 assert.equal(n.email, null);
 
+// A tagline that ends its own sentence is not given a second stop.
+const stopped = baseNarrative(facts({ signals: { ...signals, tagline: "Your local garden centre for over 75 years." } }), w);
+assert.ok(stopped.what_you_sell.includes(`"Your local garden centre for over 75 years." `) && !stopped.what_you_sell.includes(`years.".`), stopped.what_you_sell);
+assert.ok(n.what_you_sell.includes(`"24/7 plumbers".`), "a tagline with no stop gets one");
+
 // No footer year read is unknown, never "Footer year is stale" (live scan 2026-11-12: a Squarespace
 // site with no year was told its year was years behind).
 const yearless = scoreFacts(facts({ signals: { ...signals, copyright_year: null } }, weak.checks));

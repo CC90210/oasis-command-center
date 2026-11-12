@@ -5,7 +5,7 @@
  *
  * Reuses the audit's HTML helpers (lib/ai-audit/site-checks.ts) rather than a second parser.
  */
-import { asciiLower, innerOf, tagsOf, visibleText, type PageSnapshot } from "@/lib/ai-audit/site-checks";
+import { asciiLower, decodeEntities, innerOf, tagsOf, visibleText, type PageSnapshot } from "@/lib/ai-audit/site-checks";
 import type { SiteSignals } from "@/lib/site-scan/types";
 
 export const TEXT_EXCERPT_MAX = 6_000;
@@ -115,24 +115,6 @@ function clean(s: string | null | undefined, max = 200): string | null {
   if (!s) return null;
   const t = s.replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f]/g, "").trim();
   return t ? t.slice(0, max) : null;
-}
-
-function fromCodePoint(n: number): string {
-  return Number.isInteger(n) && n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : "";
-}
-
-// Numeric entities too: Squarespace writes og:site_name as "Harper's Garden Centre &#124; Hamilton".
-// `&amp;` last, so "&amp;#124;" reads as the text "&#124;", not a pipe.
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&#(\d{1,7});/g, (_, d: string) => fromCodePoint(Number(d)))
-    .replace(/&#x([0-9a-f]{1,6});/gi, (_, h: string) => fromCodePoint(parseInt(h, 16)))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
 }
 
 function uniq(list: string[], max = MAX_LIST): string[] {

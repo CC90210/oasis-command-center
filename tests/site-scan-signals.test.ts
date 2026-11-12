@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { extractSignals } from "../lib/site-scan/signals";
-import type { PageSnapshot } from "../lib/ai-audit/site-checks";
+import { runSiteChecks, type PageSnapshot } from "../lib/ai-audit/site-checks";
 
 function page(url: string, html: string, status = 200): PageSnapshot {
   return { url, finalUrl: url, status, contentType: "text/html", html, bytes: html.length, ms: 300, truncated: false };
@@ -93,6 +93,9 @@ const sq = extractSignals({
 assert.equal(sq.og_site_name, "Harper's Garden Centre | Hamilton, Ontario", "numeric entities decode");
 assert.equal(sq.business_name, "Harper's Garden Centre", "the name is what comes before the pipe");
 assert.deepEqual(sq.services, ["Landscape design"], `a heading label is not a service: ${sq.services.join("|")}`);
+// The site-health "Page title" row read the same title raw ("Harper&#39;s").
+const sqTitle = runSiteChecks({ pages: [page("https://harpers.example/", `<html><head><title>Harper&#39;s Garden Centre &#124; Hamilton</title></head><body><h1>Hi</h1></body></html>`)], https: { served: true, httpRedirects: null }, sitemap: null }).find((ch) => ch.key === "title");
+assert.equal(sqTitle?.detail, `The home page title is "Harper's Garden Centre | Hamilton".`);
 const dash = extractSignals({ domain: "sj.example", pages: [page("https://sj.example/", `<html><head><meta property="og:site_name" content="Smith - Jones Law"></head><body></body></html>`)] });
 assert.equal(dash.business_name, "Smith - Jones Law", "a hyphen is part of a name");
 assert.ok(!s.services.includes("Services"), "the fixture's bare Services nav link is a heading");

@@ -536,6 +536,26 @@ function findAll(readings: readonly Reading[], sigs: readonly Sig[]): { found: s
   return { found, evidence };
 }
 
+function fromCodePoint(n: number): string {
+  return Number.isInteger(n) && n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : "";
+}
+
+/**
+ * Entities in a short piece of text (a title, an attribute), numeric ones included: Squarespace
+ * writes "Harper&#39;s" and "&#124;". `&amp;` last, so "&amp;#124;" reads as the text "&#124;".
+ */
+export function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d{1,7});/g, (_, d: string) => fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, h: string) => fromCodePoint(parseInt(h, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 /** The text a visitor would read: no tags, scripts or styles. */
 export function visibleText(html: string): string {
   return stripTags(withoutBlocks(html))
@@ -865,7 +885,7 @@ export function runSiteChecks(input: {
 
   // The title: its first 1,000 characters, wherever it closes (a title is text only, so the start of one is the start of it).
   const titleTag = nextTag(homeReading.markup, homeLower, "title", 0);
-  const titleText = titleTag ? stripTags(homeReading.markup.slice(titleTag.end, Math.min(closeAt(homeLower, "title", titleTag.end), titleTag.end + 1_000))).slice(0, 300) : "";
+  const titleText = titleTag ? decodeEntities(stripTags(homeReading.markup.slice(titleTag.end, Math.min(closeAt(homeLower, "title", titleTag.end), titleTag.end + 1_000)))).slice(0, 300) : "";
   checks.push(yesNo("title", !!titleText, `The home page title is "${titleText.slice(0, 90)}".`, "The home page has no title for browsers and search results.", [], titleText ? { url: home.finalUrl, excerpt: titleText.slice(0, 160) } : null, false, titleTag ? null : homeCut));
 
   const description = metaContent(metas, "description");
