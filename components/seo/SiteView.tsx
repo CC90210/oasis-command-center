@@ -76,7 +76,7 @@ export function SiteView({ loaded, range }: { loaded: Loaded<SiteData>; siteId: 
     <div className="space-y-5">
       {!data || !s ? (
         <>
-          <UnavailableBanner />
+          <UnavailableBanner reason={loaded.state === "unavailable" ? loaded.reason : loaded.state === "not_found" ? "404_not_found" : undefined} />
           <SiteKpis summary={null} range={range} error />
         </>
       ) : s.rollups_pending ? (
