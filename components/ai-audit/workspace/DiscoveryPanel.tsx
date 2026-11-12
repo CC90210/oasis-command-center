@@ -19,6 +19,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { EngagementView } from "@/lib/ai-audit/view";
 import { AI_ENGINES, AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payload";
+import { toolErrorLine } from "@/lib/tools/errors";
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
@@ -117,7 +118,9 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
   const [ai, setAi] = useState<"" | "yes" | "no">("");
   const [engine, setEngine] = useState<AiEngine>(view.settings.engine);
   // Who reads the call for the draft, apart from Gate 1's engine (review of phase 2b: one state served both selects).
-  const [readBy, setReadBy] = useState<"mac_claude" | "cloud_workspace">(view.settings.engine === "cloud_workspace" ? "cloud_workspace" : "mac_claude");
+  // The Mac is offered only while its runner is live; otherwise the cloud account reads the call. A
+  // workspace set to Mac Claude with no Mac on would queue a run that waits a day, then cancels.
+  const [readBy, setReadBy] = useState<"mac_claude" | "cloud_workspace">(view.settings.engine === "mac_claude" && view.macRunnerLive ? "mac_claude" : "cloud_workspace");
   const [busy, setBusy] = useState(false);
   // While a draft is reading the call, the page looks again every 15 seconds, so its status, report and
   // facts appear when it ends (Codex review of phase 2b: one refresh at the start showed "queued" for good).
@@ -387,12 +390,19 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
               <div>
                 <div className="label">Read by</div>
                 <select className="select" value={readBy} onChange={(ev) => setReadBy(ev.target.value as "mac_claude" | "cloud_workspace")}>
-                  {(["mac_claude", "cloud_workspace"] as const).map((k) => (
-                    <option key={k} value={k}>
-                      {AI_ENGINE_LABELS[k]}
-                    </option>
-                  ))}
+                  {(["mac_claude", "cloud_workspace"] as const)
+                    .filter((k) => k !== "mac_claude" || view.macRunnerLive)
+                    .map((k) => (
+                      <option key={k} value={k}>
+                        {AI_ENGINE_LABELS[k]}
+                      </option>
+                    ))}
                 </select>
+                {readBy === "cloud_workspace" && !view.cloudAccountReady ? (
+                  <div className="mt-1 text-[12px] text-status-warm">
+                    No cloud AI account is connected for this workspace. <Link href="/settings/connections" className="underline">Connect one in Settings</Link>, or fill the profile by hand.
+                  </div>
+                ) : null}
               </div>
               {isOwner ? (
                 <button
@@ -424,7 +434,8 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
               Last run: <span className="text-fg">{EXTRACTION_STATUS_WORDS[view.extraction.status] ?? view.extraction.status.replace(/_/g, " ")}</span>
               {view.extraction.windows ? `, ${view.extraction.done} of ${view.extraction.windows} part${view.extraction.windows === 1 ? "" : "s"} read` : ""}
               {view.extraction.failed ? <span className="text-status-warm">, {view.extraction.failed} failed</span> : null}
-              {view.extraction.status === "waiting_runner" ? ", waiting for the Mac" : ""}.
+              {view.extraction.status === "waiting_runner" ? (view.macRunnerLive ? ", waiting for the Mac" : ", waiting for a Mac that is not on") : ""}.
+              {view.extraction.error ? <span className="text-status-warm"> {toolErrorLine(view.extraction.error, "worker")}</span> : null}
             </div>
           ) : null}
           {view.extractionReport ? (

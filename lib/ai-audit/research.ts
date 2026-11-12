@@ -58,8 +58,14 @@ export const RESEARCH_STEP = "research";
 export const SEARCH_TOOL_KEY = "ai_audit_search";
 /** The stage research runs in: after Gate 1, before final review. */
 export const RESEARCH_STAGES: readonly AiAuditStage[] = ["generating"];
-/** A web search no Mac has taken in this long is skipped, with a gap. */
-export const MAC_SEARCH_WAIT_MS = 6 * 3_600_000;
+/**
+ * A web search no Mac has taken in this long is skipped, with a gap. Fifteen minutes, not six
+ * hours (2026-11-12): the Mac's model/search handlers were retired, so a research run that waited
+ * on it stalled for six hours before continuing with the keyless modules. The site read, PageSpeed
+ * and the evidence rules do not need a model; the research must not wait a shift for one.
+ */
+export const MAC_SEARCH_WAIT_MS = 15 * 60_000;
+export const MAC_SEARCH_WAIT_WORDS = "fifteen minutes";
 /** All the found pages together, read within this long. */
 export const FETCH_BUDGET_MS = 25_000;
 /** What one source keeps of its page: the sentence that states each claim, and the start. */
@@ -530,7 +536,7 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
         sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'runner_offline', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'queued'",
         args: [input.now.toISOString(), input.now.toISOString(), t, state.search!.job_id],
       });
-      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "No Mac ran the web search within six hours, so the research has no web search." };
+      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: `No Mac ran the web search within ${MAC_SEARCH_WAIT_WORDS}, so the research has no web search.` };
     } else {
       return "waiting";
     }
