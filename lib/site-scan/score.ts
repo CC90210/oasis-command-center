@@ -64,6 +64,13 @@ function pillar(
   return { pillar: { key, label: LABELS[key], score: clamp((score / readable) * 100), weight: WEIGHTS[key], detail }, candidates };
 }
 
+/** The claim panel's promise, true to the report above it: no "three fixes" when none were priced. */
+export function claimHeading(fixCount: number): string {
+  if (fixCount <= 0) return "Get a founder to read your site.";
+  if (fixCount === 1) return "Get the fix priced by a founder.";
+  return `Get the ${fixCount === 2 ? "two" : "three"} fixes priced by a founder.`;
+}
+
 export function scoreFacts(facts: ScanFacts): ScanScore {
   const c = checkMap(facts);
   // Signals from a page with no readable text (a site that draws itself in the browser: a 586 KB
@@ -109,7 +116,8 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
     [
       { earned: tri("https"), points: 25, fix: { key: "https", title: "Secure HTTPS address", why: "Browsers warn visitors on an insecure page.", automation: "site_rebuild" } },
       { earned: tri("structured_data"), points: 20, fix: { key: "structured_data", title: "Structured business data", why: "Schema.org tells Google your name, hours and area; without it the knowledge panel guesses.", automation: "local_seo_setup" } },
-      { earned: s ? s.copyright_year !== null && yearNow - s.copyright_year <= 1 : null, points: 15, fix: { key: "copyright", title: "Footer year is stale", why: "A footer years behind reads as an abandoned business.", automation: "site_rebuild" } },
+      // No footer year read is unknown, not stale: the fix says "years behind", which needs a year.
+      { earned: s && s.copyright_year !== null ? yearNow - s.copyright_year <= 1 : null, points: 15, fix: { key: "copyright", title: "Footer year is stale", why: "A footer years behind reads as an abandoned business.", automation: "site_rebuild" } },
       { earned: tri("social_links"), points: 15, fix: { key: "social_links", title: "Linked social profiles", why: "Visitors check that the business is alive elsewhere.", automation: "content_system" } },
       { earned: tri("analytics"), points: 15, fix: { key: "analytics", title: "Visitor analytics", why: "Without measurement, no change can be proved to work.", automation: "analytics_setup" } },
       { earned: s ? s.phones.length > 0 || s.emails.length > 0 : null, points: 10, fix: { key: "contact_visible", title: "Visible contact details", why: "No phone or email could be read on any page.", automation: "conversion_page" } },

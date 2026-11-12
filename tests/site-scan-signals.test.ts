@@ -81,4 +81,20 @@ assert.equal(t.business_name, "Acme Plumbing Inc");
 const t2 = extractSignals({ domain: "z.example", pages: [page("https://z.example/", `<html><head><title>Chez Lune | Brunch all day</title></head><body></body></html>`)] });
 assert.equal(t2.business_name, "Chez Lune");
 
+// Live scan 2026-11-12 (a Squarespace site): og:site_name was the whole title with a numeric
+// entity, and a dropdown heading "Folder: Services" was listed as a service.
+const sq = extractSignals({
+  domain: "harpers.example",
+  pages: [page("https://harpers.example/", `<html><head><title>Harper&#39;s Garden Centre | Hamilton, Ontario</title>
+<meta property="og:site_name" content="Harper&#39;s Garden Centre &#124; Hamilton, Ontario"></head><body>
+<nav><a href="/services">Folder: Services</a><a href="/services/design">Folder: Landscape design</a><a href="/products">Our products</a></nav>
+<h1>Your local garden centre</h1></body></html>`)],
+});
+assert.equal(sq.og_site_name, "Harper's Garden Centre | Hamilton, Ontario", "numeric entities decode");
+assert.equal(sq.business_name, "Harper's Garden Centre", "the name is what comes before the pipe");
+assert.deepEqual(sq.services, ["Landscape design"], `a heading label is not a service: ${sq.services.join("|")}`);
+const dash = extractSignals({ domain: "sj.example", pages: [page("https://sj.example/", `<html><head><meta property="og:site_name" content="Smith - Jones Law"></head><body></body></html>`)] });
+assert.equal(dash.business_name, "Smith - Jones Law", "a hyphen is part of a name");
+assert.ok(!s.services.includes("Services"), "the fixture's bare Services nav link is a heading");
+
 console.log("site-scan-signals: ok");

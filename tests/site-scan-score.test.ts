@@ -5,7 +5,7 @@
  * Run: node --conditions=react-server --import tsx tests/site-scan-score.test.ts
  */
 import assert from "node:assert/strict";
-import { scoreFacts } from "../lib/site-scan/score";
+import { claimHeading, scoreFacts } from "../lib/site-scan/score";
 import { baseNarrative } from "../lib/site-scan/narrative";
 import { FACTS_SCHEMA, type ScanFacts, type SiteSignals } from "../lib/site-scan/types";
 import type { CheckKey, CheckStatus, SiteCheck } from "../lib/ai-audit/site-checks";
@@ -84,5 +84,18 @@ assert.ok(n.what_you_sell.includes("Acme Plumbing") && n.what_you_sell.includes(
 assert.ok(n.who_buys.includes("No prices are shown"));
 assert.ok(n.fixes_intro.includes(`${w.total}/100`));
 assert.equal(n.email, null);
+
+// No footer year read is unknown, never "Footer year is stale" (live scan 2026-11-12: a Squarespace
+// site with no year was told its year was years behind).
+const yearless = scoreFacts(facts({ signals: { ...signals, copyright_year: null } }, weak.checks));
+assert.ok(!yearless.pillars.find((p) => p.key === "trust")?.detail.includes("Footer year is stale"), "no year is not a stale year");
+assert.ok(!yearless.fixes.some((f) => f.key === "copyright"));
+assert.ok(w.pillars.find((p) => p.key === "trust")?.detail.includes("Footer year is stale"), "a 2020 year still is");
+
+// The claim heading promises only the fixes the report priced.
+assert.equal(claimHeading(3), "Get the three fixes priced by a founder.");
+assert.equal(claimHeading(2), "Get the two fixes priced by a founder.");
+assert.equal(claimHeading(1), "Get the fix priced by a founder.");
+assert.ok(!/fix/.test(claimHeading(0)));
 
 console.log("site-scan-score: ok");
