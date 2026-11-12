@@ -16,9 +16,10 @@
  * re-ranking reads.
  */
 import type { Client } from "@libsql/client";
+import { randomUUID } from "node:crypto";
 import { formLinkMac, formLinkMacMatches, verifyFormLink } from "@/lib/form-links";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
-import { aiAuditTablesInstalled, openEngagement, readLead, recordEvent } from "@/lib/ai-audit/store";
+import { aiAuditTablesInstalled, openEngagement, readLead } from "@/lib/ai-audit/store";
 import { getScan, reserveClaim, setClaimEngagement } from "@/lib/site-scan/store";
 
 const CLAIM_PURPOSE = "site_scan_claim/v1";
@@ -57,11 +58,8 @@ export async function claimScan(
   const lead = await readLead(db, input.tenantId, verified.payload.lead_id);
   if (!lead) return { ok: false, error: "lead_not_found" };
 
-  // The first claim is recorded on the row (a conditional UPDATE: of two racing, one wins).
-  const reserved = await reserveClaim(db, { tenantId: input.tenantId, id: scan.id, leadRecordId: lead.id, now: input.now });
-
-  // Every claimant's own engagement. openEngagement returns the lead's open one when there is one,
-  // so a retry lands on it; the attachment event is written once per engagement and scan.
+  // The claimant's own engagement first: nothing is written to the scan for a claim whose audit
+  // cannot open. openEngagement returns the lead's open one when there is one, so a retry lands on it.
   if (!(await aiAuditTablesInstalled(db))) return { ok: false, error: "audit_not_opened" };
   let opened: Awaited<ReturnType<typeof openEngagement>>;
   try {
@@ -76,26 +74,24 @@ export async function claimScan(
     return { ok: false, error: "audit_not_opened" };
   }
   const engagementId = opened.engagement.id;
+  // Then the attachment, once per engagement and scan even when two retries race.
+  await attachScan(db, { tenantId: input.tenantId, engagementId, scanId: scan.id, now: input.now, meta: { domain: scan.domain, score: scan.score?.total ?? null, created: opened.created } });
+  // Last, the row's record of the first claim (a conditional UPDATE: of two racing, one wins).
+  const reserved = await reserveClaim(db, { tenantId: input.tenantId, id: scan.id, leadRecordId: lead.id, now: input.now });
   if (reserved !== "taken") await setClaimEngagement(db, { tenantId: input.tenantId, id: scan.id, leadRecordId: lead.id, engagementId, now: input.now });
-  if (!(await scanAlreadyAttached(db, input.tenantId, engagementId, scan.id))) {
-    await recordEvent(db, {
-      tenantId: input.tenantId,
-      engagementId,
-      event: "free_scan_attached",
-      actor: { type: "system", id: null },
-      now: input.now,
-      refType: "site_scan",
-      refId: scan.id,
-      meta: { domain: scan.domain, score: scan.score?.total ?? null, created: opened.created, first_claim: reserved === "reserved" },
-    });
-  }
   return { ok: true, engagementId, alreadyClaimed: reserved === "mine" };
 }
 
-async function scanAlreadyAttached(db: Client, tenantId: string, engagementId: string, scanId: string): Promise<boolean> {
-  const rs = await db.execute({
-    sql: "SELECT 1 FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ? AND event = 'free_scan_attached' AND ref_id = ? LIMIT 1",
-    args: [tenantId, engagementId, scanId],
+/**
+ * Write `free_scan_attached` for this engagement and scan unless it is already there, in ONE
+ * statement (INSERT ... SELECT ... WHERE NOT EXISTS runs under SQLite's write lock), so two
+ * concurrent retries leave one event. Same columns as lib/ai-audit/store.ts eventStatement.
+ */
+async function attachScan(db: Client, input: { tenantId: string; engagementId: string; scanId: string; now: Date; meta: Record<string, unknown> }): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO ai_audit_events (id, tenant_id, engagement_id, event, from_stage, to_stage, actor_type, actor_id, ref_type, ref_id, meta, created_at)
+          SELECT ?, ?, ?, 'free_scan_attached', NULL, NULL, 'system', NULL, 'site_scan', ?, ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ? AND event = 'free_scan_attached' AND ref_id = ?)`,
+    args: [randomUUID(), input.tenantId, input.engagementId, input.scanId, JSON.stringify(input.meta), input.now.toISOString(), input.tenantId, input.engagementId, input.scanId],
   });
-  return rs.rows.length > 0;
 }

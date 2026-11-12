@@ -219,9 +219,10 @@ export async function setStatus(
 }
 
 /**
- * Reserve the scan for a lead before anything else is opened for it. The conditional UPDATE is
- * the lock: of two claims racing, one lead wins and the other sees `taken`. The same lead again
- * is `mine` (a retry), so a retried claim never opens a second engagement.
+ * Record the scan's first claim: the lead whose audit opened first (lib/site-scan/claim.ts calls
+ * this only after the engagement exists). The conditional UPDATE decides a race: one lead is
+ * `reserved`, any other sees `taken` (claims are not exclusive; that lead keeps its own
+ * engagement). The same lead again is `mine`, a retry.
  */
 export async function reserveClaim(
   db: Client,

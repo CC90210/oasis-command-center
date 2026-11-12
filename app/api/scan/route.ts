@@ -24,7 +24,8 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "cache-control": "no-store" };
 const json = (status: number, body: Record<string, unknown>) => NextResponse.json(body, { status, headers: NO_STORE });
 
-export const SCANS_PER_HOUR = 5;
+// Not exported: a route file may only export its handlers and route config (Next build type check).
+const SCANS_PER_HOUR = 5;
 
 export async function POST(req: Request): Promise<Response> {
   if (!sameOrigin(req)) return json(403, { ok: false, error: "forbidden" });

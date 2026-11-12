@@ -61,6 +61,13 @@ async function main() {
     assert.equal((await getScan(db, OASIS, row.id))!.leadRecordId, null, "nothing was reserved by a refused claim");
   });
 
+  await check("a failed claimant arriving first leaves the scan unclaimed, and is told the audit did not open", async () => {
+    assert.deepEqual(await claim(LEAD_LOST), { ok: false, error: "audit_not_opened" });
+    const scan = (await getScan(db, OASIS, row.id))!;
+    assert.equal(scan.leadRecordId, null, "no first claim recorded for an audit that never opened");
+    assert.equal(scan.outcome, "none");
+  });
+
   let engagementA = "";
   await check("the first claim opens an engagement, records the scan once, and marks the row", async () => {
     const a = await claim(LEAD_A);
@@ -74,11 +81,13 @@ async function main() {
     assert.equal(await attachments(engagementA), 1);
   });
 
-  await check("a retry lands on the same engagement and writes nothing twice", async () => {
+  await check("a retry, and two retries at once, land on the same engagement and write the attachment once", async () => {
     const again = await claim(LEAD_A);
     assert.ok(again.ok);
     assert.equal(again.engagementId, engagementA);
     assert.equal(again.alreadyClaimed, true);
+    const both = await Promise.all([claim(LEAD_A), claim(LEAD_A)]);
+    assert.ok(both.every((r) => r.ok && r.engagementId === engagementA));
     assert.equal(await attachments(engagementA), 1);
   });
 
@@ -90,10 +99,6 @@ async function main() {
     const scan = (await getScan(db, OASIS, row.id))!;
     assert.equal(scan.leadRecordId, LEAD_A);
     assert.equal(scan.engagementId, engagementA);
-  });
-
-  await check("a lead no audit can open for is told so, never shown a success", async () => {
-    assert.deepEqual(await claim(LEAD_LOST), { ok: false, error: "audit_not_opened" });
   });
 
   finish("site-scan-claim");
