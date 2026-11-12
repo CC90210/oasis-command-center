@@ -82,7 +82,8 @@ const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_f
 export const ESTATE_WIDE_CHECKS: DripCheck[] = [
   ...DEPLOY_CHECKS,
   ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),
-  ...SEO_CHECKS,
+  // CC's Search screen: OASIS's operator chat, never the retired default lane.
+  ...SEO_CHECKS.map((c): DripCheck => ({ ...c, lane: "operator" })),
 ];
 
 

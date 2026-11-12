@@ -20,6 +20,7 @@ import { useRouter } from "next/navigation";
 import type { EngagementView } from "@/lib/ai-audit/view";
 import { AI_ENGINES, AI_ENGINE_LABELS, type AiEngine } from "@/lib/ai-audit/authorize-payload";
 import { toolErrorLine } from "@/lib/tools/errors";
+import { setupHref } from "@/lib/setup-links";
 import { CREDENTIAL_MARKER, TRANSCRIPT_MAX_BYTES, type TranscriptLine } from "@/lib/ai-audit/transcript";
 import { PROFILE_EDIT_STAGES } from "@/lib/ai-audit/rules";
 import { describeError, postAction, postJson } from "./api";
@@ -400,7 +401,7 @@ export function DiscoveryPanel({ view, isOwner }: { view: EngagementView; isOwne
                 </select>
                 {readBy === "cloud_workspace" && !view.cloudAccountReady ? (
                   <div className="mt-1 text-[12px] text-status-warm">
-                    No cloud AI account is connected for this workspace. <Link href="/settings/connections" className="underline">Connect one in Settings</Link>, or fill the profile by hand.
+                    No cloud AI account is connected for this workspace. <Link href={setupHref("ai_account")} className="underline">Connect one in Settings</Link>, or fill the profile by hand.
                   </div>
                 ) : null}
               </div>

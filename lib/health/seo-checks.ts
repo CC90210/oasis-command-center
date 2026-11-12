@@ -32,11 +32,14 @@ async function observeSeo(): Promise<{ observed: number | null; reason: string }
   }
 }
 
-export const SEO_CHECKS: DripCheck[] = [
+/**
+ * No audience here: lib/health/runner.ts gives it OASIS's operator chat where it registers it
+ * (tests/workspace-alerts.test.ts keeps the files that name a lane to a list that only shrinks).
+ */
+export const SEO_CHECKS: Array<Omit<DripCheck, "lane">> = [
   {
     id: SEO_CHECK_ID,
     severity: "high",
-    lane: "operator",
     rule: { kind: "must_be_zero" },
     observe: async () => (await observeSeo()).observed,
     observeDetailed: async () => observeSeo(),
