@@ -47,7 +47,8 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
     : "Who buys from this site could not be read from its pages.";
 
   const low = [...score.pillars].sort((a, b) => a.score - b.score)[0];
-  const fixesIntro = `The score is ${score.total}/100. The weakest area is "${low.label}" at ${low.score}. Fixing the three items below is worth about ${score.fixes.reduce((a, f) => a + f.impact, 0)} points, and each maps to ${list(score.fixes.map((f) => automationWords(f.automation)), 3)}.`;
+  const builds = [...new Set(score.fixes.map((f) => automationWords(f.automation)))];
+  const fixesIntro = `The score is ${score.total}/100. The weakest area is "${low.label}" at ${low.score}. Fixing the ${score.fixes.length === 1 ? "item" : `${score.fixes.length} items`} below is worth about ${score.fixes.reduce((a, f) => a + f.impact, 0)} points${builds.length ? `, through ${list(builds, 3)}` : ""}.`;
 
   return {
     schema: NARRATIVE_SCHEMA,
