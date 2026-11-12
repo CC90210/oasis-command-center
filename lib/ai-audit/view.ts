@@ -35,6 +35,8 @@ import { getApprovalInTenant, parsePayload } from "@/lib/os/approvals/store";
 import { listTranscripts, type Transcript } from "@/lib/ai-audit/transcripts";
 import { listCallNotes, type CallNote } from "@/lib/ai-audit/call-notes";
 import { latestExtraction, type ExtractionStatus } from "@/lib/ai-audit/extraction";
+import { liveRunnerForTool } from "@/lib/tools/store";
+import { hasUsableKey, LOCAL_MODEL_PROVIDER, readWorkspaceAiAccount } from "@/lib/ai/workspace-account";
 import { roomsForEngagement, type AuditRoom } from "@/lib/ai-audit/meet-link";
 import { aiConsent } from "@/lib/ai-audit/authorize";
 import { essentialGaps } from "@/lib/ai-audit/framework";
@@ -222,6 +224,10 @@ export type EngagementView = {
   settings: AiAuditSettings;
   /** The independent, default-off switch for model-assisted reading, search and writing. */
   modelSearchEnabled: boolean;
+  /** A Mac runner that serves the model tool has claimed within the live window. False: the Mac engine is not on offer. */
+  macRunnerLive: boolean;
+  /** The workspace has a usable cloud AI account (Settings > AI brain), so the cloud engine can run. */
+  cloudAccountReady: boolean;
   catalogue: CatalogueItem[];
   /** Phase 2: the call, its transcripts and Gate 1. */
   transcripts: Transcript[];
@@ -361,6 +367,10 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     receipts,
     settings: settings.settings,
     modelSearchEnabled: aiAuditModelSearchEnabled(),
+    macRunnerLive: (await liveRunnerForTool(db, tenantId, "ai_audit_model", now).catch(() => null)) !== null,
+    cloudAccountReady: await readWorkspaceAiAccount(tenantId)
+      .then((account) => hasUsableKey(account) && account.provider !== LOCAL_MODEL_PROVIDER)
+      .catch(() => false),
     catalogue: catalogue.filter((i) => i.status === "confirmed"),
     transcripts,
     callNotes,

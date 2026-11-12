@@ -25,6 +25,7 @@ import { WORKER_REPORTER_OFFLINE_REASON } from "@/lib/automations/worker-status"
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
+import { SEO_CHECKS } from "./seo-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
 import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
 import { DASHBOARD_EMAIL_CHECKS } from "./dashboard-email-checks";
@@ -81,6 +82,8 @@ const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_f
 export const ESTATE_WIDE_CHECKS: DripCheck[] = [
   ...DEPLOY_CHECKS,
   ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),
+  // CC's Search screen: OASIS's operator chat, never the retired default lane.
+  ...SEO_CHECKS.map((c): DripCheck => ({ ...c, lane: "operator" })),
 ];
 
 

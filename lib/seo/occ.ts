@@ -4,7 +4,6 @@
  * file and nothing else under lib/seo or components/seo.
  */
 import "server-only";
-import { notFound } from "next/navigation";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveFounder } from "@/lib/founders/gate";
 import { FINANCE_OWNER_EMAILS, ownerKeyForUser } from "@/lib/founders-finances/access";
@@ -45,5 +44,8 @@ export async function seoOwnerEmail(): Promise<string | null> {
 
 /** Page gate: 404 for anyone but CC, so the screen's existence is not confirmed. */
 export async function requireSeoOwner(): Promise<void> {
-  if (!(await seoOwnerEmail())) notFound();
+  if (!(await seoOwnerEmail())) {
+    const { notFound } = await import("next/navigation");
+    notFound();
+  }
 }

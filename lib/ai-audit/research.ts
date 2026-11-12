@@ -58,8 +58,16 @@ export const RESEARCH_STEP = "research";
 export const SEARCH_TOOL_KEY = "ai_audit_search";
 /** The stage research runs in: after Gate 1, before final review. */
 export const RESEARCH_STAGES: readonly AiAuditStage[] = ["generating"];
-/** A web search no Mac has taken in this long is skipped, with a gap. */
-export const MAC_SEARCH_WAIT_MS = 6 * 3_600_000;
+/**
+ * A web search no Mac has taken in this long is skipped, with a gap. Fifteen minutes, not six
+ * hours (2026-11-12): the Mac's model/search handlers were retired, so a research run that waited
+ * on it stalled for six hours before continuing with the keyless modules. The site read, PageSpeed
+ * and the evidence rules do not need a model; the research must not wait a shift for one.
+ */
+export const MAC_SEARCH_WAIT_MS = 15 * 60_000;
+export const MAC_SEARCH_WAIT_WORDS = "fifteen minutes";
+/** A search a Mac did claim gets this long, from when it was queued, to answer (the old six-hour wait). */
+export const MAC_SEARCH_RUN_MAX_MS = 6 * 3_600_000;
 /** All the found pages together, read within this long. */
 export const FETCH_BUDGET_MS = 25_000;
 /** What one source keeps of its page: the sentence that states each claim, and the start. */
@@ -525,12 +533,18 @@ export async function advanceResearch(db: Client, input: { tenantId: string; ste
       state.search = { ...state.search!, results: [], note: `The web search on the Mac failed (${String(job.error_code ?? "error")}).` };
     } else if (!job) {
       state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "The web search was never handed to the Mac, so the research has no web search." };
-    } else if (input.now.getTime() - Date.parse(String(job.created_at)) > MAC_SEARCH_WAIT_MS) {
-      await db.execute({
+    } else if (String(job.status) === "queued" && input.now.getTime() - Date.parse(String(job.created_at)) > MAC_SEARCH_WAIT_MS) {
+      // The wait is for a Mac to pick the search up. The conditional UPDATE is the decision: a Mac
+      // that claimed it a moment ago wins, and the research keeps waiting for its answer.
+      const timedOut = await db.execute({
         sql: "UPDATE tool_jobs SET status = 'failed', error_code = 'runner_offline', finished_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'queued'",
         args: [input.now.toISOString(), input.now.toISOString(), t, state.search!.job_id],
       });
-      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "No Mac ran the web search within six hours, so the research has no web search." };
+      if (timedOut.rowsAffected !== 1) return "waiting";
+      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: `No Mac ran the web search within ${MAC_SEARCH_WAIT_WORDS}, so the research has no web search.` };
+    } else if (String(job.status) !== "queued" && input.now.getTime() - Date.parse(String(job.created_at)) > MAC_SEARCH_RUN_MAX_MS) {
+      // Claimed but never answered: the lease reaper owns the job; the research stops waiting on it.
+      state.search = { ...(state.search ?? { job_id: null, queued_at: null }), results: [], note: "The Mac took the web search but did not finish it, so the research has no web search." };
     } else {
       return "waiting";
     }
@@ -916,9 +930,9 @@ export async function dueResearch(db: Client, tenantId: string, now = new Date()
     sql: `SELECT s.id FROM ai_audit_steps s
             LEFT JOIN tool_jobs j ON j.tenant_id = s.tenant_id AND j.id = CASE WHEN json_valid(s.result_ref) THEN json_extract(s.result_ref, '$.search.job_id') END
            WHERE s.tenant_id = ? AND s.step_key = ? AND s.status = 'waiting_runner' AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= ?)
-             AND (j.id IS NULL OR j.status NOT IN ('queued', 'claimed', 'running') OR j.created_at < ?)
+             AND (j.id IS NULL OR j.status NOT IN ('queued', 'claimed', 'running') OR (j.status = 'queued' AND j.created_at < ?) OR j.created_at < ?)
            ORDER BY s.updated_at LIMIT 3`,
-    args: [t, RESEARCH_STEP, at, new Date(now.getTime() - MAC_SEARCH_WAIT_MS).toISOString()],
+    args: [t, RESEARCH_STEP, at, new Date(now.getTime() - MAC_SEARCH_WAIT_MS).toISOString(), new Date(now.getTime() - MAC_SEARCH_RUN_MAX_MS).toISOString()],
   });
   return { start, advance: [...active.rows, ...waiting.rows].map((r) => String(r.id)) };
 }

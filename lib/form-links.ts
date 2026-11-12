@@ -35,7 +35,7 @@
  * without making a fresh link a daily ritual).
  */
 
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 
 // Renamed 2026-05-15 from BRAVO_FORM_LINK_HMAC_KEY at CC's correction —
 // forms aren't a Bravo-agent feature, they're a tenant-product feature
@@ -216,4 +216,25 @@ export function verifyFormLink(token: string | undefined | null): VerifyFormLink
   }
 
   return { ok: true, payload };
+}
+
+/**
+ * A keyed MAC of `value` under this deployment's form-link key, scoped by `purpose` so it can
+ * never stand in for a form-link signature. Null in production without the key (the caller
+ * fails closed); a plain digest in local dev without one, as signFormLink is unsigned there.
+ */
+export function formLinkMac(purpose: string, value: string): string | null {
+  const key = getKey();
+  const message = `${purpose}\u0000${value}`;
+  if (!key) return shouldEnforce() ? null : createHash("sha256").update(message, "utf8").digest("base64url");
+  return createHmac("sha256", key).update(message, "utf8").digest("base64url");
+}
+
+/** Timing-safe check of a formLinkMac value. False when the key is missing in production. */
+export function formLinkMacMatches(purpose: string, value: string, provided: string): boolean {
+  const expected = formLinkMac(purpose, value);
+  if (!expected || typeof provided !== "string") return false;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(provided, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
 }

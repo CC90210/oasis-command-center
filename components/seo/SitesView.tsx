@@ -44,7 +44,7 @@ function Row({ s, base }: { s: SiteListRow; base: string }) {
  * MainShell's canvas owns the page width (PageFrame ruling, Adon 2026-10-07).
  */
 export function SitesView({ loaded, base = "/seo" }: { loaded: Loaded<SitesList>; base?: string }) {
-  if (loaded.state !== "ok") return <UnavailableBanner />;
+  if (loaded.state !== "ok") return <UnavailableBanner reason={loaded.state === "unavailable" ? loaded.reason : "404_not_found"} />;
   if (loaded.data.sites.length === 0) {
     return <p className="text-sm text-fg-muted">No sites yet. Add the first one.</p>;
   }

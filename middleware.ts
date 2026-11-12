@@ -33,6 +33,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/install.sh",           // Same as /install.ps1.
   "/oasis-loop",           // public static OASIS Loop HTML deliverables under /public/oasis-loop
   "/unsubscribe",          // CASL-compliant email unsubscribe landing — reached from email footers (DEFAULT_UNSUBSCRIBE_BASE in BEA/scripts/casl_compliance.py). Recipients may not have an account; the confirmation page reads ?email=&brand=&token= from the URL and POSTs to /api/unsubscribe (also public, service-role insert into email_suppressions). MUST be public or every unsub link 401s before the form renders, which is itself a CASL violation.
+  "/api/scan",             // the free AI scan's API (app/api/scan/*): a visitor has no session. Same-origin, rate-limited and honeypot-guarded inside each route; nothing reads a lead without the forms route's signed token.
   "/api/unsubscribe",      // companion API for /unsubscribe — POST records the suppression via service-role Supabase client. Token-validated INSIDE the route when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; otherwise email-only opt-out is accepted (matches the URL format casl_compliance.py emits today).
   "/privacy",              // public legal route — linked from signup consent, public form pages, and email footers. MUST be public or the consent link 401s for the exact audience that has no account yet.
   "/terms",                // public legal route — same reason; the arbitration + DMCA policy has to be readable BEFORE acceptance to be binding.

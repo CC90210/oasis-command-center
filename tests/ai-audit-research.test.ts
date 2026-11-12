@@ -668,7 +668,7 @@ async function main() {
     assert.equal(await research.advanceResearch(db, { tenantId: OASIS, stepId: id, now: later, deps }), "finished");
     const pack = (await research.latestResearch(db, OASIS, eid))!.content;
     const gaps = pack.gaps.map((g) => g.why).join(" | ");
-    assert.match(gaps, /No Mac ran the web search within six hours/);
+    assert.match(gaps, /No Mac ran the web search within fifteen minutes/);
     assert.match(gaps, /No website is known for the business/);
     // Self-test of 2026-10-27: no website is itself the likely problem, so the audit can offer one.
     const noSite = pack.findings.find((f) => f.id === "h-no-own-site");

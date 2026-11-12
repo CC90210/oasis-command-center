@@ -57,6 +57,7 @@ export const MARKETING_HOME_PATH = "/home";
 export const MARKETING_PATHS = [
   MARKETING_HOME_PATH,
   "/audit",
+  "/scan", // the free AI scan: paste a domain, watch the report build (app/(marketing)/scan)
   "/fleet", // the agent fleet. NOT "/agents" — that's the auth-gated dashboard.
   "/work",
   "/command-center",

@@ -7,7 +7,8 @@
   "vars": {
     "DEPLOY_ENV": "production",
     "DEPLOY_PLATFORM": "cloudflare",
-    "DEPLOY_SURFACE": "oasis"
+    "DEPLOY_SURFACE": "oasis",
+    "AI_AUDIT_MODEL_SEARCH_ENABLED": "on"
   },
   "assets": {
     "binding": "ASSETS",

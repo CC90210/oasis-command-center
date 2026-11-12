@@ -53,6 +53,7 @@ import type { Client, InStatement } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
+import { enrichJobInput, enrichReportStatement, parseEnrichReport } from "@/lib/site-scan/enrich-job";
 import {
   DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
@@ -271,6 +272,18 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
     const hold = { max_hold_seconds: runnerRules(job.toolKey).maxHoldSeconds };
     if (job.toolKey === "meet_delete_local") {
       return answer({ room_id: job.input.room_id, title: job.input.title, local_folder: job.input.local_folder ?? null }, hold);
+    }
+    if (job.toolKey === "site_scan_enrich") {
+      // The scan's facts and text are read now, from the row; the job holds the scan id only.
+      const built = await enrichJobInput(deps.db, job);
+      if (built.ok) return answer(built.input as unknown as Record<string, unknown>, hold);
+      const at = deps.now.toISOString();
+      await deps.db.execute({
+        sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'scan_gone', error_message = ?, finished_at = ?, updated_at = ?
+              WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ident.tenantIds.length)})`,
+        args: ["The scan this job was for is no longer waiting on it.", at, at, job.id, ident.runnerKey, leaseId, ...ident.tenantIds],
+      });
+      return toolsJson(200, { ok: true, job: null, poll_after_seconds: 0 });
     }
     if (job.toolKey === "ai_audit_pdf") {
       // The render address is signed now, for fifteen minutes, so the job row
@@ -665,6 +678,7 @@ async function completeSystemJob(
   if (toolKey === "ai_audit_pdf") return completeAuditPdf(ref, b, deps);
   if (toolKey === "ai_audit_model") return completeAuditModel(ref, b, deps);
   if (toolKey === "ai_audit_search") return completeAuditSearch(ref, b, deps);
+  if (toolKey === "site_scan_enrich") return completeSiteScanEnrich(ref, b, deps);
   const transcript = toolKey === "meet_transcribe" ? parseTranscriptReport(b) : null;
   const deleted = toolKey === "meet_delete_local" ? parseDeleteLocalReport(b) : null;
   if (transcript && !transcript.ok) return invalid(transcript.field);
@@ -736,6 +750,47 @@ async function completeAuditPdf(ref: LeaseRef, b: Record<string, unknown>, deps:
   });
   if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "ai_audit_pdf");
   return toolsJson(200, { ok: true, duplicate: false, stored: stored.ok });
+}
+
+/**
+ * The VPS's enrichment of a free scan (lib/site-scan/enrich-job.ts): every field checked and
+ * capped, stored on the scan only if it is still waiting, the job's "done" guarded on this lease.
+ */
+async function completeSiteScanEnrich(ref: LeaseRef, b: Record<string, unknown>, deps: RunnerDeps): Promise<Response> {
+  const report = parseEnrichReport(b);
+  if (!report.ok) return invalid(report.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return systemRepeatOrLost(deps.db, ref, "site_scan_enrich");
+  if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
+  // The scan write and the job's completion commit together, each under this runner's lease: a
+  // runner that paused past its lease cannot overwrite the report of the runner that took over.
+  const lease = { jobId: ref.jobId, runnerKey: ref.runnerKey, leaseId: ref.leaseId };
+  const scanWrite = enrichReportStatement({ tenantId: job.tenantId, jobInput: job.input, report: report.value, now: deps.now }, lease);
+  const at = deps.now.toISOString();
+  const complete = (applied: boolean) => ({
+    sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
+          WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
+    args: [JSON.stringify({ applied, segments: report.value.enrich.segments.length, prospects: report.value.enrich.prospects.length }), at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
+  });
+  let applied = false;
+  let completed: number;
+  if (scanWrite) {
+    // `applied` is only known after the scan write, so it is recorded by a second guarded update in the same transaction.
+    const tx = await deps.db.transaction("write");
+    try {
+      applied = (await tx.execute(scanWrite)).rowsAffected === 1;
+      completed = (await tx.execute(complete(applied))).rowsAffected;
+      if (completed === 1) await tx.commit();
+      else await tx.rollback();
+    } finally {
+      tx.close();
+    }
+  } else {
+    completed = (await deps.db.execute(complete(false))).rowsAffected;
+  }
+  if (completed !== 1) return systemRepeatOrLost(deps.db, ref, "site_scan_enrich");
+  return toolsJson(200, { ok: true, duplicate: false, applied });
 }
 
 /** The Mac's answer to one extraction window: checked, kept on the job as facts only, and the run finished when it was the last. */

@@ -34,6 +34,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -74,6 +75,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -107,6 +109,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -140,6 +143,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -173,6 +177,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -206,6 +211,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -239,6 +245,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -272,6 +279,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -305,6 +313,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -338,6 +347,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -371,6 +381,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -404,6 +415,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
@@ -437,6 +449,7 @@ Disallow: /
 Allow: /$
 Allow: /home
 Allow: /audit
+Allow: /scan
 Allow: /command-center
 Allow: /pricing
 Allow: /onboarding
