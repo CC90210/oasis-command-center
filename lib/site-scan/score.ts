@@ -97,8 +97,12 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
       { earned: tri("html_size"), points: 20, fix: { key: "html_size", title: "Heavy home page", why: "A large page is slow on mobile data.", automation: "site_rebuild" } },
       { earned: tri("response_time"), points: 20, fix: { key: "response_time_check", title: "Server response time", why: "Hosting adds delay before anything loads.", automation: "site_rebuild" } },
     ],
-    perf !== null ? "Fast enough on a phone." : "The server answers quickly. Google's phone test was not available for this scan, so only the server side is measured.",
+    perf !== null ? "Fast enough on a phone." : "The server answers quickly.",
   );
+  // Whatever the detail says (full marks or "Missing: ..."), the reader must know when no phone test ran.
+  if (perf === null && speed.pillar.score !== null) {
+    speed.pillar.detail += " Google's phone test was not available for this scan, so only the server side is measured.";
+  }
 
   const trust = pillar(
     "trust",
