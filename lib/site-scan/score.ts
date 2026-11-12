@@ -66,7 +66,9 @@ function pillar(
 
 export function scoreFacts(facts: ScanFacts): ScanScore {
   const c = checkMap(facts);
-  const s = facts.signals;
+  // Signals from a page with no readable text (a site that draws itself in the browser: a 586 KB
+  // shell, zero words) are not evidence that a call link, a form or a city is missing.
+  const s = facts.signals && facts.signals.word_count > 0 ? facts.signals : null;
   const ps = facts.pagespeed && "scores" in facts.pagespeed ? facts.pagespeed : null;
   const perf = ps?.scores.performance ?? null;
   const seo = ps?.scores.seo ?? null;
@@ -95,7 +97,7 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
       { earned: tri("html_size"), points: 20, fix: { key: "html_size", title: "Heavy home page", why: "A large page is slow on mobile data.", automation: "site_rebuild" } },
       { earned: tri("response_time"), points: 20, fix: { key: "response_time_check", title: "Server response time", why: "Hosting adds delay before anything loads.", automation: "site_rebuild" } },
     ],
-    "Fast enough on a phone.",
+    perf !== null ? "Fast enough on a phone." : "The server answers quickly. Google's phone test was not available for this scan, so only the server side is measured.",
   );
 
   const trust = pillar(
@@ -138,11 +140,13 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
 
   const groups = [conversion, speed, trust, findability, reach];
   const pillars = groups.map((g) => g.pillar);
-  // The total is over the pillars that could be scored, re-weighted to 100. An unread site, or one
-  // where under half the weight could be scored, has no total: "0" would claim everything is broken.
+  // The total is over the pillars that could be scored, re-weighted to 100. An unread site, a site
+  // whose pages carried no readable text, or one where under half the weight could be scored, has
+  // no total: "0" would claim everything is broken, and "92" from speed and HTTPS alone would
+  // claim a visitor can act on a page nobody could read.
   const scored = pillars.filter((p): p is ScorePillar & { score: number } => p.score !== null);
   const scoredWeight = scored.reduce((a, p) => a + p.weight, 0);
-  const total = facts.site.unread || scoredWeight < MIN_SCORED_WEIGHT ? null : clamp(scored.reduce((acc, p) => acc + p.score * p.weight, 0) / scoredWeight);
+  const total = facts.site.unread || !s || scoredWeight < MIN_SCORED_WEIGHT ? null : clamp(scored.reduce((acc, p) => acc + p.score * p.weight, 0) / scoredWeight);
   // With no total, a "+N points" has nothing to add to, so no fix is priced (or listed).
   const fixes = (total === null ? [] : groups.flatMap((g) => g.candidates))
     .map((f) => ({ ...f, impact: Math.round((f.impact * 100) / scoredWeight) }))

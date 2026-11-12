@@ -79,6 +79,13 @@ function scoring() {
   const known = scoreFacts(facts({ signals: null }, [check("title", "no"), check("meta_description", "yes")]));
   assert.ok(known.fixes.some((f) => f.key === "seo_basics") || known.pillars.find((p) => p.key === "findability")!.detail.includes("Page title"));
 
+  // A page with no readable text (a browser-drawn shell: mrrooter.ca read 586 KB and zero words,
+  // 2026-11-12) is not evidence that a call link or a city is missing, and gets no total.
+  const shell = scoreFacts(facts({ signals: { ...signals, word_count: 0, cta_phrases: [], phones: [], localities: [] } }, [check("https", "yes"), check("analytics", "yes"), check("sitemap", "yes"), check("html_size", "yes"), check("response_time", "yes"), check("mobile_viewport", "yes"), check("meta_description", "yes")]));
+  assert.equal(shell.total, null, "no total from speed and HTTPS alone");
+  assert.equal(shell.pillars.find((p) => p.key === "conversion")!.score, null, "nothing a visitor does could be read");
+  assert.ok(!shell.fixes.some((f) => f.key === "cta" || f.key === "chat" || f.key === "locality"), "no fix is sold on a page nobody could read");
+
   // A fully read site keeps the old arithmetic: every pillar scored, total over 100 weight.
   const read = scoreFacts(facts({}, [check("https", "yes"), check("click_to_call", "yes"), check("contact_form", "yes"), check("online_booking", "yes"), check("live_chat", "yes"), check("title", "yes"), check("meta_description", "yes"), check("sitemap", "yes"), check("mobile_viewport", "yes"), check("html_size", "yes"), check("response_time", "yes"), check("structured_data", "yes"), check("social_links", "yes"), check("analytics", "yes"), check("email_link", "yes")]));
   assert.ok(read.pillars.every((p) => p.score !== null));
