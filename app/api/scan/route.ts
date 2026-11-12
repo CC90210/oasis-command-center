@@ -1,0 +1,65 @@
+/**
+ * POST /api/scan — start (or reuse) a free scan of a public website.
+ *
+ * Public: a visitor has no session. Guards, in order: same origin, 5 scans per hour per address,
+ * a honeypot a script fills, a body under 4 KB, and the audit's own address rules (public names
+ * only; a social profile is told so). The response is immediate; Tier 0 runs after it returns and
+ * the page watches GET /api/scan/:id.
+ */
+import { NextResponse, after } from "next/server";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { clientIpFromHeaders, sha256 } from "@/lib/api-helpers";
+import { HONEYPOT_BODY_KEY, isHoneypotFilled } from "@/lib/forms/honeypot";
+import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
+import { rateLimit } from "@/lib/rate-limit";
+import { siteTarget } from "@/lib/ai-audit/site-url";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { runTier0 } from "@/lib/site-scan/run";
+import { findReusableScan, insertScan, siteScanTablesInstalled } from "@/lib/site-scan/store";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const NO_STORE = { "cache-control": "no-store" };
+const json = (status: number, body: Record<string, unknown>) => NextResponse.json(body, { status, headers: NO_STORE });
+
+export const SCANS_PER_HOUR = 5;
+
+export async function POST(req: Request): Promise<Response> {
+  if (!sameOrigin(req)) return json(403, { ok: false, error: "forbidden" });
+  const ip = clientIpFromHeaders(req.headers);
+  const limit = rateLimit({ key: `site-scan:create:${ip === "unknown" ? "no-ip" : ip}`, capacity: SCANS_PER_HOUR, refillPerSec: SCANS_PER_HOUR / 3600 });
+  if (!limit.allowed) return json(429, { ok: false, error: "rate_limited", retry_in_sec: limit.resetIn });
+  const body = await readCappedJson(req, 4_096);
+  if (!body) return json(400, { ok: false, error: "bad_body" });
+  if (isHoneypotFilled(body[HONEYPOT_BODY_KEY])) {
+    console.warn("[site-scan.create] honeypot filled; request dropped");
+    return json(200, { ok: true, trapped: true });
+  }
+  const raw = typeof body.website === "string" ? body.website.trim().slice(0, 500) : "";
+  if (!raw) return json(422, { ok: false, error: "website_required" });
+  const target = siteTarget(raw);
+  if (target.kind === "social") return json(422, { ok: false, error: "social_profile", platform: target.platform });
+  if (target.kind !== "site") return json(422, { ok: false, error: "not_a_website", reason: target.reason });
+  if (!tursoConfigured()) return json(503, { ok: false, error: "not_installed" });
+
+  const db = getTursoClient();
+  if (!(await siteScanTablesInstalled(db))) return json(503, { ok: false, error: "not_installed" });
+  const now = new Date();
+  const domain = target.host.toLowerCase().replace(/^www\./, "");
+  const existing = await findReusableScan(db, AI_AUDIT_TENANT_ID, domain, now);
+  if (existing) return json(200, { ok: true, scan_id: existing.id, reused: true });
+
+  const ipHash = ip === "unknown" ? null : sha256(`site-scan:${ip}`).slice(0, 32);
+  const row = await insertScan(db, { tenantId: AI_AUDIT_TENANT_ID, domain, url: target.start, ipHash, now });
+  if (row.status === "reading" && row.createdAt === now.toISOString()) {
+    after(async () => {
+      try {
+        await runTier0(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id });
+      } catch (err) {
+        console.error("[site-scan.create] tier 0 crashed", { scanId: row.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+      }
+    });
+  }
+  return json(201, { ok: true, scan_id: row.id, reused: false });
+}

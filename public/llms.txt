@@ -14,6 +14,7 @@ OASIS is a consultancy and product studio, not a self-serve SaaS signup. Engagem
 
 - [Home](https://oasisai.work/): what OASIS is and who it is for.
 - [Free business AI audit](https://oasisai.work/audit): the three-step intake for identifying the highest-return agent opportunity.
+- [Free AI scan](https://oasisai.work/scan): paste a website; the report builds live (site health, what you sell, buyer segments, sample prospects, a first email, the OASIS score and three fixes).
 - [The fleet](https://oasisai.work/fleet): the agent roles OASIS deploys and what each one owns.
 - [Work](https://oasisai.work/work): engagements and what was built.
 - [AI Command Center](https://oasisai.work/command-center): the operating layer for agents, approvals, workflows and measurement.

@@ -360,7 +360,7 @@ export function toolByKey(k: unknown): ToolDef | null {
  * in flight (a meeting is never refused because downloads are busy, and the
  * reverse).
  */
-export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local" | "ai_audit_pdf" | "ai_audit_model" | "ai_audit_search";
+export type SystemRunnerToolKey = "meet_transcribe" | "meet_delete_local" | "ai_audit_pdf" | "ai_audit_model" | "ai_audit_search" | "site_scan_enrich";
 export type RunnerToolKey = ToolKey | SystemRunnerToolKey;
 
 export type RunnerRules = {
@@ -384,6 +384,10 @@ export const SYSTEM_RUNNER_TOOLS: Readonly<Record<SystemRunnerToolKey, RunnerRul
   // Web search on the Mac for a Free AI Audit's research (lib/ai-audit/research.ts): public facts
   // only, the prompt built at claim time; the job keeps only the checked list of pages it found.
   ai_audit_search: { stages: ["thinking"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
+  // The free scan's enrichment on the VPS (lib/site-scan/enrich-job.ts): local embeddings over the
+  // site's text, our own business dataset for competitors and prospects, a template narrative.
+  // Keyless; the job row holds the scan id only and the input is built at claim time.
+  site_scan_enrich: { stages: ["thinking", "matching", "finishing"], maxHoldSeconds: MAX_LEASE_HOLD_SECONDS },
 };
 
 export const SYSTEM_RUNNER_TOOL_KEYS = Object.keys(SYSTEM_RUNNER_TOOLS) as SystemRunnerToolKey[];
