@@ -8,8 +8,6 @@
     "DEPLOY_ENV": "production",
     "DEPLOY_PLATFORM": "cloudflare",
     "DEPLOY_SURFACE": "oasis",
-    // The Free AI Audit's model/search switch (lib/ai-audit/env.ts). A plain var, not a secret: it
-    // is a setting, and a secrets push from a store that lacks it would otherwise drop it.
     "AI_AUDIT_MODEL_SEARCH_ENABLED": "on"
   },
   "assets": {
