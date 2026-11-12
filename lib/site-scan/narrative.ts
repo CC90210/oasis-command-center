@@ -35,7 +35,8 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
   const name = s?.business_name ?? facts.domain;
   const where = s?.localities.length ? ` in ${list(s.localities, 2)}` : "";
   const services = s?.services.length ? ` The site names ${list(s.services, 4)}.` : "";
-  const tagline = s?.tagline ? ` Its own words: "${s.tagline}".` : "";
+  // A tagline that ends its own sentence keeps its stop inside the quote: never "years.".
+  const tagline = s?.tagline ? ` Its own words: "${s.tagline}"${/[.!?]$/.test(s.tagline) ? "" : "."}` : "";
   const whatYouSell =
     facts.site.unread
       ? `${facts.domain} could not be read (${facts.site.unread.replace(/_/g, " ")}), so this report covers what could be measured from outside.`

@@ -7,6 +7,7 @@ import { HoneypotField } from "@/components/forms/HoneypotField";
 import { trapValue } from "@/lib/forms/honeypot";
 import type { ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import type { ScanView } from "@/lib/site-scan/types";
+import { claimHeading } from "@/lib/site-scan/score";
 import { ScanReport } from "@/components/scan/ScanReport";
 import { StageRail } from "@/components/scan/StageRail";
 import { ClaimForm } from "@/components/scan/ClaimForm";
@@ -203,7 +204,7 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
             ) : claimKey ? (
               <>
                 <p className="font-data text-[10px] uppercase tracking-[0.24em] text-signal">Keep this report</p>
-                <h2 className="mt-3 font-display text-2xl font-semibold text-fg">Get the three fixes priced by a founder.</h2>
+                <h2 className="mt-3 font-display text-2xl font-semibold text-fg">{claimHeading(scan.score?.fixes.length ?? 0)}</h2>
                 <p className="mt-2 text-[15px] leading-relaxed text-fg-muted">
                   Send this report to the OASIS team and it becomes a live audit in our Command Center. A founder reads it, prices the fixes, and emails you; book a call if you want one. No obligation.
                 </p>

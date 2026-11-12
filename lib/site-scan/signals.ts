@@ -5,7 +5,7 @@
  *
  * Reuses the audit's HTML helpers (lib/ai-audit/site-checks.ts) rather than a second parser.
  */
-import { asciiLower, innerOf, tagsOf, visibleText, type PageSnapshot } from "@/lib/ai-audit/site-checks";
+import { asciiLower, decodeEntities, innerOf, tagsOf, visibleText, type PageSnapshot } from "@/lib/ai-audit/site-checks";
 import type { SiteSignals } from "@/lib/site-scan/types";
 
 export const TEXT_EXCERPT_MAX = 6_000;
@@ -90,6 +90,10 @@ const CTA_RE =
 const PHONE_RE = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const YEAR_RE = /(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-\u2013]\s*)?((?:19|20)\d{2})/i;
+// A nav label that is only a heading ("Services", "Our products") names no service. Squarespace
+// prefixes a dropdown's hidden label with "Folder:", which the link text picks up.
+const NAV_FOLDER = /^folder:\s*/i;
+const HEADING_LABEL = /^(?:our |all |view (?:all |our )?|see (?:all |our )?)?(?:services?|solutions?|treatments?|products?|programs?|classes?|lessons?|packages?|plans?|menu)$/i;
 const SERVICE_WORDS = /\b(services?|solutions?|treatments?|repairs?|installation|cleaning|design|consulting|therapy|plans?|packages?|menu|products?|programs?|classes?|lessons?)\b/i;
 const PRICING_RE = /\b(pricing|prices?|rates?|\$\s?\d{2,}|starting at|per (?:hour|month|session|visit)|packages?)\b/i;
 const CA_REGIONS = "ontario|quebec|québec|british columbia|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland|prince edward island|yukon|nunavut";
@@ -111,16 +115,6 @@ function clean(s: string | null | undefined, max = 200): string | null {
   if (!s) return null;
   const t = s.replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f]/g, "").trim();
   return t ? t.slice(0, max) : null;
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
 }
 
 function uniq(list: string[], max = MAX_LIST): string[] {
@@ -315,8 +309,8 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
       if (host === siteHost || host.endsWith(`.${siteHost}`)) {
         internal += 1;
         if (/\/(blog|news|articles?|insights|journal|resources)(\/|$)/i.test(url.pathname)) blogFound = true;
-        const label = a.text;
-        if (label && label.length <= 40 && SERVICE_WORDS.test(label + " " + url.pathname)) services.push(label);
+        const label = a.text.replace(NAV_FOLDER, "");
+        if (label && label.length <= 40 && !HEADING_LABEL.test(label) && SERVICE_WORDS.test(label + " " + url.pathname)) services.push(label);
       } else {
         external += 1;
         const path = `${host}${url.pathname}`;
@@ -332,7 +326,10 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
 
   const separator = /\s[|\-\u2013\u2014:·\u2022]\s/;
   const nameFromTitle = title ? title.split(separator).map((s) => s.trim()).filter(Boolean) : [];
-  const businessName = clean(ogSiteName ?? schemaNames[0] ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
+  // og:site_name is often the whole page title ("Harper's Garden Centre | Hamilton, Ontario"): the
+  // name is what comes before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
+  const ogName = ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null;
+  const businessName = clean(ogName ?? schemaNames[0] ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
   const tagline = clean(h1[0] ?? metaDescription ?? (nameFromTitle.length > 1 ? nameFromTitle.slice(1).join(" ") : null), 200);
   const words = allText.split(/\s+/).filter(Boolean);
 
