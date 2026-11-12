@@ -86,6 +86,12 @@ export type SiteReport = {
   notes: string[];
   /** Why nothing on the site was read or checked (and there are no checks), or null when its home page was. */
   unread: "no_answer" | "not_allowed" | "home_page_failed" | "not_the_site" | null;
+  /**
+   * The pages the checks measured: the home page and the linked pages that were the business's
+   * own. `pages` also holds the ones turned away (a bot check, a placeholder, a non-2xx), so a
+   * reader of page content takes these. Empty when the site was not read.
+   */
+  checked?: PageSnapshot[];
 };
 
 type Read = { ok: true; page: PageSnapshot } | { ok: false; error: string; finalUrl: string | null; status: number | null };
@@ -280,7 +286,7 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
     );
   };
   // The start actually used, so the brief never cites an address that was not asked for.
-  const done = (checks: SiteCheck[], unread: SiteReport["unread"]): SiteReport => ({ start, pages, checks, notes, unread });
+  const done = (checks: SiteCheck[], unread: SiteReport["unread"], checked: PageSnapshot[] = []): SiteReport => ({ start, pages, checks, notes, unread, checked });
 
   // robots.txt, once for each scheme and host, before anything else there is read.
   const robotsByOrigin = new Map<string, Promise<Robots>>();
@@ -428,5 +434,5 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
     });
   }
   const snapshots = [home.page, ...extra];
-  return done(runSiteChecks({ pages: snapshots, https: { served, httpRedirects, secureFailure }, sitemap, unread }), null);
+  return done(runSiteChecks({ pages: snapshots, https: { served, httpRedirects, secureFailure }, sitemap, unread }), null, snapshots);
 }

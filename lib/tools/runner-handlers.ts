@@ -53,7 +53,7 @@ import type { Client, InStatement } from "@libsql/client";
 import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
-import { applyEnrichReport, enrichJobInput, parseEnrichReport } from "@/lib/site-scan/enrich-job";
+import { enrichJobInput, enrichReportStatement, parseEnrichReport } from "@/lib/site-scan/enrich-job";
 import {
   DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
@@ -763,14 +763,33 @@ async function completeSiteScanEnrich(ref: LeaseRef, b: Record<string, unknown>,
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return systemRepeatOrLost(deps.db, ref, "site_scan_enrich");
   if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
-  const applied = await applyEnrichReport(deps.db, { tenantId: job.tenantId, jobInput: job.input, report: report.value, now: deps.now });
+  // The scan write and the job's completion commit together, each under this runner's lease: a
+  // runner that paused past its lease cannot overwrite the report of the runner that took over.
+  const lease = { jobId: ref.jobId, runnerKey: ref.runnerKey, leaseId: ref.leaseId };
+  const scanWrite = enrichReportStatement({ tenantId: job.tenantId, jobInput: job.input, report: report.value, now: deps.now }, lease);
   const at = deps.now.toISOString();
-  const rs = await deps.db.execute({
+  const complete = (applied: boolean) => ({
     sql: `UPDATE tool_jobs SET status = 'done', stage = NULL, result_json = ?, error_code = NULL, error_message = NULL, finished_at = ?, updated_at = ?
           WHERE ${LEASE_GUARD} AND tenant_id IN (${sqlPlaceholders(ref.tenantIds.length)})`,
     args: [JSON.stringify({ applied, segments: report.value.enrich.segments.length, prospects: report.value.enrich.prospects.length }), at, at, ref.jobId, ref.runnerKey, ref.leaseId, ...ref.tenantIds],
   });
-  if (rs.rowsAffected !== 1) return systemRepeatOrLost(deps.db, ref, "site_scan_enrich");
+  let applied = false;
+  let completed: number;
+  if (scanWrite) {
+    // `applied` is only known after the scan write, so it is recorded by a second guarded update in the same transaction.
+    const tx = await deps.db.transaction("write");
+    try {
+      applied = (await tx.execute(scanWrite)).rowsAffected === 1;
+      completed = (await tx.execute(complete(applied))).rowsAffected;
+      if (completed === 1) await tx.commit();
+      else await tx.rollback();
+    } finally {
+      tx.close();
+    }
+  } else {
+    completed = (await deps.db.execute(complete(false))).rowsAffected;
+  }
+  if (completed !== 1) return systemRepeatOrLost(deps.db, ref, "site_scan_enrich");
   return toolsJson(200, { ok: true, duplicate: false, applied });
 }
 

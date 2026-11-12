@@ -17,8 +17,8 @@ export const metadata: Metadata = {
 const STEPS = [
   ["Reads the site", "Every public page a visitor would, plus the parts Google reads: speed, structure, trust signals."],
   ["Learns what you sell", "What the site says, in its own words, and the businesses competing for the same searches."],
-  ["Finds who buys it", "Buyer segments scored for fit, with real sample businesses from our own Canadian directory."],
-  ["Writes the first move", "An email to one of them, built from your site's own offer. Then the three fixes worth the most."],
+  ["Finds who buys it", "Buyer segments scored for fit, with sample businesses from our own Canadian directory when it has a close match. If that part is still running, your report link fills in when it finishes."],
+  ["Writes the first move", "When a sample business is found, an email to it, built from your site's own offer. Always, the three fixes worth the most."],
 ] as const;
 
 export default async function ScanPage() {
@@ -35,7 +35,7 @@ export default async function ScanPage() {
                 Paste your website. Watch the diagnosis build.
               </h1>
               <p className="mx-auto mt-6 max-w-2xl text-[18px] leading-relaxed text-fg-muted">
-                An AI reads your site like a buyer and like Google, scores it, works out who buys from you, finds businesses like them, and writes the first email. Live, in about a minute.
+                An AI reads your site like a buyer and like Google, scores it, and works out who buys from you. Where our directory has a match, it finds businesses like them and writes the first email. Live, in about a minute.
               </p>
             </div>
           </Reveal>

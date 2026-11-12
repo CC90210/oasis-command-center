@@ -58,6 +58,7 @@ import type { SiteReadDeps } from "@/lib/ai-audit/site-fetch";
 import { autoAttachMeetTranscripts } from "@/lib/ai-audit/meet-link";
 import { advanceResearch, defaultPageSpeedDeps, dueResearch, noteResearchFailure, purgeUnauthorizedResearch, researchTablesInstalled, RESEARCH_PHASE_MS, startResearch, type ResearchDeps } from "@/lib/ai-audit/research";
 import { purgeVoidedResearch } from "@/lib/ai-audit/research-purge";
+import { purgeExpiredScans, siteScanTablesInstalled } from "@/lib/site-scan/store";
 import { draftAuditFromResearch, draftProposalFromAudit } from "@/lib/ai-audit/drafting";
 import { advanceCloudWriting, callOffStaleWriting, defaultWriteModel, dueWriting, startWriting, type WriteDeps } from "@/lib/ai-audit/writing";
 import { fileFollowUp, withdrawStaleFollowUps } from "@/lib/ai-audit/follow-up";
@@ -407,6 +408,10 @@ export async function runAiAuditTick(
       await purgeVoidedResearch(db, tenantId);
       await purgeUnauthorizedResearch(db, tenantId);
       research = await dueResearch(db, tenantId, now());
+    });
+    // The free scans past their declared 30 days (expires_at): unclaimed ones deleted, claimed ones keep no visitor address hash.
+    await guard("site_scan_purge", undefined, async () => {
+      if (await siteScanTablesInstalled(db)) await purgeExpiredScans(db, tenantId, now());
     });
     const researchDeps: ResearchDeps = deps.research ?? { site: deps.site ?? defaultSiteDeps(), pagespeed: defaultPageSpeedDeps(), alert: deps.payment.alert };
     for (const id of research.start) {

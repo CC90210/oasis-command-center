@@ -34,8 +34,13 @@ export function defaultTier0Deps(): Tier0Deps {
   return { site: defaultSiteDeps(), pagespeed: defaultPageSpeedDeps(), now: () => new Date() };
 }
 
-/** The pages the reader loaded, as the checks and the signals read them. */
+/**
+ * The pages the checks measured. The reader's own list when it has one: a page it turned away (a
+ * bot check, a placeholder, a non-2xx) must not lend the scan its name, phone or services. The
+ * rebuild from request records is only for a report without that list.
+ */
 export function snapshotsOf(report: SiteReport): PageSnapshot[] {
+  if (report.checked) return report.checked;
   const out: PageSnapshot[] = [];
   for (const p of report.pages) {
     if (p.kind !== "site_page" || p.status === null || p.html === null) continue;
@@ -126,6 +131,17 @@ export async function runTier0(db: Client, input: { tenantId: string; scanId: st
     await setStatus(db, { tenantId: input.tenantId, id: row.id, status: "done", stage: "done", errorCode: "enrich_no_runner", now: deps.now(), onlyFrom: ["enriching"] });
   }
   return { ok: true };
+}
+
+/**
+ * Close a scan whose Tier 0 threw. A row still reading is failed (a retry resets it, see
+ * insertScan); one already saved for enrichment keeps the Worker's report and is marked finished.
+ */
+export async function closeCrashedTier0(db: Client, input: { tenantId: string; scanId: string; now: Date }): Promise<void> {
+  const failed = await setStatus(db, { tenantId: input.tenantId, id: input.scanId, status: "failed", stage: "read", errorCode: "tier0_crashed", now: input.now, onlyFrom: ["queued", "reading"] });
+  if (!failed) {
+    await setStatus(db, { tenantId: input.tenantId, id: input.scanId, status: "done", stage: "done", errorCode: "enrich_not_queued", now: input.now, onlyFrom: ["enriching"] });
+  }
 }
 
 /** Has a runner that serves site_scan_enrich claimed within the live window? Read failures count as "no". */

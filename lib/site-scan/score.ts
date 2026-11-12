@@ -32,6 +32,11 @@ function clamp(n: number): number {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+/** Under this share of a pillar's points readable, the pillar is not scored: a guess is not a measurement. */
+export const MIN_READABLE_POINTS = 25;
+/** Under this share of the total's weight scored, the site gets no total. */
+export const MIN_SCORED_WEIGHT = 50;
+
 /** A pillar is a sum of points; each missing item is a candidate fix with its own points. */
 function pillar(
   key: ScorePillar["key"],
@@ -40,21 +45,21 @@ function pillar(
 ): { pillar: ScorePillar; candidates: Candidate[] } {
   let score = 0;
   let unknownPoints = 0;
-  const candidates: Candidate[] = [];
-  const missing: string[] = [];
+  const missing: Array<{ points: number; fix: Omit<ScanFix, "impact"> }> = [];
   for (const it of items) {
     if (it.earned === true) score += it.points;
     else if (it.earned === null) unknownPoints += it.points;
-    else if (it.fix) {
-      missing.push(it.fix.title);
-      candidates.push({ ...it.fix, pillar: key, points: it.points, impact: Math.round((it.points * WEIGHTS[key]) / 100) });
-    }
+    else if (it.fix) missing.push({ points: it.points, fix: it.fix });
   }
-  // Unknowns neither earn nor lose: the pillar is scored over what could be read.
+  // Unknowns neither earn nor lose: the pillar is scored over what could be read, and a fix is
+  // worth what it moves on that same scale (points / readable of the pillar, times its weight).
   const readable = 100 - unknownPoints;
-  const normalised = readable > 0 ? (score / readable) * 100 : 0;
-  const detail = missing.length ? `Missing: ${missing.join("; ")}.` : unknownPoints >= 50 ? "Mostly unreadable from here." : detailWhenFull;
-  return { pillar: { key, label: LABELS[key], score: clamp(normalised), weight: WEIGHTS[key], detail }, candidates };
+  if (readable < MIN_READABLE_POINTS) {
+    return { pillar: { key, label: LABELS[key], score: null, weight: WEIGHTS[key], detail: "Not enough of this could be read from outside to score it." }, candidates: [] };
+  }
+  const candidates: Candidate[] = missing.map((m) => ({ ...m.fix, pillar: key, points: m.points, impact: Math.round((m.points * WEIGHTS[key]) / readable) }));
+  const detail = missing.length ? `Missing: ${missing.map((m) => m.fix.title).join("; ")}.` : unknownPoints >= 50 ? "Mostly unreadable from here." : detailWhenFull;
+  return { pillar: { key, label: LABELS[key], score: clamp((score / readable) * 100), weight: WEIGHTS[key], detail }, candidates };
 }
 
 export function scoreFacts(facts: ScanFacts): ScanScore {
@@ -73,7 +78,8 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
       { earned: tri("contact_form"), points: 20, fix: { key: "contact_form", title: "A contact form that answers back", why: "Without a form, after-hours visitors have no way to leave a request.", automation: "lead_form_autoreply" } },
       { earned: tri("online_booking"), points: 30, fix: { key: "online_booking", title: "Online booking", why: "Visitors who can book without calling book more often, and at night.", automation: "booking_and_reminders" } },
       { earned: s ? s.cta_phrases.length > 0 : null, points: 15, fix: { key: "cta", title: "A clear call to action", why: "No page tells the visitor what to do next.", automation: "conversion_page" } },
-      { earned: tri("live_chat") === true || (s ? s.chat_tools.length > 0 : false), points: 10, fix: { key: "chat", title: "Chat or text-back", why: "A question that waits for business hours is usually asked elsewhere.", automation: "missed_call_textback" } },
+      // Read pages with no chat tool are evidence of none; with no pages read, only the check can say.
+      { earned: tri("live_chat") === true || (s ? s.chat_tools.length > 0 : false) ? true : s ? false : tri("live_chat"), points: 10, fix: { key: "chat", title: "Chat or text-back", why: "A question that waits for business hours is usually asked elsewhere.", automation: "missed_call_textback" } },
     ],
     "Every way to act is in place.",
   );
@@ -108,7 +114,7 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
     [
       seo !== null
         ? { earned: seo >= 80, points: 40, fix: { key: "seo_basics", title: `Search basics (PageSpeed SEO ${seo}/100)`, why: "Titles, descriptions and crawlability are what Google reads first.", automation: "local_seo_setup" } }
-        : { earned: tri("title") === true && tri("meta_description") === true, points: 40, fix: { key: "seo_basics", title: "Page title and search description", why: "The two lines Google shows are missing or empty.", automation: "local_seo_setup" } },
+        : { earned: tri("title") === false || tri("meta_description") === false ? false : tri("title") === true && tri("meta_description") === true ? true : null, points: 40, fix: { key: "seo_basics", title: "Page title and search description", why: "The two lines Google shows are missing or empty.", automation: "local_seo_setup" } },
       { earned: tri("sitemap"), points: 20, fix: { key: "sitemap", title: "Sitemap", why: "A sitemap tells Google which pages exist.", automation: "local_seo_setup" } },
       { earned: s ? s.h1.length > 0 : null, points: 15, fix: { key: "h1", title: "A headline Google can read", why: "No H1 heading names what the page is about.", automation: "local_seo_setup" } },
       { earned: s && s.images_total > 0 ? s.images_missing_alt / s.images_total <= 0.3 : s ? true : null, points: 15, fix: { key: "alt_text", title: "Image descriptions", why: "Most images have no alt text, so search and screen readers see nothing.", automation: "local_seo_setup" } },
@@ -130,7 +136,11 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
 
   const groups = [conversion, speed, trust, findability, reach];
   const pillars = groups.map((g) => g.pillar);
-  const total = clamp(pillars.reduce((acc, p) => acc + (p.score * p.weight) / 100, 0));
+  // The total is over the pillars that could be scored, re-weighted to 100. An unread site, or one
+  // where under half the weight could be scored, has no total: "0" would claim everything is broken.
+  const scored = pillars.filter((p): p is ScorePillar & { score: number } => p.score !== null);
+  const scoredWeight = scored.reduce((a, p) => a + p.weight, 0);
+  const total = facts.site.unread || scoredWeight < MIN_SCORED_WEIGHT ? null : clamp(scored.reduce((acc, p) => acc + p.score * p.weight, 0) / scoredWeight);
   const fixes = groups
     .flatMap((g) => g.candidates)
     .sort((a, b) => b.impact - a.impact || a.title.localeCompare(b.title))

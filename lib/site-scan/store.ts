@@ -5,7 +5,7 @@
  * repeat inside SCAN_REUSE_DAYS hands back the latest finished row instead of reading the site
  * again (the cache that keeps the free scan free).
  */
-import type { Client, InValue } from "@libsql/client";
+import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
 import {
@@ -21,6 +21,17 @@ import {
 } from "@/lib/site-scan/types";
 
 export const SCAN_REUSE_DAYS = 7;
+/** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
+export const STALE_READ_MS = 3 * 60_000;
+
+/**
+ * What one scan is "of": the host, plus the business's folder on a shared site builder
+ * (acme.wixsite.com/acme), so two businesses on one builder host never share a scan.
+ */
+export function scanKeyOf(target: { host: string; pathPrefix: string }): string {
+  const host = target.host.toLowerCase().replace(/^www\./, "");
+  return target.pathPrefix && target.pathPrefix !== "/" ? `${host}${target.pathPrefix.toLowerCase()}` : host;
+}
 
 const COLUMNS =
   "id, tenant_id, domain, url, status, stage, facts_json, score_json, enrich_json, narrative_json, error_code, outcome, " +
@@ -85,21 +96,33 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
   return r ? rowFromRecord(r as unknown as Record<string, unknown>) : null;
 }
 
-/** The latest usable scan of a domain within SCAN_REUSE_DAYS: finished, or still being worked on. */
+/**
+ * The latest usable scan of a domain within SCAN_REUSE_DAYS: finished, or still being worked on.
+ * A failed row, and a read nobody has touched for STALE_READ_MS (its Worker died), are not reused.
+ */
 export async function findReusableScan(db: Client, tenantId: string, domain: string, now: Date): Promise<ScanRow | null> {
   const since = new Date(now.getTime() - SCAN_REUSE_DAYS * 86_400_000).toISOString();
+  const staleBefore = new Date(now.getTime() - STALE_READ_MS).toISOString();
   const rs = await db.execute({
-    sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND created_at >= ? AND status <> 'failed' ORDER BY created_at DESC LIMIT 1`,
-    args: [tenantId, domain, since],
+    sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND created_at >= ? AND status <> 'failed'
+            AND NOT (status IN ('queued', 'reading') AND updated_at < ?)
+          ORDER BY created_at DESC LIMIT 1`,
+    args: [tenantId, domain, since, staleBefore],
   });
   const r = rs.rows[0];
   return r ? rowFromRecord(r as unknown as Record<string, unknown>) : null;
 }
 
+/**
+ * A new scan row, ready for Tier 0. `started` says the caller owns this read and must run it:
+ * true for a fresh row, and for today's row of the domain when it had failed or its read was
+ * orphaned (it is reset in place, under the one-per-day index, rather than handed back broken).
+ * False when another visitor's read of the same domain today is the one in progress.
+ */
 export async function insertScan(
   db: Client,
   input: { tenantId: string; domain: string; url: string; ipHash: string | null; now: Date },
-): Promise<ScanRow> {
+): Promise<{ row: ScanRow; started: boolean }> {
   const id = randomUUID();
   const at = input.now.toISOString();
   const day = at.slice(0, 10);
@@ -111,17 +134,25 @@ export async function insertScan(
       args: [id, input.tenantId, input.domain, input.url, input.ipHash, day, at, at, expires],
     });
   } catch (err) {
-    // Two visitors, one domain, one day: the row that won is the scan.
-    if (err instanceof Error && /UNIQUE|constraint/i.test(err.message)) {
-      const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
-      const r = rs.rows[0];
-      if (r) return rowFromRecord(r as unknown as Record<string, unknown>);
-    }
-    throw err;
+    if (!(err instanceof Error && /UNIQUE|constraint/i.test(err.message))) throw err;
+    // Two visitors, one domain, one day. A failed or orphaned row is reset for this attempt (the
+    // conditional UPDATE lets exactly one retry win); a live one is the scan.
+    const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
+    const reset = await db.execute({
+      sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL, updated_at = ?
+            WHERE tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`,
+      args: [input.url, at, input.tenantId, input.domain, day, staleBefore],
+    });
+    const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
+    const r = rs.rows[0];
+    if (!r) throw err;
+    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: reset.rowsAffected === 1 };
   }
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
-  return row;
+  return { row, started: true };
 }
 
 export async function saveTier0(
@@ -137,10 +168,23 @@ export async function saveTier0(
   return rs.rowsAffected === 1;
 }
 
-export async function saveEnrich(
-  db: Client,
-  input: { tenantId: string; id: string; enrich: ScanEnrich; narrative: ScanNarrative | null; embedding: number[] | null; now: Date },
-): Promise<boolean> {
+export type EnrichWrite = { tenantId: string; id: string; enrich: ScanEnrich; narrative: ScanNarrative | null; embedding: number[] | null; now: Date };
+
+/**
+ * The runner's enrichment as one statement, written only while the runner's lease still holds the
+ * job (the same test as lib/tools/store.ts LEASE_GUARD, inside the statement). The caller runs it
+ * in one transaction with the guarded job completion: a runner that paused past its lease and
+ * resumes after another runner finished cannot overwrite the public report.
+ */
+export function enrichStatement(input: EnrichWrite, lease: { jobId: string; runnerKey: string; leaseId: string }): InStatement {
+  const base = saveEnrichSql(input);
+  return {
+    sql: `${base.sql} AND EXISTS (SELECT 1 FROM tool_jobs WHERE id = ? AND claimed_by = ? AND lease_id = ? AND status IN ('claimed', 'running'))`,
+    args: [...base.args, lease.jobId, lease.runnerKey, lease.leaseId],
+  };
+}
+
+function saveEnrichSql(input: EnrichWrite): { sql: string; args: InValue[] } {
   const at = input.now.toISOString();
   const sets: string[] = ["enrich_json = ?", "status = 'done'", "stage = 'done'", "enriched_at = ?", "updated_at = ?"];
   const args: InValue[] = [JSON.stringify(input.enrich), at, at];
@@ -153,7 +197,12 @@ export async function saveEnrich(
     args.push(JSON.stringify(input.embedding));
   }
   args.push(input.tenantId, input.id);
-  const rs = await db.execute({ sql: `UPDATE site_scans SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND status IN ('enriching', 'done')`, args });
+  return { sql: `UPDATE site_scans SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ? AND status IN ('enriching', 'done')`, args };
+}
+
+/** The enrichment without a lease (tests, operator repair). The runner path uses enrichStatement. */
+export async function saveEnrich(db: Client, input: EnrichWrite): Promise<boolean> {
+  const rs = await db.execute(saveEnrichSql(input));
   return rs.rowsAffected === 1;
 }
 
@@ -169,16 +218,54 @@ export async function setStatus(
   return rs.rowsAffected === 1;
 }
 
-export async function attachLead(
+/**
+ * Reserve the scan for a lead before anything else is opened for it. The conditional UPDATE is
+ * the lock: of two claims racing, one lead wins and the other sees `taken`. The same lead again
+ * is `mine` (a retry), so a retried claim never opens a second engagement.
+ */
+export async function reserveClaim(
   db: Client,
-  input: { tenantId: string; id: string; leadRecordId: string; engagementId: string | null; now: Date },
+  input: { tenantId: string; id: string; leadRecordId: string; now: Date },
+): Promise<"reserved" | "mine" | "taken"> {
+  const rs = await db.execute({
+    sql: `UPDATE site_scans SET lead_record_id = ?, outcome = CASE WHEN outcome = 'none' THEN 'claimed' ELSE outcome END, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND lead_record_id IS NULL`,
+    args: [input.leadRecordId, input.now.toISOString(), input.tenantId, input.id],
+  });
+  if (rs.rowsAffected === 1) return "reserved";
+  const row = await getScan(db, input.tenantId, input.id);
+  return row?.leadRecordId === input.leadRecordId ? "mine" : "taken";
+}
+
+/** Record the engagement a reserved claim opened. Only the claim's own lead, and only once. */
+export async function setClaimEngagement(
+  db: Client,
+  input: { tenantId: string; id: string; leadRecordId: string; engagementId: string; now: Date },
 ): Promise<boolean> {
   const rs = await db.execute({
-    sql: `UPDATE site_scans SET lead_record_id = ?, engagement_id = COALESCE(?, engagement_id), outcome = CASE WHEN outcome = 'none' THEN 'claimed' ELSE outcome END, updated_at = ?
-          WHERE tenant_id = ? AND id = ?`,
-    args: [input.leadRecordId, input.engagementId, input.now.toISOString(), input.tenantId, input.id],
+    sql: `UPDATE site_scans SET engagement_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND lead_record_id = ? AND engagement_id IS NULL`,
+    args: [input.engagementId, input.now.toISOString(), input.tenantId, input.id, input.leadRecordId],
   });
   return rs.rowsAffected === 1;
+}
+
+/**
+ * Retention: delete the scans past expires_at (30 days) that nobody claimed. Their facts, visitor
+ * address hash and outcome go with them; that drops their `none` outcomes from learn.py's weekly
+ * re-rank, which is the cost of keeping a stranger's scan no longer than declared. A claimed scan
+ * is the first step of a lead's audit and is kept with it, but its visitor address hash is cleared.
+ */
+export async function purgeExpiredScans(db: Client, tenantId: string, now: Date, limit = 500): Promise<{ deleted: number; scrubbed: number }> {
+  const at = now.toISOString();
+  const del = await db.execute({
+    sql: `DELETE FROM site_scans WHERE tenant_id = ? AND id IN (SELECT id FROM site_scans WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NULL LIMIT ?)`,
+    args: [tenantId, tenantId, at, limit],
+  });
+  const scrub = await db.execute({
+    sql: `UPDATE site_scans SET ip_hash = NULL WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NOT NULL AND ip_hash IS NOT NULL`,
+    args: [tenantId, at],
+  });
+  return { deleted: del.rowsAffected, scrubbed: scrub.rowsAffected };
 }
 
 /** The latest scan of a domain for an operator view (the SEO site page, the audit workspace). */

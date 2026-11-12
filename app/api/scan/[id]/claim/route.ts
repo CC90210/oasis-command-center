@@ -1,6 +1,7 @@
 /**
  * POST /api/scan/:id/claim — link the visitor's lead (its minted form token) to the scan and open
  * the AI audit engagement it continues as. The lead itself was created by POST /api/forms/submit.
+ * Body: { token, claim_key } — the claim key came back from the POST /api/scan that started it.
  */
 import { NextResponse } from "next/server";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
@@ -28,10 +29,12 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const body = await readCappedJson(req, 8_192);
   const token = body && typeof body.token === "string" ? body.token.trim() : "";
   if (!token || token.length > 2_048) return json(422, { ok: false, error: "token_required" });
+  const claimKey = body && typeof body.claim_key === "string" ? body.claim_key.trim() : "";
+  if (!claimKey || claimKey.length > 256) return json(403, { ok: false, error: "bad_claim_key" });
   if (!tursoConfigured()) return json(503, { ok: false, error: "not_installed" });
-  const result = await claimScan(getTursoClient(), { tenantId: AI_AUDIT_TENANT_ID, scanId: id, token, now: new Date() });
+  const result = await claimScan(getTursoClient(), { tenantId: AI_AUDIT_TENANT_ID, scanId: id, token, claimKey, now: new Date() });
   if (!result.ok) {
-    const status = result.error === "scan_not_found" ? 404 : result.error === "lead_not_found" ? 404 : 403;
+    const status = result.error === "scan_not_found" || result.error === "lead_not_found" ? 404 : result.error === "claimed_by_another" ? 409 : 403;
     return json(status, { ok: false, error: result.error });
   }
   return json(200, { ok: true, engagement_id: result.engagementId, already_claimed: result.alreadyClaimed });

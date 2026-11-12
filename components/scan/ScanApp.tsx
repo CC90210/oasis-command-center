@@ -18,6 +18,24 @@ import { ClaimForm } from "@/components/scan/ClaimForm";
  */
 
 const POLL_MS = 2_000;
+const CLAIM_KEY_STORE = "oasis-scan-claim:";
+
+/** The claim key POST /api/scan gave this browser, kept for the tab so a reload can still save the report. */
+function storedClaimKey(scanId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(CLAIM_KEY_STORE + scanId);
+  } catch {
+    return null;
+  }
+}
+
+function storeClaimKey(scanId: string, key: string): void {
+  try {
+    window.sessionStorage.setItem(CLAIM_KEY_STORE + scanId, key);
+  } catch {
+    // Private mode or storage off: the key still lives in memory for this page.
+  }
+}
 
 type Props = {
   initialScanId: string | null;
@@ -42,6 +60,8 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
+  // Read once on the client; the claim section draws only after the first poll, so server and client markup agree.
+  const [claimKey, setClaimKey] = useState<string | null>(() => (typeof window !== "undefined" && initialScanId ? storedClaimKey(initialScanId) : null));
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
   const inFlight = useRef(false);
@@ -90,7 +110,7 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ website, honeypot: trapped }),
       });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; scan_id?: string; trapped?: boolean; error?: string; platform?: string } | null;
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; scan_id?: string; claim_key?: string | null; trapped?: boolean; error?: string; platform?: string } | null;
       if (data?.trapped) {
         setError("Thanks. We will take it from here.");
         return;
@@ -102,6 +122,8 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
       }
       setScan(null);
       setClaimed(false);
+      setClaimKey(data.claim_key ?? null);
+      if (data.claim_key) storeClaimKey(data.scan_id, data.claim_key);
       setScanId(data.scan_id);
       if (typeof window !== "undefined") window.history.replaceState(null, "", `/scan/${data.scan_id}`);
       inFlight.current = false;
@@ -118,6 +140,7 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
     setScan(null);
     setError(null);
     setClaimed(false);
+    setClaimKey(null);
     if (typeof window !== "undefined") window.history.replaceState(null, "", "/scan");
   }
 
@@ -177,16 +200,25 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
           <section id="claim" className="mt-12 scroll-mt-24 border border-ops-edge bg-ops-panel/90 p-6 sm:p-8">
             {claimed ? (
               <ClaimedPanel bookingUrl={bookingUrl} />
-            ) : (
+            ) : claimKey ? (
               <>
                 <p className="font-data text-[10px] uppercase tracking-[0.24em] text-signal">Keep this report</p>
-                <h2 className="mt-3 font-display text-2xl font-semibold text-fg">Email me the full report and the three fixes, priced.</h2>
+                <h2 className="mt-3 font-display text-2xl font-semibold text-fg">Get the three fixes priced by a founder.</h2>
                 <p className="mt-2 text-[15px] leading-relaxed text-fg-muted">
-                  The report becomes a live audit in our Command Center. A founder reviews it, prices the fixes, and books the call if you want one. No obligation.
+                  Send this report to the OASIS team and it becomes a live audit in our Command Center. A founder reads it, prices the fixes, and emails you; book a call if you want one. No obligation.
                 </p>
                 <div className="mt-6">
-                  <ClaimForm scanId={scan.id} businessName={scan.facts.signals?.business_name ?? scan.domain} website={scan.url} consentIdentity={consentIdentity} onClaimed={() => setClaimed(true)} />
+                  <ClaimForm scanId={scan.id} claimKey={claimKey} businessName={scan.facts.signals?.business_name ?? scan.domain} website={scan.url} consentIdentity={consentIdentity} onClaimed={() => setClaimed(true)} />
                 </div>
+              </>
+            ) : (
+              <>
+                <p className="font-data text-[10px] uppercase tracking-[0.24em] text-signal">Your own business?</p>
+                <h2 className="mt-3 font-display text-2xl font-semibold text-fg">Run the free scan on your site.</h2>
+                <p className="mt-2 text-[15px] leading-relaxed text-fg-muted">This is a shared report. A report can be sent to the OASIS team from the browser that ran it.</p>
+                <button type="button" onClick={reset} className={`${CTA_PRIMARY} mt-6`}>
+                  Scan my business <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </button>
               </>
             )}
           </section>

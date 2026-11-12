@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { applyEnrichReport, enrichJobInput, parseEnrichReport } from "../lib/site-scan/enrich-job";
 import { queueEnrichment } from "../lib/site-scan/run";
-import { attachLead, findReusableScan, getScan, insertScan, latestScanForDomain, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
+import { findReusableScan, getScan, insertScan, latestScanForDomain, reserveClaim, setClaimEngagement, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
 import { ENRICH_SCHEMA, NARRATIVE_SCHEMA, SCORE_SCHEMA, FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "../lib/site-scan/types";
 import { stageStates, toView } from "../lib/site-scan/view";
 
@@ -31,14 +31,14 @@ async function main() {
     assert.equal(await siteScanTablesInstalled(db), true);
 
     const t0 = new Date("2026-11-12T10:00:00.000Z");
-    const row = await insertScan(db, { tenantId: TENANT, domain: "acme.example", url: "https://acme.example/", ipHash: "abc", now: t0 });
+    const { row } = await insertScan(db, { tenantId: TENANT, domain: "acme.example", url: "https://acme.example/", ipHash: "abc", now: t0 });
     assert.equal(row.status, "reading");
     assert.equal(row.stage, "read");
     assert.equal((await scanCounts(db, TENANT)).scans, 1);
 
     // The same domain the same day is the same row; another workspace never sees it.
     const again = await insertScan(db, { tenantId: TENANT, domain: "acme.example", url: "https://acme.example/", ipHash: null, now: new Date("2026-11-12T11:00:00.000Z") });
-    assert.equal(again.id, row.id, "one scan per domain per day");
+    assert.equal(again.row.id, row.id, "one scan per domain per day");
     assert.equal(await getScan(db, "other-tenant", row.id), null);
 
     // The view while reading: the first stage runs, nothing is done.
@@ -113,7 +113,7 @@ async function main() {
     assert.equal(await applyEnrichReport(db, { tenantId: TENANT, jobInput: { scan_id: row.id }, report: report.value, now: t2 }), true, "a repeated report is idempotent on a done row");
 
     // An enrichment that never arrives is closed by the view after the wait; the Worker's report stands.
-    const second = await insertScan(db, { tenantId: TENANT, domain: "slow.example", url: "https://slow.example/", ipHash: null, now: t0 });
+    const { row: second } = await insertScan(db, { tenantId: TENANT, domain: "slow.example", url: "https://slow.example/", ipHash: null, now: t0 });
     await saveTier0(db, { tenantId: TENANT, id: second.id, facts: { ...facts, domain: "slow.example" }, score, narrative, status: "enriching", stage: "profile", now: t1 });
     const late = toView((await getScan(db, TENANT, second.id))!, new Date("2026-11-12T10:30:00.000Z"));
     assert.equal(late.status, "done");
@@ -126,7 +126,8 @@ async function main() {
     assert.match(failed.error ?? "", /could not be read/);
 
     // Claiming links the lead and flips the outcome once.
-    assert.equal(await attachLead(db, { tenantId: TENANT, id: row.id, leadRecordId: "lead-1", engagementId: "eng-1", now: t2 }), true);
+    assert.equal(await reserveClaim(db, { tenantId: TENANT, id: row.id, leadRecordId: "lead-1", now: t2 }), "reserved");
+    assert.equal(await setClaimEngagement(db, { tenantId: TENANT, id: row.id, leadRecordId: "lead-1", engagementId: "eng-1", now: t2 }), true);
     const claimed = (await getScan(db, TENANT, row.id))!;
     assert.equal(claimed.outcome, "claimed");
     assert.equal(claimed.engagementId, "eng-1");

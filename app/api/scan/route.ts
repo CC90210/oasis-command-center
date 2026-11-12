@@ -14,8 +14,9 @@ import { readCappedJson, sameOrigin } from "@/lib/offer-pages/public-http";
 import { rateLimit } from "@/lib/rate-limit";
 import { siteTarget } from "@/lib/ai-audit/site-url";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { runTier0 } from "@/lib/site-scan/run";
-import { findReusableScan, insertScan, siteScanTablesInstalled } from "@/lib/site-scan/store";
+import { claimKeyFor } from "@/lib/site-scan/claim";
+import { closeCrashedTier0, runTier0 } from "@/lib/site-scan/run";
+import { findReusableScan, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,20 +47,26 @@ export async function POST(req: Request): Promise<Response> {
   const db = getTursoClient();
   if (!(await siteScanTablesInstalled(db))) return json(503, { ok: false, error: "not_installed" });
   const now = new Date();
-  const domain = target.host.toLowerCase().replace(/^www\./, "");
+  const domain = scanKeyOf(target);
+  // The claim key goes only to a browser that asked for this scan (lib/site-scan/claim.ts). A
+  // visitor re-scanning the same domain gets it too: they could have started the scan themselves.
   const existing = await findReusableScan(db, AI_AUDIT_TENANT_ID, domain, now);
-  if (existing) return json(200, { ok: true, scan_id: existing.id, reused: true });
+  if (existing) return json(200, { ok: true, scan_id: existing.id, reused: true, claim_key: claimKeyFor(existing.id) });
 
   const ipHash = ip === "unknown" ? null : sha256(`site-scan:${ip}`).slice(0, 32);
-  const row = await insertScan(db, { tenantId: AI_AUDIT_TENANT_ID, domain, url: target.start, ipHash, now });
-  if (row.status === "reading" && row.createdAt === now.toISOString()) {
+  const { row, started } = await insertScan(db, { tenantId: AI_AUDIT_TENANT_ID, domain, url: target.start, ipHash, now });
+  if (started) {
     after(async () => {
       try {
         await runTier0(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id });
       } catch (err) {
         console.error("[site-scan.create] tier 0 crashed", { scanId: row.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+        // Never leave the row looking busy: a later visitor would be handed it instead of a new read.
+        await closeCrashedTier0(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id, now: new Date() }).catch((closeErr: unknown) => {
+          console.error("[site-scan.create] crashed scan not closed", { scanId: row.id, error: closeErr instanceof Error ? closeErr.message : String(closeErr) });
+        });
       }
     });
   }
-  return json(201, { ok: true, scan_id: row.id, reused: false });
+  return json(started ? 201 : 200, { ok: true, scan_id: row.id, reused: !started, claim_key: claimKeyFor(row.id) });
 }

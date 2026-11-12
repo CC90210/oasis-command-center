@@ -98,8 +98,8 @@ export type ScanFacts = {
 export type ScorePillar = {
   key: "conversion" | "speed" | "trust" | "findability" | "reach";
   label: string;
-  /** 0-100 within the pillar. */
-  score: number;
+  /** 0-100 within the pillar; null when too little of it could be read to say (never a 0 for "unknown"). */
+  score: number | null;
   /** Share of the total, in hundredths (the five sum to 100). */
   weight: number;
   detail: string;
@@ -117,7 +117,8 @@ export type ScanFix = {
 
 export type ScanScore = {
   schema: typeof SCORE_SCHEMA;
-  total: number;
+  /** 0-100 over the pillars that could be scored; null when the evidence is too thin to score the site at all. */
+  total: number | null;
   pillars: ScorePillar[];
   fixes: ScanFix[];
 };

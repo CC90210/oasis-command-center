@@ -6,8 +6,8 @@
  * carries page text. The answer is validated field by field with hard caps: it is data from a
  * machine we run, but a runner can be wrong, and nothing it says reaches a visitor unchecked.
  */
-import type { Client } from "@libsql/client";
-import { getScan, saveEnrich } from "@/lib/site-scan/store";
+import type { Client, InStatement } from "@libsql/client";
+import { enrichStatement, getScan, saveEnrich } from "@/lib/site-scan/store";
 import { ENRICH_SCHEMA, NARRATIVE_SCHEMA, type ScanEnrich, type ScanNarrative } from "@/lib/site-scan/types";
 
 export const ENRICH_INPUT_TEXT_MAX = 6_000;
@@ -40,7 +40,9 @@ export async function enrichJobInput(
     ok: true,
     input: {
       scan_id: scan.id,
-      domain: scan.domain,
+      // The host only: a shared-builder scan's key carries the business's folder (scanKeyOf), and
+      // the runner looks this name up in DNS and in the directory.
+      domain: scan.domain.split("/")[0],
       url: scan.url,
       leadgen_tenant_id: job.tenantId,
       facts: { ...rest, signals: signals ? { ...signals, text_excerpt: undefined } : null },
@@ -171,6 +173,16 @@ export function parseEnrichReport(b: Record<string, unknown>): { ok: true; value
 }
 
 /** Store a checked report on the scan it was for. False when the scan moved on (failed, deleted). */
+/** The report's scan write, guarded by the runner's lease (store.enrichStatement); null when the job names no scan. */
+export function enrichReportStatement(
+  input: { tenantId: string; jobInput: Record<string, unknown>; report: EnrichReport; now: Date },
+  lease: { jobId: string; runnerKey: string; leaseId: string },
+): InStatement | null {
+  const scanId = typeof input.jobInput.scan_id === "string" ? input.jobInput.scan_id : "";
+  if (!scanId) return null;
+  return enrichStatement({ tenantId: input.tenantId, id: scanId, enrich: input.report.enrich, narrative: input.report.narrative, embedding: input.report.embedding, now: input.now }, lease);
+}
+
 export async function applyEnrichReport(
   db: Client,
   input: { tenantId: string; jobInput: Record<string, unknown>; report: EnrichReport; now: Date },

@@ -61,6 +61,7 @@ const ERROR_WORDS: Record<string, string> = {
   not_a_website: "That address is not a public website.",
   read_failed: "The site could not be read from here. Check the address and try again.",
   read_timeout: "Reading the site took too long. Try again in a minute.",
+  tier0_crashed: "The scan stopped partway. Scan the site again and it starts fresh.",
 };
 
 export function toView(row: ScanRow, now: Date): ScanView {

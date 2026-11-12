@@ -222,19 +222,21 @@ export function ScanReport({ scan }: { scan: ScanView }) {
       ) : null}
 
       {scan.score ? (
-        <Panel eyebrow="OASIS score" title={`${scan.score.total} out of 100`}>
+        <Panel eyebrow="OASIS score" title={scan.score.total === null ? "Not enough to score" : `${scan.score.total} out of 100`}>
           <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
-            <Ring value={scan.score.total} />
+            {scan.score.total !== null ? <Ring value={scan.score.total} /> : null}
             <div className="min-w-0 flex-1">
               <ul className="space-y-2">
                 {scan.score.pillars.map((p) => (
                   <li key={p.key}>
                     <div className="flex items-baseline justify-between gap-3">
                       <span className="text-[14px] text-fg">{p.label}</span>
-                      <span className="font-data text-[12px] text-fg-dim">{p.score} · {p.weight}% of total</span>
+                      <span className="font-data text-[12px] text-fg-dim">{p.score ?? "n/a"} · {p.weight}% of total</span>
                     </div>
                     <div className="mt-1 h-1 bg-ops-line">
-                      <div className={`h-1 ${p.score >= 70 ? "bg-status-engaged" : p.score >= 45 ? "bg-[#E3C567]" : "bg-status-warm"}`} style={{ width: `${p.score}%` }} />
+                      {p.score !== null ? (
+                        <div className={`h-1 ${p.score >= 70 ? "bg-status-engaged" : p.score >= 45 ? "bg-[#E3C567]" : "bg-status-warm"}`} style={{ width: `${p.score}%` }} />
+                      ) : null}
                     </div>
                     <p className="mt-1 text-[12px] text-fg-dim">{p.detail}</p>
                   </li>
@@ -243,7 +245,7 @@ export function ScanReport({ scan }: { scan: ScanView }) {
             </div>
           </div>
           {scan.narrative ? <p className="mt-6 text-[15px] leading-relaxed text-fg-muted">{scan.narrative.fixes_intro}</p> : null}
-          <ol className="mt-5 grid gap-px overflow-hidden border border-ops-line bg-ops-line md:grid-cols-3">
+          {scan.score.fixes.length ? <ol className="mt-5 grid gap-px overflow-hidden border border-ops-line bg-ops-line md:grid-cols-3">
             {scan.score.fixes.map((fix, i) => (
               <li key={fix.key} className="bg-ops-panel p-5">
                 <p className="font-data text-[10px] uppercase tracking-[0.22em] text-fg-dim">Fix {i + 1} · +{fix.impact} pts</p>
@@ -252,7 +254,7 @@ export function ScanReport({ scan }: { scan: ScanView }) {
                 <p className="mt-3 text-[12px] text-signal">OASIS builds: {automationWords(fix.automation)}</p>
               </li>
             ))}
-          </ol>
+          </ol> : null}
         </Panel>
       ) : f && !scan.error ? (
         <Working what="Scoring and prioritising fixes" />

@@ -46,9 +46,15 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
     ? `Visitors arrive on ${facts.site.pages_read} readable page${facts.site.pages_read === 1 ? "" : "s"}, mostly about ${list(s.keywords.slice(0, 5).map((k) => k.term), 5) || "the business"}. ${pricing}`
     : "Who buys from this site could not be read from its pages.";
 
-  const low = [...score.pillars].sort((a, b) => a.score - b.score)[0];
+  const low = score.pillars.filter((p) => p.score !== null).sort((a, b) => (a.score ?? 0) - (b.score ?? 0))[0] ?? null;
   const builds = [...new Set(score.fixes.map((f) => automationWords(f.automation)))];
-  const fixesIntro = `The score is ${score.total}/100. The weakest area is "${low.label}" at ${low.score}. Fixing the ${score.fixes.length === 1 ? "item" : `${score.fixes.length} items`} below is worth about ${score.fixes.reduce((a, f) => a + f.impact, 0)} points${builds.length ? `, through ${list(builds, 3)}` : ""}.`;
+  const fixesLine = score.fixes.length
+    ? ` Fixing the ${score.fixes.length === 1 ? "item" : `${score.fixes.length} items`} below is worth about ${score.fixes.reduce((a, f) => a + f.impact, 0)} points${builds.length ? `, through ${list(builds, 3)}` : ""}.`
+    : "";
+  const fixesIntro =
+    score.total === null || !low
+      ? `Too little of the site could be read from outside to score it, so no OASIS score is given.${fixesLine}`
+      : `The score is ${score.total}/100. The weakest area is "${low.label}" at ${low.score}.${fixesLine}`;
 
   return {
     schema: NARRATIVE_SCHEMA,
