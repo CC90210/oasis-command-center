@@ -53,7 +53,7 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
     : "";
   const fixesIntro =
     score.total === null || !low
-      ? `Too little of the site could be read from outside to score it, so no OASIS score is given.${fixesLine}`
+      ? "Too little of the site could be read from outside to score it, so no OASIS score is given and no fix is priced."
       : `The score is ${score.total}/100. The weakest area is "${low.label}" at ${low.score}.${fixesLine}`;
 
   return {

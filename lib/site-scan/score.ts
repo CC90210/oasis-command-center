@@ -57,7 +57,9 @@ function pillar(
   if (readable < MIN_READABLE_POINTS) {
     return { pillar: { key, label: LABELS[key], score: null, weight: WEIGHTS[key], detail: "Not enough of this could be read from outside to score it." }, candidates: [] };
   }
-  const candidates: Candidate[] = missing.map((m) => ({ ...m.fix, pillar: key, points: m.points, impact: Math.round((m.points * WEIGHTS[key]) / readable) }));
+  // `impact` here is the fix's weighted gain over 100 weight; scoreFacts rescales it to the scored
+  // weight once that is known, the same denominator the total uses.
+  const candidates: Candidate[] = missing.map((m) => ({ ...m.fix, pillar: key, points: m.points, impact: (m.points * WEIGHTS[key]) / readable }));
   const detail = missing.length ? `Missing: ${missing.map((m) => m.fix.title).join("; ")}.` : unknownPoints >= 50 ? "Mostly unreadable from here." : detailWhenFull;
   return { pillar: { key, label: LABELS[key], score: clamp((score / readable) * 100), weight: WEIGHTS[key], detail }, candidates };
 }
@@ -141,8 +143,9 @@ export function scoreFacts(facts: ScanFacts): ScanScore {
   const scored = pillars.filter((p): p is ScorePillar & { score: number } => p.score !== null);
   const scoredWeight = scored.reduce((a, p) => a + p.weight, 0);
   const total = facts.site.unread || scoredWeight < MIN_SCORED_WEIGHT ? null : clamp(scored.reduce((acc, p) => acc + p.score * p.weight, 0) / scoredWeight);
-  const fixes = groups
-    .flatMap((g) => g.candidates)
+  // With no total, a "+N points" has nothing to add to, so no fix is priced (or listed).
+  const fixes = (total === null ? [] : groups.flatMap((g) => g.candidates))
+    .map((f) => ({ ...f, impact: Math.round((f.impact * 100) / scoredWeight) }))
     .sort((a, b) => b.impact - a.impact || a.title.localeCompare(b.title))
     .filter((f, i, arr) => arr.findIndex((x) => x.key === f.key) === i)
     .slice(0, 3)

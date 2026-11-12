@@ -34,7 +34,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!tursoConfigured()) return json(503, { ok: false, error: "not_installed" });
   const result = await claimScan(getTursoClient(), { tenantId: AI_AUDIT_TENANT_ID, scanId: id, token, claimKey, now: new Date() });
   if (!result.ok) {
-    const status = result.error === "scan_not_found" || result.error === "lead_not_found" ? 404 : result.error === "claimed_by_another" ? 409 : 403;
+    const status = result.error === "scan_not_found" || result.error === "lead_not_found" ? 404 : result.error === "audit_not_opened" ? 409 : 403;
     return json(status, { ok: false, error: result.error });
   }
   return json(200, { ok: true, engagement_id: result.engagementId, already_claimed: result.alreadyClaimed });

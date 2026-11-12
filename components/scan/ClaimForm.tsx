@@ -21,7 +21,8 @@ import { AUDIT_FUNNEL, CONTACT_EMAIL } from "@/lib/marketing/routes";
 const FIELD = "w-full border border-ops-edge bg-ops-void/40 px-3 py-2.5 text-[15px] text-fg placeholder:text-fg-dim focus:border-signal focus:outline-none";
 
 const CLAIM_ERRORS: Record<string, string> = {
-  claimed_by_another: "Someone else already saved this report to their name. Your details reached us, and the OASIS team will follow up with you directly.",
+  audit_not_opened: "Your details reached us, but the audit could not be opened for them automatically. The OASIS team will follow up with you directly.",
+  wrong_form: "This report can only be saved through the form on this page. Reload the page and try again.",
   bad_claim_key: "This report can only be saved from the browser that ran the scan. Run your own free scan above and save that one.",
   rate_limited: "Too many attempts just now. Give it a minute and try again.",
 };
@@ -73,7 +74,7 @@ export function ClaimForm({
     }
     const code = data?.error ?? "";
     console.error("[scan.claim] link refused", { status: res.status, code });
-    if (code === "claimed_by_another" || code === "bad_claim_key") return fail(CLAIM_ERRORS[code], true);
+    if (code === "audit_not_opened" || code === "bad_claim_key" || code === "wrong_form") return fail(CLAIM_ERRORS[code], true);
     fail(CLAIM_ERRORS[code] ?? `Your details were sent, but the report could not be saved to them. Press the button again, or email ${CONTACT_EMAIL}.`);
   }
 
@@ -129,6 +130,8 @@ export function ClaimForm({
   return (
     <form onSubmit={onSubmit} className="grid gap-4 sm:grid-cols-2" noValidate>
       <HoneypotField inputRef={trapRef} />
+      {/* Once the lead is saved its details are fixed: a retry re-sends only the claim, so an edit here would be shown but never stored. */}
+      <fieldset disabled={leadSent} className="m-0 grid min-w-0 gap-4 border-0 p-0 sm:col-span-2 sm:grid-cols-2 disabled:opacity-70">
       <label className="block">
         <span className="font-data text-[10px] uppercase tracking-[0.2em] text-fg-dim">Your name</span>
         <input name="name" autoComplete="name" required className={`${FIELD} mt-1.5`} />
@@ -151,6 +154,12 @@ export function ClaimForm({
           <ConsentChoice key={channel} id={`${idBase}-${channel}`} channel={channel} identity={consentIdentity} checked={consent[channel]} onChange={(checked) => setConsent((c) => ({ ...c, [channel]: checked }))} name={AUDIT_CONSENT_FIELDS[channel]} variant="marketing" />
         ))}
       </div>
+      </fieldset>
+      {leadSent ? (
+        <p className="text-[13px] text-fg-dim sm:col-span-2">
+          Your details are saved. To change them, email {CONTACT_EMAIL}.
+        </p>
+      ) : null}
       {error ? <p role="alert" className="text-[14px] text-status-warm sm:col-span-2">{error}</p> : null}
       <div className="sm:col-span-2">
         <button type="submit" disabled={sending || closed} className={CTA_PRIMARY}>

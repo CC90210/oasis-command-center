@@ -30,7 +30,11 @@ process.env.CRON_ATTEST_SECRET = "cron-attest-for-tests";
 delete process.env.CRON_ALLOW_LOCAL;
 
 const db = createClient({ url: `file:${dbFile}` });
-const NOW = Date.parse("2026-10-28T12:00:30.000Z");
+// Yesterday at 12:00:30 UTC, not a fixed date: POST /api/cron/runs prunes against the real clock
+// (CRON_RUNS_KEEP_DAYS = 14), so a pinned 2026-10-28 aged out on 2026-11-11 and the ticks this
+// test stores were deleted as they landed. The checks that need a calendar date use their own.
+const DAY = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+const NOW = Date.parse(`${DAY}T12:00:30.000Z`);
 const MIN = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -107,7 +111,7 @@ async function main(): Promise<void> {
     assert.deepEqual(health.last, { ok: false, status: "500", ms: 120, at: iso(NOW - 15 * MIN) }, "the newest run");
     assert.deepEqual(health.day, { ok: 1, total: 2 }, "the 30-hour-old run is outside 24 h");
     assert.equal(health.words, "every 15 minutes");
-    assert.equal(health.nextAt, "2026-10-28T12:15:00.000Z");
+    assert.equal(health.nextAt, `${DAY}T12:15:00.000Z`);
     const audit = flows.find((f) => f.path === "/api/cron/ai-audit-tick")!;
     assert.equal(audit.last, null);
     assert.deepEqual(cards.lastRunLine(audit, NOW), { tone: "none", text: "Not measured yet" });
