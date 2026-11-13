@@ -81,6 +81,8 @@ export function useScanStream(scanId: string | null): ScanStream {
         const res = await fetch(`/api/scan/${encodeURIComponent(scanId)}`, { cache: "no-store" }).catch(() => null);
         if (!alive) return;
         const data = (res ? await res.json().catch(() => null) : null) as { ok?: boolean; scan?: ScanView; error?: string } | null;
+        // The visitor may have moved to another scan while the body was read: drop a stale answer.
+        if (!alive) return;
         if (data?.error === "not_found") {
           setGone(true);
           setError("That scan link has expired. Start a new one below.");

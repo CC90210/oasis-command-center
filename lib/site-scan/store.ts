@@ -139,31 +139,32 @@ export async function insertScan(
     // Two visitors, one domain, one day. A failed or orphaned row is reset for this attempt (the
     // conditional UPDATE lets exactly one retry win); a live one is the scan.
     const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
-    // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260). A
-    // database that predates that column resets the row without it.
+    // The row a retry may take over: failed, or a read nobody has touched for STALE_READ_MS.
+    const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`;
+    const where = [input.tenantId, input.domain, day, staleBefore];
+    // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
     const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, updated_at = ?
-            WHERE tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`,
-      args: [input.url, at, input.tenantId, input.domain, day, staleBefore],
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, updated_at = ? WHERE ${resettable}`,
+      args: [input.url, at, ...where],
     });
-    const reset = await db.execute(resetSql(", tier0_claimed_at = NULL")).catch((resetErr: unknown) => {
-      if (resetErr instanceof Error && /no such column: tier0_claimed_at/i.test(resetErr.message)) return db.execute(resetSql(""));
-      throw resetErr;
-    });
+    // The failed attempt's feed goes in the same transaction as the reset, on the same condition: it
+    // is never replayed beside the new read, never uses up its allowance, and no stream can claim
+    // the new read (and start writing) between the two.
+    const clearFeed = { sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id IN (SELECT id FROM site_scans WHERE ${resettable})`, args: [input.tenantId, ...where] };
+    let resetRows: number;
+    try {
+      resetRows = (await db.batch([clearFeed, resetSql(", tier0_claimed_at = NULL")], "write"))[1].rowsAffected;
+    } catch (resetErr) {
+      // A database that predates bravo__260 has neither the feed nor the claim: the reset alone.
+      if (!(eventsTableMissing(resetErr) || (resetErr instanceof Error && /no such column: tier0_claimed_at/i.test(resetErr.message)))) throw resetErr;
+      resetRows = (await db.execute(resetSql(""))).rowsAffected;
+    }
     const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
     const r = rs.rows[0];
     if (!r) throw err;
-    const row = rowFromRecord(r as unknown as Record<string, unknown>);
-    if (reset.rowsAffected === 1) {
-      // The retry is a new read under the same id: the failed attempt's feed is not replayed beside
-      // it, and does not use up its allowance. Cleared before anything can claim the new read.
-      await db.execute({ sql: "DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id = ?", args: [input.tenantId, row.id] }).catch((delErr: unknown) => {
-        if (!eventsTableMissing(delErr)) throw delErr;
-      });
-    }
-    return { row, started: reset.rowsAffected === 1 };
+    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: resetRows === 1 };
   }
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");

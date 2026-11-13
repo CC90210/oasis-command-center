@@ -6,7 +6,7 @@
  * replaces it with the segments, competitors and prospects it found; a model polish (Tier 2)
  * may rewrite it once more. Every sentence here is built from a stored fact, nothing else.
  */
-import type { ScanFacts, ScanNarrative, ScanScore } from "@/lib/site-scan/types";
+import type { ScanEnrich, ScanFacts, ScanNarrative, ScanScore } from "@/lib/site-scan/types";
 import { NARRATIVE_SCHEMA } from "@/lib/site-scan/types";
 
 const AUTOMATION_WORDS: Record<string, string> = {
@@ -80,4 +80,17 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
     fixes_intro: fixesIntro,
     email: null,
   };
+}
+
+/**
+ * Where the matches came from, with the attribution each source's licence asks for. Without the
+ * engine's records the directory is named only when the matches say so (or carry no source at all,
+ * as every match from the directory-only engine before 2.0 did); otherwise nothing is guessed.
+ */
+export function sourcesLine(enrich: ScanEnrich): string {
+  const sources = enrich.sources ?? [];
+  if (sources.length) return `From ${sources.map((s) => s.label).join(" and ")}. ${sources.map((s) => s.note).join(" ")}`;
+  const matches = [...enrich.competitors, ...enrich.prospects];
+  if (matches.every((m) => !m.source || m.source === "directory")) return "From OASIS’s own business directory.";
+  return "From public business listings.";
 }

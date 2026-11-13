@@ -1,7 +1,7 @@
 "use client";
 
 import { CHECK_TITLES } from "@/lib/ai-audit/site-checks";
-import { automationWords } from "@/lib/site-scan/narrative";
+import { automationWords, sourcesLine } from "@/lib/site-scan/narrative";
 import type { ScanView } from "@/lib/site-scan/types";
 
 /**
@@ -32,12 +32,6 @@ function Working({ what }: { what: string }) {
 function km(d: number): string {
   if (d < 1) return `${Math.max(10, Math.round((d * 1000) / 10) * 10)} m`;
   return d < 10 ? `${d.toFixed(1)} km` : `${Math.round(d)} km`;
-}
-
-/** Where the matches came from, with the attribution each source's licence asks for. */
-function sourcesLine(sources: { label: string; note: string }[] | undefined): string {
-  if (!sources?.length) return "From OASIS’s own business directory.";
-  return `From ${sources.map((s) => s.label).join(" and ")}. ${sources.map((s) => s.note).join(" ")}`;
 }
 
 function statusTone(status: "yes" | "no" | "unknown") {
@@ -152,6 +146,8 @@ export function ScanReport({ scan }: { scan: ScanView }) {
                   ))}
                 </ul>
                 {scan.narrative.competitors_note ? <p className="mt-3 text-[13px] text-fg-muted">{scan.narrative.competitors_note}</p> : null}
+                {/* The prospects panel carries the attribution; with no prospects it is said here. */}
+                {!scan.enrich.prospects.length ? <p className="mt-2 text-[12px] text-fg-dim">{sourcesLine(scan.enrich)}</p> : null}
               </div>
             ) : null}
           </Panel>
@@ -215,7 +211,7 @@ export function ScanReport({ scan }: { scan: ScanView }) {
                 </li>
               ))}
             </ul>
-            <p className="mt-4 text-[12px] text-fg-dim">{sourcesLine(scan.enrich.sources)} Names and places only; nobody is contacted by this page.</p>
+            <p className="mt-4 text-[12px] text-fg-dim">{sourcesLine(scan.enrich)} Names and places only; nobody is contacted by this page.</p>
           </Panel>
         ) : stage("prospects") === "skipped" ? (
           <Panel eyebrow="Sample prospects" title="Found on the call">
