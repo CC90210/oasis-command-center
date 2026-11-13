@@ -31,6 +31,11 @@ export const RUNNER_BODY_MAX_BYTES = 64 * 1024;
  * transcript comes back in it, and an hour of talk is well past 64 KiB.
  */
 export const COMPLETE_BODY_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * The largest signed body POST /api/internal/tools/scan-screenshot takes: a home page's picture
+ * (at most 250,000 bytes, lib/site-scan/screenshot.ts) as base64, plus the lease fields.
+ */
+export const SCREENSHOT_BODY_MAX_BYTES = 340 * 1024;
 /** How long a presigned upload URL stays valid (lib/r2-storage.ts signs PUTs for this long). */
 export const UPLOAD_URL_TTL_SECONDS = 900;
 /**
