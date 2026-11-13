@@ -37,12 +37,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      # Same toolchain and install as the build job below (its comments say why).
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci --no-audit --no-fund
+      # Node 22 and npm ci, one definition for every job (its comments say why).
+      - uses: ./.github/actions/install
       - run: npm run typecheck
       - run: npm run lint
 
@@ -82,12 +78,8 @@ jobs:
       NODE_OPTIONS: --conditions=react-server
     steps:
       - uses: actions/checkout@v4
-      # Same toolchain and install as the build job below (its comments say why).
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci --no-audit --no-fund
+      # Node 22 and npm ci, one definition for every job (its comments say why).
+      - uses: ./.github/actions/install
       - name: Tests (shard 1 of 4)
         if: matrix.shard == 1
         run: |
@@ -238,10 +230,6 @@ jobs:
       # the artifact that ships: a different Node, a dependency tree the
       # lockfile does not pin, and no OpenNext or wrangler step at all.
       # Node version, install command and build command now match the deploy.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
       # `npm ci` is back. From 2026-08-01 it could not install here: the
       # Windows-generated lockfile lacked @emnapi/runtime@1.11.3, the entry
       # Linux's `sharp` variant needs, and the job ran `npm install` instead.
@@ -250,7 +238,7 @@ jobs:
       # (green on 2026-09-29), so CI can pin the exact tree the deploy builds.
       # If the lockfile loses a Linux entry again, this step fails before the
       # deploy does, which is where that should be found.
-      - run: npm ci --no-audit --no-fund
+      - uses: ./.github/actions/install
       # NEXT'S COMPILE CACHE (2026-11-13). The OpenNext build runs `next build`, the
       # longest step left once the jobs run side by side (277 s on 2026-11-13). Next
       # keeps its webpack cache in .next/cache and reuses it for files that did not

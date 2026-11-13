@@ -1,0 +1,16 @@
+name: Install
+description: >-
+  Node 22 and the exact locked dependency tree, for every CI job (.github/workflows/ci.yml).
+  One definition, so the jobs that now run side by side can never drift apart: a CI job on
+  another Node or another install is how a green check once said nothing about the artifact
+  production runs. It matches the deploy (deploy-cloudflare.yml: Node 22, npm ci).
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+    # npm ci runs the postinstall that patches the OpenNext plugin (scripts/patch-opennext-manifests.mjs).
+    - run: npm ci --no-audit --no-fund
+      shell: bash
