@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Calendar, Mail, ShieldCheck } from "lucide-react";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, Eyebrow } from "@/components/marketing/Section";
@@ -87,6 +88,13 @@ export default function ContactPage() {
                 Step 1 of 4
               </h2>
               <AuditForm consentIdentity={consentIdentity} />
+              <p className="mt-6 border-t border-ops-line pt-5 text-[14px] text-fg-muted">
+                Want to see it first?{" "}
+                <Link href="/scan" className="text-fg underline decoration-ops-edge underline-offset-4 hover:text-signal">
+                  Run the free scan
+                </Link>{" "}
+                on your website. It takes about a minute.
+              </p>
             </div>
           </Reveal>
 

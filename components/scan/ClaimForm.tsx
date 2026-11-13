@@ -33,6 +33,7 @@ export function ClaimForm({
   businessName,
   website,
   consentIdentity,
+  formSlug = AUDIT_FUNNEL.formSlug,
   onClaimed,
 }: {
   scanId: string;
@@ -40,6 +41,8 @@ export function ClaimForm({
   businessName: string;
   website: string;
   consentIdentity: ConsentIdentity;
+  /** The form the claim submits: the scan's own offer form when it is on (lib/site-scan/claim.ts scanClaimFormSlug). */
+  formSlug?: string;
   onClaimed: () => void;
 }) {
   const [status, setStatus] = useState<"idle" | "sending" | "error" | "closed">("idle");
@@ -90,12 +93,14 @@ export function ClaimForm({
     }
     const trapped = trapValue(trapRef.current, trapLatch);
     if (trapped) {
-      await reportTrappedSubmission({ anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: AUDIT_FUNNEL.formSlug }, step_index: 0 }, trapped);
+      await reportTrappedSubmission({ anonymous_init: { tenant_slug: AUDIT_FUNNEL.tenantSlug, form_slug: formSlug }, step_index: 0 }, trapped);
       onClaimed();
       return;
     }
     const context = { submissionPath: window.location.pathname, visitId: getOrCreateVisitId(), attribution: auditAttributionFromSearch(window.location.search) };
-    const body = auditFormBody(new FormData(e.currentTarget), context);
+    // The audit's first-step fields, filed under the form this claim belongs to (the scan's own offer).
+    const built = auditFormBody(new FormData(e.currentTarget), context);
+    const body = { ...built, anonymous_init: { ...built.anonymous_init, form_slug: formSlug } };
     const problem = auditFormProblem(body.payload);
     if (problem) return fail(problem);
     setStatus("sending");

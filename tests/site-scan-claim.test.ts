@@ -101,6 +101,92 @@ async function main() {
     assert.equal(scan.engagementId, engagementA);
   });
 
+  // The free scan is its own offer (lib/site-scan/offer.ts): a claim submits the free-scan form, so
+  // its lead is filed under the scan and never counted as an AI Automation Audit submission. The
+  // audit intake's token still claims (the fallback while free-scan is off, and a browser that
+  // loaded the page before the form existed).
+  await check("the scan's own offer form claims; the page uses it only while it is switched on", async () => {
+    const { scanClaimFormSlug } = await import("../lib/site-scan/claim");
+    assert.equal(await scanClaimFormSlug(db, OASIS), "ai-audit", "no free-scan form yet: the audit intake");
+    await db.execute({ sql: "INSERT INTO forms (id, tenant_id, slug, name, enabled) VALUES ('form-free-scan', ?, 'free-scan', 'Free AI website scan', 0)", args: [OASIS] });
+    assert.equal(await scanClaimFormSlug(db, OASIS), "ai-audit", "switched off: the audit intake");
+    await db.execute({ sql: "UPDATE forms SET enabled = 1 WHERE id = 'form-free-scan'" });
+    assert.equal(await scanClaimFormSlug(db, OASIS), "free-scan", "switched on: the scan's own form");
+    assert.equal(await scanClaimFormSlug(db, "another-workspace"), "ai-audit");
+    await seedLead(db, "lead-scan-offer", "qualified");
+    const viaScan = await claim("lead-scan-offer", { form: "form-free-scan" });
+    assert.ok(viaScan.ok, JSON.stringify(viaScan));
+    assert.equal(await attachments(viaScan.engagementId), 1, "a free-scan claim opens the audit with the scan attached");
+    assert.deepEqual(await claim(LEAD_A, { form: START_FORM }), { ok: false, error: "wrong_form" }, "the workspace's other forms still cannot claim");
+  });
+
+  // The AI audits board and an audit's page show the scan that opened it (CC, 2026-11-13: the scan
+  // and the audit must read as one path, not two overlapping pages).
+  await check("the AI audits board counts audits opened from the scan, and an audit links the report its lead saw", async () => {
+    const { countAuditsFromScan } = await import("../lib/ai-audit/view");
+    const { listEvents } = await import("../lib/ai-audit/store");
+    const { SCAN_ATTACHED_EVENT, scansAttached } = await import("../lib/ai-audit/scan-origin");
+    const opened = new Set((await db.execute({ sql: "SELECT engagement_id FROM ai_audit_events WHERE tenant_id = ? AND event = 'free_scan_attached'", args: [OASIS] })).rows.map((r) => String(r.engagement_id)));
+    assert.ok(opened.size >= 2, "the claims above opened audits from the scan");
+    assert.equal(await countAuditsFromScan(db, OASIS), opened.size, "one per audit, however many times it was claimed");
+    const engagementId = [...opened][0];
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 1 WHERE id = ?", args: [engagementId] });
+    assert.equal(await countAuditsFromScan(db, OASIS), opened.size - 1, "a test audit is left out of the board's numbers");
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 0 WHERE id = ?", args: [engagementId] });
+    assert.equal(await countAuditsFromScan(db, "another-workspace"), 0);
+    const shown = scansAttached(await listEvents(db, OASIS, engagementId));
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].domain, "scan-fixture.test");
+    assert.match(shown[0].id, /^[0-9a-f-]{36}$/);
+    // CodeRabbit, #816: the page's history holds the newest 150 events; the attachment is read on its
+    // own (engagementView's `scans`), so a long-running audit never loses its link to the scan.
+    for (let i = 0; i < 160; i++) {
+      await db.execute({
+        sql: "INSERT INTO ai_audit_events (id, tenant_id, engagement_id, event, actor_type, meta, created_at) VALUES (?, ?, ?, 'note', 'system', '{}', ?)",
+        args: [`later-${i}`, OASIS, engagementId, new Date(Date.parse("2027-01-01T00:00:00.000Z") + i * 1000).toISOString()],
+      });
+    }
+    assert.equal(scansAttached(await listEvents(db, OASIS, engagementId, 150)).length, 0, "precondition: the history no longer holds the attachment");
+    assert.deepEqual(scansAttached(await listEvents(db, OASIS, engagementId, 50, { event: SCAN_ATTACHED_EVENT })), shown, "the attachment's own read still finds it");
+    const base = { id: "x", from_stage: null, to_stage: null, actor_type: "system", actor_id: null, created_at: "2026-11-13T00:00:00.000Z" };
+    assert.deepEqual(
+      scansAttached([
+        { ...base, event: "free_scan_attached", ref_type: "site_scan", ref_id: "../../admin", meta: { domain: "x.ca" } },
+        { ...base, event: "delivered", ref_type: "site_scan", ref_id: shown[0].id, meta: {} },
+      ]),
+      [],
+      "only a scan id of the right shape on the right event becomes a link",
+    );
+  });
+
+  // The landing hero starts the scan and then opens its page; a browser that keeps no storage gets
+  // the claim key in the address fragment (never sent to a server), and the page wipes it on arrival.
+  await check("a browser without storage still gets its claim key from the hero, and only from the fragment", async () => {
+    const replaced: string[] = [];
+    const loc = { hash: "", pathname: "/scan/s-1", search: "?utm_source=ad" };
+    const g = globalThis as unknown as { window?: unknown };
+    g.window = { location: loc, history: { state: null, replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) } };
+    try {
+      const { claimKeyFromHash, dropClaimKeyHash, scanPath } = await import("../components/scan/start-scan");
+      const key = "Ab3_-".repeat(9);
+      assert.equal(scanPath("s-1", "?utm_source=ad"), "/scan/s-1?utm_source=ad", "a kept key never goes in the address");
+      assert.equal(scanPath("s-1", "?utm_source=ad", key), `/scan/s-1?utm_source=ad#claim=${key}`);
+      assert.equal(scanPath("s-1", "", "<script>"), "/scan/s-1", "only a key of the claim key's shape is handed over");
+      loc.hash = `#claim=${key}`;
+      assert.equal(claimKeyFromHash(), key);
+      dropClaimKeyHash();
+      assert.deepEqual(replaced, ["/scan/s-1?utm_source=ad"], "the key is wiped from the address, the campaign tags stay");
+      loc.hash = "#claim=short";
+      assert.equal(claimKeyFromHash(), null);
+      loc.hash = "#section";
+      assert.equal(claimKeyFromHash(), null);
+      dropClaimKeyHash();
+      assert.equal(replaced.length, 1, "an ordinary fragment is left alone");
+    } finally {
+      delete g.window;
+    }
+  });
+
   finish("site-scan-claim");
 }
 

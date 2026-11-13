@@ -29,6 +29,9 @@ export const FUNNEL_EVENT_NAMES = [
   "community_click",
   "checkout_click",
   "booking_made",
+  // The free scan's offer (lib/site-scan/offer.ts): a visitor started a scan, and its report finished.
+  "scan_started",
+  "scan_finished",
 ] as const;
 
 export type FunnelEventName = (typeof FUNNEL_EVENT_NAMES)[number];

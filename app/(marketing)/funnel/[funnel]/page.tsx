@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { AuditForm } from "@/components/marketing/AuditForm";
 import { CtaLink } from "@/components/marketing/Cta";
@@ -16,7 +17,7 @@ import { getSessionUser } from "@/lib/supabase-server";
 const PUBLIC_FUNNEL_METADATA = {
   audit: {
     title: "Free business AI audit",
-    description: "A practical three-step intake that finds where AI can remove delay, recover leads, and create measurable capacity in your business.",
+    description: "A practical four-question intake that finds where AI can remove delay, recover leads, and create measurable capacity in your business.",
   },
   "command-center": {
     title: "AI command center",
@@ -71,11 +72,19 @@ function AuditPage() {
                 A short intake, an honest diagnosis, and a build recommendation tied to time, revenue, or response speed. No generic AI wish list.
               </p>
               {BOOKING_URL ? <div className="mt-8"><CtaLink href={BOOKING_URL} external>Book a strategy call</CtaLink></div> : null}
+              {/* The free scan is the front door to this audit (CC, 2026-11-13): one click for anyone not ready to fill in the form. */}
+              <p className="mt-8 max-w-xl border-l border-signal/50 pl-4 text-[15px] leading-relaxed text-fg-muted">
+                Not ready for the full audit?{" "}
+                <Link href="/scan" className="text-fg underline decoration-ops-edge underline-offset-4 hover:text-signal">
+                  Run the free scan first
+                </Link>
+                : paste your website and watch an AI read it, score it and find who buys from you, in about a minute.
+              </p>
             </div>
           </Reveal>
           <Reveal delay={100}>
             <div id="apply" className="scroll-mt-24 border border-ops-edge bg-ops-panel/90 p-6 backdrop-blur sm:p-8">
-              <p className="mb-6 font-data text-[10px] uppercase tracking-[0.24em] text-signal">Start the three-step audit</p>
+              <p className="mb-6 font-data text-[10px] uppercase tracking-[0.24em] text-signal">Start the audit: four questions</p>
               <AuditForm consentIdentity={consentIdentity} />
             </div>
           </Reveal>

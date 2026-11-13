@@ -28,6 +28,7 @@ import { AUDIT_STAGES, boardColumns, pipelineColumnKey, pipelineColumnMeta, pipe
 import { ownerPipelineSnapshot, type PipelineDeal } from "@/lib/ai-audit/pipeline-deals";
 import { StartAiAuditButton } from "@/components/ai-audit/StartAiAuditButton";
 import { setupChecks, type SetupCheck } from "@/lib/ai-audit/setup";
+import { SCAN_DETAILS_PATH } from "@/lib/site-scan/offer";
 
 export const dynamic = "force-dynamic";
 
@@ -86,9 +87,6 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
       subtitle={`${rows.length} ${showClosed ? noun : `open ${noun}`}${flagged ? `, ${flagged} need attention` : ""}${tests ? `, ${tests === 1 ? "1 test" : `${tests} tests`} left out of the numbers` : ""}`}
       actions={
         <>
-          <Link href="/ai-audits/scans" className="btn-secondary">
-            Free scans
-          </Link>
           <Link href="/ai-audits/catalogue" className="btn-secondary">
             Price catalogue
           </Link>
@@ -123,6 +121,18 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
           hint={metrics ? (metrics.delivered ? `${metrics.won} of ${metrics.delivered} delivered audits paid` : "Paid out of delivered") : "The numbers could not be read"}
         />
       </div>
+
+      {/* The free scan is the audit's front door (CC, 2026-11-13): its own numbers live on its offer. */}
+      <p className="mb-4 text-sm text-fg-muted">
+        {metrics ? (
+          <>
+            {metrics.fromScan === 1 ? "1 audit" : `${metrics.fromScan} audits`} started from the free website scan.{" "}
+          </>
+        ) : null}
+        <Link href={SCAN_DETAILS_PATH} className="underline underline-offset-2">
+          How the free scan is doing
+        </Link>
+      </p>
 
       {blocked.length ? (
         <div className="mb-5 rounded-xl border border-hairline bg-bg-panel px-4 py-2.5 text-sm">

@@ -11,12 +11,24 @@
  * No em dash in the label or the glyph: "-" is a plain hyphen.
  */
 
-export type FunnelMetricKey = "views" | "video_plays" | "leads" | "booked" | "community";
+export type FunnelMetricKey = "views" | "video_plays" | "scans" | "leads" | "booked" | "community";
 
 export const FUNNEL_METRICS: ReadonlyArray<{ key: FunnelMetricKey; label: string }> = [
   { key: "views", label: "Views" },
   { key: "video_plays", label: "Video plays" },
   { key: "leads", label: "Leads" },
+  { key: "booked", label: "Booked" },
+  { key: "community", label: "Sent to community" },
+];
+
+/**
+ * The free scan's offer (lib/site-scan/offer.ts) has no video: its strip counts the scans visitors
+ * ran, and calls its leads what they are, reports sent to the team (the claim is its one form step).
+ */
+export const SCAN_FUNNEL_METRICS: ReadonlyArray<{ key: FunnelMetricKey; label: string }> = [
+  { key: "views", label: "Views" },
+  { key: "scans", label: "Scans run" },
+  { key: "leads", label: "Reports sent" },
   { key: "booked", label: "Booked" },
   { key: "community", label: "Sent to community" },
 ];

@@ -261,11 +261,12 @@ export async function listEngagements(
   return rs.rows.map(mapEngagement);
 }
 
-export async function listEvents(db: Client, tenantId: string, engagementId: string, limit = 200): Promise<AuditEvent[]> {
+/** The engagement's events, newest first; `only` keeps one kind (an attachment the history's limit would push out). */
+export async function listEvents(db: Client, tenantId: string, engagementId: string, limit = 200, only?: { event: string }): Promise<AuditEvent[]> {
   const rs = await db.execute({
     sql: `SELECT id, event, from_stage, to_stage, actor_type, actor_id, ref_type, ref_id, meta, created_at
-          FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
-    args: [requireTenant(tenantId), engagementId, Math.min(Math.max(limit, 1), 1_000)],
+          FROM ai_audit_events WHERE tenant_id = ? AND engagement_id = ?${only ? " AND event = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    args: [requireTenant(tenantId), engagementId, ...(only ? [only.event] : []), Math.min(Math.max(limit, 1), 1_000)],
   });
   return rs.rows.map((r) => ({
     id: String(r.id),

@@ -14,6 +14,8 @@ import { OasisLogo } from "@/components/brand/OasisLogo";
  */
 
 const LINKS = [
+  // The free scan is the front door to the audit (CC, 2026-11-13), so it sits just before it.
+  { href: "/scan", label: "Free scan" },
   { href: "/audit", label: "Audit" },
   { href: "/fleet", label: "Fleet" },
   { href: "/work", label: "Work" },

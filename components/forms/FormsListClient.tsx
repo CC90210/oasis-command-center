@@ -52,6 +52,7 @@ import { OffersCardsGrid, type OfferCardEntry } from "./OffersCardsClient";
 import type { OfferCardViewModel } from "./OfferCard";
 import { offerCreateSlug, slugTakenMessage, ROUTER_SLUG } from "@/lib/offers/router-create";
 import { offerShareablePath } from "@/lib/offers/short-links";
+import { SCAN_DETAILS_PATH, SCAN_OFFER_SLUG } from "@/lib/site-scan/offer";
 import { WritePageDescription, WritePageToggle } from "@/components/offer-pages/WritePageFields";
 import { requestWrittenPage, writePageInputProblem } from "@/lib/offer-pages/write-page-client";
 import type { FunnelCounts } from "@/lib/offers/tracking-store";
@@ -113,6 +114,7 @@ export function FormsListClient({
   offers = null,
   recentLeads = {},
   recentFunnel = {},
+  scanWorkspace = false,
 }: {
   initialRows: FormRow[];
   tenantLogoUrl: string | null;
@@ -135,6 +137,8 @@ export function FormsListClient({
    *  7-day window (V5a, offer_funnel_events). Missing = untracked (table not
    *  applied here yet); each metric's own null = a failed read. */
   recentFunnel?: Record<string, FunnelCounts>;
+  /** The OASIS workspace, the only one whose free-scan form is the live scan's offer (app/forms/page.tsx). */
+  scanWorkspace?: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -418,7 +422,20 @@ export function FormsListClient({
     );
   };
 
-  const actions = (r: FormRow, offer: boolean) => (
+  // The free scan's offer: its page is the live /scan, built in code, so there is no page to edit
+  // and its one form step is the claim the scan depends on; deleting or rebuilding it here would
+  // break "Send it to the OASIS team". Its card opens the scan's details instead.
+  const isScanOffer = (r: FormRow) => scanWorkspace && r.slug === SCAN_OFFER_SLUG && !!offers?.[r.id];
+  const actions = (r: FormRow, offer: boolean) =>
+    isScanOffer(r) ? (
+      <div className="inline-flex flex-wrap items-center gap-3">
+        <Link href={SCAN_DETAILS_PATH} className="inline-flex items-center gap-1 font-semibold text-accent hover:text-accent-bright text-xs" title="Every scan: what it found, its replay, and the lead it became.">
+          Scan details
+        </Link>
+        {offerLinkActions(r)}
+        {responsesLink(r)}
+      </div>
+    ) : (
     <div className="inline-flex flex-wrap items-center gap-3">
       {canEdit && (
         <Link
@@ -442,7 +459,7 @@ export function FormsListClient({
         </button>
       )}
     </div>
-  );
+    );
 
   // Every offer row as a card view model + its pre-built toggle/actions nodes
   // (OffersCardsClient lays these out; it owns no click handler of its own).
@@ -461,6 +478,7 @@ export function FormsListClient({
       views: typeof recentFunnel[r.id]?.views === "number" ? recentFunnel[r.id].views : null,
       videoPlays: typeof recentFunnel[r.id]?.video_plays === "number" ? recentFunnel[r.id].video_plays : null,
       community: typeof recentFunnel[r.id]?.community === "number" ? recentFunnel[r.id].community : null,
+      ...(isScanOffer(r) ? { kind: "scan" as const, scans: typeof recentFunnel[r.id]?.scans === "number" ? (recentFunnel[r.id].scans as number) : null } : {}),
       publicPath: offerShareablePath(tenantSlug, r.slug),
       // Each state says only what is true of it (Codex review of #630): an
       // address that could not be built is not an unpublished page, and a

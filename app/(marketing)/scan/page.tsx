@@ -5,6 +5,7 @@ import { ScanApp } from "@/components/scan/ScanApp";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
 import { AUDIT_FUNNEL, BOOKING_URL } from "@/lib/marketing/routes";
 import { proofCounts } from "@/lib/site-scan/proof";
+import { scanPageClaimFormSlug } from "@/lib/site-scan/claim";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +25,8 @@ const STEPS = [
 export default async function ScanPage() {
   const consentIdentity = resolveConsentIdentity({ tenantSlug: AUDIT_FUNNEL.tenantSlug }).identity;
   const proof = await proofCounts();
+  // The form the claim submits: the scan's own offer form while it is on (lib/site-scan/claim.ts).
+  const claimFormSlug = await scanPageClaimFormSlug();
   return (
     <>
       <section className="m-edge m-hero relative overflow-hidden">
@@ -41,7 +44,7 @@ export default async function ScanPage() {
           </Reveal>
           <Reveal delay={120}>
             <div className="mt-10">
-              <ScanApp initialScanId={null} consentIdentity={consentIdentity} bookingUrl={BOOKING_URL || null} proof={proof} />
+              <ScanApp initialScanId={null} consentIdentity={consentIdentity} bookingUrl={BOOKING_URL || null} proof={proof} claimFormSlug={claimFormSlug} />
             </div>
           </Reveal>
         </div>

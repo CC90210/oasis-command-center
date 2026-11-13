@@ -110,7 +110,7 @@ async function store() {
   try {
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql"), "utf8"));
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
-    const t0 = new Date("2026-11-12T10:00:00.000Z");
+    const t0 = new Date("2026-11-14T10:00:00.000Z"); // after REPORT_FORMAT_SINCE, as every new scan is
 
     // A failed scan is retried the same day: the row is reset in place and the caller must run it.
     const first = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: t0 });

@@ -27,6 +27,7 @@ import {
   type ProposalVersion,
 } from "@/lib/ai-audit/versions";
 import { getEngagement, getSettings, int, listEngagements, listEvents, readLead, requireTenant, type AiAuditSettings, type AuditEvent, type Engagement } from "@/lib/ai-audit/store";
+import { SCAN_ATTACHED_EVENT, scansAttached, type ScanOrigin } from "@/lib/ai-audit/scan-origin";
 import { listCatalogue } from "@/lib/ai-audit/catalogue-store";
 import type { CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { getShareLink, type ShareLink } from "@/lib/ai-audit/link";
@@ -165,6 +166,8 @@ export type BoardMetrics = {
   delivered: number;
   /** Every engagement ever opened, closed ones too. */
   total: number;
+  /** Engagements a lead opened by sending their free scan to the team (free_scan_attached, lib/site-scan/claim.ts). */
+  fromScan: number;
 };
 
 const IN_PROGRESS: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating", "final_review"];
@@ -172,7 +175,7 @@ const WON: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active
 
 export async function boardMetrics(db: Client, tenantId: string, now: Date = new Date()): Promise<BoardMetrics> {
   const t = requireTenant(tenantId);
-  const m: BoardMetrics = { cardsWaiting: 0, problems: 0, inProgress: 0, withClient: 0, stalled: 0, won: 0, delivered: 0, total: 0 };
+  const m: BoardMetrics = { cardsWaiting: 0, problems: 0, inProgress: 0, withClient: 0, stalled: 0, won: 0, delivered: 0, total: 0, fromScan: 0 };
   const groups = await db.execute({ sql: "SELECT stage, health, COUNT(*) AS n FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0 GROUP BY stage, health", args: [t] });
   for (const r of groups.rows) {
     const stage = String(r.stage) as AiAuditStage;
@@ -197,7 +200,19 @@ export async function boardMetrics(db: Client, tenantId: string, now: Date = new
     args: [t],
   });
   m.delivered = int(delivered.rows[0]?.n);
+  m.fromScan = await countAuditsFromScan(db, t);
   return m;
+}
+
+/** Real engagements opened by a lead who sent their free scan to the team (free_scan_attached). */
+export async function countAuditsFromScan(db: Client, tenantId: string): Promise<number> {
+  const rs = await db.execute({
+    sql: `SELECT COUNT(DISTINCT ev.engagement_id) AS n FROM ai_audit_events ev
+            JOIN ai_audit_engagements e ON e.tenant_id = ev.tenant_id AND e.id = ev.engagement_id
+           WHERE ev.tenant_id = ? AND ev.event = 'free_scan_attached' AND e.is_fixture = 0`,
+    args: [requireTenant(tenantId)],
+  });
+  return int(rs.rows[0]?.n);
 }
 
 export type EngagementView = {
@@ -205,6 +220,8 @@ export type EngagementView = {
   row: BoardRow;
   lead: { id: string; stage: string; website: string | null; city: string | null } | null;
   events: AuditEvent[];
+  /** The free scans the audit was opened from, read on their own so the history's limit never hides them. */
+  scans: ScanOrigin[];
   profile: { version: ProfileVersion; fields: ProfileField[] } | null;
   audit: AuditVersion | null;
   auditVersions: Array<Pick<AuditVersion, "id" | "version_no" | "status" | "created_at" | "delivered_at" | "pdf_sha256">>;
@@ -268,9 +285,10 @@ export type EngagementView = {
 export async function engagementView(db: Client, tenantId: string, engagementId: string, now: Date): Promise<EngagementView | null> {
   const engagement = await getEngagement(db, tenantId, engagementId);
   if (!engagement) return null;
-  const [lead, events, auditVersions, proposalVersions, settings, catalogue, checkouts, receipts] = await Promise.all([
+  const [lead, events, scanEvents, auditVersions, proposalVersions, settings, catalogue, checkouts, receipts] = await Promise.all([
     readLead(db, tenantId, engagement.lead_id),
     listEvents(db, tenantId, engagement.id, 150),
+    listEvents(db, tenantId, engagement.id, 50, { event: SCAN_ATTACHED_EVENT }),
     listAuditVersions(db, tenantId, engagement.id),
     listProposalVersions(db, tenantId, engagement.id),
     getSettings(db, tenantId),
@@ -333,6 +351,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     row: boardRow(engagement, lead ? { stage: lead.stage || null, motion: typeof lead.data.sales_motion === "string" ? lead.data.sales_motion : null } : null),
     lead: lead ? { id: lead.id, stage: lead.stage, website: lead.website, city: lead.city } : null,
     events,
+    scans: scansAttached(scanEvents),
     profile: profileVersion ? { version: profileVersion, fields } : null,
     audit,
     auditVersions: auditVersions.map((v) => ({ id: v.id, version_no: v.version_no, status: v.status, created_at: v.created_at, delivered_at: v.delivered_at, pdf_sha256: v.pdf_sha256 })),

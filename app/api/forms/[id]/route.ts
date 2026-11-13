@@ -23,6 +23,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { formsSession } from "@/lib/forms/access";
 import { parseRedirectInput } from "@/lib/forms/redirect-url";
 import { deleteFormWithOfferPage, offerPagesDb } from "@/lib/offer-pages/store";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { SCAN_OFFER_SLUG } from "@/lib/site-scan/offer";
 import {
   parseFormSteps,
   parseFormBranding,
@@ -194,6 +196,24 @@ export async function DELETE(
       },
       { status: 409 },
     );
+  }
+  // The free scan's claim form (lib/site-scan/claim.ts) is not deleted here either: its card hides
+  // Delete, but a list drawn without offer summaries shows it, and a deleted row would send scan
+  // leads back to the AI audit form and fail every claim token it had issued (CodeRabbit, #816).
+  // Switching it off is the way to pause it.
+  if (tenantId === AI_AUDIT_TENANT_ID) {
+    const form = await db.from("forms").select("slug").eq("tenant_id", tenantId).eq("id", id).maybeSingle();
+    if (form.error) return NextResponse.json({ ok: false, error: form.error.message }, { status: 500 });
+    if ((form.data as { slug?: string } | null)?.slug === SCAN_OFFER_SLUG) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "scan_offer_form",
+          message: "This form is the free scan's claim, so it can't be deleted. To stop taking scan leads, switch it off instead (claims then go to the AI audit form).",
+        },
+        { status: 409 },
+      );
+    }
   }
   // OFFER PAGES (bravo__203). On the Turso data plane the form and its offer
   // page row are deleted in ONE batch, so no orphaned page outlives its form
