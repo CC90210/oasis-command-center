@@ -54,7 +54,7 @@ async function main() {
     await saveEnrich(db, {
       tenantId: TENANT,
       id: a,
-      enrich: { schema: ENRICH_SCHEMA, engine: { embedder: "t", version: "1.2.0" }, category: { key: "plumbing_hvac", label: "Plumbing, heating and HVAC", confidence: 0.9 }, keywords: [], segments: [], competitors: [{ name: "P1", domain: null, locality: null }, { name: "P2", domain: null, locality: null }], prospects: [], email_auth: null, notes: [] },
+      enrich: { schema: ENRICH_SCHEMA, engine: { embedder: "t", version: "1.2.0" }, category: { key: "plumbing_hvac", label: "Plumbing, heating and HVAC", confidence: 0.9 }, keywords: [], segments: [], competitors: [{ name: "P1", domain: null, locality: null }, { name: "P2", domain: null, locality: null }], prospects: [], email_auth: null, notes: [], location: { lat: 43.25, lon: -79.87, country: "ca", locality: "Hamilton", source: "overture" } },
       narrative: null,
       embedding: null,
       now,
@@ -75,6 +75,7 @@ async function main() {
     assert.deepEqual(m.days[27], { day: "2026-11-10", scans: 1, claimed: 0 });
     assert.equal(m.days[28].scans, 0, "an empty day is present, not skipped");
     assert.deepEqual(m.categories, [{ label: "Plumbing, heating and HVAC", scans: 1 }]);
+    assert.deepEqual(m.countries, [{ country: "CA", scans: 1 }], "countries come from where the engine located the business");
     assert.deepEqual(m.recent.map((r) => r.domain), ["plumber-one.ca", "garden-two.ca", "bakery-three.ca"]);
     const top = m.recent[0];
     assert.deepEqual({ score: top.score, competitors: top.competitors, engine: top.engine, steps: top.steps, lead: top.leadRecordId, outcome: top.outcome }, { score: 70, competitors: 2, engine: "1.2.0", steps: 2, lead: "lead-1", outcome: "claimed" });

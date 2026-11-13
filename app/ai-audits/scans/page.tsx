@@ -39,6 +39,15 @@ function when(iso: string): string {
   return d.toLocaleString("en-CA", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/Toronto" });
 }
 
+/** "CA" -> "Canada", in English; the code itself when the runtime has no name for it. */
+function countryName(code: string): string {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
 function pct(part: number, whole: number): string {
   return whole ? `${Math.round((part / whole) * 100)}%` : "0%";
 }
@@ -122,6 +131,18 @@ export default async function FreeScansPage() {
               </ol>
             ) : (
               <p className="mt-3 text-[12.5px] text-fg-muted">Appears once the matching engine has classified a scan.</p>
+            )}
+            <h2 className="mt-5 text-sm font-semibold text-fg">Where they are</h2>
+            {metrics.countries.length ? (
+              <ol className="mt-2 flex flex-wrap gap-2">
+                {metrics.countries.map((c) => (
+                  <li key={c.country} className="rounded-md border border-hairline px-2 py-1 text-[12px] text-fg">
+                    {countryName(c.country)} <span className="tabular-nums text-fg-muted">{c.scans}</span>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="mt-2 text-[12.5px] text-fg-muted">Appears once the matching engine has located a business.</p>
             )}
           </section>
         </div>

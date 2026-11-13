@@ -44,7 +44,8 @@ export type RecentScan = {
   engagementId: string | null;
 };
 
-export type ScanMetrics = { totals: ScanTotals; days: ScanDay[]; categories: ScanCategory[]; recent: RecentScan[] };
+export type ScanCountry = { country: string; scans: number };
+export type ScanMetrics = { totals: ScanTotals; days: ScanDay[]; categories: ScanCategory[]; countries: ScanCountry[]; recent: RecentScan[] };
 
 const n = (v: unknown): number => (v === null || v === undefined || v === "" ? 0 : Number(v));
 const orNull = (v: unknown): number | null => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -107,6 +108,16 @@ export async function scanMetrics(db: Client, tenantId: string, now: Date, opts:
     })
   ).rows.map((r) => ({ label: String(r.label), scans: n(r.scans) }));
 
+  // Where the scanned businesses are: the country the matching engine located them in (engine 2.0).
+  const countries: ScanCountry[] = (
+    await db.execute({
+      sql: `SELECT upper(json_extract(enrich_json, '$.location.country')) AS country, COUNT(*) AS scans FROM site_scans
+            WHERE tenant_id = ? AND enrich_json IS NOT NULL AND json_extract(enrich_json, '$.location.country') IS NOT NULL
+            GROUP BY country ORDER BY scans DESC, country LIMIT 10`,
+      args: [tenantId],
+    })
+  ).rows.map((r) => ({ country: String(r.country), scans: n(r.scans) }));
+
   const recentSql = (steps: string) => `
     SELECT s.id, s.domain, s.status, s.outcome, s.created_at, s.enriched_at, s.error_code, s.lead_record_id, s.engagement_id,
            json_extract(s.score_json, '$.total') AS score,
@@ -142,5 +153,5 @@ export async function scanMetrics(db: Client, tenantId: string, now: Date, opts:
     engagementId: str(r.engagement_id),
   }));
 
-  return { totals, days: days.map((d) => byDay.get(d) ?? { day: d, scans: 0, claimed: 0 }), categories, recent };
+  return { totals, days: days.map((d) => byDay.get(d) ?? { day: d, scans: 0, claimed: 0 }), categories, countries, recent };
 }
