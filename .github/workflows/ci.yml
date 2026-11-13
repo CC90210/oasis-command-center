@@ -239,21 +239,10 @@ jobs:
       # If the lockfile loses a Linux entry again, this step fails before the
       # deploy does, which is where that should be found.
       - uses: ./.github/actions/install
-      # NEXT'S COMPILE CACHE (2026-11-13). The OpenNext build runs `next build`, the
-      # longest step left once the jobs run side by side (277 s on 2026-11-13). Next
-      # keeps its webpack cache in .next/cache and reuses it for files that did not
-      # change; restoring it here is Next's own advice for CI. The key is the
-      # lockfile plus the source, and a miss falls back to the newest cache for the
-      # same lockfile. A cache only skips work Next can prove is unchanged, so the
-      # artifact checked below is the same either way. CI only: the deploy builds
-      # from scratch with the production settings (deploy-cloudflare.yml).
-      - name: Restore Next's build cache
-        uses: actions/cache@v4
-        with:
-          path: .next/cache
-          key: next-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('app/**', 'components/**', 'lib/**', 'next.config.js', 'middleware.ts') }}
-          restore-keys: |
-            next-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+      # NO NEXT BUILD CACHE (2026-11-13). Restoring .next/cache was tried in #818 and taken out
+      # in #819: the first build that restored main's cache ran the Next build out of its 4 GB
+      # heap ("Reached heap limit" at 71 s), since webpack loads the persistent cache into memory.
+      # The build starts clean, as the deploy's does; the jobs running side by side are the gain.
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
       # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
