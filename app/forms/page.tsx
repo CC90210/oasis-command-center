@@ -166,6 +166,7 @@ export default async function FormsPage() {
           offers={offers?.statuses ?? null}
           recentLeads={offers?.recentLeads ?? {}}
           recentFunnel={offers?.funnel ?? {}}
+          scanWorkspace={tenantId === AI_AUDIT_TENANT_ID}
         />
       ) : null}
     </div>

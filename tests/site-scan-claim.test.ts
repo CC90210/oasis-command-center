@@ -120,6 +120,34 @@ async function main() {
     assert.deepEqual(await claim(LEAD_A, { form: START_FORM }), { ok: false, error: "wrong_form" }, "the workspace's other forms still cannot claim");
   });
 
+  // The landing hero starts the scan and then opens its page; a browser that keeps no storage gets
+  // the claim key in the address fragment (never sent to a server), and the page wipes it on arrival.
+  await check("a browser without storage still gets its claim key from the hero, and only from the fragment", async () => {
+    const replaced: string[] = [];
+    const loc = { hash: "", pathname: "/scan/s-1", search: "?utm_source=ad" };
+    const g = globalThis as unknown as { window?: unknown };
+    g.window = { location: loc, history: { state: null, replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) } };
+    try {
+      const { claimKeyFromHash, dropClaimKeyHash, scanPath } = await import("../components/scan/start-scan");
+      const key = "Ab3_-".repeat(9);
+      assert.equal(scanPath("s-1", "?utm_source=ad"), "/scan/s-1?utm_source=ad", "a kept key never goes in the address");
+      assert.equal(scanPath("s-1", "?utm_source=ad", key), `/scan/s-1?utm_source=ad#claim=${key}`);
+      assert.equal(scanPath("s-1", "", "<script>"), "/scan/s-1", "only a key of the claim key's shape is handed over");
+      loc.hash = `#claim=${key}`;
+      assert.equal(claimKeyFromHash(), key);
+      dropClaimKeyHash();
+      assert.deepEqual(replaced, ["/scan/s-1?utm_source=ad"], "the key is wiped from the address, the campaign tags stay");
+      loc.hash = "#claim=short";
+      assert.equal(claimKeyFromHash(), null);
+      loc.hash = "#section";
+      assert.equal(claimKeyFromHash(), null);
+      dropClaimKeyHash();
+      assert.equal(replaced.length, 1, "an ordinary fragment is left alone");
+    } finally {
+      delete g.window;
+    }
+  });
+
   finish("site-scan-claim");
 }
 

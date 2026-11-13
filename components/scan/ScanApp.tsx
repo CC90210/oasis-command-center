@@ -12,7 +12,7 @@ import { ScanReport } from "@/components/scan/ScanReport";
 import { ClaimForm } from "@/components/scan/ClaimForm";
 import { LiveWorkspace } from "@/components/scan/LiveWorkspace";
 import { useScanStream } from "@/components/scan/useScanStream";
-import { scanPath, startScan, storedClaimKey, trackScan } from "@/components/scan/start-scan";
+import { claimKeyFromHash, dropClaimKeyHash, scanPath, startScan, storedClaimKey, trackScan } from "@/components/scan/start-scan";
 
 /**
  * The free scan, end to end in the browser: paste a domain, POST /api/scan, then follow
@@ -36,7 +36,11 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof, cla
   const [startError, setStartError] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
   // Read once on the client; the claim section draws only after the first frame, so server and client markup agree.
-  const [claimKey, setClaimKey] = useState<string | null>(() => (typeof window !== "undefined" && initialScanId ? storedClaimKey(initialScanId) : null));
+  // A browser without storage was handed the key in the address fragment (HeroScan); it is wiped below.
+  const [claimKey, setClaimKey] = useState<string | null>(() => (typeof window !== "undefined" && initialScanId ? (storedClaimKey(initialScanId) ?? claimKeyFromHash()) : null));
+  useEffect(() => {
+    dropClaimKeyHash();
+  }, []);
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
   const inFlight = useRef(false);

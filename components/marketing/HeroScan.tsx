@@ -34,8 +34,10 @@ export function HeroScan() {
       if (!started.trapped) inFlight.current = false;
       return;
     }
-    // The scan is running already: its page follows it live (the claim key is kept for this tab).
-    window.location.assign(scanPath(started.scanId));
+    // The scan is running already: its page follows it live. The claim key is kept for this tab;
+    // a browser that keeps no storage gets it in the address fragment instead, so the visitor can
+    // still send the report they just started.
+    window.location.assign(scanPath(started.scanId, undefined, started.claimKeyKept ? null : started.claimKey));
   }
 
   return (

@@ -176,6 +176,23 @@ async function main() {
         offers: { "scan-1": { status: "live", publishedVersion: 0, headline: "Paste your website", hasVideo: false } },
         recentLeads: { "scan-1": 2 },
         recentFunnel: { "scan-1": { views: 40, video_plays: 0, community: 0, scans: 17 } },
+        scanWorkspace: true,
+      },
+    },
+    // -- 3c. another workspace's offer that happens to use the slug is an ordinary offer --
+    scanSlugElsewhere: {
+      kind: "list",
+      props: {
+        initialRows: [row("other-1", "free-scan", "Their own free scan", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "acme",
+        tenantName: "Acme",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "other-1": 1 },
+        offers: { "other-1": { status: "live", publishedVersion: 2, headline: "Our scan" } },
+        recentLeads: { "other-1": 1 },
+        recentFunnel: { "other-1": { views: 5, video_plays: 1, community: 0 } },
       },
     },
     // -- 4. Preview: canEdit && enabled only --------------------------------
@@ -356,6 +373,13 @@ async function main() {
     assert.ok(h.includes('href="/forms/scans"') && h.includes("Scan details"), "Scan details is missing");
     assert.ok(!h.includes("/forms/scan-1/edit"), "the scan's claim form must not open in the page builder");
     assert.ok(!h.includes(">Delete<"), "deleting the scan's claim form from its card would break the claim");
+  });
+  await step("another workspace's free-scan offer keeps its page builder, Delete and video count", () => {
+    const h = html.scanSlugElsewhere;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(!h.includes("Scan details") && !h.includes("Scans run"), "only the OASIS workspace's free-scan is the live scan");
+    assert.ok(h.includes("Video plays"), "an ordinary offer counts its video plays");
+    assert.ok(!h.includes('href="/scan"'), "an ordinary offer does not link the OASIS scan");
   });
 
   await step("a draft offer shows its editor Open draft and Publish, and never a Copy link to the bare form", () => {

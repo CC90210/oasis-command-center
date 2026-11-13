@@ -114,6 +114,7 @@ export function FormsListClient({
   offers = null,
   recentLeads = {},
   recentFunnel = {},
+  scanWorkspace = false,
 }: {
   initialRows: FormRow[];
   tenantLogoUrl: string | null;
@@ -136,6 +137,8 @@ export function FormsListClient({
    *  7-day window (V5a, offer_funnel_events). Missing = untracked (table not
    *  applied here yet); each metric's own null = a failed read. */
   recentFunnel?: Record<string, FunnelCounts>;
+  /** The OASIS workspace, the only one whose free-scan form is the live scan's offer (app/forms/page.tsx). */
+  scanWorkspace?: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -422,7 +425,7 @@ export function FormsListClient({
   // The free scan's offer: its page is the live /scan, built in code, so there is no page to edit
   // and its one form step is the claim the scan depends on; deleting or rebuilding it here would
   // break "Send it to the OASIS team". Its card opens the scan's details instead.
-  const isScanOffer = (r: FormRow) => r.slug === SCAN_OFFER_SLUG && !!offers?.[r.id];
+  const isScanOffer = (r: FormRow) => scanWorkspace && r.slug === SCAN_OFFER_SLUG && !!offers?.[r.id];
   const actions = (r: FormRow, offer: boolean) =>
     isScanOffer(r) ? (
       <div className="inline-flex flex-wrap items-center gap-3">
