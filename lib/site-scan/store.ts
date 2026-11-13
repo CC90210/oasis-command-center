@@ -30,7 +30,7 @@ export const SCAN_REUSE_DAYS = 7;
  * read again (findReusableScan, and insertScan resets today's row in place). Move it forward
  * whenever what a report shows changes. A report a lead claimed is never reset.
  */
-export const REPORT_FORMAT_SINCE = "2026-11-13T05:21:00.000Z";
+export const REPORT_FORMAT_SINCE = "2026-11-13T08:00:00.000Z"; // the browser read, the thin-page read and the walk (#819)
 /** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
 export const STALE_READ_MS = 3 * 60_000;
 
