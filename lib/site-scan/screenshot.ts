@@ -36,12 +36,58 @@ export async function saveScreenshot(db: Client, input: { tenantId: string; scan
   return rs.rowsAffected === 1;
 }
 
-/** The stored picture, copied into its own buffer (a Response body), or null. */
-export async function readScreenshot(db: Client, input: { tenantId: string; scanId: string }): Promise<Uint8Array<ArrayBuffer> | null> {
-  const rs = await db.execute({ sql: "SELECT screenshot_jpeg FROM site_scans WHERE tenant_id = ? AND id = ? LIMIT 1", args: [input.tenantId, input.scanId] });
+/** The pictures of the walk (bravo__262): at most this many per scan, each at most MAX_SHOT_BYTES. */
+export const MAX_SHOTS = 10;
+export const MAX_SHOT_BYTES = 150_000;
+const MAX_PAGE_URL = 2_048;
+
+export function shotPath(scanId: string, seq: number): string {
+  return `/api/scan/${scanId}/shot/${seq}`;
+}
+
+/** A picture's place in the walk and the page it shows, as the runner posted them; null when either is not right. */
+export function parseShotRef(seq: unknown, pageUrl: unknown): { seq: number; pageUrl: string } | null {
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0 || seq >= MAX_SHOTS) return null;
+  if (typeof pageUrl !== "string" || pageUrl.length > MAX_PAGE_URL) return null;
+  try {
+    const u = new URL(pageUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    u.hash = "";
+    return { seq, pageUrl: u.toString() };
+  } catch {
+    return null;
+  }
+}
+
+/** Keep one picture of the walk on its scan; a repeat of the same seq (a retried job) replaces it. */
+export async function saveShot(db: Client, input: { tenantId: string; scanId: string; seq: number; pageUrl: string; bytes: Uint8Array; now: Date }): Promise<boolean> {
+  if (input.bytes.length > MAX_SHOT_BYTES) return false;
+  const rs = await db.execute({
+    sql: `INSERT INTO site_scan_shots (tenant_id, scan_id, seq, page_url, jpeg, created_at) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (tenant_id, scan_id, seq) DO UPDATE SET page_url = excluded.page_url, jpeg = excluded.jpeg, created_at = excluded.created_at`,
+    args: [input.tenantId, input.scanId, input.seq, input.pageUrl, input.bytes, input.now.toISOString()],
+  });
+  return rs.rowsAffected >= 1;
+}
+
+export async function readShot(db: Client, input: { tenantId: string; scanId: string; seq: number }): Promise<Uint8Array<ArrayBuffer> | null> {
+  const rs = await db.execute({ sql: "SELECT jpeg FROM site_scan_shots WHERE tenant_id = ? AND scan_id = ? AND seq = ? LIMIT 1", args: [input.tenantId, input.scanId, input.seq] });
+  return bytesOf(rs.rows[0]?.jpeg);
+}
+
+export function shotsTableMissing(err: unknown): boolean {
+  return err instanceof Error && /no such table: site_scan_shots/i.test(err.message);
+}
+
+function bytesOf(v: unknown): Uint8Array<ArrayBuffer> | null {
   // libSQL hands a BLOB back as an ArrayBuffer; a local driver may give a Uint8Array view.
-  const v: unknown = rs.rows[0]?.screenshot_jpeg;
   if (v instanceof ArrayBuffer) return new Uint8Array(v.slice(0));
   if (v instanceof Uint8Array) return new Uint8Array(v);
   return null;
+}
+
+/** The stored picture, copied into its own buffer (a Response body), or null. */
+export async function readScreenshot(db: Client, input: { tenantId: string; scanId: string }): Promise<Uint8Array<ArrayBuffer> | null> {
+  const rs = await db.execute({ sql: "SELECT screenshot_jpeg FROM site_scans WHERE tenant_id = ? AND id = ? LIMIT 1", args: [input.tenantId, input.scanId] });
+  return bytesOf(rs.rows[0]?.screenshot_jpeg);
 }

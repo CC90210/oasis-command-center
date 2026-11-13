@@ -341,6 +341,16 @@ export async function purgeExpiredScans(db: Client, tenantId: string, now: Date,
     sql: `UPDATE site_scans SET ip_hash = NULL WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NOT NULL AND ip_hash IS NOT NULL`,
     args: [tenantId, at],
   });
+  // A deleted scan's pictures of the walk go with it (bravo__262; a database without the table has none).
+  try {
+    await db.execute({
+      sql: `DELETE FROM site_scan_shots WHERE tenant_id = ? AND scan_id IN (
+              SELECT DISTINCT sh.scan_id FROM site_scan_shots sh WHERE sh.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM site_scans s WHERE s.tenant_id = sh.tenant_id AND s.id = sh.scan_id) LIMIT ?)`,
+      args: [tenantId, tenantId, limit],
+    });
+  } catch (err) {
+    if (!(err instanceof Error && /no such table: site_scan_shots/i.test(err.message))) throw err;
+  }
   // A deleted scan's live feed goes with it (a claimed scan keeps both).
   try {
     await db.execute({

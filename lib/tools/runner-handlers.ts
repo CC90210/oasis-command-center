@@ -94,7 +94,7 @@ import {
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
-import { decodeScreenshot, MAX_SCREENSHOT_BYTES, saveScreenshot, screenshotPath } from "@/lib/site-scan/screenshot";
+import { decodeScreenshot, MAX_SCREENSHOT_BYTES, MAX_SHOT_BYTES, MAX_SHOTS, parseShotRef, saveScreenshot, saveShot, screenshotPath, shotPath, shotsTableMissing } from "@/lib/site-scan/screenshot";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
@@ -503,25 +503,56 @@ export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps):
   if ("field" in ref) return invalid(ref.field);
   const bytes = decodeScreenshot(auth.body.image_b64);
   if (!bytes) return invalid("image_b64", { max_bytes: MAX_SCREENSHOT_BYTES });
+  // A picture of the walk (bravo__262) names its place and the page it shows; without them it is
+  // the home page alone, as an older runner posts it.
+  const walking = auth.body.seq !== undefined || auth.body.page_url !== undefined;
+  const shot = walking ? parseShotRef(auth.body.seq, auth.body.page_url) : null;
+  if (walking && !shot) return invalid("seq", { max_shots: MAX_SHOTS });
+  if (shot && bytes.length > MAX_SHOT_BYTES) return invalid("image_b64", { max_bytes: MAX_SHOT_BYTES });
   if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return leaseLost();
   if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
   const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
   if (!scanId) return invalid("job");
+  let kept: "home" | "shot" = "home";
   try {
-    if (!(await saveScreenshot(deps.db, { tenantId: job.tenantId, scanId, bytes, now: deps.now }))) return invalid("job");
+    // The home page (the walk's first picture, or an older runner's only one) is the scan's own
+    // picture, kept on its row for the permalink.
+    if ((!shot || shot.seq === 0) && !(await saveScreenshot(deps.db, { tenantId: job.tenantId, scanId, bytes, now: deps.now }))) return invalid("job");
+    if (shot) {
+      try {
+        if (!(await saveShot(deps.db, { tenantId: job.tenantId, scanId, seq: shot.seq, pageUrl: shot.pageUrl, bytes, now: deps.now }))) return invalid("job");
+        kept = "shot";
+      } catch (err) {
+        if (!shotsTableMissing(err)) throw err;
+        // A database before bravo__262 keeps the home page only; the answer tells the runner not to walk on.
+        if (shot.seq !== 0) return notInstalled("shots_table_missing");
+      }
+    }
   } catch (err) {
     if (err instanceof Error && /no such column: screenshot_jpeg/i.test(err.message)) return notInstalled("screenshot_column_missing");
     throw err;
   }
-  const line = cleanEvent({ kind: "screenshot", text: "Took a picture of the home page as a visitor first sees it", data: { url: screenshotPath(scanId) }, at: deps.now.toISOString() });
+  const url = kept === "shot" && shot ? shotPath(scanId, shot.seq) : screenshotPath(scanId);
+  const text = shot && shot.seq > 0 ? `Looking at ${pagePath(shot.pageUrl)}` : "Took a picture of the home page as a visitor first sees it";
+  const line = cleanEvent({ kind: "screenshot", text, data: shot ? { url, page: shot.pageUrl, seq: shot.seq } : { url }, at: deps.now.toISOString() });
   if (line) {
     await appendEvents(deps.db, { tenantId: job.tenantId, scanId, source: "runner", events: [line] }).catch((err: unknown) => {
       if (!eventsTableMissing(err)) throw err;
     });
   }
-  return toolsJson(200, { ok: true, bytes: bytes.length });
+  return toolsJson(200, { ok: true, bytes: bytes.length, ...(shot ? { seq: shot.seq, walk: kept === "shot" } : {}) });
+}
+
+/** A page's path and query, for the feed ("Looking at /contact"). */
+function pagePath(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}` || "/";
+  } catch {
+    return url;
+  }
 }
 
 // ---------------------------------------------------------------------------

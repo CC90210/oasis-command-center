@@ -114,6 +114,50 @@ async function main() {
     assert.equal((await feedOf()).filter((e) => e.kind === "screenshot").length, before);
   });
 
+  // The walk (bravo__262): the home page first, then each page the runner opens, each picture shown as it arrives.
+  await applyMigrationFile(db, join(ROOT, "database", "turso", "bravo__262_site_scan_shots.sql"));
+  await check("the walk's pictures are kept in order with their pages; the home page is the scan's own picture too", async () => {
+    const home = jpeg(900);
+    const a = await post({ ...base, seq: 0, page_url: "https://acme-plumbing.ca/#top", image_b64: b64(home) });
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    assert.deepEqual([a.body.seq, a.body.walk], [0, true], "the runner is told it may walk on");
+    assert.equal((await shots.readScreenshot(db, { tenantId: OASIS, scanId: row.id }))?.length, 900, "the home page replaces the earlier picture on the row");
+    assert.equal((await shots.readShot(db, { tenantId: OASIS, scanId: row.id, seq: 0 }))?.length, 900);
+    const contact = jpeg(1_200);
+    const c = await post({ ...base, seq: 1, page_url: "https://acme-plumbing.ca/contact?ref=nav", image_b64: b64(contact) });
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+    assert.equal((await shots.readShot(db, { tenantId: OASIS, scanId: row.id, seq: 1 }))?.length, 1_200);
+    assert.equal((await shots.readScreenshot(db, { tenantId: OASIS, scanId: row.id }))?.length, 900, "a later page never replaces the home page");
+    const lines = (await feedOf()).filter((e) => e.kind === "screenshot").slice(-2);
+    assert.deepEqual(lines.map((e) => [e.text, e.data?.url, e.data?.page, e.data?.seq]), [
+      ["Took a picture of the home page as a visitor first sees it", `/api/scan/${row.id}/shot/0`, "https://acme-plumbing.ca/", 0],
+      ["Looking at /contact?ref=nav", `/api/scan/${row.id}/shot/1`, "https://acme-plumbing.ca/contact?ref=nav", 1],
+    ]);
+    const again = await post({ ...base, seq: 1, page_url: "https://acme-plumbing.ca/contact", image_b64: b64(jpeg(700)) });
+    assert.equal(again.status, 200, "a retried job may post the same place again");
+    assert.equal((await shots.readShot(db, { tenantId: OASIS, scanId: row.id, seq: 1 }))?.length, 700);
+  });
+
+  await check("a picture of the walk is refused past the walk's length, without a real page, or past its size", async () => {
+    assert.equal((await post({ ...base, seq: shots.MAX_SHOTS, page_url: "https://acme-plumbing.ca/x", image_b64: b64(jpeg(64)) })).status, 422);
+    assert.equal((await post({ ...base, seq: 2, page_url: "javascript:alert(1)", image_b64: b64(jpeg(64)) })).status, 422);
+    assert.equal((await post({ ...base, seq: 2, image_b64: b64(jpeg(64)) })).status, 422, "a place without its page");
+    assert.equal((await post({ ...base, seq: "2", page_url: "https://acme-plumbing.ca/x", image_b64: b64(jpeg(64)) })).status, 422);
+    assert.equal((await post({ ...base, seq: 2, page_url: "https://acme-plumbing.ca/x", image_b64: b64(jpeg(shots.MAX_SHOT_BYTES + 1)) })).status, 422);
+    assert.equal(await shots.readShot(db, { tenantId: OASIS, scanId: row.id, seq: 2 }), null);
+    assert.equal(shots.parseShotRef(0, "https://a.ca/p#frag")?.pageUrl, "https://a.ca/p");
+    assert.equal(shots.parseShotRef(-1, "https://a.ca/"), null);
+  });
+
+  await check("a deleted scan's pictures go with it; a claimed scan keeps them", async () => {
+    const { purgeExpiredScans } = await import("../lib/site-scan/store");
+    const count = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM site_scan_shots WHERE scan_id = ?", args: [row.id] })).rows[0].n);
+    assert.equal(await count(), 2);
+    await db.execute({ sql: "UPDATE site_scans SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", args: [row.id] });
+    await purgeExpiredScans(db, OASIS, t0);
+    assert.equal(await count(), 0, "the pictures are deleted with the scan");
+  });
+
   finish("site-scan-screenshot");
 }
 
