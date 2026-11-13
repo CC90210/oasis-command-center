@@ -829,10 +829,14 @@ async function main() {
     assert.ok(!titles.includes(z.updated_at), "and not the record's updated_at");
   });
   await check("last touch reads every source the Conversations tab reads, per client, and equals the thread's latest message", async () => {
+    // The Health tab counts days against the real clock, so this check's dates count from it too, not
+    // from T0: a touch two days before a fixed T0 is 46 days old by 2026-11-13 and reads "At risk".
+    const now = Date.now(); // read once: the same date is inserted and then expected
+    const live = (days: number) => new Date(now - days * 86_400_000).toISOString();
     // Hand-added clients (no deal), created 60 days ago, each reached through ONE source only.
     const made: Record<string, typeof X> = {};
     const mk = async (key: string, email: string, phone: string | null) => {
-      const r = await store.createCustomer(db, OASIS, { ...base, display_name: `Touch ${key}`, primary_email: email, primary_phone: phone }, USERS.cc.id, new Date(ago(60)));
+      const r = await store.createCustomer(db, OASIS, { ...base, display_name: `Touch ${key}`, primary_email: email, primary_phone: phone }, USERS.cc.id, new Date(live(60)));
       assert.ok(r.ok, JSON.stringify(r));
       made[key] = r.customer;
     };
@@ -844,45 +848,45 @@ async function main() {
     await mk("approved", "owner@approved.test", null);
     await mk("welcome", "owner@welcome.test", null);
     await mk("unsure", "owner@unsure.test", null);
-    await store.addContact(db, OASIS, made.contact.id, { name: "Ops", email: "ops@contact.test", phone: null, role: null }, new Date(ago(59)));
-    await store.addContact(db, OASIS, made.inbound.id, { name: "Cell", email: null, phone: "514-555-0199", role: null }, new Date(ago(59)));
+    await store.addContact(db, OASIS, made.contact.id, { name: "Ops", email: "ops@contact.test", phone: null, role: null }, new Date(live(59)));
+    await store.addContact(db, OASIS, made.inbound.id, { name: "Cell", email: null, phone: "514-555-0199", role: null }, new Date(live(59)));
     await db.batch(
       [
         // An email to a CONTACT's address, not stamped with the client (sent from the inbox, say).
-        li("li-t-contact", OASIS, { preview: "TO-CONTACT", to_email: "Ops@Contact.test", at: ago(2) }),
+        li("li-t-contact", OASIS, { preview: "TO-CONTACT", to_email: "Ops@Contact.test", at: live(2) }),
         // A text to the primary phone: to_phone, no email at all.
-        li("li-t-sms", OASIS, { channel: "sms", type: "sms_sent", preview: "TO-PHONE", to_phone: "+15145550101", at: ago(3) }),
+        li("li-t-sms", OASIS, { channel: "sms", type: "sms_sent", preview: "TO-PHONE", to_phone: "+15145550101", at: live(3) }),
         // A text FROM a contact's phone.
         {
           sql: "INSERT INTO lead_interactions (id, tenant_id, type, channel, direction, content_preview, from_phone, created_at) VALUES (?, ?, 'sms_received', 'sms', 'inbound', 'FROM-CONTACT-PHONE', '+15145550199', ?)",
-          args: ["li-t-inbound", OASIS, ago(4)],
+          args: ["li-t-inbound", OASIS, live(4)],
         },
         // Stamped with the client's id, to an address no longer on file.
-        li("li-t-stamped", OASIS, { preview: "STAMPED", to_email: "gone@elsewhere.test", at: ago(5), metadata: JSON.stringify({ customer_id: made.stamped.id }) }),
-        slack("ce-t-slack", OASIS, made.slack.id, "SLACK-ONLY", ago(6)),
+        li("li-t-stamped", OASIS, { preview: "STAMPED", to_email: "gone@elsewhere.test", at: live(5), metadata: JSON.stringify({ customer_id: made.stamped.id }) }),
+        slack("ce-t-slack", OASIS, made.slack.id, "SLACK-ONLY", live(6)),
         {
           sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
                   payload_hash, status, executed_at, execution_result, idempotency_key, created_at, updated_at)
                 VALUES ('ap-t-approved', ?, 'client_success', 'agent', 'client-success', 'send_email', 'Email', ?, ?, 'h', 'executed', ?, ?, 'ap-t-approved', ?, ?)`,
-          args: [OASIS, `customer:${made.approved.id}`, JSON.stringify({ to: "owner@approved.test", subject: "Hi", body: "APPROVED-SEND" }), ago(7),
-            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), ago(8), ago(7)],
+          args: [OASIS, `customer:${made.approved.id}`, JSON.stringify({ to: "owner@approved.test", subject: "Hi", body: "APPROVED-SEND" }), live(7),
+            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), live(8), live(7)],
         },
         // A paying AI audit client's welcome email, its own approval kind, sent; and a second one still waiting (Codex review of #754).
         {
           sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
                   payload_hash, status, executed_at, execution_result, idempotency_key, created_at, updated_at)
                 VALUES ('ap-t-welcome', ?, NULL, 'routine', 'ai-audit', 'welcome_ai_audit', 'Welcome email', ?, ?, 'h', 'executed', ?, ?, 'ap-t-welcome', ?, ?)`,
-          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome", body: "WELCOME-SEND" }), ago(9),
-            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), ago(10), ago(9)],
+          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome", body: "WELCOME-SEND" }), live(9),
+            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), live(10), live(9)],
         },
         {
           sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
                   payload_hash, status, idempotency_key, created_at, updated_at)
                 VALUES ('ap-t-welcome-waiting', ?, NULL, 'routine', 'ai-audit', 'welcome_ai_audit', 'Welcome email', ?, ?, 'h2', 'pending', 'ap-t-welcome-waiting', ?, ?)`,
-          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome again", body: "WELCOME-WAITING" }), ago(11), ago(11)],
+          args: [OASIS, `customer:${made.welcome.id}`, JSON.stringify({ to: "owner@welcome.test", subject: "Welcome again", body: "WELCOME-WAITING" }), live(11), live(11)],
         },
         // A send the mail server could not confirm is the ONLY thing for this one.
-        li("li-t-unsure", OASIS, { type: "email_delivery_unknown", preview: "MAYBE-SENT", to_email: "owner@unsure.test", at: ago(1), metadata: JSON.stringify({ customer_id: made.unsure.id }) }),
+        li("li-t-unsure", OASIS, { type: "email_delivery_unknown", preview: "MAYBE-SENT", to_email: "owner@unsure.test", at: live(1), metadata: JSON.stringify({ customer_id: made.unsure.id }) }),
       ],
       "write",
     );
@@ -892,14 +896,14 @@ async function main() {
       sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
       args: [LEAD_NOTE, OASIS, JSON.stringify({ stage: "launched", company: "Note Only Co", name: "Nora Note", email: "nora@noteonly.test" })],
     });
-    const noteConv = await store.convertLeadToCustomer(db, OASIS, LEAD_NOTE, USERS.cc.id, new Date(ago(60)));
+    const noteConv = await store.convertLeadToCustomer(db, OASIS, LEAD_NOTE, USERS.cc.id, new Date(live(60)));
     assert.ok(noteConv.ok, JSON.stringify(noteConv));
-    await db.batch([li("li-t-note", OASIS, { lead_id: LEAD_NOTE, channel: "note", type: "note", preview: "INTERNAL-ONLY", at: ago(1) })], "write");
+    await db.batch([li("li-t-note", OASIS, { lead_id: LEAD_NOTE, channel: "note", type: "note", preview: "INTERNAL-ONLY", at: live(1) })], "write");
     assert.equal((await activity.lastTouchFor(db, OASIS, [noteConv.customer])).get(noteConv.customer.id), null, "an internal note on the deal is not contact");
     const all = Object.values(made);
     const touch = await activity.lastTouchFor(db, OASIS, all);
     const expected: Record<string, string | null> = {
-      contact: ago(2), sms: ago(3), inbound: ago(4), stamped: ago(5), slack: ago(6), approved: ago(7), welcome: ago(9), unsure: null,
+      contact: live(2), sms: live(3), inbound: live(4), stamped: live(5), slack: live(6), approved: live(7), welcome: live(9), unsure: null,
     };
     for (const [key, c] of Object.entries(made)) {
       assert.equal(touch.get(c.id), expected[key], `${key}: last touch`);
@@ -915,7 +919,7 @@ async function main() {
     const h = await page(record(made.contact.id, "health"));
     assert.doesNotMatch(h, /No contact recorded since the record was created/);
     assert.doesNotMatch(h, /\bAt risk\b/);
-    // (The page counts days against the real clock; the fixtures are 60 days before T0.)
+    // (The page counts days against the real clock, as the fixtures above do.)
     assert.match(await page(record(made.unsure.id, "health")), /No contact recorded since the record was created in \d+ days/, "an unconfirmed send is not contact");
   });
   await check("the list and the record carry a health badge", async () => {
