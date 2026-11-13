@@ -81,6 +81,7 @@ import {
   MARKETING_MEDIA_BUCKET,
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
+  POLL_SOON_SECONDS,
   RUN_TIMEOUT_SECONDS,
   SCAN_PAGES_BODY_MAX_BYTES,
   SCREENSHOT_BODY_MAX_BYTES,
@@ -95,6 +96,7 @@ import {
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
+import { scanWorkPending } from "@/lib/site-scan/store";
 import { decodeScreenshot, MAX_SCREENSHOT_BYTES, MAX_SHOT_BYTES, MAX_SHOTS, parseShotRef, saveScreenshot, saveShot, screenshotPath, shotPath, shotsTableMissing } from "@/lib/site-scan/screenshot";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
@@ -259,7 +261,15 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
 
   const leaseId = newLeaseId();
   const job = await claimNextJob(deps.db, { tenantIds: ident.tenantIds, toolKeys: tools, runnerKey: ident.runnerKey, leaseId, now: deps.now });
-  if (!job) return toolsJson(200, { ok: true, job: null, poll_after_seconds: POLL_AFTER_SECONDS });
+  if (!job) {
+    // A scan being worked on in one of this runner's workspaces: its job is seconds away, so the
+    // runner is asked back at once. Failing to read that is the usual wait, never a failed claim.
+    const soon = await scanWorkPending(deps.db, ident.tenantIds, deps.now).catch((err: unknown) => {
+      console.error("[tools.claim] scan work pending unreadable", err instanceof Error ? err.message : String(err));
+      return false;
+    });
+    return toolsJson(200, { ok: true, job: null, poll_after_seconds: soon ? POLL_SOON_SECONDS : POLL_AFTER_SECONDS });
+  }
   const limits = {
     max_bytes: MAX_VIDEO_BYTES,
     lease_seconds: LEASE_SECONDS,

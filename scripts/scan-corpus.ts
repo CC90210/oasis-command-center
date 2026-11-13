@@ -39,6 +39,8 @@ const fileAt = args.indexOf("--file");
 const fromFile = fileAt >= 0 ? readFileSync(args[fileAt + 1], "utf8").split(/\r?\n/).map((l) => l.replace(/#.*/, "").trim()).filter(Boolean) : [];
 const skip = new Set([...(outAt >= 0 ? [outAt, outAt + 1] : []), ...(fileAt >= 0 ? [fileAt, fileAt + 1] : [])]);
 const sites = [...fromFile, ...args.filter((a, i) => !a.startsWith("--") && !skip.has(i))];
+/** The sites this run has scanned, by scan key: a repeat is said once, not read again. */
+const scanned = new Set<string>();
 
 /** The runner's worker: one JSON line in, one out. */
 function startWorker() {
@@ -82,9 +84,14 @@ async function scanOne(db: Db, worker: ReturnType<typeof startWorker>, input: st
   const target = siteTarget(input);
   if (target.kind !== "site") return { input, outcome: `refused at the door: ${target.kind}${"reason" in target ? ` (${String(target.reason)})` : ""}` };
   await seedRunner(db, new Date(), ["site_scan_enrich"], "bea:corpus");
-  const { row, started } = await insertScan(db, { tenantId: OASIS, domain: scanKeyOf(target), url: target.start, ipHash: null, now: new Date() });
-  // The same site twice in one run ("melnik.ca" and "WWW.MELNIK.CA/") is one scan, as in production: said, not re-reported.
-  if (!started) return { input, outcome: `the same scan as ${row.domain} earlier in this run (one per site per day)` };
+  // The same site twice in one run ("melnik.ca" and "WWW.MELNIK.CA/") is said, not re-run: in production a
+  // repeat is a fresh read in front of its visitor (insertScan resets the day's finished row), which here
+  // would only report the site twice.
+  const domain = scanKeyOf(target);
+  if (scanned.has(domain)) return { input, outcome: `the same site as ${domain} earlier in this run` };
+  scanned.add(domain);
+  const { row, started } = await insertScan(db, { tenantId: OASIS, domain, url: target.start, ipHash: null, now: new Date() });
+  if (!started) return { input, outcome: `a read of ${row.domain} is already in progress` };
   const site = blockWorker
     ? { fetch: async () => new Response("Forbidden", { status: 403, headers: { "content-type": "text/html" } }), clock: () => Date.now() }
     : defaultSiteDeps();

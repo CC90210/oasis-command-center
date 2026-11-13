@@ -1,10 +1,13 @@
 /**
- * POST /api/scan — start (or reuse) a free scan of a public website.
+ * POST /api/scan — start a free scan of a public website (or join the one of the same site
+ * already running).
  *
  * Public: a visitor has no session. Guards, in order: same origin, 5 scans per hour per address,
  * a honeypot a script fills, a body under 4 KB, and the audit's own address rules (public names
  * only; a social profile is told so). The response is immediate; the page then opens
- * GET /api/scan/:id/stream, which runs Tier 0 live (this route's after() is the fallback).
+ * GET /api/scan/:id/stream, which runs Tier 0 live (this route's after() is the fallback). Every
+ * scan a visitor starts is a real run they watch: a finished report of the same site is read
+ * again, never handed back (lib/site-scan/store.ts insertScan).
  */
 import { NextResponse, after } from "next/server";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
@@ -16,7 +19,7 @@ import { siteTarget } from "@/lib/ai-audit/site-url";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { claimKeyFor } from "@/lib/site-scan/claim";
 import { defaultTier0Deps, runTier0Live } from "@/lib/site-scan/run";
-import { claimTier0, findReusableScan, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
+import { claimTier0, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,12 +54,9 @@ export async function POST(req: Request): Promise<Response> {
   if (!(await siteScanTablesInstalled(db))) return json(503, { ok: false, error: "not_installed" });
   const now = new Date();
   const domain = scanKeyOf(target);
-  // The claim key goes only to a browser that asked for this scan (lib/site-scan/claim.ts). A
-  // visitor re-scanning the same domain gets it too: they could have started the scan themselves.
-  const existing = await findReusableScan(db, AI_AUDIT_TENANT_ID, domain, now);
-  if (existing) return json(200, { ok: true, scan_id: existing.id, reused: true, claim_key: claimKeyFor(existing.id) });
-
   const ipHash = ip === "unknown" ? null : sha256(`site-scan:${ip}`).slice(0, 32);
+  // The claim key goes only to a browser that asked for this scan (lib/site-scan/claim.ts). A
+  // visitor joining the run of the same domain gets it too: they could have started it themselves.
   const { row, started } = await insertScan(db, { tenantId: AI_AUDIT_TENANT_ID, domain, url: target.start, ipHash, now });
   if (started) {
     // The visitor's live stream claims Tier 0 and runs it in its own connection
@@ -78,5 +78,5 @@ export async function POST(req: Request): Promise<Response> {
       await runTier0Live(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id }, { ...defaultTier0Deps(), pagespeed: null });
     });
   }
-  return json(started ? 201 : 200, { ok: true, scan_id: row.id, reused: !started, claim_key: claimKeyFor(row.id) });
+  return json(started ? 201 : 200, { ok: true, scan_id: row.id, joined: !started, claim_key: claimKeyFor(row.id) });
 }

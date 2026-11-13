@@ -61,6 +61,11 @@ export const MAX_LEASE_HOLD_SECONDS = RUN_TIMEOUT_SECONDS + UPLOAD_URL_TTL_SECON
 export const MEET_TRANSCRIBE_MAX_HOLD_SECONDS = 24 * 60 * 60;
 /** How long a runner waits between claims when there is nothing to do. */
 export const POLL_AFTER_SECONDS = 30;
+/**
+ * ...and while a visitor's free scan is being worked on (lib/site-scan/store.ts scanWorkPending):
+ * its runner job is seconds away, and the visitor is watching for the match and the pictures.
+ */
+export const POLL_SOON_SECONDS = 2;
 /** At most this many runner jobs queued or running per workspace. */
 export const MAX_RUNNER_JOBS_IN_FLIGHT = 5;
 /** The bucket every Library video lives in (private; signed URLs only). */

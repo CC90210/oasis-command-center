@@ -22,6 +22,8 @@
  */
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   CLIENT_A,
   ENV,
@@ -83,6 +85,18 @@ async function main() {
     assert.equal(a.status, 200, JSON.stringify(a.body));
     assert.equal(a.body.job, null);
     assert.equal(a.body.poll_after_seconds, 30);
+  });
+
+  await check("a free scan being worked on asks the runner back in two seconds; none, the usual wait", async () => {
+    await db.executeMultiple(readFileSync(join(__dirname, "..", "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
+    const { insertScan, setStatus } = await import("../lib/site-scan/store");
+    const now = new Date("2026-10-09T01:00:00.000Z");
+    const { row } = await insertScan(db, { tenantId: OASIS, domain: "poll-hint.example", url: "https://poll-hint.example/", ipHash: null, now });
+    const working = await claim(now);
+    assert.equal(working.status, 200, JSON.stringify(working.body));
+    assert.equal(working.body.poll_after_seconds, 2, "a read in progress: its runner job is seconds away");
+    await setStatus(db, { tenantId: OASIS, id: row.id, status: "done", stage: "done", now });
+    assert.equal((await claim(now)).body.poll_after_seconds, 30, "nothing being worked on: the usual wait");
   });
 
   const T0 = new Date("2026-10-09T02:00:00.000Z");
