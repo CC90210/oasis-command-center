@@ -100,4 +100,15 @@ const dash = extractSignals({ domain: "sj.example", pages: [page("https://sj.exa
 assert.equal(dash.business_name, "Smith - Jones Law", "a hyphen is part of a name");
 assert.ok(!s.services.includes("Services"), "the fixture's bare Services nav link is a heading");
 
+// Live scan 2026-11-13 (cuisina.ca, Magento): the title "Home page | Cuisina" headed the report as
+// "Home page". A page's own label is never the name, wherever it appears.
+const home = extractSignals({ domain: "cuisina.example", pages: [page("https://cuisina.example/", `<html><head><title>Home page | Cuisina</title></head><body></body></html>`)] });
+assert.equal(home.business_name, "Cuisina");
+const accueil = extractSignals({ domain: "lune.example", pages: [page("https://lune.example/", `<html><head><title>Accueil - Fleuriste Lune</title></head><body></body></html>`)] });
+assert.equal(accueil.business_name, "Fleuriste Lune");
+const ogHome = extractSignals({ domain: "og.example", pages: [page("https://og.example/", `<html><head><title>Bakery Nord | Fresh bread</title><meta property="og:site_name" content="Home"></head><body></body></html>`)] });
+assert.equal(ogHome.business_name, "Bakery Nord", "a generic og:site_name falls through to the title");
+const onlyHome = extractSignals({ domain: "bare.example", pages: [page("https://bare.example/", `<html><head><title>Homepage</title></head><body></body></html>`)] });
+assert.equal(onlyHome.business_name, "bare.example", "nothing but a page label: the domain");
+
 console.log("site-scan-signals: ok");

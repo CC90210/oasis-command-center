@@ -93,6 +93,11 @@ const YEAR_RE = /(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-\u2013]\s*)?((?:19|20)\d
 // A nav label that is only a heading ("Services", "Our products") names no service. Squarespace
 // prefixes a dropdown's hidden label with "Folder:", which the link text picks up.
 const NAV_FOLDER = /^folder:\s*/i;
+/**
+ * A page's own label, never the business's name: "Home page | Cuisina" (Magento's default title,
+ * live scan 2026-11-13) is Cuisina, "Accueil - Fleuriste Lune" is Fleuriste Lune.
+ */
+const GENERIC_PAGE_LABEL = /^(?:home|home ?page|main page|welcome|accueil|page d'accueil|bienvenue|inicio|startseite|index|untitled|official (?:web)?site)$/i;
 const HEADING_LABEL = /^(?:our |all |view (?:all |our )?|see (?:all |our )?)?(?:services?|solutions?|treatments?|products?|programs?|classes?|lessons?|packages?|plans?|menu)$/i;
 const SERVICE_WORDS = /\b(services?|solutions?|treatments?|repairs?|installation|cleaning|design|consulting|therapy|plans?|packages?|menu|products?|programs?|classes?|lessons?)\b/i;
 const PRICING_RE = /\b(pricing|prices?|rates?|\$\s?\d{2,}|starting at|per (?:hour|month|session|visit)|packages?)\b/i;
@@ -325,11 +330,12 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
   }
 
   const separator = /\s[|\-\u2013\u2014:·\u2022]\s/;
-  const nameFromTitle = title ? title.split(separator).map((s) => s.trim()).filter(Boolean) : [];
+  const named = (s: string | null | undefined): string | null => (s && !GENERIC_PAGE_LABEL.test(s.trim()) ? s : null);
+  const nameFromTitle = title ? title.split(separator).map((s) => s.trim()).filter((s) => !!named(s)) : [];
   // og:site_name is often the whole page title ("Harper's Garden Centre | Hamilton, Ontario"): the
   // name is what comes before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
-  const ogName = ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null;
-  const businessName = clean(ogName ?? schemaNames[0] ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
+  const ogName = named(ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null);
+  const businessName = clean(ogName ?? schemaNames.find((n) => !!named(n)) ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
   const tagline = clean(h1[0] ?? metaDescription ?? (nameFromTitle.length > 1 ? nameFromTitle.slice(1).join(" ") : null), 200);
   const words = allText.split(/\s+/).filter(Boolean);
 
