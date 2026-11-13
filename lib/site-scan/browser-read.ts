@@ -33,6 +33,23 @@ export function wantsBrowserRead(unread: string | null | undefined): boolean {
   return !!unread && (BROWSER_READ_UNREAD as readonly string[]).includes(unread);
 }
 
+/** Fewer readable words than this, over every page read, is a page a browser has yet to draw. */
+export const THIN_WORDS = 60;
+
+/**
+ * A read that reached the site but found almost nothing on it: under THIN_WORDS words, or too
+ * little to score. Live 2026-11-13: mrrooter.ca and bettys.co.uk came back as one page with no
+ * name and no score, where a browser sees a full site.
+ */
+export function isThinRead(facts: { site: { unread: string | null } ; signals: { word_count: number } | null }, score: { total: number | null }): boolean {
+  return !facts.site.unread && ((facts.signals?.word_count ?? 0) < THIN_WORDS || score.total === null);
+}
+
+/** Whether the runner reads this scan's site in its browser before it matches. */
+export function needsBrowserRead(site: { unread: string | null; thin?: boolean } | null | undefined): boolean {
+  return !!site && (wantsBrowserRead(site.unread) || site.thin === true);
+}
+
 /** One address as a key: absolute, no fragment. */
 export function pageKey(url: string): string | null {
   try {

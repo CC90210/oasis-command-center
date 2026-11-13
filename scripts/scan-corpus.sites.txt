@@ -1,0 +1,40 @@
+# The free scan's regression corpus (scripts/scan-corpus.ts). One site per line; text after # is a note.
+# Every kind of address a visitor may paste, kept here so a change is tried on all of them.
+#
+# Canadian local businesses (the directory's home ground)
+melnik.ca                      # fabrication; once read as printing
+cuisina.ca                     # Quebec kitchenware shop, French, Magento "Home page" title
+fleuristemckenna.ca            # Quebec florist, French, named entities in titles
+mrrooter.ca                    # franchise plumber
+harpersgardencentre.ca         # Squarespace garden centre
+mountainelectric.ca            # GoDaddy builder; stalled the Worker
+baycitypaints.ca               # paint store
+lillipot.ca                    # florist
+# United States
+mandymanagement.com            # property manager, Connecticut; refused the Worker (403)
+joespizzanyc.com               # pizzeria, New York
+katzsdelicatessen.com          # deli, New York
+tartinebakery.com              # bakery, San Francisco
+bluebottlecoffee.com           # coffee, Shopify store
+# United Kingdom, Australia, Europe
+dishoom.com                    # restaurant group, UK
+monmouthcoffee.co.uk           # coffee, London
+bettys.co.uk                   # tea rooms, Yorkshire
+lunelacroissanterie.com        # bakery, Melbourne
+poilane.com                    # bakery, Paris (French)
+dallmayr.com                   # delicatessen, Munich (German)
+casalucio.es                   # restaurant, Madrid (Spanish)
+# Platforms and heavy sites
+allbirds.com                   # Shopify brand
+linear.app                     # software, JavaScript app
+notion.com                     # software, large marketing site
+nike.com                       # bot-protected (Akamai)
+zara.com                       # bot-protected, redirects by country
+# Addresses as people type them
+WWW.MELNIK.CA/                 # capitals, www, trailing slash
+https://melnik.ca/contact?utm_source=test   # a deep link with a campaign tag
+info.cern.ch                   # http only, one tiny page
+bücher.de                      # an accented (IDN) domain
+thisdomaindoesnotexist-oasis-scan.com      # does not exist
+facebook.com/joespizzanyc      # a social profile, not a website
+joespizza                      # not an address at all

@@ -4,7 +4,7 @@
  * Run: node --conditions=react-server --import tsx tests/site-scan-signals.test.ts
  */
 import assert from "node:assert/strict";
-import { extractSignals } from "../lib/site-scan/signals";
+import { extractSignals, tidyName } from "../lib/site-scan/signals";
 import { runSiteChecks, type PageSnapshot } from "../lib/ai-audit/site-checks";
 
 function page(url: string, html: string, status = 200): PageSnapshot {
@@ -110,5 +110,14 @@ const ogHome = extractSignals({ domain: "og.example", pages: [page("https://og.e
 assert.equal(ogHome.business_name, "Bakery Nord", "a generic og:site_name falls through to the title");
 const onlyHome = extractSignals({ domain: "bare.example", pages: [page("https://bare.example/", `<html><head><title>Homepage</title></head><body></body></html>`)] });
 assert.equal(onlyHome.business_name, "bare.example", "nothing but a page label: the domain");
+
+// Live 2026-11-13: "Mandy Management Home" headed a report; a greeting is not part of a name either.
+assert.equal(tidyName("Mandy Management Home"), "Mandy Management");
+assert.equal(tidyName("Welcome to Joe's Pizza"), "Joe's Pizza");
+assert.equal(tidyName("Bienvenue chez Fleuriste Lune"), "Fleuriste Lune");
+assert.equal(tidyName("Sweet Home"), "Sweet Home", "a trailing label leaves at least two words, or stays");
+assert.equal(tidyName("Home Depot"), "Home Depot", "only a trailing label goes");
+const greeted = extractSignals({ domain: "mm.example", pages: [page("https://mm.example/", `<html><head><title>Mandy Management Home</title></head><body></body></html>`)] });
+assert.equal(greeted.business_name, "Mandy Management");
 
 console.log("site-scan-signals: ok");

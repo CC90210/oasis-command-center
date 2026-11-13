@@ -98,6 +98,19 @@ const NAV_FOLDER = /^folder:\s*/i;
  * live scan 2026-11-13) is Cuisina, "Accueil - Fleuriste Lune" is Fleuriste Lune.
  */
 const GENERIC_PAGE_LABEL = /^(?:home|home ?page|main page|welcome|accueil|page d'accueil|bienvenue|inicio|startseite|index|untitled|official (?:web)?site)$/i;
+/**
+ * A name with a page's greeting or label around it: "Welcome to Joe's Pizza" is Joe's Pizza, "Mandy
+ * Management Home" (live scan 2026-11-13) is Mandy Management. A trailing label is taken off only
+ * when two words are left, so "Sweet Home" stays a name.
+ */
+const LEADING_GREETING = /^(?:welcome to(?: the)?|bienvenue (?:chez|[aà]|sur)|willkommen (?:bei|im|in der)|bienvenido a|benvenuti (?:da|a))\s+/i;
+const TRAILING_LABEL = /\s+(?:home ?page|home|accueil|startseite|official (?:web)?site)$/i;
+export function tidyName(name: string): string {
+  let out = name.trim().replace(LEADING_GREETING, "");
+  const cut = out.replace(TRAILING_LABEL, "");
+  if (cut !== out && cut.trim().split(/\s+/).length >= 2) out = cut;
+  return out.trim() || name.trim();
+}
 const HEADING_LABEL = /^(?:our |all |view (?:all |our )?|see (?:all |our )?)?(?:services?|solutions?|treatments?|products?|programs?|classes?|lessons?|packages?|plans?|menu)$/i;
 const SERVICE_WORDS = /\b(services?|solutions?|treatments?|repairs?|installation|cleaning|design|consulting|therapy|plans?|packages?|menu|products?|programs?|classes?|lessons?)\b/i;
 const PRICING_RE = /\b(pricing|prices?|rates?|\$\s?\d{2,}|starting at|per (?:hour|month|session|visit)|packages?)\b/i;
@@ -335,7 +348,8 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
   // og:site_name is often the whole page title ("Harper's Garden Centre | Hamilton, Ontario"): the
   // name is what comes before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
   const ogName = named(ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null);
-  const businessName = clean(ogName ?? schemaNames.find((n) => !!named(n)) ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
+  const chosenName = ogName ?? schemaNames.find((n) => !!named(n)) ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]);
+  const businessName = clean(chosenName ? tidyName(chosenName) : input.domain, 80) ?? input.domain;
   const tagline = clean(h1[0] ?? metaDescription ?? (nameFromTitle.length > 1 ? nameFromTitle.slice(1).join(" ") : null), 200);
   const words = allText.split(/\s+/).filter(Boolean);
 

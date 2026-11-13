@@ -22,7 +22,7 @@ import { extractSignals } from "@/lib/site-scan/signals";
 import { getScan, saveBrowserRead, saveTier0, setStatus } from "@/lib/site-scan/store";
 import { appendEvents, cleanEvent, eventsTableMissing, EventSink, NO_EVENTS, type CleanEvent, type ScanEvents } from "@/lib/site-scan/events";
 import { checkLines, pageLine, planLine, scoreLines, signalLines, speedLine, type Line } from "@/lib/site-scan/live";
-import { replayRead, wantsBrowserRead, type BrowserPage } from "@/lib/site-scan/browser-read";
+import { isThinRead, needsBrowserRead, replayRead, wantsBrowserRead, type BrowserPage } from "@/lib/site-scan/browser-read";
 import { FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "@/lib/site-scan/types";
 
 export const ENRICH_TOOL_KEY = "site_scan_enrich" as const;
@@ -164,6 +164,13 @@ export async function runTier0(
   }
 
   const { facts, score, narrative } = analyseRead(row.domain, report, pagespeed, deps.now().toISOString(), say);
+  if (isThinRead(facts, score)) {
+    // Set either way: a finished thin report is read again by the next visitor (store EMPTY_DONE).
+    facts.site.thin = true;
+    if (await enrichRunnerLive(db, input.tenantId, deps.now())) {
+      say({ kind: "note", text: "Almost nothing on the page could be read without a browser (it is drawn by JavaScript), so a real browser will read it next" });
+    }
+  }
 
   if (report.unread) {
     // Refused, not answered, or shown a bot check: hosts that block Cloudflare's network do this to
@@ -286,7 +293,7 @@ export async function browserRead(
   input: { tenantId: string; scanId: string; pages: BrowserPage[]; lastRound: boolean; now: Date },
 ): Promise<{ ok: true; need: string[] } | { ok: true; need: null; unread: string | null } | { ok: false; code: "not_wanted" }> {
   const row = await getScan(db, input.tenantId, input.scanId);
-  if (!row || row.status !== "enriching" || !row.facts || !wantsBrowserRead(row.facts.site.unread)) return { ok: false, code: "not_wanted" };
+  if (!row || row.status !== "enriching" || !row.facts || !needsBrowserRead(row.facts.site)) return { ok: false, code: "not_wanted" };
   const target = siteTarget(row.url);
   if (target.kind !== "site") return { ok: false, code: "not_wanted" };
 

@@ -113,7 +113,8 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
  * an empty report kept for a week would hide that (CC, 2026-11-13).
  */
 // COALESCE: a read with nothing unread is NULL here, and NOT (NULL) would hide every good report.
-const EMPTY_DONE = `(status = 'done' AND COALESCE(json_extract(facts_json, '$.site.unread'), '') IN (${BROWSER_READ_UNREAD.map(() => "?").join(", ")}))`;
+const BROWSER_WANTED = `(COALESCE(json_extract(facts_json, '$.site.unread'), '') IN (${BROWSER_READ_UNREAD.map(() => "?").join(", ")}) OR COALESCE(json_extract(facts_json, '$.site.thin'), 0) = 1)`;
+const EMPTY_DONE = `(status = 'done' AND ${BROWSER_WANTED})`;
 
 /**
  * The latest usable scan of a domain within SCAN_REUSE_DAYS: finished, or still being worked on.
@@ -234,10 +235,9 @@ export async function saveBrowserRead(
   db: Client,
   input: { tenantId: string; id: string; facts: ScanFacts; score: ScanScore; narrative: ScanNarrative; now: Date },
 ): Promise<boolean> {
-  const unread = BROWSER_READ_UNREAD.map(() => "?").join(", ");
   const rs = await db.execute({
     sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, updated_at = ?
-          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND json_extract(facts_json, '$.site.unread') IN (${unread})`,
+          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND ${BROWSER_WANTED}`,
     args: [JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.now.toISOString(), input.tenantId, input.id, ...BROWSER_READ_UNREAD],
   });
   return rs.rowsAffected === 1;

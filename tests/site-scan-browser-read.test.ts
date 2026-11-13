@@ -144,6 +144,33 @@ async function main() {
     await db.execute({ sql: "UPDATE tool_jobs SET tool_key = 'site_scan_enrich' WHERE id = ?", args: [jobId] });
   });
 
+  await check("a page drawn by JavaScript (almost no text for the Worker) is flagged thin and read by the browser", async () => {
+    const shell = `<!doctype html><html><head><title>Loading</title></head><body><div id="root"></div><script src="/app.js"></script></body></html>`;
+    const jsSite = async (url: string) =>
+      url.endsWith("/robots.txt")
+        ? new Response("User-agent: *\nAllow: /\n", { status: 200, headers: { "content-type": "text/plain" } })
+        : new Response(shell, { status: 200, headers: { "content-type": "text/html" } });
+    const { row: js } = await insertScan(db, { tenantId: OASIS, domain: "bayside-plumbing.ca", url: `${SITE}/`, ipHash: null, now: new Date(t0.getTime() + 86_400_000) });
+    const out = await run.runTier0(db, { tenantId: OASIS, scanId: js.id }, tier0(jsSite));
+    assert.equal(out.ok, true);
+    const before = (await getScan(db, OASIS, js.id))!;
+    assert.equal(before.facts?.site.unread, null);
+    assert.equal(before.facts?.site.thin, true, "too little text to be the site a visitor sees");
+    assert.equal(br.needsBrowserRead(before.facts?.site), true);
+    const job = String((await db.execute({ sql: "SELECT id FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ?", args: [js.id] })).rows[0].id);
+    await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = 'bea:oasis-vps-audit', lease_id = ? WHERE id = ?", args: [LEASE, job] });
+    const pages = [`${SITE}/robots.txt`, `${SITE}/`, "http://bayside-plumbing.ca/", "http://bayside-plumbing.ca/robots.txt", `${SITE}/sitemap.xml`, `${SITE}/services`, `${SITE}/contact`, `${SITE}/about`].map(browserPage);
+    const done = await h
+      .handleToolsScanPages(signedRequest("scan-pages", { runner_id: "oasis-vps-audit", job_id: job, lease_id: LEASE, round: br.MAX_BROWSER_ROUNDS, pages }, t0), { db, env: ENV, now: t0, storage: null })
+      .then(answerOf);
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(done.body.done, true);
+    const after = (await getScan(db, OASIS, js.id))!;
+    assert.equal(after.facts?.signals?.business_name, "Bayside Plumbing", "the browser's read replaced the shell");
+    assert.equal(after.facts?.site.thin, undefined, "the browser's read is not flagged again");
+    assert.ok((after.facts?.signals?.word_count ?? 0) >= br.THIN_WORDS);
+  });
+
   await check("a robots.txt that closes the site stays final: no browser, the report closes", async () => {
     const { row: closed } = await insertScan(db, { tenantId: OASIS, domain: "closed-site.ca", url: "https://closed-site.ca/", ipHash: null, now: t0 });
     const out = await run.runTier0(db, { tenantId: OASIS, scanId: closed.id }, tier0(refusingSite("User-agent: *\nDisallow: /\n")));
