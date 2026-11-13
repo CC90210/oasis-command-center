@@ -45,15 +45,15 @@ type PageMeta = {
 // (`git log -1 --format=%cs -- "app/(marketing)/<page>"`), taken 2026-10-05.
 // /start was retired 2026-09-29 (#479) and is out of the registry, so it is gone here too.
 const PAGES: Record<string, PageMeta> = {
-  "/": { priority: 1, freq: "weekly", lastmod: "2026-08-01" },
-  "/audit": { priority: 0.95, freq: "monthly", lastmod: "2026-10-13" },
+  "/": { priority: 1, freq: "weekly", lastmod: "2026-11-13" },
+  "/audit": { priority: 0.95, freq: "monthly", lastmod: "2026-11-13" },
   "/scan": { priority: 0.95, freq: "monthly", lastmod: "2026-11-12" },
   "/fleet": { priority: 0.9, freq: "monthly", lastmod: "2026-07-31" },
   "/work": { priority: 0.9, freq: "monthly", lastmod: "2026-09-09" },
   "/command-center": { priority: 0.9, freq: "monthly", lastmod: "2026-10-13" },
   "/pricing": { priority: 0.95, freq: "monthly", lastmod: "2026-10-13" },
   "/onboarding": { priority: 0.8, freq: "monthly", lastmod: "2026-10-13" },
-  "/contact": { priority: 0.8, freq: "monthly", lastmod: "2026-09-09" },
+  "/contact": { priority: 0.8, freq: "monthly", lastmod: "2026-11-13" },
   "/about": { priority: 0.7, freq: "monthly", lastmod: "2026-07-31" },
   "/privacy": { priority: 0.3, freq: "yearly", lastmod: "2026-09-28" },
   "/terms": { priority: 0.3, freq: "yearly", lastmod: "2026-07-31" },

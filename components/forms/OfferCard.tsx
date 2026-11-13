@@ -14,7 +14,7 @@
 import type { ReactNode } from "react";
 import { Plus } from "lucide-react";
 import { Tag } from "@/components/Card";
-import { FUNNEL_METRICS, funnelCell, type FunnelMetricKey } from "@/lib/offers/funnel-strip";
+import { FUNNEL_METRICS, SCAN_FUNNEL_METRICS, funnelCell, type FunnelMetricKey } from "@/lib/offers/funnel-strip";
 
 export type OfferPageStatus = "live" | "live_with_changes" | "draft";
 
@@ -35,6 +35,10 @@ export type OfferCardViewModel = {
   videoPlays: number | null;
   /** Distinct visits sent to the free community over the last 7 days. null = could not be read. */
   community: number | null;
+  /** The free scan's offer (lib/site-scan/offer.ts): its strip counts scans run instead of video plays. */
+  kind?: "scan";
+  /** Distinct visits that started a scan over the last 7 days (the scan offer only). null = could not be read. */
+  scans?: number | null;
   /** The landing page's address (path), or null when the workspace could not be resolved. */
   publicPath?: string | null;
   /**
@@ -112,15 +116,20 @@ function FunnelStrip({
   videoPlays,
   leads,
   community,
+  scans = null,
+  kind,
 }: {
   views: number | null;
   videoPlays: number | null;
   leads: number | null;
   community: number | null;
+  scans?: number | null;
+  kind?: "scan";
 }) {
   const VALUES: Record<FunnelMetricKey, number | null> = {
     views,
     video_plays: videoPlays,
+    scans,
     leads,
     booked: null,
     community,
@@ -129,7 +138,7 @@ function FunnelStrip({
     <div>
       <div className="mb-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-fg-dim">Last 7 days</div>
       <dl className="grid grid-cols-5 gap-1.5 rounded-lg border border-hairline bg-bg-elev/40 p-2">
-        {FUNNEL_METRICS.map((m) => {
+        {(kind === "scan" ? SCAN_FUNNEL_METRICS : FUNNEL_METRICS).map((m) => {
           const cell = funnelCell(VALUES[m.key], m.key === "booked" ? "untracked" : "unavailable");
           return (
             <div key={m.key} className="flex flex-col items-center gap-0.5 text-center">
@@ -181,10 +190,14 @@ export function OfferCard({
       </header>
       <div className="flex flex-wrap items-center gap-2">
         <Tag tone={statusTone(offer.status)}>{offerPageLabel(offer.status, offer.publishedVersion)}</Tag>
-        <Tag tone={offer.hasVideo ? "accent" : "neutral"}>{offer.hasVideo ? "Video attached" : "No video attached"}</Tag>
+        {offer.kind === "scan" ? (
+          <Tag tone="accent">Page: the live scan</Tag>
+        ) : (
+          <Tag tone={offer.hasVideo ? "accent" : "neutral"}>{offer.hasVideo ? "Video attached" : "No video attached"}</Tag>
+        )}
       </div>
       <LinkLine path={offer.publicPath} state={offer.linkState} />
-      <FunnelStrip views={offer.views} videoPlays={offer.videoPlays} leads={offer.leads} community={offer.community} />
+      <FunnelStrip views={offer.views} videoPlays={offer.videoPlays} leads={offer.leads} community={offer.community} scans={offer.scans ?? null} kind={offer.kind} />
       <div className="flex flex-wrap items-center gap-3 border-t border-hairline pt-3 text-xs">{actions}</div>
     </article>
   );

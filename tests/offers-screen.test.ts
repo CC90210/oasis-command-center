@@ -162,6 +162,22 @@ async function main() {
         recentLeads: { "offer-2": 0 },
       },
     },
+    // -- 3b. the free scan's offer: its page is /scan, its strip counts scans --
+    scanOffer: {
+      kind: "list",
+      props: {
+        initialRows: [row("scan-1", "free-scan", "Free AI website scan", true)],
+        tenantLogoUrl: null,
+        tenantSlug: "oasis-ai-cc",
+        tenantName: "OASIS",
+        profileSlug: "oasis",
+        canEdit: true,
+        responseCounts: { "scan-1": 3 },
+        offers: { "scan-1": { status: "live", publishedVersion: 0, headline: "Paste your website", hasVideo: false } },
+        recentLeads: { "scan-1": 2 },
+        recentFunnel: { "scan-1": { views: 40, video_plays: 0, community: 0, scans: 17 } },
+      },
+    },
     // -- 4. Preview: canEdit && enabled only --------------------------------
     previewEditorEnabled: {
       kind: "list",
@@ -328,6 +344,18 @@ async function main() {
     assert.ok(h.includes("No start-here page yet"), "the empty state is missing");
     assert.ok(h.includes(">Create<"), "the Create action is missing");
     assert.ok(!h.includes("Which one is you"), "a router card appeared with no vsl form");
+  });
+
+  await step("the free scan's card counts scans run and reports sent, links /scan and its details, and has no page builder", () => {
+    const h = html.scanOffer;
+    assert.doesNotMatch(h, /^RENDER FAILED/, h.slice(0, 300));
+    assert.ok(h.includes("Scans run") && h.includes(">17<"), "the scans-run count is missing");
+    assert.ok(h.includes("Reports sent") && h.includes(">2<"), "reports sent (its leads) is missing");
+    assert.ok(!h.includes("Video plays"), "the scan offer has no video to count");
+    assert.ok(h.includes('href="/scan"'), "the card's link is the live scan");
+    assert.ok(h.includes('href="/forms/scans"') && h.includes("Scan details"), "Scan details is missing");
+    assert.ok(!h.includes("/forms/scan-1/edit"), "the scan's claim form must not open in the page builder");
+    assert.ok(!h.includes(">Delete<"), "deleting the scan's claim form from its card would break the claim");
   });
 
   await step("a draft offer shows its editor Open draft and Publish, and never a Copy link to the bare form", () => {

@@ -19,6 +19,7 @@ import { CONTACT_EMAIL } from "@/lib/marketing/routes";
  */
 
 const SITE_LINKS = [
+  { href: "/scan", label: "Free AI scan" },
   { href: "/audit", label: "Free AI audit" },
   { href: "/fleet", label: "The fleet" },
   { href: "/work", label: "What we build" },

@@ -101,6 +101,25 @@ async function main() {
     assert.equal(scan.engagementId, engagementA);
   });
 
+  // The free scan is its own offer (lib/site-scan/offer.ts): a claim submits the free-scan form, so
+  // its lead is filed under the scan and never counted as an AI Automation Audit submission. The
+  // audit intake's token still claims (the fallback while free-scan is off, and a browser that
+  // loaded the page before the form existed).
+  await check("the scan's own offer form claims; the page uses it only while it is switched on", async () => {
+    const { scanClaimFormSlug } = await import("../lib/site-scan/claim");
+    assert.equal(await scanClaimFormSlug(db, OASIS), "ai-audit", "no free-scan form yet: the audit intake");
+    await db.execute({ sql: "INSERT INTO forms (id, tenant_id, slug, name, enabled) VALUES ('form-free-scan', ?, 'free-scan', 'Free AI website scan', 0)", args: [OASIS] });
+    assert.equal(await scanClaimFormSlug(db, OASIS), "ai-audit", "switched off: the audit intake");
+    await db.execute({ sql: "UPDATE forms SET enabled = 1 WHERE id = 'form-free-scan'" });
+    assert.equal(await scanClaimFormSlug(db, OASIS), "free-scan", "switched on: the scan's own form");
+    assert.equal(await scanClaimFormSlug(db, "another-workspace"), "ai-audit");
+    await seedLead(db, "lead-scan-offer", "qualified");
+    const viaScan = await claim("lead-scan-offer", { form: "form-free-scan" });
+    assert.ok(viaScan.ok, JSON.stringify(viaScan));
+    assert.equal(await attachments(viaScan.engagementId), 1, "a free-scan claim opens the audit with the scan attached");
+    assert.deepEqual(await claim(LEAD_A, { form: START_FORM }), { ok: false, error: "wrong_form" }, "the workspace's other forms still cannot claim");
+  });
+
   finish("site-scan-claim");
 }
 

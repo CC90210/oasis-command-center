@@ -12,6 +12,7 @@ import { ScanReport } from "@/components/scan/ScanReport";
 import { ClaimForm } from "@/components/scan/ClaimForm";
 import { LiveWorkspace } from "@/components/scan/LiveWorkspace";
 import { useScanStream } from "@/components/scan/useScanStream";
+import { scanPath, startScan, storedClaimKey, trackScan } from "@/components/scan/start-scan";
 
 /**
  * The free scan, end to end in the browser: paste a domain, POST /api/scan, then follow
@@ -19,42 +20,16 @@ import { useScanStream } from "@/components/scan/useScanStream";
  * and the report's sections as their data lands. Nothing is drawn before the server has it.
  */
 
-const CLAIM_KEY_STORE = "oasis-scan-claim:";
-
-/** The claim key POST /api/scan gave this browser, kept for the tab so a reload can still save the report. */
-function storedClaimKey(scanId: string): string | null {
-  try {
-    return window.sessionStorage.getItem(CLAIM_KEY_STORE + scanId);
-  } catch {
-    return null;
-  }
-}
-
-function storeClaimKey(scanId: string, key: string): void {
-  try {
-    window.sessionStorage.setItem(CLAIM_KEY_STORE + scanId, key);
-  } catch {
-    // Private mode or storage off: the key still lives in memory for this page.
-  }
-}
-
 type Props = {
   initialScanId: string | null;
   consentIdentity: ConsentIdentity;
   bookingUrl: string | null;
   proof: { scans: number; domains: number } | null;
+  /** The form "Send it to the OASIS team" submits (lib/site-scan/claim.ts scanClaimFormSlug). */
+  claimFormSlug: string;
 };
 
-const INPUT_ERRORS: Record<string, string> = {
-  website_required: "Paste your website address first.",
-  not_a_website: "That does not look like a public website address. Try the form www.yourbusiness.com.",
-  social_profile: "That is a social profile, not a website. Paste the business's own site, or tell us you don't have one.",
-  rate_limited: "That is a lot of scans from one place. Give it an hour, or book a call and we will run them with you.",
-  not_installed: "The scanner is being set up on this deployment. Try again shortly.",
-  forbidden: "Open this page on oasisai.work and try again.",
-};
-
-export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: Props) {
+export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof, claimFormSlug }: Props) {
   const [website, setWebsite] = useState("");
   const [scanId, setScanId] = useState<string | null>(initialScanId);
   const [starting, setStarting] = useState(false);
@@ -73,6 +48,18 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
   useEffect(() => {
     if (scan?.claimed) setClaimed(true);
   }, [scan?.claimed]);
+
+  // The free scan's offer counts (offer_funnel_events): one view per page load, and a finished
+  // report once per scan this visitor watched run (a permalink opened later is not a new finish).
+  useEffect(() => {
+    trackScan("page_view");
+  }, []);
+  const finishedCounted = useRef<string | null>(null);
+  useEffect(() => {
+    if (!scanId || !live.finished || live.wasFinished || finishedCounted.current === scanId) return;
+    finishedCounted.current = scanId;
+    trackScan("scan_finished");
+  }, [scanId, live.finished, live.wasFinished]);
 
   // A scan started from the form brings the agent's workspace into view: on /scan it opens below
   // the hero, where a visitor would otherwise miss the work starting.
@@ -93,30 +80,19 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
     const trapped = trapValue(trapRef.current, trapLatch);
     setStarting(true);
     try {
-      const res = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ website, honeypot: trapped }),
-      });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; scan_id?: string; claim_key?: string | null; trapped?: boolean; error?: string; platform?: string } | null;
-      if (data?.trapped) {
-        setError("Thanks. We will take it from here.");
-        return;
-      }
-      if (!res.ok || !data?.ok || !data.scan_id) {
-        setError(INPUT_ERRORS[data?.error ?? ""] ?? "That didn't go through. Try again in a moment.");
-        inFlight.current = false;
+      const started = await startScan(website, trapped);
+      if (!started.ok) {
+        setError(started.error);
+        // A trapped submission stays latched: a script that filled the honeypot does not retry.
+        if (!started.trapped) inFlight.current = false;
         return;
       }
       setClaimed(false);
-      setClaimKey(data.claim_key ?? null);
-      if (data.claim_key) storeClaimKey(data.scan_id, data.claim_key);
+      setClaimKey(started.claimKey);
       startedHere.current = true;
-      setScanId(data.scan_id);
-      if (typeof window !== "undefined") window.history.replaceState(null, "", `/scan/${data.scan_id}`);
-      inFlight.current = false;
-    } catch {
-      setError("Couldn't reach the server. Check your connection and try again.");
+      setScanId(started.scanId);
+      // The page's own query (utm_*) stays on the address, so the claim files the lead with it.
+      if (typeof window !== "undefined") window.history.replaceState(null, "", scanPath(started.scanId));
       inFlight.current = false;
     } finally {
       setStarting(false);
@@ -128,7 +104,7 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
     setError(null);
     setClaimed(false);
     setClaimKey(null);
-    if (typeof window !== "undefined") window.history.replaceState(null, "", "/scan");
+    if (typeof window !== "undefined") window.history.replaceState(null, "", `/scan${window.location.search}`);
   }
 
   if (!scanId) {
@@ -194,7 +170,7 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
                   Send this report to the OASIS team and it becomes a live audit in our Command Center. A founder reads it, prices the fixes, and emails you; book a call if you want one. No obligation.
                 </p>
                 <div className="mt-6">
-                  <ClaimForm scanId={scan.id} claimKey={claimKey} businessName={scan.facts.signals?.business_name ?? scan.domain} website={scan.url} consentIdentity={consentIdentity} onClaimed={() => setClaimed(true)} />
+                  <ClaimForm scanId={scan.id} claimKey={claimKey} businessName={scan.facts.signals?.business_name ?? scan.domain} website={scan.url} consentIdentity={consentIdentity} formSlug={claimFormSlug} onClaimed={() => setClaimed(true)} />
                 </div>
               </>
             ) : (

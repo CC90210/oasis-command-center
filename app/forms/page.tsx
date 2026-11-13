@@ -53,6 +53,8 @@ import { formsEditRefusal } from "@/lib/forms/access";
 import { countResponsesByForm } from "@/lib/forms/responses";
 import { countRecentLeads, listOfferSummaries, offerPagesDb, type OfferSummary } from "@/lib/offer-pages/store";
 import { countFunnelEventMetrics, type FunnelCounts } from "@/lib/offers/tracking-store";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { SCAN_OFFER_HEADLINE, SCAN_OFFER_SLUG, SCAN_OFFER_SUBHEADLINE } from "@/lib/site-scan/offer";
 import { AlertCircle, CheckCheck } from "lucide-react";
 import Link from "next/link";
 
@@ -119,7 +121,7 @@ export default async function FormsPage() {
     : {};
   const refusal = formsEditRefusal({ persona: viewer.surface.persona, tenantId });
   const canEdit = refusal === null;
-  const offers = result.ok ? await loadOfferColumns(tenantId, result.rows.map((r) => r.id)) : null;
+  const offers = result.ok ? await loadOfferColumns(tenantId, result.rows) : null;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -176,9 +178,15 @@ export default async function FormsPage() {
  * available here (no Turso data plane, or bravo__203 not applied): every form
  * is then an intake form, as before.
  */
+/** The free scan's offer form, in the one workspace the scan files into. */
+function scanOfferForm(tenantId: string, forms: FormRow[]): FormRow | null {
+  if (tenantId !== AI_AUDIT_TENANT_ID) return null;
+  return forms.find((r) => r.slug === SCAN_OFFER_SLUG) ?? null;
+}
+
 async function loadOfferColumns(
   tenantId: string,
-  formIds: string[],
+  forms: FormRow[],
 ): Promise<{
   statuses: Record<string, OfferSummary>;
   recentLeads: Record<string, number | null>;
@@ -186,10 +194,17 @@ async function loadOfferColumns(
 } | null> {
   const db = offerPagesDb();
   if (!db) return null;
+  const formIds = forms.map((r) => r.id);
   try {
     const map = await listOfferSummaries(db, tenantId);
     if (!map) return null;
-    const statuses = Object.fromEntries([...map.entries()].filter(([id]) => formIds.includes(id)));
+    const statuses: Record<string, OfferSummary> = Object.fromEntries([...map.entries()].filter(([id]) => formIds.includes(id)));
+    // The free scan is an offer whose page is the live /scan (lib/site-scan/offer.ts), not an
+    // offer-page document: its form is listed with the offers, live while the form is on.
+    const scan = scanOfferForm(tenantId, forms);
+    if (scan && !statuses[scan.id]) {
+      statuses[scan.id] = { status: scan.enabled ? "live" : "draft", publishedVersion: 0, headline: SCAN_OFFER_HEADLINE, subheadline: SCAN_OFFER_SUBHEADLINE, hasVideo: false };
+    }
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const ids = Object.keys(statuses);
     // Two independent reads (leads from form_submissions, views/video_plays/

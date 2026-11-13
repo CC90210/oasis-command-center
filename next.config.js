@@ -336,6 +336,9 @@ const nextConfig = {
       { source: "/command", destination: "/f/oasis-ai-cc/command", permanent: false },
       { source: "/community", destination: "/f/oasis-ai-cc/community", permanent: false },
       { source: "/fleet-audit", destination: "/f/oasis-ai-cc/fleet", permanent: false },
+      // The free scan's offer form (lib/site-scan/offer.ts) has no page of its own: its address is
+      // the scan itself (lib/offers/short-links.ts OASIS_OFFER_SITE_PAGES), never a second form page.
+      { source: "/f/oasis-ai-cc/free-scan", destination: "/scan", permanent: false },
       {
         // The short campaign URL is public and permanent. Next preserves the
         // query string, so UTM/source attribution reaches the canonical form.

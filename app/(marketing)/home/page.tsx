@@ -1,13 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import { CtaLink, CTA_INLINE } from "@/components/marketing/Cta";
+import { CTA_INLINE } from "@/components/marketing/Cta";
 import { AcronymMark } from "@/components/marketing/AcronymMark";
 import { HarnessBuilder } from "@/components/marketing/HarnessBuilder";
 import { FleetRoster } from "@/components/marketing/FleetRoster";
 import { Reveal } from "@/components/marketing/Reveal";
 import { Section, SectionHead, Eyebrow } from "@/components/marketing/Section";
 import { AuditForm } from "@/components/marketing/AuditForm";
+import { HeroScan } from "@/components/marketing/HeroScan";
 import { CLIENT_BUILDS, DIFFERENTIATORS, ECONOMICS } from "@/lib/marketing/fleet";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
 import { resolveConsentIdentity } from "@/lib/consent/ledger-identity";
@@ -96,12 +97,19 @@ export default function MarketingHome() {
             </p>
           </Reveal>
 
+          {/* The free scan is the front door (CC, 2026-11-13): paste a site and the scan starts.
+              The audit and the fleet stay one click away beside it. */}
           <Reveal delay={270}>
-            <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <CtaLink href="/contact">Start the audit</CtaLink>
-              <CtaLink href="/fleet" variant="secondary" arrow={false}>
-                Meet the fleet
-              </CtaLink>
+            <div className="mt-10">
+              <HeroScan />
+              <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 text-[14px]">
+                <Link href="/contact" className="text-fg underline decoration-ops-edge underline-offset-4 hover:text-signal">
+                  Start the full audit
+                </Link>
+                <Link href="/fleet" className="text-fg-muted underline decoration-ops-edge underline-offset-4 hover:text-fg">
+                  Meet the fleet
+                </Link>
+              </div>
             </div>
           </Reveal>
 

@@ -1,7 +1,8 @@
 /**
  * lib/site-scan/claim.ts — a visitor claims their report: the lead the forms route already
- * created (the browser POSTed /api/forms/submit, step 0 of the ai-audit funnel, and holds its
- * minted token) gets an AI audit engagement that continues from the scan.
+ * created (the browser POSTed /api/forms/submit, step 0 of the scan's offer form, free-scan, or
+ * of the ai-audit funnel while that form is off, and holds its minted token) gets an AI audit
+ * engagement that continues from the scan.
  *
  * Proofs. The minted token proves which lead this is, and that it came from the audit form
  * (signed by this deployment; no lead id is ever taken from the browser). The claim key proves
@@ -21,6 +22,10 @@ import { formLinkMac, formLinkMacMatches, verifyFormLink } from "@/lib/form-link
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
 import { aiAuditTablesInstalled, openEngagement, readLead } from "@/lib/ai-audit/store";
 import { getScan, reserveClaim, setClaimEngagement } from "@/lib/site-scan/store";
+import { SCAN_OFFER_SLUG } from "@/lib/site-scan/offer";
+import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { dbBool } from "@/lib/db-bool";
 
 const CLAIM_PURPOSE = "site_scan_claim/v1";
 
@@ -36,10 +41,36 @@ export type ClaimResult =
       error: "scan_not_found" | "bad_token" | "bad_claim_key" | "lead_not_found" | "wrong_workspace" | "wrong_form" | "audit_not_opened";
     };
 
-async function auditFormId(db: Client, tenantId: string): Promise<string | null> {
-  const rs = await db.execute({ sql: "SELECT id FROM forms WHERE tenant_id = ? AND slug = ? LIMIT 1", args: [tenantId, AUDIT_FUNNEL.formSlug] });
-  const id = rs.rows[0]?.id;
-  return typeof id === "string" && id ? id : null;
+/**
+ * The forms whose token may claim a scan: the scan's own offer form (free-scan, the one the claim
+ * uses while it is switched on) and the AI audit intake (the claim before the scan was its own
+ * offer, and the fallback while free-scan is off). Both are this workspace's audit front doors.
+ */
+async function claimFormIds(db: Client, tenantId: string): Promise<string[]> {
+  const rs = await db.execute({ sql: "SELECT id FROM forms WHERE tenant_id = ? AND slug IN (?, ?)", args: [tenantId, SCAN_OFFER_SLUG, AUDIT_FUNNEL.formSlug] });
+  return rs.rows.map((r) => r.id).filter((id): id is string => typeof id === "string" && !!id);
+}
+
+/**
+ * Which form "Send it to the OASIS team" submits: the scan's own offer form when it exists and is
+ * switched on, so the lead and its count are filed under the free scan (never as an AI Automation
+ * Audit submission); otherwise the audit intake, as before the scan was an offer. A read failure
+ * answers the audit intake, which always accepts the claim.
+ */
+/** scanClaimFormSlug for the public scan pages: the audit intake when there is no database here. */
+export async function scanPageClaimFormSlug(): Promise<string> {
+  if (!tursoConfigured()) return AUDIT_FUNNEL.formSlug;
+  return scanClaimFormSlug(getTursoClient(), AI_AUDIT_TENANT_ID);
+}
+
+export async function scanClaimFormSlug(db: Client, tenantId: string): Promise<string> {
+  try {
+    const rs = await db.execute({ sql: "SELECT enabled FROM forms WHERE tenant_id = ? AND slug = ? LIMIT 1", args: [tenantId, SCAN_OFFER_SLUG] });
+    return rs.rows[0] && dbBool(rs.rows[0].enabled) ? SCAN_OFFER_SLUG : AUDIT_FUNNEL.formSlug;
+  } catch (err) {
+    console.error("[site-scan.claim] could not read the scan's offer form; the claim uses the audit intake", err instanceof Error ? err.message : String(err));
+    return AUDIT_FUNNEL.formSlug;
+  }
 }
 
 export async function claimScan(
@@ -52,9 +83,10 @@ export async function claimScan(
   const verified = verifyFormLink(input.token);
   if (!verified.ok) return { ok: false, error: "bad_token" };
   if (verified.payload.tenant !== AUDIT_FUNNEL.tenantSlug) return { ok: false, error: "wrong_workspace" };
-  // Only the audit intake opens an audit: a token from the workspace's other forms is not one.
-  const formId = await auditFormId(db, input.tenantId);
-  if (!formId || verified.payload.form_id !== formId) return { ok: false, error: "wrong_form" };
+  // Only an audit front door opens an audit (the scan's offer form or the audit intake): a token
+  // from the workspace's other forms is not one.
+  const formIds = await claimFormIds(db, input.tenantId);
+  if (!formIds.includes(verified.payload.form_id)) return { ok: false, error: "wrong_form" };
   const lead = await readLead(db, input.tenantId, verified.payload.lead_id);
   if (!lead) return { ok: false, error: "lead_not_found" };
 

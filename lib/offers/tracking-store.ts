@@ -239,7 +239,8 @@ export async function findLeadForVisit(db: Client, tenantId: string, visitId: st
   return lookupVisitLead(db, tenantId, visitId);
 }
 
-export type FunnelCounts = { views: number | null; video_plays: number | null; community: number | null };
+/** `scans`: distinct visits that started a free scan (scan_started; only the free-scan offer sends it). */
+export type FunnelCounts = { views: number | null; video_plays: number | null; community: number | null; scans?: number | null };
 
 /**
  * Distinct-visit counts per form, over a window, for the three funnel-strip
@@ -257,7 +258,7 @@ export async function countFunnelEventMetrics(
   sinceIso: string,
 ): Promise<Record<string, FunnelCounts>> {
   const out: Record<string, FunnelCounts> = Object.fromEntries(
-    formIds.map((id) => [id, { views: 0, video_plays: 0, community: 0 }]),
+    formIds.map((id) => [id, { views: 0, video_plays: 0, community: 0, scans: 0 }]),
   );
   if (!formIds.length) return out;
   try {
@@ -265,7 +266,7 @@ export async function countFunnelEventMetrics(
     const rs = await db.execute({
       sql: `SELECT form_id, event, COUNT(DISTINCT visit_id) AS n FROM offer_funnel_events
             WHERE tenant_id = ? AND created_at >= ? AND form_id IN (${marks})
-              AND event IN ('page_view', 'video_play', 'community_click')
+              AND event IN ('page_view', 'video_play', 'community_click', 'scan_started')
             GROUP BY form_id, event`,
       args: [tenantId, sinceIso, ...formIds],
     });
@@ -273,6 +274,7 @@ export async function countFunnelEventMetrics(
       page_view: "views",
       video_play: "video_plays",
       community_click: "community",
+      scan_started: "scans",
     };
     for (const r of rowsOf<{ form_id: string; event: string; n: number }>(rs)) {
       const k = key[r.event];
@@ -287,7 +289,7 @@ export async function countFunnelEventMetrics(
     // as "-" / "couldn't load" by funnelCell(value, "unavailable").
     if (isMissingFunnelTable(err) || isMissingOfferTable(err)) noteMissing("counts");
     else console.error("[offer-funnel] funnel counts unreadable", { tenantId, error: err instanceof Error ? err.message : String(err) });
-    return Object.fromEntries(formIds.map((id) => [id, { views: null, video_plays: null, community: null }]));
+    return Object.fromEntries(formIds.map((id) => [id, { views: null, video_plays: null, community: null, scans: null }]));
   }
 }
 

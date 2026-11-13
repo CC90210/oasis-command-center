@@ -532,6 +532,20 @@ async function main() {
     assert.equal(crossed[FORM_A].views, 0, "CLIENT_B asking about CLIENT_A's own form_id must see zero, never CLIENT_A's rows");
   });
 
+  // -- 9b. the free scan's offer counts the scans its visitors started -------
+  await check("scan_started is accepted and counted as scans run, one per visit", async () => {
+    const { countFunnelEventMetrics } = await import("../lib/offers/tracking-store");
+    const dbClient = (await import("../lib/offer-pages/store")).offerPagesDb()!;
+    const visit = randomVisitId();
+    const before = (await countFunnelEventMetrics(dbClient, CLIENT_A, [FORM_A], "2000-01-01T00:00:00.000Z"))[FORM_A].scans ?? 0;
+    const first = await postEvent({ tenant: "client-a", form: "intake", visit_id: visit, event: "scan_started" });
+    assert.ok(first.status < 300, `scan_started refused: ${first.status}`);
+    await postEvent({ tenant: "client-a", form: "intake", visit_id: visit, event: "scan_started" });
+    await postEvent({ tenant: "client-a", form: "intake", visit_id: randomVisitId(), event: "scan_finished" });
+    const after = (await countFunnelEventMetrics(dbClient, CLIENT_A, [FORM_A], "2000-01-01T00:00:00.000Z"))[FORM_A].scans ?? 0;
+    assert.equal(after - before, 1, "two starts from one visit are one scan run; a finish is not a start");
+  });
+
   // -- 10. 13-month retention purge ------------------------------------------
   await check("purgeFunnelEventsOlderThan deletes exactly the rows past the cutoff, and nothing else", async () => {
     const { purgeFunnelEventsOlderThan, retentionCutoff } = await import("../lib/offers/tracking-store");

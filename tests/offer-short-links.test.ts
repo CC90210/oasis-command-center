@@ -80,6 +80,15 @@ async function main(): Promise<void> {
     }
   });
 
+  check("the free scan's offer hands out the scan itself, and its form's own address goes there", () => {
+    assert.equal(offerShareablePath("oasis-ai-cc", "free-scan"), "/scan", "the card's link is the live scan");
+    assert.equal(offerShareablePath("acme", "free-scan"), "/f/acme/free-scan", "only OASIS's free scan is the scan page");
+    const rule = bySource.get("/f/oasis-ai-cc/free-scan");
+    assert.ok(rule, "/f/oasis-ai-cc/free-scan has no redirect: it would show a second, bare scan form");
+    assert.equal(rule.destination, "/scan");
+    assert.equal(rule.permanent, false);
+  });
+
   console.log("offer-short-links: all passed");
 }
 
