@@ -107,8 +107,18 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
 }
 
 /**
+ * A finished report on which nothing was read, because the site turned the reader away (refused,
+ * not answered, a bot check: BROWSER_READ_UNREAD). It is never handed to the next visitor, and
+ * today's is read again in place: a browser may read it now (lib/site-scan/browser-read.ts), and
+ * an empty report kept for a week would hide that (CC, 2026-11-13).
+ */
+// COALESCE: a read with nothing unread is NULL here, and NOT (NULL) would hide every good report.
+const EMPTY_DONE = `(status = 'done' AND COALESCE(json_extract(facts_json, '$.site.unread'), '') IN (${BROWSER_READ_UNREAD.map(() => "?").join(", ")}))`;
+
+/**
  * The latest usable scan of a domain within SCAN_REUSE_DAYS: finished, or still being worked on.
- * A failed row, and a read nobody has touched for STALE_READ_MS (its Worker died), are not reused.
+ * A failed row, a read nobody has touched for STALE_READ_MS (its Worker died), and a finished
+ * report the site turned the reader away from (EMPTY_DONE) are not reused.
  */
 export async function findReusableScan(db: Client, tenantId: string, domain: string, now: Date): Promise<ScanRow | null> {
   const window = new Date(now.getTime() - SCAN_REUSE_DAYS * 86_400_000).toISOString();
@@ -116,9 +126,9 @@ export async function findReusableScan(db: Client, tenantId: string, domain: str
   const staleBefore = new Date(now.getTime() - STALE_READ_MS).toISOString();
   const rs = await db.execute({
     sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND created_at >= ? AND status <> 'failed'
-            AND NOT (status IN ('queued', 'reading') AND updated_at < ?)
+            AND NOT (status IN ('queued', 'reading') AND updated_at < ?) AND NOT ${EMPTY_DONE}
           ORDER BY created_at DESC LIMIT 1`,
-    args: [tenantId, domain, since, staleBefore],
+    args: [tenantId, domain, since, staleBefore, ...BROWSER_READ_UNREAD],
   });
   const r = rs.rows[0];
   return r ? rowFromRecord(r as unknown as Record<string, unknown>) : null;
@@ -152,8 +162,8 @@ export async function insertScan(
     // The row a retry may take over: failed, a read nobody has touched for STALE_READ_MS, or a
     // report made before REPORT_FORMAT_SINCE (findReusableScan no longer hands it out).
     const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?) OR created_at < ?)`;
-    const where = [input.tenantId, input.domain, day, staleBefore, REPORT_FORMAT_SINCE];
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?) OR created_at < ? OR ${EMPTY_DONE})`;
+    const where = [input.tenantId, input.domain, day, staleBefore, REPORT_FORMAT_SINCE, ...BROWSER_READ_UNREAD];
     // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
     const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,

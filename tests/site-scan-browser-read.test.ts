@@ -151,6 +151,24 @@ async function main() {
     assert.equal((await getScan(db, OASIS, closed.id))!.status, "done");
   });
 
+  await check("an empty report a browser could read is never reused, and today's is read again; a good report still is", async () => {
+    const { findReusableScan } = await import("../lib/site-scan/store");
+    const { row: empty } = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: t0 });
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "home_page_failed" } }), empty.id] });
+    const later = new Date(t0.getTime() + 3_600_000);
+    assert.equal(await findReusableScan(db, OASIS, "empty-site.ca", later), null, "the empty report is not handed to the next visitor");
+    const again = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: later });
+    assert.equal(again.row.id, empty.id);
+    assert.equal(again.started, true, "today's empty report is read again in place");
+
+    const { row: good } = await insertScan(db, { tenantId: OASIS, domain: "good-site.ca", url: "https://good-site.ca/", ipHash: null, now: t0 });
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: null } }), good.id] });
+    assert.equal((await findReusableScan(db, OASIS, "good-site.ca", later))?.id, good.id, "a report with nothing unread is reused as before");
+    const robots = await insertScan(db, { tenantId: OASIS, domain: "robots-site.ca", url: "https://robots-site.ca/", ipHash: null, now: t0 });
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "not_allowed" } }), robots.row.id] });
+    assert.equal((await findReusableScan(db, OASIS, "robots-site.ca", later))?.id, robots.row.id, "robots.txt closing the site stays the answer for the week");
+  });
+
   await check("with no runner listening, a refused site closes at once as before", async () => {
     await db.execute("UPDATE tool_runners SET last_seen_at = '2020-01-01T00:00:00.000Z'");
     const { row: lone } = await insertScan(db, { tenantId: OASIS, domain: "lone-site.ca", url: "https://lone-site.ca/", ipHash: null, now: t0 });
