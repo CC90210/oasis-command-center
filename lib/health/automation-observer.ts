@@ -23,8 +23,9 @@ const at = (value: unknown) => typeof value === "string" ? Date.parse(value) : N
  * runs on. Fed minute samples, "two consecutive failures" meant two MINUTES, so a
  * Telegram long-poll reconnect (3-4 min) became a 🔴 FAILING and, two minutes
  * later, a 🟢 RECOVERED — 39 flaps and ~30 pages in the 24 h to 2026-11-13.
- * Only the quarter-hour sample may page; the state machine then sees one sample
- * per 15 minutes, as designed, and confirms only what lasts half an hour.
+ * Only the quarter-hour sample may page. The state machine then sees one sample
+ * per 15 minutes and confirms on the second consecutive failing sample, about 15
+ * minutes after the first — a condition has to outlive a reconnect to page.
  */
 export const OBSERVER_PAGING_INTERVAL_MIN = 15;
 export function isObserverPagingTick(tickMs: number): boolean {
