@@ -165,6 +165,8 @@ export type BoardMetrics = {
   delivered: number;
   /** Every engagement ever opened, closed ones too. */
   total: number;
+  /** Engagements a lead opened by sending their free scan to the team (free_scan_attached, lib/site-scan/claim.ts). */
+  fromScan: number;
 };
 
 const IN_PROGRESS: readonly AiAuditStage[] = ["new_lead", "pre_call_research", "call_scheduled", "call_completed", "transcript_review", "generating", "final_review"];
@@ -172,7 +174,7 @@ const WON: readonly AiAuditStage[] = ["payment_confirmed", "onboarding", "active
 
 export async function boardMetrics(db: Client, tenantId: string, now: Date = new Date()): Promise<BoardMetrics> {
   const t = requireTenant(tenantId);
-  const m: BoardMetrics = { cardsWaiting: 0, problems: 0, inProgress: 0, withClient: 0, stalled: 0, won: 0, delivered: 0, total: 0 };
+  const m: BoardMetrics = { cardsWaiting: 0, problems: 0, inProgress: 0, withClient: 0, stalled: 0, won: 0, delivered: 0, total: 0, fromScan: 0 };
   const groups = await db.execute({ sql: "SELECT stage, health, COUNT(*) AS n FROM ai_audit_engagements WHERE tenant_id = ? AND is_fixture = 0 GROUP BY stage, health", args: [t] });
   for (const r of groups.rows) {
     const stage = String(r.stage) as AiAuditStage;
@@ -197,7 +199,19 @@ export async function boardMetrics(db: Client, tenantId: string, now: Date = new
     args: [t],
   });
   m.delivered = int(delivered.rows[0]?.n);
+  m.fromScan = await countAuditsFromScan(db, t);
   return m;
+}
+
+/** Real engagements opened by a lead who sent their free scan to the team (free_scan_attached). */
+export async function countAuditsFromScan(db: Client, tenantId: string): Promise<number> {
+  const rs = await db.execute({
+    sql: `SELECT COUNT(DISTINCT ev.engagement_id) AS n FROM ai_audit_events ev
+            JOIN ai_audit_engagements e ON e.tenant_id = ev.tenant_id AND e.id = ev.engagement_id
+           WHERE ev.tenant_id = ? AND ev.event = 'free_scan_attached' AND e.is_fixture = 0`,
+    args: [requireTenant(tenantId)],
+  });
+  return int(rs.rows[0]?.n);
 }
 
 export type EngagementView = {

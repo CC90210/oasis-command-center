@@ -120,6 +120,35 @@ async function main() {
     assert.deepEqual(await claim(LEAD_A, { form: START_FORM }), { ok: false, error: "wrong_form" }, "the workspace's other forms still cannot claim");
   });
 
+  // The AI audits board and an audit's page show the scan that opened it (CC, 2026-11-13: the scan
+  // and the audit must read as one path, not two overlapping pages).
+  await check("the AI audits board counts audits opened from the scan, and an audit links the report its lead saw", async () => {
+    const { countAuditsFromScan } = await import("../lib/ai-audit/view");
+    const { listEvents } = await import("../lib/ai-audit/store");
+    const { scansAttached } = await import("../lib/ai-audit/scan-origin");
+    const opened = new Set((await db.execute({ sql: "SELECT engagement_id FROM ai_audit_events WHERE tenant_id = ? AND event = 'free_scan_attached'", args: [OASIS] })).rows.map((r) => String(r.engagement_id)));
+    assert.ok(opened.size >= 2, "the claims above opened audits from the scan");
+    assert.equal(await countAuditsFromScan(db, OASIS), opened.size, "one per audit, however many times it was claimed");
+    const engagementId = [...opened][0];
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 1 WHERE id = ?", args: [engagementId] });
+    assert.equal(await countAuditsFromScan(db, OASIS), opened.size - 1, "a test audit is left out of the board's numbers");
+    await db.execute({ sql: "UPDATE ai_audit_engagements SET is_fixture = 0 WHERE id = ?", args: [engagementId] });
+    assert.equal(await countAuditsFromScan(db, "another-workspace"), 0);
+    const shown = scansAttached(await listEvents(db, OASIS, engagementId));
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].domain, "scan-fixture.test");
+    assert.match(shown[0].id, /^[0-9a-f-]{36}$/);
+    const base = { id: "x", from_stage: null, to_stage: null, actor_type: "system", actor_id: null, created_at: "2026-11-13T00:00:00.000Z" };
+    assert.deepEqual(
+      scansAttached([
+        { ...base, event: "free_scan_attached", ref_type: "site_scan", ref_id: "../../admin", meta: { domain: "x.ca" } },
+        { ...base, event: "delivered", ref_type: "site_scan", ref_id: shown[0].id, meta: {} },
+      ]),
+      [],
+      "only a scan id of the right shape on the right event becomes a link",
+    );
+  });
+
   // The landing hero starts the scan and then opens its page; a browser that keeps no storage gets
   // the claim key in the address fragment (never sent to a server), and the page wipes it on arrival.
   await check("a browser without storage still gets its claim key from the hero, and only from the fragment", async () => {

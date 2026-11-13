@@ -25,6 +25,7 @@ import {
   type BusinessType,
 } from "@/lib/ai-audit/rules";
 import { formatMoney } from "@/lib/ai-audit/catalogue";
+import { scansAttached } from "@/lib/ai-audit/scan-origin";
 import { ProfileEditor } from "./ProfileEditor";
 import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
@@ -160,6 +161,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
   // Forward into Transcript to approve only through "Ask for authorization", which files Gate 1's card;
   // the move by hand stays for going back there from a later stage.
   const manualMoves = STAGE_MOVES[e.stage].filter((s) => MANUAL_STAGE_TARGETS.includes(s) && !(s === "transcript_review" && e.stage === "call_completed"));
+  const fromScans = scansAttached(view.events);
   const auditEditable = !view.audit || view.audit.status === "draft";
   const proposalEditable = !view.proposal || view.proposal.status === "draft";
   const submitted = view.audit?.status === "awaiting_approval";
@@ -224,6 +226,20 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
               ))}
             </ul>
           ) : null}
+        </div>
+      ) : null}
+
+      {fromScans.length ? (
+        <div className="rounded-lg border border-hairline bg-bg-panel px-4 py-2.5 text-sm text-fg">
+          {fromScans.map((s) => (
+            <div key={s.id}>
+              Started from the free scan of <span className="font-medium">{s.domain}</span>
+              {s.score !== null ? <span className="text-fg-muted"> (scored {s.score}/100)</span> : null}, {when(s.at)}.{" "}
+              <a href={`/scan/${s.id}`} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+                Open the report they saw
+              </a>
+            </div>
+          ))}
         </div>
       ) : null}
 
