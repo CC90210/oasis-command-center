@@ -313,6 +313,11 @@ export async function browserRead(
 
   say(healthLines(report, "The browser could not read the site either"));
   const { facts, score, narrative } = analyseRead(row.domain, report, null, input.now.toISOString(), say);
+  // A browser read that is thin too is kept and scored as it is, and flagged, so the next visitor's
+  // scan reads the site again rather than keeping an empty report for the week (the next read may
+  // do better: a slower page, a fixed reader). This job never reads it again (store BROWSER_WANTED
+  // still lets this job's own later round replace it).
+  if (isThinRead(facts, score)) facts.site.thin = true;
   if (!(await saveBrowserRead(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, now: input.now, lease: input.lease }))) return { ok: false, code: "not_wanted" };
   const at = input.now.toISOString();
   const events = lines.map((l) => cleanEvent({ kind: l.kind, text: l.text, data: l.data, at })).filter((e): e is CleanEvent => e !== null);
