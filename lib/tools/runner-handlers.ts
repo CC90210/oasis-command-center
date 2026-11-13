@@ -79,6 +79,7 @@ import {
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
   RUN_TIMEOUT_SECONDS,
+  SCREENSHOT_BODY_MAX_BYTES,
   UPLOAD_URL_TTL_SECONDS,
 } from "@/lib/tools/limits";
 import {
@@ -90,6 +91,7 @@ import {
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
+import { decodeScreenshot, MAX_SCREENSHOT_BYTES, saveScreenshot, screenshotPath } from "@/lib/site-scan/screenshot";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
@@ -442,6 +444,9 @@ export async function handleToolsProgress(req: Request, deps: RunnerDeps): Promi
     const o = e as Record<string, unknown>;
     const t = typeof o.at === "string" ? Date.parse(o.at) : Number.NaN;
     const at = Number.isFinite(t) && Math.abs(t - nowMs) <= PROGRESS_CLOCK_SKEW_MS ? new Date(t).toISOString() : deps.now.toISOString();
+    // A picture is announced only by scan-screenshot, which stored it: a posted `screenshot` line
+    // could point the visitor's page at any address.
+    if (o.kind === "screenshot") return [];
     const clean = cleanEvent({ kind: o.kind, text: o.text, data: o.data, at });
     return clean ? [clean] : [];
   });
@@ -452,6 +457,40 @@ export async function handleToolsProgress(req: Request, deps: RunnerDeps): Promi
     if (eventsTableMissing(err)) return toolsJson(200, { ok: true, written: 0 });
     throw err;
   }
+}
+
+/**
+ * POST scan-screenshot: the picture of the scanned home page, taken by the runner while it
+ * matches. Same rules as progress: a signed request, the job's lease, only site_scan_enrich, only
+ * its own scan; the body must be a JPEG within MAX_SCREENSHOT_BYTES. Kept on the scan row and
+ * announced in the live feed, where the page's browser frame shows it.
+ */
+export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps): Promise<Response> {
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now, SCREENSHOT_BODY_MAX_BYTES);
+  if (!auth.ok) return auth.response;
+  const ref = leaseRef(auth.producer, auth.body);
+  if ("field" in ref) return invalid(ref.field);
+  const bytes = decodeScreenshot(auth.body.image_b64);
+  if (!bytes) return invalid("image_b64", { max_bytes: MAX_SCREENSHOT_BYTES });
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return leaseLost();
+  if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
+  const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
+  if (!scanId) return invalid("job");
+  try {
+    if (!(await saveScreenshot(deps.db, { tenantId: job.tenantId, scanId, bytes, now: deps.now }))) return invalid("job");
+  } catch (err) {
+    if (err instanceof Error && /no such column: screenshot_jpeg/i.test(err.message)) return notInstalled("screenshot_column_missing");
+    throw err;
+  }
+  const line = cleanEvent({ kind: "screenshot", text: "Took a picture of the home page as a visitor first sees it", data: { url: screenshotPath(scanId) }, at: deps.now.toISOString() });
+  if (line) {
+    await appendEvents(deps.db, { tenantId: job.tenantId, scanId, source: "runner", events: [line] }).catch((err: unknown) => {
+      if (!eventsTableMissing(err)) throw err;
+    });
+  }
+  return toolsJson(200, { ok: true, bytes: bytes.length });
 }
 
 // ---------------------------------------------------------------------------

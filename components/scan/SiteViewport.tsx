@@ -10,6 +10,8 @@ import type { ScanEvent } from "@/lib/site-scan/events";
 
 type PageRead = { path: string; title: string | null; url: string | null; ok: boolean };
 
+const SCREENSHOT_PATH = /^\/api\/scan\/[0-9a-f-]{36}\/screenshot$/;
+
 function pagesOf(events: ScanEvent[]): PageRead[] {
   const out: PageRead[] = [];
   for (const ev of events) {
@@ -28,7 +30,8 @@ function pagesOf(events: ScanEvent[]): PageRead[] {
 export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[]; fallbackUrl: string; live: boolean }) {
   const pages = pagesOf(events);
   const current = pages[pages.length - 1] ?? null;
-  const shot = [...events].reverse().find((e) => e.kind === "screenshot" && typeof e.data?.url === "string");
+  // Only our own stored picture of this scan is ever shown (GET /api/scan/:id/screenshot).
+  const shot = [...events].reverse().find((e) => e.kind === "screenshot" && typeof e.data?.url === "string" && SCREENSHOT_PATH.test(e.data.url));
   const address = current?.url ?? fallbackUrl;
   return (
     <figure className="overflow-hidden border border-ops-edge bg-ops-panel">
@@ -44,7 +47,7 @@ export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[
       </div>
       <div className="relative aspect-[16/10] overflow-hidden bg-ops-void">
         {shot ? (
-          // eslint-disable-next-line @next/next/no-img-element -- a short-lived signed URL from our own storage, not an optimisable asset
+          // eslint-disable-next-line @next/next/no-img-element -- our own stored picture of this scan (GET /api/scan/:id/screenshot), not an optimisable asset
           <img src={String(shot.data?.url)} alt={`The home page of ${address}, as the scanner saw it`} className="h-full w-full object-cover object-top" />
         ) : (
           <ol className="absolute inset-0 overflow-hidden p-4 font-data text-[11.5px] leading-relaxed">
