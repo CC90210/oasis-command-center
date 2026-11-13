@@ -19,10 +19,11 @@ import { inputHashOf, insertJob, isMissingToolTables, liveRunnerForTool, newJobI
 import { baseNarrative } from "@/lib/site-scan/narrative";
 import { scoreFacts } from "@/lib/site-scan/score";
 import { extractSignals } from "@/lib/site-scan/signals";
-import { getScan, saveTier0, setStatus } from "@/lib/site-scan/store";
-import { EventSink, NO_EVENTS, type ScanEvents } from "@/lib/site-scan/events";
+import { getScan, saveBrowserRead, saveTier0, setStatus } from "@/lib/site-scan/store";
+import { appendEvents, cleanEvent, eventsTableMissing, EventSink, NO_EVENTS, type CleanEvent, type ScanEvents } from "@/lib/site-scan/events";
 import { checkLines, pageLine, planLine, scoreLines, signalLines, speedLine, type Line } from "@/lib/site-scan/live";
-import { FACTS_SCHEMA, type ScanFacts } from "@/lib/site-scan/types";
+import { replayRead, wantsBrowserRead, type BrowserPage } from "@/lib/site-scan/browser-read";
+import { FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "@/lib/site-scan/types";
 
 export const ENRICH_TOOL_KEY = "site_scan_enrich" as const;
 export const PAGESPEED_SCAN_TIMEOUT_MS = 20_000;
@@ -77,6 +78,43 @@ export function factsFrom(input: { domain: string; report: SiteReport; pagespeed
 }
 
 /**
+ * The feed's line for each request the reader records. robots.txt is asked once per address the
+ * site answers on (https, www, http); the reader is told about it once.
+ */
+function pageRecorder(say: (l: Line) => void): (r: PageRecord) => void {
+  let robotsSaid = false;
+  return (r) => {
+    if (r.kind === "robots_txt" && r.error === null) {
+      if (robotsSaid) return;
+      robotsSaid = true;
+    }
+    say(pageLine(r));
+  };
+}
+
+/**
+ * What a read becomes: the health lines, the facts, the score and the template narrative, told to
+ * the feed as it goes. Shared by the Worker's own read and the browser's (browserRead).
+ */
+function analyseRead(
+  domain: string,
+  report: SiteReport,
+  pagespeed: PageSpeedResult | null,
+  readAt: string,
+  say: (l: Line | Line[]) => void,
+): { facts: ScanFacts; score: ScanScore; narrative: ScanNarrative } {
+  const facts = factsFrom({ domain, report, pagespeed, readAt });
+  say(signalLines(facts.signals));
+  const score = scoreFacts(facts);
+  say(scoreLines(score));
+  return { facts, score, narrative: baseNarrative(facts, score) };
+}
+
+function healthLines(report: SiteReport, fallback: string): Line[] {
+  return report.unread ? [{ kind: "error", text: report.notes[0] ?? fallback }] : checkLines(report.checks);
+}
+
+/**
  * Run Tier 0 for one scan row. Idempotent on the row's status: a row no longer `reading` (a second
  * run, a sweep that failed it) is left alone.
  */
@@ -99,16 +137,7 @@ export async function runTier0(
   }
 
   say({ kind: "note", text: `Opening ${target.start} the way a first-time buyer would`, data: { url: target.start } });
-  // robots.txt is asked once per address the site answers on (https, www, http); the reader is
-  // told about it once.
-  let robotsSaid = false;
-  const onRecord = (r: PageRecord) => {
-    if (r.kind === "robots_txt" && r.error === null) {
-      if (robotsSaid) return;
-      robotsSaid = true;
-    }
-    say(pageLine(r));
-  };
+  const onRecord = pageRecorder(say);
   let report: SiteReport;
   try {
     report = await readSite(target, { ...deps.site, onRecord, onPlan: (p) => say(planLine(p)) });
@@ -120,8 +149,7 @@ export async function runTier0(
   }
 
   await setStatus(db, { tenantId: input.tenantId, id: row.id, status: "reading", stage: "health", now: deps.now(), onlyFrom: ["reading"] });
-  if (report.unread) say({ kind: "error", text: report.notes[0] ?? "Nothing on the site could be read" });
-  else say(checkLines(report.checks));
+  say(healthLines(report, "Nothing on the site could be read"));
 
   let pagespeed: PageSpeedResult | null = null;
   if (deps.pagespeed && !report.unread) {
@@ -135,14 +163,25 @@ export async function runTier0(
     say(speedLine(pagespeed));
   }
 
-  const facts = factsFrom({ domain: row.domain, report, pagespeed, readAt: deps.now().toISOString() });
-  say(signalLines(facts.signals));
-  const score = scoreFacts(facts);
-  say(scoreLines(score));
-  const narrative = baseNarrative(facts, score);
+  const { facts, score, narrative } = analyseRead(row.domain, report, pagespeed, deps.now().toISOString(), say);
 
-  // A site that could not be read at all is finished here: there is nothing for the runner to enrich.
   if (report.unread) {
+    // Refused, not answered, or shown a bot check: hosts that block Cloudflare's network do this to
+    // the Worker while answering everyone else. The runner opens the site in a real browser on its
+    // own network (browserRead) when one is listening. A robots.txt that closes the site is final.
+    if (wantsBrowserRead(report.unread) && (await enrichRunnerLive(db, input.tenantId, deps.now()))) {
+      const handed = await saveTier0(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, status: "enriching", stage: "health", now: deps.now() });
+      if (!handed) return { ok: false, code: "status_changed" };
+      const queued = await queueEnrichment(db, { tenantId: input.tenantId, scanId: row.id, now: deps.now() });
+      if (queued.ok) {
+        say({ kind: "note", text: "This site turns away our first reader, so a real browser on another network is opening it instead" });
+        return { ok: true, code: "browser_read" };
+      }
+      console.error("[site-scan.tier0] browser read not queued", { scanId: row.id, reason: queued.reason });
+      await setStatus(db, { tenantId: input.tenantId, id: row.id, status: "done", stage: "done", errorCode: `enrich_${queued.reason}`, now: deps.now(), onlyFrom: ["enriching"] });
+      say({ kind: "done", text: "Report ready" });
+      return { ok: true, code: "unread" };
+    }
     await saveTier0(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, status: "done", stage: "done", now: deps.now() });
     say({ kind: "done", text: "Report ready" });
     return { ok: true, code: "unread" };
@@ -233,4 +272,39 @@ export async function queueEnrichment(db: Client, input: { tenantId: string; sca
     if (err instanceof Error && /UNIQUE|constraint/i.test(err.message)) return { ok: true };
     throw err;
   }
+}
+
+/**
+ * The browser's read of a site the Worker was turned away from (lib/site-scan/browser-read.ts),
+ * for POST /api/internal/tools/scan-pages. readSite runs over the runner's answers. While it asks
+ * for an address the runner has not sent and rounds are left, nothing is written and those
+ * addresses go back. Otherwise the read's facts, score and narrative replace the Worker's empty
+ * ones, the read is told to the feed, and the runner goes on to match.
+ */
+export async function browserRead(
+  db: Client,
+  input: { tenantId: string; scanId: string; pages: BrowserPage[]; lastRound: boolean; now: Date },
+): Promise<{ ok: true; need: string[] } | { ok: true; need: null; unread: string | null } | { ok: false; code: "not_wanted" }> {
+  const row = await getScan(db, input.tenantId, input.scanId);
+  if (!row || row.status !== "enriching" || !row.facts || !wantsBrowserRead(row.facts.site.unread)) return { ok: false, code: "not_wanted" };
+  const target = siteTarget(row.url);
+  if (target.kind !== "site") return { ok: false, code: "not_wanted" };
+
+  const lines: Line[] = [];
+  const say = (l: Line | Line[]) => {
+    lines.push(...(Array.isArray(l) ? l : [l]));
+  };
+  const replay = replayRead(input.pages);
+  const report = await readSite(target, { ...replay.deps, onRecord: pageRecorder(say), onPlan: (p) => say(planLine(p)) });
+  if (replay.missing.size && !input.lastRound) return { ok: true, need: [...replay.missing] };
+
+  say(healthLines(report, "The browser could not read the site either"));
+  const { facts, score, narrative } = analyseRead(row.domain, report, null, input.now.toISOString(), say);
+  if (!(await saveBrowserRead(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, now: input.now }))) return { ok: false, code: "not_wanted" };
+  const at = input.now.toISOString();
+  const events = lines.map((l) => cleanEvent({ kind: l.kind, text: l.text, data: l.data, at })).filter((e): e is CleanEvent => e !== null);
+  await appendEvents(db, { tenantId: input.tenantId, scanId: row.id, source: "runner", events }).catch((err: unknown) => {
+    if (!eventsTableMissing(err)) throw err;
+  });
+  return { ok: true, need: null, unread: report.unread };
 }

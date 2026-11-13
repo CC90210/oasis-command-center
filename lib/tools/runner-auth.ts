@@ -67,7 +67,7 @@ export async function authenticateToolsRequest(
   req: Request,
   env: Record<string, string | undefined>,
   now: Date,
-  /** The body cap: 64 KiB on every route but complete, which takes a meeting's transcript (COMPLETE_BODY_MAX_BYTES), and scan-screenshot, a home page's picture (SCREENSHOT_BODY_MAX_BYTES). */
+  /** The body cap: 64 KiB on every route but complete, which takes a meeting's transcript (COMPLETE_BODY_MAX_BYTES), scan-screenshot, a home page's picture (SCREENSHOT_BODY_MAX_BYTES), and scan-pages, a browser's read of a site (SCAN_PAGES_BODY_MAX_BYTES). */
   maxBytes: number = RUNNER_BODY_MAX_BYTES,
 ): Promise<ToolsAuth> {
   const producerHeader = (req.headers.get(HEADER_PRODUCER) || "").trim().toLowerCase();

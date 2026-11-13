@@ -54,6 +54,8 @@ import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
 import { enrichJobInput, enrichReportStatement, parseEnrichReport } from "@/lib/site-scan/enrich-job";
+import { MAX_BROWSER_ROUNDS, parseBrowserPages } from "@/lib/site-scan/browser-read";
+import { browserRead } from "@/lib/site-scan/run";
 import {
   DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
@@ -79,6 +81,7 @@ import {
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
   RUN_TIMEOUT_SECONDS,
+  SCAN_PAGES_BODY_MAX_BYTES,
   SCREENSHOT_BODY_MAX_BYTES,
   UPLOAD_URL_TTL_SECONDS,
 } from "@/lib/tools/limits";
@@ -465,6 +468,34 @@ export async function handleToolsProgress(req: Request, deps: RunnerDeps): Promi
  * its own scan; the body must be a JPEG within MAX_SCREENSHOT_BYTES. Kept on the scan row and
  * announced in the live feed, where the page's browser frame shows it.
  */
+/**
+ * POST scan-pages: what a real browser read of a site the Worker was turned away from
+ * (lib/site-scan/browser-read.ts). Same rules as progress: a signed request, the job's lease,
+ * only site_scan_enrich, only its own scan. Answers `need` (more addresses to read, nothing
+ * written) or `done` with the job's input rebuilt from the new read, so the runner matches on it.
+ */
+export async function handleToolsScanPages(req: Request, deps: RunnerDeps): Promise<Response> {
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now, SCAN_PAGES_BODY_MAX_BYTES);
+  if (!auth.ok) return auth.response;
+  const ref = leaseRef(auth.producer, auth.body);
+  if ("field" in ref) return invalid(ref.field);
+  const round = auth.body.round;
+  if (typeof round !== "number" || !Number.isInteger(round) || round < 1 || round > MAX_BROWSER_ROUNDS) return invalid("round");
+  const parsed = parseBrowserPages(auth.body.pages);
+  if (!parsed.ok) return invalid(parsed.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return leaseLost();
+  if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
+  const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
+  if (!scanId) return invalid("job");
+  const read = await browserRead(deps.db, { tenantId: job.tenantId, scanId, pages: parsed.pages, lastRound: round === MAX_BROWSER_ROUNDS, now: deps.now });
+  if (!read.ok) return toolsJson(409, { ok: false, error: read.code });
+  if (read.need) return toolsJson(200, { ok: true, need: read.need });
+  const built = await enrichJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
+  return toolsJson(200, { ok: true, done: true, unread: read.unread, input: built.ok ? built.input : null });
+}
+
 export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps): Promise<Response> {
   const auth = await authenticateToolsRequest(req, deps.env, deps.now, SCREENSHOT_BODY_MAX_BYTES);
   if (!auth.ok) return auth.response;

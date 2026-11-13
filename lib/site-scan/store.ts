@@ -9,6 +9,7 @@ import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
 import { eventsTableMissing } from "@/lib/site-scan/events";
+import { BROWSER_READ_UNREAD } from "@/lib/site-scan/browser-read";
 import {
   SCAN_STAGES,
   SCAN_TTL_DAYS,
@@ -210,6 +211,24 @@ export async function saveTier0(
     sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, status = ?, stage = ?, error_code = NULL, updated_at = ?
           WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'reading')`,
     args: [JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.status, input.stage, at, input.tenantId, input.id],
+  });
+  return rs.rowsAffected === 1;
+}
+
+/**
+ * The browser's read in place of the Worker's empty one (lib/site-scan/run.ts browserRead): only
+ * while the runner is working on the row, and only over a read the Worker could not do, so a later
+ * post never overwrites a real read.
+ */
+export async function saveBrowserRead(
+  db: Client,
+  input: { tenantId: string; id: string; facts: ScanFacts; score: ScanScore; narrative: ScanNarrative; now: Date },
+): Promise<boolean> {
+  const unread = BROWSER_READ_UNREAD.map(() => "?").join(", ");
+  const rs = await db.execute({
+    sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND json_extract(facts_json, '$.site.unread') IN (${unread})`,
+    args: [JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.now.toISOString(), input.tenantId, input.id, ...BROWSER_READ_UNREAD],
   });
   return rs.rowsAffected === 1;
 }

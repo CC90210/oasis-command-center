@@ -36,6 +36,12 @@ export const COMPLETE_BODY_MAX_BYTES = 2 * 1024 * 1024;
  * (at most 250,000 bytes, lib/site-scan/screenshot.ts) as base64, plus the lease fields.
  */
 export const SCREENSHOT_BODY_MAX_BYTES = 340 * 1024;
+/**
+ * The largest signed body POST /api/internal/tools/scan-pages takes: the pages a real browser read
+ * for a site that turned the Worker away (lib/site-scan/browser-read.ts), each at most
+ * MAX_PAGE_BYTES of text. The runner keeps a round's pages under this.
+ */
+export const SCAN_PAGES_BODY_MAX_BYTES = 6 * 1024 * 1024;
 /** How long a presigned upload URL stays valid (lib/r2-storage.ts signs PUTs for this long). */
 export const UPLOAD_URL_TTL_SECONDS = 900;
 /**
