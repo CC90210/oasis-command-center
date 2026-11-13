@@ -47,7 +47,8 @@ export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[
   const pages = pagesOf(events);
   const current = pages[pages.length - 1] ?? null;
   const shots = events.filter((e) => e.kind === "screenshot" && typeof e.data?.url === "string" && SHOT_PATH.test(e.data.url));
-  const home = shots.find((e) => e.data?.seq === 0 || /\/screenshot(?:\?v=\d+)?$/.test(String(e.data?.url))) ?? shots[0] ?? null;
+  // The newest picture of the home page: a retried runner posts it again under a new version.
+  const home = [...shots].reverse().find((e) => e.data?.seq === 0 || /\/screenshot(?:\?v=\d+)?$/.test(String(e.data?.url))) ?? shots[0] ?? null;
   const latest = shots[shots.length - 1] ?? null;
   // Live, the frame follows the walk; finished, it rests on the home page.
   const shot = live ? latest : (home ?? latest);
