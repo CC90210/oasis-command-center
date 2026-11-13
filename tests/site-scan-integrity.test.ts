@@ -19,7 +19,6 @@ import { formLinkMacMatches } from "../lib/form-links";
 import { queueEnrichment } from "../lib/site-scan/run";
 import {
   enrichStatement,
-  findReusableScan,
   getScan,
   insertScan,
   purgeExpiredScans,
@@ -110,7 +109,7 @@ async function store() {
   try {
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql"), "utf8"));
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
-    const t0 = new Date("2026-11-14T10:00:00.000Z"); // after REPORT_FORMAT_SINCE, as every new scan is
+    const t0 = new Date("2026-11-14T10:00:00.000Z");
 
     // A failed scan is retried the same day: the row is reset in place and the caller must run it.
     const first = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: t0 });
@@ -127,7 +126,6 @@ async function store() {
 
     // An orphaned read (its Worker died) is not handed to the next visitor, and is restarted by them.
     const orphanAt = new Date(t0.getTime() + 61_000 + STALE_READ_MS);
-    assert.equal(await findReusableScan(db, TENANT, "fail.example", orphanAt), null, "a read nobody touches is not reused");
     const restarted = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: orphanAt });
     assert.equal(restarted.started, true);
 

@@ -19,13 +19,13 @@ import { inputHashOf, insertJob, isMissingToolTables, liveRunnerForTool, newJobI
 import { baseNarrative } from "@/lib/site-scan/narrative";
 import { scoreFacts } from "@/lib/site-scan/score";
 import { extractSignals } from "@/lib/site-scan/signals";
-import { getScan, saveBrowserRead, saveTier0, setStatus, type ScanLease } from "@/lib/site-scan/store";
+import { ENRICH_TOOL_KEY, getScan, saveBrowserRead, saveTier0, setStatus, type ScanLease } from "@/lib/site-scan/store";
 import { appendEvents, cleanEvent, eventsTableMissing, EventSink, NO_EVENTS, type CleanEvent, type ScanEvents } from "@/lib/site-scan/events";
 import { checkLines, pageLine, planLine, scoreLines, signalLines, speedLine, type Line } from "@/lib/site-scan/live";
 import { isThinRead, needsBrowserRead, replayRead, wantsBrowserRead, type BrowserPage } from "@/lib/site-scan/browser-read";
 import { FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "@/lib/site-scan/types";
 
-export const ENRICH_TOOL_KEY = "site_scan_enrich" as const;
+export { ENRICH_TOOL_KEY };
 export const PAGESPEED_SCAN_TIMEOUT_MS = 20_000;
 
 export type Tier0Deps = {

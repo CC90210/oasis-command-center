@@ -189,8 +189,7 @@ async function main() {
     assert.equal(after.facts?.site.thin, undefined, "the browser's read is not flagged again");
     assert.ok((after.facts?.signals?.word_count ?? 0) >= br.THIN_WORDS);
 
-    // A browser read that is thin too: kept, and flagged so the next visitor's scan reads the site again.
-    const { findReusableScan } = await import("../lib/site-scan/store");
+    // A browser read that is thin too: kept, and flagged (the report's own word on how much was read).
     const day2 = new Date(t0.getTime() + 2 * 86_400_000);
     const { row: still } = await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2 });
     await seedRunner(db, day2, ["site_scan_enrich"], "bea:oasis-vps-audit");
@@ -208,7 +207,6 @@ async function main() {
     assert.equal(kept.facts?.site.thin, true, "the browser's thin read is flagged");
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [still.id] });
     const day2later = new Date(day2.getTime() + 3_600_000);
-    assert.equal(await findReusableScan(db, OASIS, "shell-site.ca", day2later), null, "an empty report is not handed to the next visitor");
     assert.equal((await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2later })).started, true, "today's is read again");
   });
 
@@ -219,22 +217,21 @@ async function main() {
     assert.equal((await getScan(db, OASIS, closed.id))!.status, "done");
   });
 
-  await check("an empty report a browser could read is never reused, and today's is read again; a good report still is", async () => {
-    const { findReusableScan } = await import("../lib/site-scan/store");
+  await check("a finished report, empty or good, is read again in place for the next visitor today", async () => {
     const { row: empty } = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: t0 });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "home_page_failed" } }), empty.id] });
     const later = new Date(t0.getTime() + 3_600_000);
-    assert.equal(await findReusableScan(db, OASIS, "empty-site.ca", later), null, "the empty report is not handed to the next visitor");
     const again = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: later });
     assert.equal(again.row.id, empty.id);
     assert.equal(again.started, true, "today's empty report is read again in place");
 
+    // A good report too: every scan a visitor starts is a real run they watch (CC, 2026-11-13).
     const { row: good } = await insertScan(db, { tenantId: OASIS, domain: "good-site.ca", url: "https://good-site.ca/", ipHash: null, now: t0 });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: null } }), good.id] });
-    assert.equal((await findReusableScan(db, OASIS, "good-site.ca", later))?.id, good.id, "a report with nothing unread is reused as before");
-    const robots = await insertScan(db, { tenantId: OASIS, domain: "robots-site.ca", url: "https://robots-site.ca/", ipHash: null, now: t0 });
-    await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "not_allowed" } }), robots.row.id] });
-    assert.equal((await findReusableScan(db, OASIS, "robots-site.ca", later))?.id, robots.row.id, "robots.txt closing the site stays the answer for the week");
+    const goodAgain = await insertScan(db, { tenantId: OASIS, domain: "good-site.ca", url: "https://good-site.ca/", ipHash: null, now: later });
+    assert.equal(goodAgain.row.id, good.id);
+    assert.equal(goodAgain.started, true, "a good report is read again too");
+    assert.equal(goodAgain.row.facts, null, "the earlier read is not shown as the new one's");
   });
 
   await check("a site read again in place gets a runner job of its own, a finished one from before never in its way", async () => {
