@@ -16,7 +16,7 @@ import { appendEvents, cleanEvent, EventSink, listEvents, MAX_EVENTS_PER_SCAN, M
 import { checkLines, pageLine, planLine, scoreLines, shortTitle, signalLines, speedLine } from "../lib/site-scan/live";
 import { runTier0Live } from "../lib/site-scan/run";
 import { claimTier0, getScan, insertScan, purgeExpiredScans, setStatus } from "../lib/site-scan/store";
-import { encodeScanFrame, followScan, resumeAfter, WINDOW_MS, type ScanFrame } from "../lib/site-scan/stream";
+import { encodeScanFrame, followScan, resumeAfter, scanStreamResponse, WINDOW_MS, type ScanFrame } from "../lib/site-scan/stream";
 import type { FetchLike } from "../lib/ai-audit/site-fetch";
 import type { SiteSignals } from "../lib/site-scan/types";
 
@@ -91,8 +91,10 @@ async function main() {
     assert.equal(await claimTier0(db, { tenantId: TENANT, id: row.id, now: t0 }), "taken", "the stream and POST's fallback never both run it");
     await setStatus(db, { tenantId: TENANT, id: row.id, status: "failed", stage: "read", errorCode: "read_failed", now: t0 });
     assert.equal(await claimTier0(db, { tenantId: TENANT, id: row.id, now: t0 }), "taken", "only a reading scan is claimable");
+    await appendEvents(db, { tenantId: TENANT, scanId: row.id, source: "worker", events: [cleanEvent({ kind: "error", text: "The site could not be read from here", at: t0.toISOString() })!] });
     const retry = await insertScan(db, { tenantId: TENANT, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: new Date(t0.getTime() + 60_000) });
     assert.ok(retry.started && retry.row.id === row.id);
+    assert.deepEqual(await listEvents(db, { tenantId: TENANT, scanId: row.id, afterId: 0 }), [], "a retry does not replay the failed attempt's feed");
     assert.equal(await claimTier0(db, { tenantId: TENANT, id: row.id, now: t0 }), "claimed", "a retried scan is read again");
     const old = createClient({ url: `file:${join(dir, "old.db")}` });
     await old.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
@@ -166,6 +168,18 @@ async function main() {
     // ── The feed's words. ──
     assert.equal(pageLine({ kind: "robots_txt", url: "https://a.example/robots.txt", finalUrl: null, status: 404, bytes: 0, ms: 5, title: null, error: null, html: null }).text, "No robots.txt (HTTP 404), so the site's public pages are open to read");
     assert.equal(pageLine({ kind: "site_page", url: "https://a.example/x", finalUrl: null, status: null, bytes: 0, ms: 0, title: null, error: "timed_out", html: null }).text, "Could not open /x: it did not answer in time");
+    // A robots.txt server error closes the read (RFC 9309): never described as an open site.
+    assert.equal(pageLine({ kind: "robots_txt", url: "https://a.example/robots.txt", finalUrl: null, status: 503, bytes: 0, ms: 5, title: null, error: null, html: null }).text, "robots.txt answered with HTTP 503, so the site's rules could not be read");
+    // A 200 at /sitemap.xml is not called a sitemap: the sitemap check says whether it is one.
+    assert.equal(pageLine({ kind: "sitemap", url: "https://a.example/sitemap.xml", finalUrl: null, status: 200, bytes: 9, ms: 5, title: null, error: null, html: null }).text, "Read /sitemap.xml to look for a sitemap");
+
+    // A stream that fails closes without `window`, so the browser counts it as a failure.
+    const failing = (async function* (): AsyncGenerator<ScanFrame> {
+      yield { type: "ping" };
+      throw new Error("db down");
+    })();
+    const wire = await new Response(scanStreamResponse(failing, () => undefined).body).text();
+    assert.ok(wire.includes(": ping") && !wire.includes("event: window"), wire);
     assert.equal(planLine([]).text, "The home page links to no contact, booking, services or pricing page to open next");
     assert.deepEqual(checkLines([{ key: "online_booking", status: "no", detail: "", found: [], evidence: null }]).map((l) => l.text), ["Online booking: missing"]);
     assert.deepEqual(checkLines([{ key: "response_time", status: "no", detail: "", found: [], evidence: null }, { key: "analytics", status: "yes", detail: "", found: ["Google Analytics"], evidence: null }]).map((l) => l.text), ["Home page response time: slow", "Visitor analytics: found (Google Analytics)"]);

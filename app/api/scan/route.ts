@@ -15,7 +15,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { siteTarget } from "@/lib/ai-audit/site-url";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { claimKeyFor } from "@/lib/site-scan/claim";
-import { runTier0Live } from "@/lib/site-scan/run";
+import { defaultTier0Deps, runTier0Live } from "@/lib/site-scan/run";
 import { claimTier0, findReusableScan, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
 
 export const runtime = "nodejs";
@@ -27,7 +27,7 @@ const json = (status: number, body: Record<string, unknown>) => NextResponse.jso
 // Not exported: a route file may only export its handlers and route config (Next build type check).
 const SCANS_PER_HOUR = 5;
 /** How long POST waits for the visitor's live stream to claim Tier 0 before running it itself. */
-const STREAM_CLAIM_GRACE_MS = 4_000;
+const STREAM_CLAIM_GRACE_MS = 2_000;
 
 export async function POST(req: Request): Promise<Response> {
   if (!sameOrigin(req)) return json(403, { ok: false, error: "forbidden" });
@@ -61,16 +61,21 @@ export async function POST(req: Request): Promise<Response> {
   if (started) {
     // The visitor's live stream claims Tier 0 and runs it in its own connection
     // (app/api/scan/[id]/stream). This is the fallback for a browser that never opens one: after a
-    // short grace, run it here unless a stream already did. runTier0Live never throws; a crash
-    // closes the row so a later visitor is not handed a scan that looks busy.
+    // short grace, run it here only if this claim wins (or the database predates the claim). It
+    // must fit the ~30 s after() gets: the read's own 25 s budget plus the grace, so the fallback
+    // skips PageSpeed (up to 20 s more). A claim that errors runs nothing: the row may be a
+    // stream's, and a read nobody finishes is failed by the 3-minute sweep and retried fresh.
     after(async () => {
       await new Promise((r) => setTimeout(r, STREAM_CLAIM_GRACE_MS));
+      let claim: Awaited<ReturnType<typeof claimTier0>>;
       try {
-        if ((await claimTier0(db, { tenantId: AI_AUDIT_TENANT_ID, id: row.id, now: new Date() })) === "taken") return;
+        claim = await claimTier0(db, { tenantId: AI_AUDIT_TENANT_ID, id: row.id, now: new Date() });
       } catch (err) {
-        console.error("[site-scan.create] tier 0 claim failed; running it here", { scanId: row.id, error: err instanceof Error ? err.message : String(err) });
+        console.error("[site-scan.create] tier 0 claim failed; not running it here", { scanId: row.id, error: err instanceof Error ? err.message : String(err) });
+        return;
       }
-      await runTier0Live(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id });
+      if (claim === "taken") return;
+      await runTier0Live(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id }, { ...defaultTier0Deps(), pagespeed: null });
     });
   }
   return json(started ? 201 : 200, { ok: true, scan_id: row.id, reused: !started, claim_key: claimKeyFor(row.id) });

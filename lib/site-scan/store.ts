@@ -155,7 +155,15 @@ export async function insertScan(
     const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
     const r = rs.rows[0];
     if (!r) throw err;
-    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: reset.rowsAffected === 1 };
+    const row = rowFromRecord(r as unknown as Record<string, unknown>);
+    if (reset.rowsAffected === 1) {
+      // The retry is a new read under the same id: the failed attempt's feed is not replayed beside
+      // it, and does not use up its allowance. Cleared before anything can claim the new read.
+      await db.execute({ sql: "DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id = ?", args: [input.tenantId, row.id] }).catch((delErr: unknown) => {
+        if (!eventsTableMissing(delErr)) throw delErr;
+      });
+    }
+    return { row, started: reset.rowsAffected === 1 };
   }
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");

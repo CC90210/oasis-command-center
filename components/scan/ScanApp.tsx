@@ -174,12 +174,13 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
 
   return (
     <div ref={workspaceRef} className="mx-auto w-full max-w-6xl scroll-mt-24">
-      <LiveWorkspace scan={scan} events={live.events} finished={live.finished} wasFinished={live.wasFinished} />
+      {/* Above the workspace, where the visitor is looking, with the way out right under it. */}
+      {error ? <p role="alert" className="mb-4 border border-status-warm/40 bg-ops-panel p-4 text-[14px] text-status-warm">{error}</p> : null}
+      <LiveWorkspace scan={scan} events={live.events} finished={live.finished} wasFinished={live.wasFinished} stopped={live.gone} />
       <button type="button" onClick={reset} className="mt-4 text-[13px] text-fg-dim underline decoration-ops-edge underline-offset-4 hover:text-fg">
         Scan a different site
       </button>
       <div className="mt-8 min-w-0">
-        {error ? <p role="alert" className="mb-4 border border-status-warm/40 bg-ops-panel p-4 text-[14px] text-status-warm">{error}</p> : null}
         {scan ? <ScanReport scan={scan} /> : null}
         {scan && scan.facts && !scan.error ? (
           <section id="claim" className="mt-12 scroll-mt-24 border border-ops-edge bg-ops-panel/90 p-6 sm:p-8">

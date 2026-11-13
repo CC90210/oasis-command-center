@@ -46,6 +46,15 @@ function pct(part: number, whole: number): string {
 export default async function FreeScansPage() {
   const session = await aiAuditPageSession();
   if (!session) notFound();
+  // The public scan files into one workspace (its leads and audits live there). From another
+  // workspace its links would open nothing, so the page says where to look instead.
+  if (session.tenantId !== AI_AUDIT_TENANT_ID) {
+    return (
+      <PageFrame title="Free scans" subtitle="The free scan's results live in the OASIS workspace.">
+        <div className="rounded-xl border border-hairline bg-bg-panel px-4 py-3 text-sm text-fg-muted">Switch to the OASIS workspace to see who ran the free scan and what it found.</div>
+      </PageFrame>
+    );
+  }
   let metrics: ScanMetrics | null = null;
   let installed = true;
   try {
@@ -78,7 +87,7 @@ export default async function FreeScansPage() {
       ) : null}
 
       <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <KpiTile label="Scans" value={t ? t.scans.toLocaleString("en-CA") : null} status={status} emptyText="No scans yet" hint={t ? `${t.last24h} today, ${t.last7d} this week` : "The numbers could not be read"} />
+        <KpiTile label="Scans" value={t ? t.scans.toLocaleString("en-CA") : null} status={status} emptyText="No scans yet" hint={t ? `${t.last24h} in the last 24 hours, ${t.last7d} in the last 7 days` : "The numbers could not be read"} />
         <KpiTile label="People" value={t ? t.visitors.toLocaleString("en-CA") : null} status={status} emptyText="No visitors yet" hint="Distinct visitor addresses (hashed)" />
         <KpiTile label="Websites" value={t ? t.sites.toLocaleString("en-CA") : null} status={status} emptyText="None yet" hint="Distinct sites scanned" />
         <KpiTile
@@ -88,7 +97,7 @@ export default async function FreeScansPage() {
           emptyText="None yet"
           hint={t ? `${pct(t.claimed, t.scans)} of scans became a lead` : "The numbers could not be read"}
         />
-        <KpiTile label="Fully matched" value={t ? pct(t.matched, t.scans) : null} status={status} emptyText="None yet" hint={t ? `${t.matched} with competitors and buyers` : "The numbers could not be read"} />
+        <KpiTile label="Matching finished" value={t ? pct(t.matched, t.scans) : null} status={status} emptyText="None yet" hint={t ? `${t.matched} scans the matching engine finished` : "The numbers could not be read"} />
         <KpiTile label="Average score" value={t && t.avgScore !== null ? `${t.avgScore}/100` : null} status={t && t.avgScore !== null ? "live" : status === "error" ? "error" : "no_data"} emptyText="No scores yet" hint={t ? `${t.failed} scan${t.failed === 1 ? "" : "s"} failed` : "The numbers could not be read"} />
       </div>
 

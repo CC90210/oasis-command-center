@@ -55,16 +55,20 @@ export function pageLine(rec: PageRecord): Line {
   }
   switch (rec.kind) {
     case "robots_txt":
-      return rec.status === 200
-        ? { kind: "page", text: "Read robots.txt to see what the site allows a reader to open", data: base }
-        : { kind: "page", text: `No robots.txt (HTTP ${rec.status}), so the site's public pages are open to read`, data: base };
+      // RFC 9309, as robotsFrom reads it: a 4xx means no rules (open); any other failure closes the read.
+      if (rec.status === 200) return { kind: "page", text: "Read robots.txt to see what the site allows a reader to open", data: base };
+      if (rec.status !== null && rec.status >= 400 && rec.status < 500) {
+        return { kind: "page", text: `No robots.txt (HTTP ${rec.status}), so the site's public pages are open to read`, data: base };
+      }
+      return { kind: "page", text: `robots.txt answered with HTTP ${rec.status}, so the site's rules could not be read`, data: base };
     case "http_check": {
       const secure = (rec.finalUrl ?? "").startsWith("https:");
       return { kind: "page", text: secure ? "Plain http:// sends visitors on to the secure address" : "Plain http:// does not send visitors to the secure address", data: { ...base, secure } };
     }
     case "sitemap":
+      // Whether what answered is a sitemap is the sitemap check's verdict, said with the checks.
       return rec.status === 200
-        ? { kind: "page", text: `Opened the sitemap at ${path}`, data: base }
+        ? { kind: "page", text: `Read ${path} to look for a sitemap`, data: base }
         : { kind: "page", text: `No sitemap at ${path} (HTTP ${rec.status})`, data: base };
     case "site_page": {
       const ok = rec.status !== null && rec.status >= 200 && rec.status < 300;

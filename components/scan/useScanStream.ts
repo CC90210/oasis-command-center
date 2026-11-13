@@ -21,6 +21,8 @@ export type ScanStream = {
   wasFinished: boolean;
   finished: boolean;
   error: string | null;
+  /** The scan is gone (an expired link): nothing more will come. */
+  gone: boolean;
 };
 
 function over(scan: ScanView): boolean {
@@ -33,6 +35,7 @@ export function useScanStream(scanId: string | null): ScanStream {
   const [finished, setFinished] = useState(false);
   const [wasFinished, setWasFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gone, setGone] = useState(false);
   const firstScan = useRef(true);
 
   useEffect(() => {
@@ -41,6 +44,7 @@ export function useScanStream(scanId: string | null): ScanStream {
     setFinished(false);
     setWasFinished(false);
     setError(null);
+    setGone(false);
     firstScan.current = true;
     if (!scanId) return;
     let alive = true;
@@ -62,16 +66,39 @@ export function useScanStream(scanId: string | null): ScanStream {
       if (final || over(next)) setFinished(final || over(next));
     };
 
+    // A read that fails is tried again (backing off to 10 s) while the scan is unfinished; the
+    // visitor is told only after a few misses in a row, and the message clears when a read lands.
+    let misses = 0;
+    let polling = false;
+    const schedule = (ms: number) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void poll(), ms);
+    };
     const poll = async () => {
-      const res = await fetch(`/api/scan/${encodeURIComponent(scanId)}`, { cache: "no-store" }).catch(() => null);
-      if (!alive) return;
-      const data = (res ? await res.json().catch(() => null) : null) as { ok?: boolean; scan?: ScanView; error?: string } | null;
-      if (!res || !res.ok || !data?.ok || !data.scan) {
-        setError(data?.error === "not_found" ? "That scan link has expired. Start a new one below." : "The scan could not be read right now.");
-        return;
+      if (polling || !alive) return;
+      polling = true;
+      try {
+        const res = await fetch(`/api/scan/${encodeURIComponent(scanId)}`, { cache: "no-store" }).catch(() => null);
+        if (!alive) return;
+        const data = (res ? await res.json().catch(() => null) : null) as { ok?: boolean; scan?: ScanView; error?: string } | null;
+        if (data?.error === "not_found") {
+          setGone(true);
+          setError("That scan link has expired. Start a new one below.");
+          return;
+        }
+        if (!res || !res.ok || !data?.ok || !data.scan) {
+          misses += 1;
+          if (misses >= 3) setError("The scan could not be read right now. Still trying...");
+          schedule(Math.min(10_000, POLL_MS * 2 ** Math.min(misses, 3)));
+          return;
+        }
+        misses = 0;
+        setError(null);
+        takeScan(data.scan, false);
+        if (!over(data.scan)) schedule(POLL_MS);
+      } finally {
+        polling = false;
       }
-      takeScan(data.scan, false);
-      if (!over(data.scan)) timer = setTimeout(() => void poll(), POLL_MS);
     };
 
     if (typeof window === "undefined" || typeof window.EventSource === "undefined") {
@@ -105,6 +132,7 @@ export function useScanStream(scanId: string | null): ScanStream {
       });
       es.addEventListener("gone", () => {
         es?.close();
+        setGone(true);
         setError("That scan link has expired. Start a new one below.");
       });
       // The server ends each window on purpose; the reconnect that follows is not a failure.
@@ -139,5 +167,5 @@ export function useScanStream(scanId: string | null): ScanStream {
     };
   }, [scanId]);
 
-  return { scan, events, finished, wasFinished, error };
+  return { scan, events, finished, wasFinished, error, gone };
 }

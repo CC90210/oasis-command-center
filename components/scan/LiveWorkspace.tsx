@@ -51,11 +51,12 @@ function useElapsed(t0: number | null, running: boolean, lastAt: number | null):
   return Math.max(0, ((running ? now : (lastAt ?? now)) - t0) / 1_000);
 }
 
-export function LiveWorkspace({ scan, events, finished, wasFinished }: { scan: ScanView | null; events: ScanEvent[]; finished: boolean; wasFinished: boolean }) {
+export function LiveWorkspace({ scan, events, finished, wasFinished, stopped = false }: { scan: ScanView | null; events: ScanEvent[]; finished: boolean; wasFinished: boolean; stopped?: boolean }) {
   const shownCount = usePacedCount(events.length, wasFinished);
   const shown = events.slice(0, shownCount);
   const catching = shownCount < events.length;
-  const live = !finished || catching;
+  // `stopped`: the scan cannot be followed (an expired link): never drawn as still working.
+  const live = !stopped && (!finished || catching);
   const t0 = events.length ? new Date(events[0].at).getTime() : null;
   const lastAt = shown.length ? new Date(shown[shown.length - 1].at).getTime() : null;
   const elapsed = useElapsed(t0, !finished, lastAt);
@@ -70,7 +71,7 @@ export function LiveWorkspace({ scan, events, finished, wasFinished }: { scan: S
         <div className="flex items-center gap-3">
           <span className={`h-2 w-2 rounded-full ${live ? "animate-pulse bg-signal" : "bg-status-engaged"}`} aria-hidden="true" />
           <p className="font-data text-[11px] uppercase tracking-[0.24em] text-fg">
-            {live ? (current ? current.title : "Working") : scan?.status === "failed" ? "Stopped" : "Finished"}
+            {live ? (current ? current.title : "Working") : stopped || scan?.status === "failed" ? "Stopped" : "Finished"}
           </p>
         </div>
         <p className="font-data text-[11px] uppercase tracking-[0.2em] text-fg-dim">

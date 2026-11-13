@@ -134,8 +134,9 @@ export function scanStreamResponse(frames: AsyncGenerator<ScanFrame>, onGone: ()
         }
         controller.enqueue(enc.encode(encodeScanFrame(next.value)));
       } catch (err) {
+        // Closed without a `window` frame: the browser counts it as a failure (useScanStream), and
+        // one that keeps failing falls back to reading the scan the plain way.
         console.error("[site-scan.stream]", err instanceof Error ? (err.stack ?? err.message) : String(err));
-        controller.enqueue(enc.encode("event: window\ndata: {}\n\n"));
         controller.close();
       }
     },
