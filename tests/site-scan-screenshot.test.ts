@@ -149,6 +149,19 @@ async function main() {
     assert.equal(shots.parseShotRef(-1, "https://a.ca/"), null);
   });
 
+  await check("a site read again in place starts without the earlier attempt's pictures", async () => {
+    const { row: first } = await insertScan(db, { tenantId: OASIS, domain: "reset-site.ca", url: "https://reset-site.ca/", ipHash: null, now: t0 });
+    assert.equal(await shots.saveScreenshot(db, { tenantId: OASIS, scanId: first.id, bytes: jpeg(900), now: t0 }), true);
+    assert.equal(await shots.saveShot(db, { tenantId: OASIS, scanId: first.id, seq: 1, pageUrl: "https://reset-site.ca/about", bytes: jpeg(500), now: t0 }), true);
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [first.id] });
+    const again = await insertScan(db, { tenantId: OASIS, domain: "reset-site.ca", url: "https://reset-site.ca/", ipHash: null, now: new Date(t0.getTime() + 3_600_000) });
+    assert.equal(again.row.id, first.id);
+    assert.equal(again.started, true);
+    assert.equal(await shots.readScreenshot(db, { tenantId: OASIS, scanId: first.id }), null, "the earlier home page picture is gone: /screenshot never serves it on the new run");
+    assert.equal((await db.execute({ sql: "SELECT screenshot_at FROM site_scans WHERE id = ?", args: [first.id] })).rows[0].screenshot_at, null);
+    assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM site_scan_shots WHERE scan_id = ?", args: [first.id] })).rows[0].n), 0, "and the walk's pictures with it");
+  });
+
   await check("a deleted scan's pictures go with it; a claimed scan keeps them", async () => {
     const { purgeExpiredScans } = await import("../lib/site-scan/store");
     const count = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM site_scan_shots WHERE scan_id = ?", args: [row.id] })).rows[0].n);

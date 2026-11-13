@@ -96,7 +96,7 @@ import {
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
-import { scanWorkPending } from "@/lib/site-scan/store";
+import { ENRICH_TOOL_KEY, scanWorkPending } from "@/lib/site-scan/store";
 import { decodeScreenshot, MAX_SCREENSHOT_BYTES, MAX_SHOT_BYTES, MAX_SHOTS, parseShotRef, saveScreenshot, saveShot, screenshotPath, shotPath, shotsTableMissing } from "@/lib/site-scan/screenshot";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
@@ -262,12 +262,13 @@ export async function handleToolsClaim(req: Request, deps: RunnerDeps): Promise<
   const leaseId = newLeaseId();
   const job = await claimNextJob(deps.db, { tenantIds: ident.tenantIds, toolKeys: tools, runnerKey: ident.runnerKey, leaseId, now: deps.now });
   if (!job) {
-    // A scan being worked on in one of this runner's workspaces: its job is seconds away, so the
-    // runner is asked back at once. Failing to read that is the usual wait, never a failed claim.
-    const soon = await scanWorkPending(deps.db, ident.tenantIds, deps.now).catch((err: unknown) => {
+    // A scan being worked on in one of this runner's workspaces: its job is seconds away, so a runner
+    // that serves scans is asked back at once (one that cannot take the job is not hurried for it).
+    // Failing to read that is the usual wait, never a failed claim.
+    const soon = tools.includes(ENRICH_TOOL_KEY) && (await scanWorkPending(deps.db, ident.tenantIds, deps.now).catch((err: unknown) => {
       console.error("[tools.claim] scan work pending unreadable", err instanceof Error ? err.message : String(err));
       return false;
-    });
+    }));
     return toolsJson(200, { ok: true, job: null, poll_after_seconds: soon ? POLL_SOON_SECONDS : POLL_AFTER_SECONDS });
   }
   const limits = {

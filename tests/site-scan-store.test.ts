@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { applyEnrichReport, enrichJobInput, parseEnrichReport } from "../lib/site-scan/enrich-job";
 import { queueEnrichment } from "../lib/site-scan/run";
-import { getScan, insertScan, latestScanForDomain, reserveClaim, setClaimEngagement, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
+import { enrichStatement, getScan, insertScan, latestScanForDomain, reserveClaim, setClaimEngagement, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
 import { ENRICH_SCHEMA, ENRICH_WAIT_MINUTES, NARRATIVE_SCHEMA, SCORE_SCHEMA, FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "../lib/site-scan/types";
 import { stageStates, toView } from "../lib/site-scan/view";
 
@@ -138,6 +138,27 @@ async function main() {
     const finalState = Object.fromEntries(stageStates(done, t2).map((s) => [s.key, s.state]));
     assert.deepEqual(finalState, { read: "done", health: "done", profile: "done", segments: "done", prospects: "done", email: "done", score: "done", done: "done" });
     assert.equal(await applyEnrichReport(db, { tenantId: TENANT, jobInput: { scan_id: row.id }, report: report.value, now: t2 }), true, "a repeated report is idempotent on a done row");
+
+    // A site read again in place: the earlier attempt's runner job, still leased by a runner that stalled,
+    // is stopped by the reset, so its late report lands nowhere, and the new attempt queues a job of its own.
+    const d0 = new Date("2026-11-16T10:00:00.000Z");
+    const held = (await insertScan(db, { tenantId: TENANT, domain: "held.example", url: "https://held.example/", ipHash: null, now: d0 })).row;
+    await saveTier0(db, { tenantId: TENANT, id: held.id, facts: { ...facts, domain: "held.example" }, score, narrative, status: "enriching", stage: "profile", now: d0 });
+    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: held.id, attempt: held.createdAt, now: d0 }), { ok: true });
+    const heldJob = String((await db.execute({ sql: "SELECT id FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ?", args: [held.id] })).rows[0].id);
+    const lease = { jobId: heldJob, runnerKey: "bea:stalled", leaseId: "lease-held" };
+    await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = ?, lease_id = ? WHERE id = ?", args: [lease.runnerKey, lease.leaseId, heldJob] });
+    const d1 = new Date(d0.getTime() + (ENRICH_WAIT_MINUTES + 1) * 60_000);
+    const heldAgain = await insertScan(db, { tenantId: TENANT, domain: "held.example", url: "https://held.example/", ipHash: null, now: d1 });
+    assert.equal(heldAgain.started, true, "an enrichment past its wait is read again");
+    const stopped = (await db.execute({ sql: "SELECT status, error_code FROM tool_jobs WHERE id = ?", args: [heldJob] })).rows[0];
+    assert.deepEqual([stopped.status, stopped.error_code], ["failed", "scan_restarted"], "the earlier attempt's job is stopped with the reset");
+    await saveTier0(db, { tenantId: TENANT, id: held.id, facts: { ...facts, domain: "held.example" }, score, narrative, status: "enriching", stage: "profile", now: d1 });
+    const lateWrite = await db.execute(enrichStatement({ tenantId: TENANT, id: held.id, enrich: report.value.enrich, narrative: null, embedding: null, now: d1 }, lease));
+    assert.equal(lateWrite.rowsAffected, 0, "the stalled runner's late report lands nowhere");
+    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: held.id, attempt: heldAgain.row.createdAt, now: d1 }), { ok: true });
+    const queuedNow = await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ? AND status = 'queued'", args: [held.id] });
+    assert.equal(Number(queuedNow.rows[0].n), 1, "the new attempt's own job is queued; the stopped one no longer holds the dedupe key");
 
     // An enrichment that never arrives is closed by the view after the wait; the Worker's report stands.
     const { row: second } = await insertScan(db, { tenantId: TENANT, domain: "slow.example", url: "https://slow.example/", ipHash: null, now: t0 });

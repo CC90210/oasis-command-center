@@ -30,6 +30,8 @@ import {
 
 /** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
 export const STALE_READ_MS = 3 * 60_000;
+/** The runner's job for a scan (lib/site-scan/run.ts queues it; the reset below stops an earlier attempt's). */
+export const ENRICH_TOOL_KEY = "site_scan_enrich" as const;
 
 /**
  * What one scan is "of": the host, plus the business's folder on a shared site builder
@@ -167,39 +169,66 @@ export async function insertScan(
     const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
               AND (status IN ('done', 'failed') OR (status IN ('queued', 'reading') AND updated_at < ?) OR (status = 'enriching' AND updated_at < ?))`;
     const where = [input.tenantId, input.domain, day, staleBefore, enrichOverdueBefore];
-    // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
-    const resetSql = (claim: string) => ({
+    // Everything of the earlier attempt goes in ONE transaction with the reset, each statement on the
+    // same condition, so a reset that loses the race takes nothing with it and one that wins leaves
+    // nothing behind, and no stream can claim the new read (and start writing) in between:
+    //  - its feed: never replayed beside the new read, never counted against its allowance;
+    //  - its pictures of the walk (bravo__262): the new walk takes its own;
+    //  - its runner job. A job still queued, or still leased by a runner that stalled past the
+    //    enrichment wait (heartbeats extend the lease, not the row), writes under the scan id alone
+    //    (enrichStatement, the picture and page routes): left alive it could put the earlier
+    //    attempt's match, narrative or pictures on the new report, and its in-flight dedupe key would
+    //    keep the new attempt's job from queueing. Failed here, every later write under its lease
+    //    lands nowhere and the runner's next heartbeat tells it to stop.
+    const ofScan = `IN (SELECT id FROM site_scans WHERE ${resettable})`;
+    const clearFeed: InStatement = { sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id ${ofScan}`, args: [input.tenantId, ...where] };
+    const clearShots: InStatement = { sql: `DELETE FROM site_scan_shots WHERE tenant_id = ? AND scan_id ${ofScan}`, args: [input.tenantId, ...where] };
+    const stopJob: InStatement = {
+      sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'scan_restarted', error_message = ?, finished_at = ?, updated_at = ?
+              WHERE tenant_id = ? AND tool_key = ? AND status IN ('queued', 'claimed', 'running') AND json_extract(input_json, '$.scan_id') ${ofScan}`,
+      args: ["The site was scanned again; this attempt's report was replaced.", at, at, input.tenantId, ENRICH_TOOL_KEY, ...where],
+    };
+    // The reset is a fresh read: dated now (so it is not reset again) and kept the full TTL. Its Tier 0
+    // claim is released (bravo__260) and the earlier home page picture dropped (bravo__261), each a
+    // column a database may predate.
+    const resetSql = (extra: string): InStatement => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, created_at = ?, updated_at = ?, expires_at = ? WHERE ${resettable}`,
-      // A reset is a fresh read: it is dated now (so it is reusable, and not reset again) and kept the full TTL.
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL${extra}, created_at = ?, updated_at = ?, expires_at = ? WHERE ${resettable}`,
       args: [input.url, at, at, expires, ...where],
     });
-    // The failed attempt's feed goes in the same transaction as the reset, on the same condition: it
-    // is never replayed beside the new read, never uses up its allowance, and no stream can claim
-    // the new read (and start writing) between the two.
-    const clearFeed = { sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id IN (SELECT id FROM site_scans WHERE ${resettable})`, args: [input.tenantId, ...where] };
+    // A database that predates one of these tables or columns (a test's, a deployment mid-migration)
+    // fails the whole batch on it; that statement or column is left out and the rest still go together.
+    const withTable: { stmt: InStatement; missing: (e: unknown) => boolean }[] = [
+      { stmt: clearFeed, missing: eventsTableMissing },
+      { stmt: clearShots, missing: shotsTableMissing },
+      { stmt: stopJob, missing: (e) => e instanceof Error && /no such table: tool_jobs/i.test(e.message) },
+    ];
+    const columns = [", tier0_claimed_at = NULL", ", screenshot_jpeg = NULL, screenshot_at = NULL"];
     let resetRows: number;
-    try {
-      resetRows = (await db.batch([clearFeed, resetSql(", tier0_claimed_at = NULL")], "write"))[1].rowsAffected;
-    } catch (resetErr) {
-      // A database that predates bravo__260 has neither the feed nor the claim: the reset alone.
-      if (!(eventsTableMissing(resetErr) || (resetErr instanceof Error && /no such column: tier0_claimed_at/i.test(resetErr.message)))) throw resetErr;
-      resetRows = (await db.execute(resetSql(""))).rowsAffected;
+    for (;;) {
+      try {
+        const out = await db.batch([...withTable.map((w) => w.stmt), resetSql(columns.join(""))], "write");
+        resetRows = out[out.length - 1].rowsAffected;
+        break;
+      } catch (batchErr) {
+        const gone = withTable.findIndex((w) => w.missing(batchErr));
+        if (gone >= 0) {
+          withTable.splice(gone, 1);
+          continue;
+        }
+        const column = batchErr instanceof Error ? /no such column: (\w+)/i.exec(batchErr.message)?.[1] : undefined;
+        const set = column ? columns.findIndex((c) => c.includes(column)) : -1;
+        if (set >= 0) {
+          columns.splice(set, 1);
+          continue;
+        }
+        throw batchErr;
+      }
     }
     const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
     const r = rs.rows[0];
     if (!r) throw err;
-    const row = rowFromRecord(r as unknown as Record<string, unknown>);
-    if (resetRows === 1) {
-      // The earlier run's pictures of the walk go too (bravo__262): the new walk takes its own, and a
-      // frame showing the morning's home page beside a fresh read would be the old report again.
-      try {
-        await db.execute({ sql: "DELETE FROM site_scan_shots WHERE tenant_id = ? AND scan_id = ?", args: [input.tenantId, row.id] });
-      } catch (shotErr) {
-        if (!shotsTableMissing(shotErr)) throw shotErr;
-      }
-    }
-    return { row, started: resetRows === 1 };
+    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: resetRows === 1 };
   }
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
