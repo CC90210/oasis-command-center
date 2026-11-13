@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { observeAutomations, missedOccurrences } from "../lib/health/automation-observer";
+import { observeAutomations, missedOccurrences, isObserverPagingTick, OBSERVER_PAGING_INTERVAL_MIN } from "../lib/health/automation-observer";
 import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 import { VPS_HEALTH_SERVICES } from "../lib/automations/vps-health";
 import { incidentWindow } from "../lib/health/incident-window";
@@ -151,5 +151,16 @@ async function independent() {
   } finally { globalThis.fetch = realFetch; Date.now = realNow; console.log = realLog; }
 }
 
-async function main() { await outcomes(); await independent(); console.log("automation-observer: OK (scoped outcome evidence, disabled gates, outage isolation, independent durable delivery)"); }
+function paging() {
+  // The Worker observes every minute; only the quarter-hour sample may page. Fed minute
+  // samples, the runner's two-strike confirmed two-minute Telegram reconnects: 39 flaps
+  // and ~30 FAILING/RECOVERED pages in the 24 h to 2026-11-13.
+  assert.equal(OBSERVER_PAGING_INTERVAL_MIN, 15);
+  for (const minute of [0, 15, 30, 45]) assert.equal(isObserverPagingTick(Date.parse(`2026-11-13T02:${String(minute).padStart(2, "0")}:00Z`)), true, `minute ${minute} pages`);
+  for (const minute of [1, 2, 14, 16, 29, 44, 59]) assert.equal(isObserverPagingTick(Date.parse(`2026-11-13T02:${String(minute).padStart(2, "0")}:00Z`)), false, `minute ${minute} only observes`);
+  assert.equal(isObserverPagingTick(Date.parse("2026-11-13T02:15:42Z")), true, "the route passes the floored tick; seconds never matter");
+  assert.equal(isObserverPagingTick(NaN), false, "an unparseable tick never pages");
+}
+
+async function main() { paging(); await outcomes(); await independent(); console.log("automation-observer: OK (quarter-hour paging, scoped outcome evidence, disabled gates, outage isolation, independent durable delivery)"); }
 main().catch((error) => { console.error(error); process.exit(1); });
