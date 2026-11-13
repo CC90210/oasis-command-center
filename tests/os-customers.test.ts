@@ -565,6 +565,24 @@ async function main() {
     assert.equal(r.body.error, "support_desk_form");
     assert.equal(await count("SELECT count(*) AS n FROM forms WHERE id = ?", [formId]), 1, "the desk's form survived");
   });
+  // CodeRabbit, PR #816: the free scan's claim form is the scan's offer; deleting it would send scan
+  // leads to the AI audit form and fail every claim token it had issued. Only OASIS's form of that
+  // slug is the scan's; another workspace's free-scan form is an ordinary form.
+  await login(USERS.cc);
+  await check("free scan: OASIS's free-scan form cannot be deleted through the Forms page (409), and stays", async () => {
+    await db.execute({ sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES ('form-free-scan-oasis', ?, 'free-scan', 'Free AI website scan', '[]', 1)", args: [OASIS] });
+    const r = await call(formByIdRoute.DELETE(req("DELETE", "/api/forms/form-free-scan-oasis"), { params: Promise.resolve({ id: "form-free-scan-oasis" }) }));
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "scan_offer_form");
+    assert.equal(await count("SELECT count(*) AS n FROM forms WHERE id = ?", ["form-free-scan-oasis"]), 1, "the scan's form survived");
+  });
+  await login(USERS.clientA);
+  await check("free scan: another workspace's form with the same slug deletes as usual", async () => {
+    await db.execute({ sql: "INSERT INTO forms (id, tenant_id, slug, name, steps, enabled) VALUES ('form-free-scan-a', ?, 'free-scan', 'Their scan', '[]', 1)", args: [CLIENT_A] });
+    const r = await call(formByIdRoute.DELETE(req("DELETE", "/api/forms/form-free-scan-a"), { params: Promise.resolve({ id: "form-free-scan-a" }) }));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(await count("SELECT count(*) AS n FROM forms WHERE id = ?", ["form-free-scan-a"]), 0);
+  });
   await login(USERS.clientB);
   await check("support desk: a desk whose form vanished reads as off; turning it on re-creates and re-registers it", async () => {
     const stale = await deskFormOf(CLIENT_B);
