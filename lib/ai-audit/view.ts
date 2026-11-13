@@ -27,6 +27,7 @@ import {
   type ProposalVersion,
 } from "@/lib/ai-audit/versions";
 import { getEngagement, getSettings, int, listEngagements, listEvents, readLead, requireTenant, type AiAuditSettings, type AuditEvent, type Engagement } from "@/lib/ai-audit/store";
+import { SCAN_ATTACHED_EVENT, scansAttached, type ScanOrigin } from "@/lib/ai-audit/scan-origin";
 import { listCatalogue } from "@/lib/ai-audit/catalogue-store";
 import type { CatalogueItem } from "@/lib/ai-audit/catalogue";
 import { getShareLink, type ShareLink } from "@/lib/ai-audit/link";
@@ -219,6 +220,8 @@ export type EngagementView = {
   row: BoardRow;
   lead: { id: string; stage: string; website: string | null; city: string | null } | null;
   events: AuditEvent[];
+  /** The free scans the audit was opened from, read on their own so the history's limit never hides them. */
+  scans: ScanOrigin[];
   profile: { version: ProfileVersion; fields: ProfileField[] } | null;
   audit: AuditVersion | null;
   auditVersions: Array<Pick<AuditVersion, "id" | "version_no" | "status" | "created_at" | "delivered_at" | "pdf_sha256">>;
@@ -282,9 +285,10 @@ export type EngagementView = {
 export async function engagementView(db: Client, tenantId: string, engagementId: string, now: Date): Promise<EngagementView | null> {
   const engagement = await getEngagement(db, tenantId, engagementId);
   if (!engagement) return null;
-  const [lead, events, auditVersions, proposalVersions, settings, catalogue, checkouts, receipts] = await Promise.all([
+  const [lead, events, scanEvents, auditVersions, proposalVersions, settings, catalogue, checkouts, receipts] = await Promise.all([
     readLead(db, tenantId, engagement.lead_id),
     listEvents(db, tenantId, engagement.id, 150),
+    listEvents(db, tenantId, engagement.id, 50, { event: SCAN_ATTACHED_EVENT }),
     listAuditVersions(db, tenantId, engagement.id),
     listProposalVersions(db, tenantId, engagement.id),
     getSettings(db, tenantId),
@@ -347,6 +351,7 @@ export async function engagementView(db: Client, tenantId: string, engagementId:
     row: boardRow(engagement, lead ? { stage: lead.stage || null, motion: typeof lead.data.sales_motion === "string" ? lead.data.sales_motion : null } : null),
     lead: lead ? { id: lead.id, stage: lead.stage, website: lead.website, city: lead.city } : null,
     events,
+    scans: scansAttached(scanEvents),
     profile: profileVersion ? { version: profileVersion, fields } : null,
     audit,
     auditVersions: auditVersions.map((v) => ({ id: v.id, version_no: v.version_no, status: v.status, created_at: v.created_at, delivered_at: v.delivered_at, pdf_sha256: v.pdf_sha256 })),

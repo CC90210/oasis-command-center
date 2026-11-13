@@ -10,13 +10,16 @@ import type { AuditEvent } from "@/lib/ai-audit/store";
 
 export type ScanOrigin = { id: string; domain: string; score: number | null; at: string };
 
+/** The event lib/site-scan/claim.ts writes when a claim opens (or joins) an audit. */
+export const SCAN_ATTACHED_EVENT = "free_scan_attached";
+
 const SCAN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function scansAttached(events: readonly AuditEvent[]): ScanOrigin[] {
   const seen = new Set<string>();
   const out: ScanOrigin[] = [];
   for (const ev of events) {
-    if (ev.event !== "free_scan_attached" || ev.ref_type !== "site_scan" || !ev.ref_id || !SCAN_ID.test(ev.ref_id) || seen.has(ev.ref_id)) continue;
+    if (ev.event !== SCAN_ATTACHED_EVENT || ev.ref_type !== "site_scan" || !ev.ref_id || !SCAN_ID.test(ev.ref_id) || seen.has(ev.ref_id)) continue;
     seen.add(ev.ref_id);
     const domain = typeof ev.meta?.domain === "string" && ev.meta.domain ? ev.meta.domain : "their website";
     const score = typeof ev.meta?.score === "number" && Number.isFinite(ev.meta.score) ? Math.round(ev.meta.score) : null;

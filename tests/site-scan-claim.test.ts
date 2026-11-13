@@ -125,7 +125,7 @@ async function main() {
   await check("the AI audits board counts audits opened from the scan, and an audit links the report its lead saw", async () => {
     const { countAuditsFromScan } = await import("../lib/ai-audit/view");
     const { listEvents } = await import("../lib/ai-audit/store");
-    const { scansAttached } = await import("../lib/ai-audit/scan-origin");
+    const { SCAN_ATTACHED_EVENT, scansAttached } = await import("../lib/ai-audit/scan-origin");
     const opened = new Set((await db.execute({ sql: "SELECT engagement_id FROM ai_audit_events WHERE tenant_id = ? AND event = 'free_scan_attached'", args: [OASIS] })).rows.map((r) => String(r.engagement_id)));
     assert.ok(opened.size >= 2, "the claims above opened audits from the scan");
     assert.equal(await countAuditsFromScan(db, OASIS), opened.size, "one per audit, however many times it was claimed");
@@ -138,6 +138,16 @@ async function main() {
     assert.equal(shown.length, 1);
     assert.equal(shown[0].domain, "scan-fixture.test");
     assert.match(shown[0].id, /^[0-9a-f-]{36}$/);
+    // CodeRabbit, #816: the page's history holds the newest 150 events; the attachment is read on its
+    // own (engagementView's `scans`), so a long-running audit never loses its link to the scan.
+    for (let i = 0; i < 160; i++) {
+      await db.execute({
+        sql: "INSERT INTO ai_audit_events (id, tenant_id, engagement_id, event, actor_type, meta, created_at) VALUES (?, ?, ?, 'note', 'system', '{}', ?)",
+        args: [`later-${i}`, OASIS, engagementId, new Date(Date.parse("2027-01-01T00:00:00.000Z") + i * 1000).toISOString()],
+      });
+    }
+    assert.equal(scansAttached(await listEvents(db, OASIS, engagementId, 150)).length, 0, "precondition: the history no longer holds the attachment");
+    assert.deepEqual(scansAttached(await listEvents(db, OASIS, engagementId, 50, { event: SCAN_ATTACHED_EVENT })), shown, "the attachment's own read still finds it");
     const base = { id: "x", from_stage: null, to_stage: null, actor_type: "system", actor_id: null, created_at: "2026-11-13T00:00:00.000Z" };
     assert.deepEqual(
       scansAttached([

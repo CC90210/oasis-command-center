@@ -25,7 +25,6 @@ import {
   type BusinessType,
 } from "@/lib/ai-audit/rules";
 import { formatMoney } from "@/lib/ai-audit/catalogue";
-import { scansAttached } from "@/lib/ai-audit/scan-origin";
 import { ProfileEditor } from "./ProfileEditor";
 import { AuditEditor } from "./AuditEditor";
 import { ProposalEditor } from "./ProposalEditor";
@@ -161,7 +160,7 @@ export function EngagementWorkspace({ view, isOwner, initialTab }: { view: Engag
   // Forward into Transcript to approve only through "Ask for authorization", which files Gate 1's card;
   // the move by hand stays for going back there from a later stage.
   const manualMoves = STAGE_MOVES[e.stage].filter((s) => MANUAL_STAGE_TARGETS.includes(s) && !(s === "transcript_review" && e.stage === "call_completed"));
-  const fromScans = scansAttached(view.events);
+  const fromScans = view.scans;
   const auditEditable = !view.audit || view.audit.status === "draft";
   const proposalEditable = !view.proposal || view.proposal.status === "draft";
   const submitted = view.audit?.status === "awaiting_approval";
