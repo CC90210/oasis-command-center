@@ -89,6 +89,12 @@ export type ScanFacts = {
     https_served: boolean;
     response_ms: number | null;
     html_kb: number | null;
+    /**
+     * The Worker read the site but found almost no text: a page drawn by JavaScript, or a shell. The
+     * runner reads it in a real browser before it matches (lib/site-scan/browser-read.ts). Set by
+     * Tier 0 only, so a browser read that is thin too is not read again.
+     */
+    thin?: boolean;
   };
   checks: SiteCheck[];
   pagespeed: PageSpeedResult | null;

@@ -59,9 +59,9 @@ async function main() {
     assert.equal(await saveTier0(db, { tenantId: TENANT, id: row.id, facts, score, narrative, status: "enriching", stage: "profile", now: t1 }), true);
     assert.equal(await saveTier0(db, { tenantId: TENANT, id: row.id, facts, score, narrative, status: "enriching", stage: "profile", now: t1 }), false, "a second Tier 0 run finds the row moved on");
 
-    const queued = await queueEnrichment(db, { tenantId: TENANT, scanId: row.id, now: t1 });
+    const queued = await queueEnrichment(db, { tenantId: TENANT, scanId: row.id, attempt: row.createdAt, now: t1 });
     assert.deepEqual(queued, { ok: true });
-    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: row.id, now: t1 }), { ok: true }, "queueing twice is one job");
+    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: row.id, attempt: row.createdAt, now: t1 }), { ok: true }, "queueing twice is one job");
     const jobs = await db.execute({ sql: "SELECT tool_key, status, runs_on, input_json FROM tool_jobs WHERE tenant_id = ?", args: [TENANT] });
     assert.equal(jobs.rows.length, 1);
     assert.equal(jobs.rows[0].tool_key, "site_scan_enrich");

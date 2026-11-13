@@ -4,7 +4,7 @@
  * Run: node --conditions=react-server --import tsx tests/site-scan-signals.test.ts
  */
 import assert from "node:assert/strict";
-import { extractSignals } from "../lib/site-scan/signals";
+import { extractSignals, tidyName } from "../lib/site-scan/signals";
 import { runSiteChecks, type PageSnapshot } from "../lib/ai-audit/site-checks";
 
 function page(url: string, html: string, status = 200): PageSnapshot {
@@ -99,5 +99,35 @@ assert.equal(sqTitle?.detail, `The home page title is "Harper's Garden Centre | 
 const dash = extractSignals({ domain: "sj.example", pages: [page("https://sj.example/", `<html><head><meta property="og:site_name" content="Smith - Jones Law"></head><body></body></html>`)] });
 assert.equal(dash.business_name, "Smith - Jones Law", "a hyphen is part of a name");
 assert.ok(!s.services.includes("Services"), "the fixture's bare Services nav link is a heading");
+
+// Live scan 2026-11-13 (cuisina.ca, Magento): the title "Home page | Cuisina" headed the report as
+// "Home page". A page's own label is never the name, wherever it appears.
+const home = extractSignals({ domain: "cuisina.example", pages: [page("https://cuisina.example/", `<html><head><title>Home page | Cuisina</title></head><body></body></html>`)] });
+assert.equal(home.business_name, "Cuisina");
+const accueil = extractSignals({ domain: "lune.example", pages: [page("https://lune.example/", `<html><head><title>Accueil - Fleuriste Lune</title></head><body></body></html>`)] });
+assert.equal(accueil.business_name, "Fleuriste Lune");
+const ogHome = extractSignals({ domain: "og.example", pages: [page("https://og.example/", `<html><head><title>Bakery Nord | Fresh bread</title><meta property="og:site_name" content="Home"></head><body></body></html>`)] });
+assert.equal(ogHome.business_name, "Bakery Nord", "a generic og:site_name falls through to the title");
+const onlyHome = extractSignals({ domain: "bare.example", pages: [page("https://bare.example/", `<html><head><title>Homepage</title></head><body></body></html>`)] });
+assert.equal(onlyHome.business_name, "bare.example", "nothing but a page label: the domain");
+
+// Live 2026-11-13: "Mandy Management Home" headed a report; a greeting is not part of a name either.
+assert.equal(tidyName("Mandy Management Home"), "Mandy Management");
+assert.equal(tidyName("Welcome to Joe's Pizza"), "Joe's Pizza");
+assert.equal(tidyName("Bienvenue chez Fleuriste Lune"), "Fleuriste Lune");
+assert.equal(tidyName("Sweet Home"), "Sweet Home", "a trailing label leaves at least two words, or stays");
+assert.equal(tidyName("Home Depot"), "Home Depot", "only a trailing label goes");
+const greeted = extractSignals({ domain: "mm.example", pages: [page("https://mm.example/", `<html><head><title>Mandy Management Home</title></head><body></body></html>`)] });
+assert.equal(greeted.business_name, "Mandy Management");
+// CodeRabbit on #819: a generic first part of og:site_name gives way to its next part; a candidate that is
+// only a label once tidied ("Welcome to the Homepage") gives way to the schema's name.
+const ogLater = extractSignals({ domain: "c.example", pages: [page("https://c.example/", `<html><head><title>Home</title><meta property="og:site_name" content="Home | Cuisina"></head><body></body></html>`)] });
+assert.equal(ogLater.business_name, "Cuisina");
+const tidiedLabel = extractSignals({
+  domain: "w.example",
+  pages: [page("https://w.example/", `<html><head><title>Welcome to the Homepage</title><meta property="og:site_name" content="Welcome to the Homepage">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"LocalBusiness","name":"Westside Dental"}</script></head><body></body></html>`)],
+});
+assert.equal(tidiedLabel.business_name, "Westside Dental");
 
 console.log("site-scan-signals: ok");

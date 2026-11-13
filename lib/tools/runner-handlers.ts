@@ -54,6 +54,9 @@ import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
 import { enrichJobInput, enrichReportStatement, parseEnrichReport } from "@/lib/site-scan/enrich-job";
+import { MAX_BROWSER_ROUNDS, needsBrowserRead, parseBrowserPages } from "@/lib/site-scan/browser-read";
+import { browserRead } from "@/lib/site-scan/run";
+import { getScan as getSiteScan } from "@/lib/site-scan/store";
 import {
   DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
@@ -79,6 +82,7 @@ import {
   MAX_VIDEO_BYTES,
   POLL_AFTER_SECONDS,
   RUN_TIMEOUT_SECONDS,
+  SCAN_PAGES_BODY_MAX_BYTES,
   SCREENSHOT_BODY_MAX_BYTES,
   UPLOAD_URL_TTL_SECONDS,
 } from "@/lib/tools/limits";
@@ -91,7 +95,7 @@ import {
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
 import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
-import { decodeScreenshot, MAX_SCREENSHOT_BYTES, saveScreenshot, screenshotPath } from "@/lib/site-scan/screenshot";
+import { decodeScreenshot, MAX_SCREENSHOT_BYTES, MAX_SHOT_BYTES, MAX_SHOTS, parseShotRef, saveScreenshot, saveShot, screenshotPath, shotPath, shotsTableMissing } from "@/lib/site-scan/screenshot";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
@@ -465,6 +469,40 @@ export async function handleToolsProgress(req: Request, deps: RunnerDeps): Promi
  * its own scan; the body must be a JPEG within MAX_SCREENSHOT_BYTES. Kept on the scan row and
  * announced in the live feed, where the page's browser frame shows it.
  */
+/**
+ * POST scan-pages: what a real browser read of a site the Worker was turned away from
+ * (lib/site-scan/browser-read.ts). Same rules as progress: a signed request, the job's lease,
+ * only site_scan_enrich, only its own scan. Answers `need` (more addresses to read, nothing
+ * written) or `done` with the job's input rebuilt from the new read, so the runner matches on it.
+ */
+export async function handleToolsScanPages(req: Request, deps: RunnerDeps): Promise<Response> {
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now, SCAN_PAGES_BODY_MAX_BYTES);
+  if (!auth.ok) return auth.response;
+  const ref = leaseRef(auth.producer, auth.body);
+  if ("field" in ref) return invalid(ref.field);
+  const round = auth.body.round;
+  if (typeof round !== "number" || !Number.isInteger(round) || round < 1 || round > MAX_BROWSER_ROUNDS) return invalid("round");
+  const parsed = parseBrowserPages(auth.body.pages);
+  if (!parsed.ok) return invalid(parsed.field);
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return leaseLost();
+  if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
+  const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
+  if (!scanId) return invalid("job");
+  const read = await browserRead(deps.db, { tenantId: job.tenantId, scanId, pages: parsed.pages, lastRound: round === MAX_BROWSER_ROUNDS, now: deps.now, lease: { jobId: ref.jobId, runnerKey: ref.runnerKey, leaseId: ref.leaseId } });
+  if (!read.ok) {
+    // A read this job finished already (its answer was lost, or it is retrying): the result again, nothing overwritten.
+    const scan = await getSiteScan(deps.db, job.tenantId, scanId);
+    if (!scan || scan.status !== "enriching" || !scan.facts || needsBrowserRead(scan.facts.site)) return toolsJson(409, { ok: false, error: read.code });
+    const again = await enrichJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
+    return toolsJson(200, { ok: true, done: true, unread: scan.facts.site.unread, input: again.ok ? again.input : null, repeated: true });
+  }
+  if (read.need) return toolsJson(200, { ok: true, need: read.need });
+  const built = await enrichJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
+  return toolsJson(200, { ok: true, done: true, unread: read.unread, input: built.ok ? built.input : null });
+}
+
 export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps): Promise<Response> {
   const auth = await authenticateToolsRequest(req, deps.env, deps.now, SCREENSHOT_BODY_MAX_BYTES);
   if (!auth.ok) return auth.response;
@@ -472,25 +510,58 @@ export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps):
   if ("field" in ref) return invalid(ref.field);
   const bytes = decodeScreenshot(auth.body.image_b64);
   if (!bytes) return invalid("image_b64", { max_bytes: MAX_SCREENSHOT_BYTES });
+  // A picture of the walk (bravo__262) names its place and the page it shows; without them it is
+  // the home page alone, as an older runner posts it.
+  const walking = auth.body.seq !== undefined || auth.body.page_url !== undefined;
+  const shot = walking ? parseShotRef(auth.body.seq, auth.body.page_url) : null;
+  if (walking && !shot) return invalid("seq", { max_shots: MAX_SHOTS });
+  if (shot && bytes.length > MAX_SHOT_BYTES) return invalid("image_b64", { max_bytes: MAX_SHOT_BYTES });
   if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
   const job = await jobUnderLease(deps.db, ref);
   if (!job) return leaseLost();
   if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
   const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
   if (!scanId) return invalid("job");
+  let kept: "home" | "shot" = "home";
   try {
-    if (!(await saveScreenshot(deps.db, { tenantId: job.tenantId, scanId, bytes, now: deps.now }))) return invalid("job");
+    // The home page (the walk's first picture, or an older runner's only one) is the scan's own
+    // picture, kept on its row for the permalink.
+    if ((!shot || shot.seq === 0) && !(await saveScreenshot(deps.db, { tenantId: job.tenantId, scanId, bytes, now: deps.now }))) return invalid("job");
+    if (shot) {
+      try {
+        if (!(await saveShot(deps.db, { tenantId: job.tenantId, scanId, seq: shot.seq, pageUrl: shot.pageUrl, bytes, now: deps.now }))) return invalid("job");
+        kept = "shot";
+      } catch (err) {
+        if (!shotsTableMissing(err)) throw err;
+        // A database before bravo__262 keeps the home page only; the answer tells the runner not to walk on.
+        if (shot.seq !== 0) return notInstalled("shots_table_missing");
+      }
+    }
   } catch (err) {
     if (err instanceof Error && /no such column: screenshot_jpeg/i.test(err.message)) return notInstalled("screenshot_column_missing");
     throw err;
   }
-  const line = cleanEvent({ kind: "screenshot", text: "Took a picture of the home page as a visitor first sees it", data: { url: screenshotPath(scanId) }, at: deps.now.toISOString() });
+  // Versioned: a retried runner replaces a picture under the same path, and the new address makes the
+  // visitor's browser fetch it instead of the one it cached (the routes cache a picture for a day).
+  const url = `${kept === "shot" && shot ? shotPath(scanId, shot.seq) : screenshotPath(scanId)}?v=${deps.now.getTime()}`;
+  const text = shot && shot.seq > 0 ? `Looking at ${pagePath(shot.pageUrl)}` : "Took a picture of the home page as a visitor first sees it";
+  const line = cleanEvent({ kind: "screenshot", text, data: shot ? { url, page: shot.pageUrl, seq: shot.seq } : { url }, at: deps.now.toISOString() });
   if (line) {
     await appendEvents(deps.db, { tenantId: job.tenantId, scanId, source: "runner", events: [line] }).catch((err: unknown) => {
       if (!eventsTableMissing(err)) throw err;
     });
   }
-  return toolsJson(200, { ok: true, bytes: bytes.length });
+  return toolsJson(200, { ok: true, bytes: bytes.length, ...(shot ? { seq: shot.seq, walk: kept === "shot" } : {}) });
+}
+
+/** A page's path and query, for the feed ("Looking at /contact"). */
+function pagePath(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}` || "/";
+  } catch {
+    return url;
+  }
 }
 
 // ---------------------------------------------------------------------------

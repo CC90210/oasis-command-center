@@ -9,6 +9,8 @@ import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
 import { eventsTableMissing } from "@/lib/site-scan/events";
+import { BROWSER_READ_UNREAD } from "@/lib/site-scan/browser-read";
+import { LEASE_GUARD } from "@/lib/tools/store";
 import {
   SCAN_STAGES,
   SCAN_TTL_DAYS,
@@ -29,7 +31,7 @@ export const SCAN_REUSE_DAYS = 7;
  * read again (findReusableScan, and insertScan resets today's row in place). Move it forward
  * whenever what a report shows changes. A report a lead claimed is never reset.
  */
-export const REPORT_FORMAT_SINCE = "2026-11-13T05:21:00.000Z";
+export const REPORT_FORMAT_SINCE = "2026-11-13T08:00:00.000Z"; // the browser read, the thin-page read and the walk (#819)
 /** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
 export const STALE_READ_MS = 3 * 60_000;
 
@@ -106,8 +108,19 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
 }
 
 /**
+ * A finished report on which nothing was read, because the site turned the reader away (refused,
+ * not answered, a bot check: BROWSER_READ_UNREAD). It is never handed to the next visitor, and
+ * today's is read again in place: a browser may read it now (lib/site-scan/browser-read.ts), and
+ * an empty report kept for a week would hide that (CC, 2026-11-13).
+ */
+// COALESCE: a read with nothing unread is NULL here, and NOT (NULL) would hide every good report.
+const BROWSER_WANTED = `(COALESCE(json_extract(facts_json, '$.site.unread'), '') IN (${BROWSER_READ_UNREAD.map(() => "?").join(", ")}) OR COALESCE(json_extract(facts_json, '$.site.thin'), 0) = 1)`;
+const EMPTY_DONE = `(status = 'done' AND ${BROWSER_WANTED})`;
+
+/**
  * The latest usable scan of a domain within SCAN_REUSE_DAYS: finished, or still being worked on.
- * A failed row, and a read nobody has touched for STALE_READ_MS (its Worker died), are not reused.
+ * A failed row, a read nobody has touched for STALE_READ_MS (its Worker died), and a finished
+ * report the site turned the reader away from (EMPTY_DONE) are not reused.
  */
 export async function findReusableScan(db: Client, tenantId: string, domain: string, now: Date): Promise<ScanRow | null> {
   const window = new Date(now.getTime() - SCAN_REUSE_DAYS * 86_400_000).toISOString();
@@ -115,9 +128,9 @@ export async function findReusableScan(db: Client, tenantId: string, domain: str
   const staleBefore = new Date(now.getTime() - STALE_READ_MS).toISOString();
   const rs = await db.execute({
     sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND created_at >= ? AND status <> 'failed'
-            AND NOT (status IN ('queued', 'reading') AND updated_at < ?)
+            AND NOT (status IN ('queued', 'reading') AND updated_at < ?) AND NOT ${EMPTY_DONE}
           ORDER BY created_at DESC LIMIT 1`,
-    args: [tenantId, domain, since, staleBefore],
+    args: [tenantId, domain, since, staleBefore, ...BROWSER_READ_UNREAD],
   });
   const r = rs.rows[0];
   return r ? rowFromRecord(r as unknown as Record<string, unknown>) : null;
@@ -151,8 +164,8 @@ export async function insertScan(
     // The row a retry may take over: failed, a read nobody has touched for STALE_READ_MS, or a
     // report made before REPORT_FORMAT_SINCE (findReusableScan no longer hands it out).
     const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?) OR created_at < ?)`;
-    const where = [input.tenantId, input.domain, day, staleBefore, REPORT_FORMAT_SINCE];
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?) OR created_at < ? OR ${EMPTY_DONE})`;
+    const where = [input.tenantId, input.domain, day, staleBefore, REPORT_FORMAT_SINCE, ...BROWSER_READ_UNREAD];
     // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
     const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
@@ -210,6 +223,30 @@ export async function saveTier0(
     sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, status = ?, stage = ?, error_code = NULL, updated_at = ?
           WHERE tenant_id = ? AND id = ? AND status IN ('queued', 'reading')`,
     args: [JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.status, input.stage, at, input.tenantId, input.id],
+  });
+  return rs.rowsAffected === 1;
+}
+
+/**
+ * The browser's read in place of the Worker's empty one (lib/site-scan/run.ts browserRead): only
+ * while the runner is working on the row, and only over a read the Worker could not do, so a later
+ * post never overwrites a real read.
+ */
+export type ScanLease = { jobId: string; runnerKey: string; leaseId: string };
+
+export async function saveBrowserRead(
+  db: Client,
+  input: { tenantId: string; id: string; facts: ScanFacts; score: ScanScore; narrative: ScanNarrative; now: Date; lease?: ScanLease },
+): Promise<boolean> {
+  // With a lease, the write holds only while the runner's lease on the job does (the same test as
+  // enrichStatement): a runner that paused past its lease and resumes after the job moved on writes nothing.
+  const rs = await db.execute({
+    sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND ${BROWSER_WANTED}${input.lease ? ` AND EXISTS (SELECT 1 FROM tool_jobs WHERE ${LEASE_GUARD})` : ""}`,
+    args: [
+      JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.now.toISOString(), input.tenantId, input.id, ...BROWSER_READ_UNREAD,
+      ...(input.lease ? [input.lease.jobId, input.lease.runnerKey, input.lease.leaseId] : []),
+    ],
   });
   return rs.rowsAffected === 1;
 }
@@ -312,6 +349,16 @@ export async function purgeExpiredScans(db: Client, tenantId: string, now: Date,
     sql: `UPDATE site_scans SET ip_hash = NULL WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NOT NULL AND ip_hash IS NOT NULL`,
     args: [tenantId, at],
   });
+  // A deleted scan's pictures of the walk go with it (bravo__262; a database without the table has none).
+  try {
+    await db.execute({
+      sql: `DELETE FROM site_scan_shots WHERE tenant_id = ? AND scan_id IN (
+              SELECT DISTINCT sh.scan_id FROM site_scan_shots sh WHERE sh.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM site_scans s WHERE s.tenant_id = sh.tenant_id AND s.id = sh.scan_id) LIMIT ?)`,
+      args: [tenantId, tenantId, limit],
+    });
+  } catch (err) {
+    if (!(err instanceof Error && /no such table: site_scan_shots/i.test(err.message))) throw err;
+  }
   // A deleted scan's live feed goes with it (a claimed scan keeps both).
   try {
     await db.execute({

@@ -156,7 +156,7 @@ async function store() {
     const { row: enr } = await insertScan(db, { tenantId: TENANT, domain: "lease.example", url: "https://lease.example/", ipHash: null, now: t0 });
     const f = facts({ domain: "lease.example" }, []);
     await saveTier0(db, { tenantId: TENANT, id: enr.id, facts: f, score: { schema: SCORE_SCHEMA, total: 50, pillars: [], fixes: [] }, narrative: baseNarrative(f, scoreFacts(f)), status: "enriching", stage: "profile", now: t0 });
-    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: enr.id, now: t0 }), { ok: true });
+    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: enr.id, attempt: enr.createdAt, now: t0 }), { ok: true });
     const job = (await db.execute({ sql: "SELECT id FROM tool_jobs WHERE tenant_id = ? AND tool_key = 'site_scan_enrich' AND json_extract(input_json, '$.scan_id') = ?", args: [TENANT, enr.id] })).rows[0];
     const jobId = String(job.id);
     await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = 'bea:runner-b', lease_id = 'lease-b' WHERE id = ?", args: [jobId] });

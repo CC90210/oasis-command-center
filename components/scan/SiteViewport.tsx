@@ -4,13 +4,29 @@ import type { ScanEvent } from "@/lib/site-scan/events";
 
 /**
  * What the agent is looking at: the address it has open and the pages it has read, in a browser
- * frame. When the runner has taken a screenshot of the home page (a `screenshot` event with a
- * signed `url`), the frame shows it. Everything drawn is from the feed; nothing is mocked up.
+ * frame. As the runner walks the site in a real browser (a `screenshot` event per page, each with
+ * our own stored picture's `url`), the frame shows each picture as it arrives, the home page first;
+ * once the scan is finished it rests on the home page. Everything drawn is from the feed; nothing
+ * is mocked up.
  */
 
 type PageRead = { path: string; title: string | null; url: string | null; ok: boolean };
 
-const SCREENSHOT_PATH = /^\/api\/scan\/[0-9a-f-]{36}\/screenshot$/;
+/**
+ * Only our own stored pictures of this scan are ever shown (GET /api/scan/:id/screenshot, /shot/:seq).
+ * The `v` is the picture's version: a retried runner replaces a picture under the same path, and
+ * the new address makes the browser fetch it instead of its cached predecessor.
+ */
+const SHOT_PATH = /^\/api\/scan\/[0-9a-f-]{36}\/(?:screenshot|shot\/\d{1,2})(?:\?v=\d{1,16})?$/;
+
+function pathOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}` || "/";
+  } catch {
+    return url;
+  }
+}
 
 function pagesOf(events: ScanEvent[]): PageRead[] {
   const out: PageRead[] = [];
@@ -30,9 +46,15 @@ function pagesOf(events: ScanEvent[]): PageRead[] {
 export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[]; fallbackUrl: string; live: boolean }) {
   const pages = pagesOf(events);
   const current = pages[pages.length - 1] ?? null;
-  // Only our own stored picture of this scan is ever shown (GET /api/scan/:id/screenshot).
-  const shot = [...events].reverse().find((e) => e.kind === "screenshot" && typeof e.data?.url === "string" && SCREENSHOT_PATH.test(e.data.url));
-  const address = current?.url ?? fallbackUrl;
+  const shots = events.filter((e) => e.kind === "screenshot" && typeof e.data?.url === "string" && SHOT_PATH.test(e.data.url));
+  // The newest picture of the home page: a retried runner posts it again under a new version.
+  const home = [...shots].reverse().find((e) => e.data?.seq === 0 || /\/screenshot(?:\?v=\d+)?$/.test(String(e.data?.url))) ?? shots[0] ?? null;
+  const latest = shots[shots.length - 1] ?? null;
+  // Live, the frame follows the walk; finished, it rests on the home page.
+  const shot = live ? latest : (home ?? latest);
+  const shotPage = typeof shot?.data?.page === "string" ? shot.data.page : null;
+  const address = shotPage ?? current?.url ?? fallbackUrl;
+  const onHome = !!shot && shot === home;
   return (
     <figure className="overflow-hidden border border-ops-edge bg-ops-panel">
       <div className="flex items-center gap-3 border-b border-ops-line px-3 py-2">
@@ -47,8 +69,8 @@ export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[
       </div>
       <div className="relative aspect-[16/10] overflow-hidden bg-ops-void">
         {shot ? (
-          // eslint-disable-next-line @next/next/no-img-element -- our own stored picture of this scan (GET /api/scan/:id/screenshot), not an optimisable asset
-          <img src={String(shot.data?.url)} alt={`The home page of ${address}, as the scanner saw it`} className="h-full w-full object-cover object-top" />
+          // eslint-disable-next-line @next/next/no-img-element -- our own stored picture of this scan (GET /api/scan/:id/screenshot or /shot/:seq), not an optimisable asset
+          <img key={String(shot.data?.url)} src={String(shot.data?.url)} alt={`${onHome ? "The home page" : pathOf(address)} of ${fallbackUrl}, as the scanner saw it`} className="h-full w-full object-cover object-top" />
         ) : (
           <ol className="absolute inset-0 overflow-hidden p-4 font-data text-[11.5px] leading-relaxed">
             {pages.length === 0 ? <li className="text-fg-dim">Opening the site...</li> : null}
@@ -63,7 +85,7 @@ export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[
         {live ? <span className="scan-sweep pointer-events-none absolute inset-x-0 top-0 h-16" aria-hidden="true" /> : null}
       </div>
       <figcaption className="border-t border-ops-line px-3 py-2 font-data text-[10px] uppercase tracking-[0.2em] text-fg-dim">
-        {shot ? "Home page, as the scanner saw it" : `${pages.filter((p) => p.ok).length} page${pages.filter((p) => p.ok).length === 1 ? "" : "s"} read`}
+        {shot ? (onHome ? "Home page, as the scanner saw it" : `Looking at ${pathOf(address)}`) : `${pages.filter((p) => p.ok).length} page${pages.filter((p) => p.ok).length === 1 ? "" : "s"} read`}
       </figcaption>
     </figure>
   );

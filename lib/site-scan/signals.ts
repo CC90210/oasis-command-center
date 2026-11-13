@@ -93,6 +93,24 @@ const YEAR_RE = /(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-\u2013]\s*)?((?:19|20)\d
 // A nav label that is only a heading ("Services", "Our products") names no service. Squarespace
 // prefixes a dropdown's hidden label with "Folder:", which the link text picks up.
 const NAV_FOLDER = /^folder:\s*/i;
+/**
+ * A page's own label, never the business's name: "Home page | Cuisina" (Magento's default title,
+ * live scan 2026-11-13) is Cuisina, "Accueil - Fleuriste Lune" is Fleuriste Lune.
+ */
+const GENERIC_PAGE_LABEL = /^(?:home|home ?page|main page|welcome|accueil|page d'accueil|bienvenue|inicio|startseite|index|untitled|official (?:web)?site)$/i;
+/**
+ * A name with a page's greeting or label around it: "Welcome to Joe's Pizza" is Joe's Pizza, "Mandy
+ * Management Home" (live scan 2026-11-13) is Mandy Management. A trailing label is taken off only
+ * when two words are left, so "Sweet Home" stays a name.
+ */
+const LEADING_GREETING = /^(?:welcome to(?: the)?|bienvenue (?:chez|[aà]|sur)|willkommen (?:bei|im|in der)|bienvenido a|benvenuti (?:da|a))\s+/i;
+const TRAILING_LABEL = /\s+(?:home ?page|home|accueil|startseite|official (?:web)?site)$/i;
+export function tidyName(name: string): string {
+  let out = name.trim().replace(LEADING_GREETING, "");
+  const cut = out.replace(TRAILING_LABEL, "");
+  if (cut !== out && cut.trim().split(/\s+/).length >= 2) out = cut;
+  return out.trim() || name.trim();
+}
 const HEADING_LABEL = /^(?:our |all |view (?:all |our )?|see (?:all |our )?)?(?:services?|solutions?|treatments?|products?|programs?|classes?|lessons?|packages?|plans?|menu)$/i;
 const SERVICE_WORDS = /\b(services?|solutions?|treatments?|repairs?|installation|cleaning|design|consulting|therapy|plans?|packages?|menu|products?|programs?|classes?|lessons?)\b/i;
 const PRICING_RE = /\b(pricing|prices?|rates?|\$\s?\d{2,}|starting at|per (?:hour|month|session|visit)|packages?)\b/i;
@@ -325,11 +343,25 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
   }
 
   const separator = /\s[|\-\u2013\u2014:·\u2022]\s/;
-  const nameFromTitle = title ? title.split(separator).map((s) => s.trim()).filter(Boolean) : [];
+  // A page's own label is never the business's name ("Home page | Cuisina" is Cuisina, Magento's
+  // default title, live scan 2026-11-13), and a greeting is no part of it ("Welcome to Joe's Pizza"):
+  // every candidate is tidied first, and one that is then only a label is passed over for the next.
+  const named = (s: string | null | undefined): string | null => {
+    const t = s ? tidyName(s) : "";
+    return t && !GENERIC_PAGE_LABEL.test(t) ? t : null;
+  };
+  const nameFromTitle = title ? title.split(separator).map((s) => named(s)).filter((s): s is string => !!s) : [];
   // og:site_name is often the whole page title ("Harper's Garden Centre | Hamilton, Ontario"): the
-  // name is what comes before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
-  const ogName = ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null;
-  const businessName = clean(ogName ?? schemaNames[0] ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]) ?? input.domain, 80) ?? input.domain;
+  // name is its first part that is one, before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
+  const ogName = ogSiteName ? (ogSiteName.split(/\s[|\u00b7\u2022]\s/).map((s) => named(s)).find((s) => !!s) ?? null) : null;
+  const lastPart = nameFromTitle[nameFromTitle.length - 1];
+  const chosenName =
+    ogName ??
+    schemaNames.map((n) => named(n)).find((n) => !!n) ??
+    (nameFromTitle.length > 1 && lastPart.length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(lastPart)
+      ? lastPart
+      : (nameFromTitle[0] ?? null));
+  const businessName = clean(chosenName ?? input.domain, 80) ?? input.domain;
   const tagline = clean(h1[0] ?? metaDescription ?? (nameFromTitle.length > 1 ? nameFromTitle.slice(1).join(" ") : null), 200);
   const words = allText.split(/\s+/).filter(Boolean);
 
