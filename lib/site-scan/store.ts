@@ -8,6 +8,7 @@
 import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
+import { eventsTableMissing } from "@/lib/site-scan/events";
 import {
   SCAN_STAGES,
   SCAN_TTL_DAYS,
@@ -138,12 +139,18 @@ export async function insertScan(
     // Two visitors, one domain, one day. A failed or orphaned row is reset for this attempt (the
     // conditional UPDATE lets exactly one retry win); a live one is the scan.
     const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
-    const reset = await db.execute({
+    // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260). A
+    // database that predates that column resets the row without it.
+    const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL, updated_at = ?
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, updated_at = ?
             WHERE tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
               AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`,
       args: [input.url, at, input.tenantId, input.domain, day, staleBefore],
+    });
+    const reset = await db.execute(resetSql(", tier0_claimed_at = NULL")).catch((resetErr: unknown) => {
+      if (resetErr instanceof Error && /no such column: tier0_claimed_at/i.test(resetErr.message)) return db.execute(resetSql(""));
+      throw resetErr;
     });
     const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
     const r = rs.rows[0];
@@ -153,6 +160,25 @@ export async function insertScan(
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
   return { row, started: true };
+}
+
+/**
+ * Who runs a scan's Tier 0. The visitor's live stream claims it and runs it inside its own
+ * connection; POST /api/scan's fallback claims it only if no stream did. The conditional UPDATE
+ * lets exactly one of them win. `unsupported`: the database predates bravo__260, so the caller
+ * runs Tier 0 the old way (POST's after()) and the stream only follows.
+ */
+export async function claimTier0(db: Client, input: { tenantId: string; id: string; now: Date }): Promise<"claimed" | "taken" | "unsupported"> {
+  try {
+    const rs = await db.execute({
+      sql: `UPDATE site_scans SET tier0_claimed_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'reading' AND tier0_claimed_at IS NULL`,
+      args: [input.now.toISOString(), input.now.toISOString(), input.tenantId, input.id],
+    });
+    return rs.rowsAffected === 1 ? "claimed" : "taken";
+  } catch (err) {
+    if (err instanceof Error && /no such column: tier0_claimed_at/i.test(err.message)) return "unsupported";
+    throw err;
+  }
 }
 
 export async function saveTier0(
@@ -266,6 +292,16 @@ export async function purgeExpiredScans(db: Client, tenantId: string, now: Date,
     sql: `UPDATE site_scans SET ip_hash = NULL WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NOT NULL AND ip_hash IS NOT NULL`,
     args: [tenantId, at],
   });
+  // A deleted scan's live feed goes with it (a claimed scan keeps both).
+  try {
+    await db.execute({
+      sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND id IN (
+              SELECT e.id FROM site_scan_events e WHERE e.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM site_scans s WHERE s.tenant_id = e.tenant_id AND s.id = e.scan_id) LIMIT ?)`,
+      args: [tenantId, tenantId, limit * 50],
+    });
+  } catch (err) {
+    if (!eventsTableMissing(err)) throw err;
+  }
   return { deleted: del.rowsAffected, scrubbed: scrub.rowsAffected };
 }
 

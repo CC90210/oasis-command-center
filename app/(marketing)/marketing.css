@@ -88,6 +88,30 @@ html[data-ad-choice] .m-consent {
   transition: none;
 }
 
+/* ── Free scan: the sweep over the page the agent is reading ──────────
+   A faint band moving down the viewport while the scan works
+   (components/scan/SiteViewport.tsx). Off under reduced motion. */
+.scan-sweep {
+  background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.1), transparent);
+  animation: scan-sweep 2.4s linear infinite;
+}
+
+@keyframes scan-sweep {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(560%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-sweep {
+    animation: none;
+    display: none;
+  }
+}
+
 /* ── Hairline section rule ─────────────────────────────────────────────
    The eyebrow device: a mono label preceded by a short rule that fades
    out. Reads as a console section header rather than a decorative divider.

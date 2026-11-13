@@ -30,10 +30,24 @@ function list(items: string[], max = 4): string {
   return `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
 }
 
+/**
+ * Where the business is, as a reader says it: "in Hamilton, ON", "in Laval and Montreal". A region
+ * code ("ON", "QC", schema.org addressRegion) qualifies its town; it is never listed as a second
+ * town ("in Hamilton and ON", seen live 2026-11-12).
+ */
+export function placePhrase(localities: string[]): string {
+  const code = /^[A-Z]{2,3}$/;
+  const towns = localities.filter((l) => !code.test(l));
+  const region = localities.find((l) => code.test(l));
+  if (towns.length === 1) return ` in ${towns[0]}${region ? `, ${region}` : ""}`;
+  if (towns.length) return ` in ${list(towns, 2)}`;
+  return region ? ` in ${region}` : "";
+}
+
 export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative {
   const s = facts.signals;
   const name = s?.business_name ?? facts.domain;
-  const where = s?.localities.length ? ` in ${list(s.localities, 2)}` : "";
+  const where = s ? placePhrase(s.localities) : "";
   const services = s?.services.length ? ` The site names ${list(s.services, 4)}.` : "";
   // A tagline that ends its own sentence keeps its stop inside the quote: never "years.".
   const tagline = s?.tagline ? ` Its own words: "${s.tagline}"${/[.!?]$/.test(s.tagline) ? "" : "."}` : "";

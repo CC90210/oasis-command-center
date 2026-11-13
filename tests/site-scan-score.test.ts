@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { claimHeading, scoreFacts } from "../lib/site-scan/score";
-import { baseNarrative } from "../lib/site-scan/narrative";
+import { baseNarrative, placePhrase } from "../lib/site-scan/narrative";
 import { FACTS_SCHEMA, type ScanFacts, type SiteSignals } from "../lib/site-scan/types";
 import type { CheckKey, CheckStatus, SiteCheck } from "../lib/ai-audit/site-checks";
 
@@ -89,6 +89,12 @@ assert.equal(n.email, null);
 const stopped = baseNarrative(facts({ signals: { ...signals, tagline: "Your local garden centre for over 75 years." } }), w);
 assert.ok(stopped.what_you_sell.includes(`"Your local garden centre for over 75 years." `) && !stopped.what_you_sell.includes(`years.".`), stopped.what_you_sell);
 assert.ok(n.what_you_sell.includes(`"24/7 plumbers".`), "a tagline with no stop gets one");
+
+// A region code qualifies its town; it is never a second town ("in Hamilton and ON").
+assert.equal(placePhrase(["Hamilton", "ON"]), " in Hamilton, ON");
+assert.equal(placePhrase(["Laval", "Montreal", "QC"]), " in Laval and Montreal");
+assert.equal(placePhrase(["QC"]), " in QC");
+assert.equal(placePhrase([]), "");
 
 // No footer year read is unknown, never "Footer year is stale" (live scan 2026-11-12: a Squarespace
 // site with no year was told its year was years behind).

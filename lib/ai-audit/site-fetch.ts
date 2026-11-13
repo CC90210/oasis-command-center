@@ -59,7 +59,26 @@ export const USER_AGENT = `${ROBOTS_AGENT}/1.0 (+https://oasisai.work; reads pub
 
 export type FetchLike = (url: string, init: { method: "GET"; redirect: "manual"; signal: AbortSignal; headers: Record<string, string> }) => Promise<Response>;
 
-export type SiteReadDeps = { fetch: FetchLike; clock: () => number };
+export type SiteReadDeps = {
+  fetch: FetchLike;
+  clock: () => number;
+  /**
+   * Watchers for a live view of the read (the free scan's feed): each request as it is recorded,
+   * and the pages chosen from the home page. Optional; the audit passes neither. A watcher that
+   * throws is logged and never changes the read.
+   */
+  onRecord?: (record: PageRecord) => void;
+  onPlan?: (pages: LinkedPage[]) => void;
+};
+
+function watch<T>(label: string, fn: ((v: T) => void) | undefined, v: T): void {
+  if (!fn) return;
+  try {
+    fn(v);
+  } catch (err) {
+    console.error("[site-fetch] a read watcher threw", { label, error: err instanceof Error ? err.message : String(err) });
+  }
+}
 
 /** One request as made: what the brief stores (a hash and an excerpt), never the page itself. */
 export type PageRecord = {
@@ -279,11 +298,11 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   // Where the read starts: the target's HTTPS address, or its plain-HTTP twin once the secure one has not answered.
   let start = target.start;
   const record = (kind: PageRecord["kind"], url: string, r: Read) => {
-    pages.push(
-      r.ok
-        ? { kind, url, finalUrl: r.page.finalUrl, status: r.page.status, bytes: r.page.bytes, ms: r.page.ms, title: kind === "site_page" || kind === "http_check" ? titleOf(r.page.html) : null, error: null, html: r.page.html }
-        : { kind, url, finalUrl: r.finalUrl, status: r.status, bytes: 0, ms: 0, title: null, error: r.error, html: null },
-    );
+    const rec: PageRecord = r.ok
+      ? { kind, url, finalUrl: r.page.finalUrl, status: r.page.status, bytes: r.page.bytes, ms: r.page.ms, title: kind === "site_page" || kind === "http_check" ? titleOf(r.page.html) : null, error: null, html: r.page.html }
+      : { kind, url, finalUrl: r.finalUrl, status: r.status, bytes: 0, ms: 0, title: null, error: r.error, html: null };
+    pages.push(rec);
+    watch("record", deps.onRecord, rec);
   };
   // The start actually used, so the brief never cites an address that was not asked for.
   const done = (checks: SiteCheck[], unread: SiteReport["unread"], checked: PageSnapshot[] = []): SiteReport => ({ start, pages, checks, notes, unread, checked });
@@ -409,6 +428,7 @@ export async function readSite(target: Extract<SiteTarget, { kind: "site" }>, de
   // One that was not read is kept with its kind: what the contact or booking
   // page would have shown is then unknown, never "no".
   const wanted = pagesToRead(home.page, sameSite, MAX_EXTRA_PAGES);
+  watch("plan", deps.onPlan, wanted);
   const extra: PageSnapshot[] = [];
   const unread: LinkedPage[] = [];
   for (let i = 0; i < wanted.length; i += 4) {
