@@ -77,6 +77,18 @@ function tri(v: unknown): boolean | null {
   return typeof v === "boolean" ? v : null;
 }
 
+function country(v: unknown): string | null {
+  return typeof v === "string" && /^[A-Za-z]{2}$/.test(v) ? v.toUpperCase() : null;
+}
+
+const MATCH_SOURCES = ["overture", "osm", "directory"] as const;
+
+/** Engine 2.0's measured place of a match, kept only when it is a real distance and bearing. */
+function placed(r: Record<string, unknown>): { country: string | null; distance_km: number | null; bearing_deg: number | null; source: (typeof MATCH_SOURCES)[number] | null } {
+  const src = typeof r.source === "string" && (MATCH_SOURCES as readonly string[]).includes(r.source) ? (r.source as (typeof MATCH_SOURCES)[number]) : null;
+  return { country: country(r.country), distance_km: num(r.distance_km, 0, 20_100), bearing_deg: num(r.bearing_deg, 0, 360), source: src };
+}
+
 function domain(v: unknown): string | null {
   const s = str(v, 253);
   if (!s) return null;
@@ -104,7 +116,7 @@ export function parseEnrich(raw: unknown): ScanEnrich | null {
   for (const c of Array.isArray(o.competitors) ? o.competitors.slice(0, 8) : []) {
     const r = (c ?? {}) as Record<string, unknown>;
     const name = str(r.name, 120);
-    if (name) competitors.push({ name, domain: domain(r.domain), locality: str(r.locality, 80) });
+    if (name) competitors.push({ name, domain: domain(r.domain), locality: str(r.locality, 80), ...placed(r) });
   }
   const prospects: ScanEnrich["prospects"] = [];
   for (const p of Array.isArray(o.prospects) ? o.prospects.slice(0, 8) : []) {
@@ -112,7 +124,19 @@ export function parseEnrich(raw: unknown): ScanEnrich | null {
     const name = str(r.name, 120);
     const categoryLabel = str(r.category_label, 120);
     const why = str(r.why, 300);
-    if (name && categoryLabel && why) prospects.push({ name, locality: str(r.locality, 80), region: str(r.region, 40), domain: domain(r.domain), category_label: categoryLabel, why });
+    if (name && categoryLabel && why) prospects.push({ name, locality: str(r.locality, 80), region: str(r.region, 40), domain: domain(r.domain), category_label: categoryLabel, why, ...placed(r) });
+  }
+  const loc = o.location && typeof o.location === "object" && !Array.isArray(o.location) ? (o.location as Record<string, unknown>) : null;
+  const lat = loc ? num(loc.lat, -90, 90) : null;
+  const lon = loc ? num(loc.lon, -180, 180) : null;
+  const location = loc && lat !== null && lon !== null ? { lat, lon, country: country(loc.country), locality: str(loc.locality, 80), source: str(loc.source, 32) ?? "unknown" } : null;
+  const sources: NonNullable<ScanEnrich["sources"]> = [];
+  for (const s of Array.isArray(o.sources) ? o.sources.slice(0, 6) : []) {
+    const r = (s ?? {}) as Record<string, unknown>;
+    const key = str(r.key, 32);
+    const label = str(r.label, 80);
+    const note = str(r.note, 300);
+    if (key && label && note) sources.push({ key, label, note });
   }
   const ea = o.email_auth && typeof o.email_auth === "object" ? (o.email_auth as Record<string, unknown>) : null;
   return {
@@ -125,6 +149,8 @@ export function parseEnrich(raw: unknown): ScanEnrich | null {
     prospects,
     email_auth: ea ? { mx: tri(ea.mx), spf: tri(ea.spf), dmarc: tri(ea.dmarc) } : null,
     notes: strList(o.notes, 10, 200),
+    location,
+    sources,
   };
 }
 

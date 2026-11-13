@@ -8,6 +8,7 @@
 import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
+import { eventsTableMissing } from "@/lib/site-scan/events";
 import {
   SCAN_STAGES,
   SCAN_TTL_DAYS,
@@ -138,21 +139,55 @@ export async function insertScan(
     // Two visitors, one domain, one day. A failed or orphaned row is reset for this attempt (the
     // conditional UPDATE lets exactly one retry win); a live one is the scan.
     const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
-    const reset = await db.execute({
+    // The row a retry may take over: failed, or a read nobody has touched for STALE_READ_MS.
+    const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`;
+    const where = [input.tenantId, input.domain, day, staleBefore];
+    // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
+    const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL, updated_at = ?
-            WHERE tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`,
-      args: [input.url, at, input.tenantId, input.domain, day, staleBefore],
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, updated_at = ? WHERE ${resettable}`,
+      args: [input.url, at, ...where],
     });
+    // The failed attempt's feed goes in the same transaction as the reset, on the same condition: it
+    // is never replayed beside the new read, never uses up its allowance, and no stream can claim
+    // the new read (and start writing) between the two.
+    const clearFeed = { sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id IN (SELECT id FROM site_scans WHERE ${resettable})`, args: [input.tenantId, ...where] };
+    let resetRows: number;
+    try {
+      resetRows = (await db.batch([clearFeed, resetSql(", tier0_claimed_at = NULL")], "write"))[1].rowsAffected;
+    } catch (resetErr) {
+      // A database that predates bravo__260 has neither the feed nor the claim: the reset alone.
+      if (!(eventsTableMissing(resetErr) || (resetErr instanceof Error && /no such column: tier0_claimed_at/i.test(resetErr.message)))) throw resetErr;
+      resetRows = (await db.execute(resetSql(""))).rowsAffected;
+    }
     const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
     const r = rs.rows[0];
     if (!r) throw err;
-    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: reset.rowsAffected === 1 };
+    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: resetRows === 1 };
   }
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
   return { row, started: true };
+}
+
+/**
+ * Who runs a scan's Tier 0. The visitor's live stream claims it and runs it inside its own
+ * connection; POST /api/scan's fallback claims it only if no stream did. The conditional UPDATE
+ * lets exactly one of them win. `unsupported`: the database predates bravo__260, so the caller
+ * runs Tier 0 the old way (POST's after()) and the stream only follows.
+ */
+export async function claimTier0(db: Client, input: { tenantId: string; id: string; now: Date }): Promise<"claimed" | "taken" | "unsupported"> {
+  try {
+    const rs = await db.execute({
+      sql: `UPDATE site_scans SET tier0_claimed_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? AND status = 'reading' AND tier0_claimed_at IS NULL`,
+      args: [input.now.toISOString(), input.now.toISOString(), input.tenantId, input.id],
+    });
+    return rs.rowsAffected === 1 ? "claimed" : "taken";
+  } catch (err) {
+    if (err instanceof Error && /no such column: tier0_claimed_at/i.test(err.message)) return "unsupported";
+    throw err;
+  }
 }
 
 export async function saveTier0(
@@ -266,6 +301,16 @@ export async function purgeExpiredScans(db: Client, tenantId: string, now: Date,
     sql: `UPDATE site_scans SET ip_hash = NULL WHERE tenant_id = ? AND expires_at < ? AND lead_record_id IS NOT NULL AND ip_hash IS NOT NULL`,
     args: [tenantId, at],
   });
+  // A deleted scan's live feed goes with it (a claimed scan keeps both).
+  try {
+    await db.execute({
+      sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND id IN (
+              SELECT e.id FROM site_scan_events e WHERE e.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM site_scans s WHERE s.tenant_id = e.tenant_id AND s.id = e.scan_id) LIMIT ?)`,
+      args: [tenantId, tenantId, limit * 50],
+    });
+  } catch (err) {
+    if (!eventsTableMissing(err)) throw err;
+  }
   return { deleted: del.rowsAffected, scrubbed: scrub.rowsAffected };
 }
 

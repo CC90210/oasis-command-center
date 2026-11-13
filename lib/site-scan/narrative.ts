@@ -6,7 +6,7 @@
  * replaces it with the segments, competitors and prospects it found; a model polish (Tier 2)
  * may rewrite it once more. Every sentence here is built from a stored fact, nothing else.
  */
-import type { ScanFacts, ScanNarrative, ScanScore } from "@/lib/site-scan/types";
+import type { ScanEnrich, ScanFacts, ScanNarrative, ScanScore } from "@/lib/site-scan/types";
 import { NARRATIVE_SCHEMA } from "@/lib/site-scan/types";
 
 const AUTOMATION_WORDS: Record<string, string> = {
@@ -30,10 +30,24 @@ function list(items: string[], max = 4): string {
   return `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
 }
 
+/**
+ * Where the business is, as a reader says it: "in Hamilton, ON", "in Laval and Montreal". A region
+ * code ("ON", "QC", schema.org addressRegion) qualifies its town; it is never listed as a second
+ * town ("in Hamilton and ON", seen live 2026-11-12).
+ */
+export function placePhrase(localities: string[]): string {
+  const code = /^[A-Z]{2,3}$/;
+  const towns = localities.filter((l) => !code.test(l));
+  const region = localities.find((l) => code.test(l));
+  if (towns.length === 1) return ` in ${towns[0]}${region ? `, ${region}` : ""}`;
+  if (towns.length) return ` in ${list(towns, 2)}`;
+  return region ? ` in ${region}` : "";
+}
+
 export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative {
   const s = facts.signals;
   const name = s?.business_name ?? facts.domain;
-  const where = s?.localities.length ? ` in ${list(s.localities, 2)}` : "";
+  const where = s ? placePhrase(s.localities) : "";
   const services = s?.services.length ? ` The site names ${list(s.services, 4)}.` : "";
   // A tagline that ends its own sentence keeps its stop inside the quote: never "years.".
   const tagline = s?.tagline ? ` Its own words: "${s.tagline}"${/[.!?]$/.test(s.tagline) ? "" : "."}` : "";
@@ -66,4 +80,17 @@ export function baseNarrative(facts: ScanFacts, score: ScanScore): ScanNarrative
     fixes_intro: fixesIntro,
     email: null,
   };
+}
+
+/**
+ * Where the matches came from, with the attribution each source's licence asks for. Without the
+ * engine's records the directory is named only when the matches say so (or carry no source at all,
+ * as every match from the directory-only engine before 2.0 did); otherwise nothing is guessed.
+ */
+export function sourcesLine(enrich: ScanEnrich): string {
+  const sources = enrich.sources ?? [];
+  if (sources.length) return `From ${sources.map((s) => s.label).join(" and ")}. ${sources.map((s) => s.note).join(" ")}`;
+  const matches = [...enrich.competitors, ...enrich.prospects];
+  if (matches.every((m) => !m.source || m.source === "directory")) return "From OASIS’s own business directory.";
+  return "From public business listings.";
 }

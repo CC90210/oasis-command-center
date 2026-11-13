@@ -86,6 +86,9 @@ export default async function AiAuditBoardPage({ searchParams }: Props) {
       subtitle={`${rows.length} ${showClosed ? noun : `open ${noun}`}${flagged ? `, ${flagged} need attention` : ""}${tests ? `, ${tests === 1 ? "1 test" : `${tests} tests`} left out of the numbers` : ""}`}
       actions={
         <>
+          <Link href="/ai-audits/scans" className="btn-secondary">
+            Free scans
+          </Link>
           <Link href="/ai-audits/catalogue" className="btn-secondary">
             Price catalogue
           </Link>

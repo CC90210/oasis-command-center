@@ -3,8 +3,8 @@
  *
  * Public: a visitor has no session. Guards, in order: same origin, 5 scans per hour per address,
  * a honeypot a script fills, a body under 4 KB, and the audit's own address rules (public names
- * only; a social profile is told so). The response is immediate; Tier 0 runs after it returns and
- * the page watches GET /api/scan/:id.
+ * only; a social profile is told so). The response is immediate; the page then opens
+ * GET /api/scan/:id/stream, which runs Tier 0 live (this route's after() is the fallback).
  */
 import { NextResponse, after } from "next/server";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";
@@ -15,8 +15,8 @@ import { rateLimit } from "@/lib/rate-limit";
 import { siteTarget } from "@/lib/ai-audit/site-url";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { claimKeyFor } from "@/lib/site-scan/claim";
-import { closeCrashedTier0, runTier0 } from "@/lib/site-scan/run";
-import { findReusableScan, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
+import { defaultTier0Deps, runTier0Live } from "@/lib/site-scan/run";
+import { claimTier0, findReusableScan, insertScan, scanKeyOf, siteScanTablesInstalled } from "@/lib/site-scan/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +26,8 @@ const json = (status: number, body: Record<string, unknown>) => NextResponse.jso
 
 // Not exported: a route file may only export its handlers and route config (Next build type check).
 const SCANS_PER_HOUR = 5;
+/** How long POST waits for the visitor's live stream to claim Tier 0 before running it itself. */
+const STREAM_CLAIM_GRACE_MS = 2_000;
 
 export async function POST(req: Request): Promise<Response> {
   if (!sameOrigin(req)) return json(403, { ok: false, error: "forbidden" });
@@ -57,16 +59,23 @@ export async function POST(req: Request): Promise<Response> {
   const ipHash = ip === "unknown" ? null : sha256(`site-scan:${ip}`).slice(0, 32);
   const { row, started } = await insertScan(db, { tenantId: AI_AUDIT_TENANT_ID, domain, url: target.start, ipHash, now });
   if (started) {
+    // The visitor's live stream claims Tier 0 and runs it in its own connection
+    // (app/api/scan/[id]/stream). This is the fallback for a browser that never opens one: after a
+    // short grace, run it here only if this claim wins (or the database predates the claim). It
+    // must fit the ~30 s after() gets: the read's own 25 s budget plus the grace, so the fallback
+    // skips PageSpeed (up to 20 s more). A claim that errors runs nothing: the row may be a
+    // stream's, and a read nobody finishes is failed by the 3-minute sweep and retried fresh.
     after(async () => {
+      await new Promise((r) => setTimeout(r, STREAM_CLAIM_GRACE_MS));
+      let claim: Awaited<ReturnType<typeof claimTier0>>;
       try {
-        await runTier0(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id });
+        claim = await claimTier0(db, { tenantId: AI_AUDIT_TENANT_ID, id: row.id, now: new Date() });
       } catch (err) {
-        console.error("[site-scan.create] tier 0 crashed", { scanId: row.id, error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
-        // Never leave the row looking busy: a later visitor would be handed it instead of a new read.
-        await closeCrashedTier0(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id, now: new Date() }).catch((closeErr: unknown) => {
-          console.error("[site-scan.create] crashed scan not closed", { scanId: row.id, error: closeErr instanceof Error ? closeErr.message : String(closeErr) });
-        });
+        console.error("[site-scan.create] tier 0 claim failed; not running it here", { scanId: row.id, error: err instanceof Error ? err.message : String(err) });
+        return;
       }
+      if (claim === "taken") return;
+      await runTier0Live(db, { tenantId: AI_AUDIT_TENANT_ID, scanId: row.id }, { ...defaultTier0Deps(), pagespeed: null });
     });
   }
   return json(started ? 201 : 200, { ok: true, scan_id: row.id, reused: !started, claim_key: claimKeyFor(row.id) });

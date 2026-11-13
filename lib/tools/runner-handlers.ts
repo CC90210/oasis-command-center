@@ -89,6 +89,7 @@ import {
   type SystemRunnerToolKey,
 } from "@/lib/tools/registry";
 import { authenticateToolsRequest, toolsJson, toolsRefuse, type ToolsProducer } from "@/lib/tools/runner-auth";
+import { appendEvents, cleanEvent, eventsTableMissing } from "@/lib/site-scan/events";
 import { parsePdfReport, storePdf, type PdfStorage } from "@/lib/ai-audit/pdf";
 import { signRenderPath } from "@/lib/ai-audit/link";
 import { aiAuditModelSearchEnabled } from "@/lib/ai-audit/env";
@@ -403,6 +404,54 @@ export async function handleToolsHeartbeat(req: Request, deps: RunnerDeps): Prom
   }
   await touchRunner(deps.db, ref.tenantIds, ref.runnerKey, deps.now);
   return toolsJson(200, { ok: true, lease_expires_at: expires });
+}
+
+// ---------------------------------------------------------------------------
+// progress
+// ---------------------------------------------------------------------------
+
+/** The tools whose runs may post live lines to a public feed (the free scan's, lib/site-scan/events.ts). */
+export const PROGRESS_TOOLS: readonly string[] = ["site_scan_enrich"];
+export const MAX_PROGRESS_EVENTS = 40;
+/** The runner's own time for a line is kept within this of the server's clock (the feed's "+2.4s" stamps). */
+const PROGRESS_CLOCK_SKEW_MS = 120_000;
+
+/**
+ * POST progress: the lines a runner posts while it works, under its lease. Only a tool in
+ * PROGRESS_TOOLS may post, only for the scan its job is for, and every line goes through the
+ * feed's own cleaning and per-scan cap (cleanEvent / appendEvents). A feed table that is not
+ * installed accepts and drops them: the report never depends on the feed.
+ */
+export async function handleToolsProgress(req: Request, deps: RunnerDeps): Promise<Response> {
+  const auth = await authenticateToolsRequest(req, deps.env, deps.now);
+  if (!auth.ok) return auth.response;
+  const ref = leaseRef(auth.producer, auth.body);
+  if ("field" in ref) return invalid(ref.field);
+  const raw = auth.body.events;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_PROGRESS_EVENTS) return invalid("events");
+  if (!(await toolTablesInstalled(deps.db))) return notInstalled("tables_missing");
+  const job = await jobUnderLease(deps.db, ref);
+  if (!job) return leaseLost();
+  if (!PROGRESS_TOOLS.includes(job.toolKey)) return invalid("tool_key");
+  const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
+  if (!scanId) return invalid("job");
+
+  const nowMs = deps.now.getTime();
+  const events = raw.flatMap((e) => {
+    if (!e || typeof e !== "object" || Array.isArray(e)) return [];
+    const o = e as Record<string, unknown>;
+    const t = typeof o.at === "string" ? Date.parse(o.at) : Number.NaN;
+    const at = Number.isFinite(t) && Math.abs(t - nowMs) <= PROGRESS_CLOCK_SKEW_MS ? new Date(t).toISOString() : deps.now.toISOString();
+    const clean = cleanEvent({ kind: o.kind, text: o.text, data: o.data, at });
+    return clean ? [clean] : [];
+  });
+  try {
+    const written = await appendEvents(deps.db, { tenantId: job.tenantId, scanId, source: "runner", events });
+    return toolsJson(200, { ok: true, written });
+  } catch (err) {
+    if (eventsTableMissing(err)) return toolsJson(200, { ok: true, written: 0 });
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

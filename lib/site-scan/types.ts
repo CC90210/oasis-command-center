@@ -124,7 +124,11 @@ export type ScanScore = {
 };
 
 export type ScanSegment = { key: string; label: string; fit: number; why: string };
-export type ScanCompetitor = { name: string; domain: string | null; locality: string | null };
+/** Where a matched business came from (engine 2.0): the Overture map, OpenStreetMap, or OASIS's own directory. */
+export type MatchSource = "overture" | "osm" | "directory";
+/** Measured from the scanned business (engine 2.0, when it was located): km, and a compass bearing. */
+type Placed = { country?: string | null; distance_km?: number | null; bearing_deg?: number | null; source?: MatchSource | null };
+export type ScanCompetitor = { name: string; domain: string | null; locality: string | null } & Placed;
 export type ScanProspect = {
   name: string;
   locality: string | null;
@@ -132,7 +136,11 @@ export type ScanProspect = {
   domain: string | null;
   category_label: string;
   why: string;
-};
+} & Placed;
+/** Where the scanned business is (engine 2.0): its own map listing, or a geocode of its address or town. */
+export type ScanLocation = { lat: number; lon: number; country: string | null; locality: string | null; source: string };
+/** A data source the matches came from, with the attribution its licence asks for. */
+export type ScanSource = { key: string; label: string; note: string };
 
 export type ScanEnrich = {
   schema: typeof ENRICH_SCHEMA;
@@ -144,6 +152,8 @@ export type ScanEnrich = {
   prospects: ScanProspect[];
   email_auth: { mx: boolean | null; spf: boolean | null; dmarc: boolean | null } | null;
   notes: string[];
+  location?: ScanLocation | null;
+  sources?: ScanSource[];
 };
 
 export type ScanNarrative = {

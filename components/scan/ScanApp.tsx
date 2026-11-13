@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { CTA_PRIMARY } from "@/components/marketing/Cta";
 import { HoneypotField } from "@/components/forms/HoneypotField";
@@ -9,16 +9,16 @@ import type { ConsentIdentity } from "@/lib/consent/ledger-disclosure";
 import type { ScanView } from "@/lib/site-scan/types";
 import { claimHeading } from "@/lib/site-scan/score";
 import { ScanReport } from "@/components/scan/ScanReport";
-import { StageRail } from "@/components/scan/StageRail";
 import { ClaimForm } from "@/components/scan/ClaimForm";
+import { LiveWorkspace } from "@/components/scan/LiveWorkspace";
+import { useScanStream } from "@/components/scan/useScanStream";
 
 /**
- * The free scan, end to end in the browser: paste a domain, POST /api/scan, then watch
- * GET /api/scan/:id every two seconds until nothing is running. Sections appear as their data
- * lands; nothing is drawn before the server has it.
+ * The free scan, end to end in the browser: paste a domain, POST /api/scan, then follow
+ * GET /api/scan/:id/stream (components/scan/useScanStream.ts): the agent's work log line by line,
+ * and the report's sections as their data lands. Nothing is drawn before the server has it.
  */
 
-const POLL_MS = 2_000;
 const CLAIM_KEY_STORE = "oasis-scan-claim:";
 
 /** The claim key POST /api/scan gave this browser, kept for the tab so a reload can still save the report. */
@@ -57,46 +57,33 @@ const INPUT_ERRORS: Record<string, string> = {
 export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: Props) {
   const [website, setWebsite] = useState("");
   const [scanId, setScanId] = useState<string | null>(initialScanId);
-  const [scan, setScan] = useState<ScanView | null>(null);
   const [starting, setStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
-  // Read once on the client; the claim section draws only after the first poll, so server and client markup agree.
+  // Read once on the client; the claim section draws only after the first frame, so server and client markup agree.
   const [claimKey, setClaimKey] = useState<string | null>(() => (typeof window !== "undefined" && initialScanId ? storedClaimKey(initialScanId) : null));
   const trapRef = useRef<HTMLInputElement | null>(null);
   const trapLatch = useRef("");
   const inFlight = useRef(false);
-
-  const poll = useCallback(async (id: string): Promise<ScanView | null> => {
-    const res = await fetch(`/api/scan/${encodeURIComponent(id)}`, { cache: "no-store" });
-    const data = (await res.json().catch(() => null)) as { ok?: boolean; scan?: ScanView; error?: string } | null;
-    if (!res.ok || !data?.ok || !data.scan) {
-      setError(data?.error === "not_found" ? "That scan link has expired. Start a new one below." : "The scan could not be read right now.");
-      return null;
-    }
-    return data.scan;
-  }, []);
+  const live = useScanStream(scanId);
+  const scan: ScanView | null = live.scan;
+  const error = startError ?? live.error;
+  const setError = setStartError;
 
   useEffect(() => {
-    if (!scanId) return;
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = async () => {
-      const next = await poll(scanId);
-      if (!alive) return;
-      if (next) {
-        setScan(next);
-        setClaimed((c) => c || next.claimed);
-        const running = next.stages.some((s) => s.state === "running" || s.state === "pending") && next.status !== "failed";
-        if (running) timer = setTimeout(tick, POLL_MS);
-      }
-    };
-    void tick();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [scanId, poll]);
+    if (scan?.claimed) setClaimed(true);
+  }, [scan?.claimed]);
+
+  // A scan started from the form brings the agent's workspace into view: on /scan it opens below
+  // the hero, where a visitor would otherwise miss the work starting.
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const startedHere = useRef(false);
+  useEffect(() => {
+    if (!scanId || !startedHere.current) return;
+    startedHere.current = false;
+    const reduce = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    workspaceRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  }, [scanId]);
 
   async function start(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -121,10 +108,10 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
         inFlight.current = false;
         return;
       }
-      setScan(null);
       setClaimed(false);
       setClaimKey(data.claim_key ?? null);
       if (data.claim_key) storeClaimKey(data.scan_id, data.claim_key);
+      startedHere.current = true;
       setScanId(data.scan_id);
       if (typeof window !== "undefined") window.history.replaceState(null, "", `/scan/${data.scan_id}`);
       inFlight.current = false;
@@ -138,7 +125,6 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
 
   function reset() {
     setScanId(null);
-    setScan(null);
     setError(null);
     setClaimed(false);
     setClaimKey(null);
@@ -187,16 +173,15 @@ export function ScanApp({ initialScanId, consentIdentity, bookingUrl, proof }: P
   }
 
   return (
-    <div className="mx-auto grid w-full max-w-6xl gap-8 lg:grid-cols-[260px_1fr]">
-      <aside className="lg:sticky lg:top-24 lg:self-start">
-        <StageRail scan={scan} />
-        <button type="button" onClick={reset} className="mt-6 text-[13px] text-fg-dim underline decoration-ops-edge underline-offset-4 hover:text-fg">
-          Scan a different site
-        </button>
-      </aside>
-      <div className="min-w-0">
-        {error ? <p role="alert" className="mb-4 border border-status-warm/40 bg-ops-panel p-4 text-[14px] text-status-warm">{error}</p> : null}
-        {scan ? <ScanReport scan={scan} /> : <p className="font-data text-[12px] uppercase tracking-[0.22em] text-fg-dim">Connecting to the scanner…</p>}
+    <div ref={workspaceRef} className="mx-auto w-full max-w-6xl scroll-mt-24">
+      {/* Above the workspace, where the visitor is looking, with the way out right under it. */}
+      {error ? <p role="alert" className="mb-4 border border-status-warm/40 bg-ops-panel p-4 text-[14px] text-status-warm">{error}</p> : null}
+      <LiveWorkspace scan={scan} events={live.events} finished={live.finished} wasFinished={live.wasFinished} stopped={live.gone} />
+      <button type="button" onClick={reset} className="mt-4 text-[13px] text-fg-dim underline decoration-ops-edge underline-offset-4 hover:text-fg">
+        Scan a different site
+      </button>
+      <div className="mt-8 min-w-0">
+        {scan ? <ScanReport scan={scan} /> : null}
         {scan && scan.facts && !scan.error ? (
           <section id="claim" className="mt-12 scroll-mt-24 border border-ops-edge bg-ops-panel/90 p-6 sm:p-8">
             {claimed ? (

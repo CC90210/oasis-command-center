@@ -1,7 +1,7 @@
 "use client";
 
 import { CHECK_TITLES } from "@/lib/ai-audit/site-checks";
-import { automationWords } from "@/lib/site-scan/narrative";
+import { automationWords, sourcesLine } from "@/lib/site-scan/narrative";
 import type { ScanView } from "@/lib/site-scan/types";
 
 /**
@@ -26,6 +26,12 @@ function Working({ what }: { what: string }) {
       {what}
     </p>
   );
+}
+
+/** A measured distance as a reader says it: "350 m", "3.2 km", "41 km". */
+function km(d: number): string {
+  if (d < 1) return `${Math.max(10, Math.round((d * 1000) / 10) * 10)} m`;
+  return d < 10 ? `${d.toFixed(1)} km` : `${Math.round(d)} km`;
 }
 
 function statusTone(status: "yes" | "no" | "unknown") {
@@ -131,11 +137,17 @@ export function ScanReport({ scan }: { scan: ScanView }) {
                     <li key={`${c.name}-${c.domain}`} className="flex items-center gap-3 border border-ops-line p-3">
                       {c.domain ? <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(c.domain)}&sz=32`} alt="" width={16} height={16} className="h-4 w-4 shrink-0" loading="lazy" /> : <span className="h-4 w-4 shrink-0 bg-ops-edge" aria-hidden="true" />}
                       <span className="min-w-0 flex-1 truncate text-[14px] text-fg">{c.name}</span>
-                      {c.locality ? <span className="text-[12px] text-fg-dim">{c.locality}</span> : null}
+                      {typeof c.distance_km === "number" ? (
+                        <span className="shrink-0 text-[12px] tabular-nums text-fg-dim">{km(c.distance_km)} away</span>
+                      ) : c.locality ? (
+                        <span className="text-[12px] text-fg-dim">{c.locality}</span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
                 {scan.narrative.competitors_note ? <p className="mt-3 text-[13px] text-fg-muted">{scan.narrative.competitors_note}</p> : null}
+                {/* The prospects panel carries the attribution; with no prospects it is said here. */}
+                {!scan.enrich.prospects.length ? <p className="mt-2 text-[12px] text-fg-dim">{sourcesLine(scan.enrich)}</p> : null}
               </div>
             ) : null}
           </Panel>
@@ -193,16 +205,17 @@ export function ScanReport({ scan }: { scan: ScanView }) {
                     {p.category_label}
                     {p.locality ? ` · ${p.locality}` : ""}
                     {p.region ? `, ${p.region}` : ""}
+                    {typeof p.distance_km === "number" ? ` · ${km(p.distance_km)}` : ""}
                   </p>
                   <p className="mt-2 text-[13px] leading-snug text-fg-muted">{p.why}</p>
                 </li>
               ))}
             </ul>
-            <p className="mt-4 text-[12px] text-fg-dim">From OASIS&rsquo;s own directory of {`${(135_000).toLocaleString("en-CA")}+`} Canadian businesses. Names and places only; nobody is contacted by this page.</p>
+            <p className="mt-4 text-[12px] text-fg-dim">{sourcesLine(scan.enrich)} Names and places only; nobody is contacted by this page.</p>
           </Panel>
         ) : stage("prospects") === "skipped" ? (
           <Panel eyebrow="Sample prospects" title="Found on the call">
-            <p className="text-[15px] leading-relaxed text-fg-muted">Our directory has no matching businesses near you yet. On the call we pull them live.</p>
+            <p className="text-[15px] leading-relaxed text-fg-muted">No close match near you in our business map or directory yet. On the call we pull them live.</p>
           </Panel>
         ) : null
       ) : null}
