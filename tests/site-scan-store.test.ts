@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { applyEnrichReport, enrichJobInput, parseEnrichReport } from "../lib/site-scan/enrich-job";
 import { queueEnrichment } from "../lib/site-scan/run";
-import { findReusableScan, getScan, insertScan, latestScanForDomain, reserveClaim, setClaimEngagement, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
+import { REPORT_FORMAT_SINCE, findReusableScan, getScan, insertScan, latestScanForDomain, reserveClaim, setClaimEngagement, saveTier0, scanCounts, setStatus, siteScanTablesInstalled } from "../lib/site-scan/store";
 import { ENRICH_SCHEMA, NARRATIVE_SCHEMA, SCORE_SCHEMA, FACTS_SCHEMA, type ScanFacts, type ScanNarrative, type ScanScore } from "../lib/site-scan/types";
 import { stageStates, toView } from "../lib/site-scan/view";
 
@@ -68,10 +68,35 @@ async function main() {
     assert.equal(jobs.rows[0].status, "queued");
     assert.deepEqual(JSON.parse(String(jobs.rows[0].input_json)), { scan_id: row.id }, "the job carries the scan id only");
 
+    // A report made before REPORT_FORMAT_SINCE (no live log, no picture) is never handed to a new visitor.
+    assert.ok(t0.toISOString() < REPORT_FORMAT_SINCE);
+    assert.equal(await findReusableScan(db, TENANT, "acme.example", new Date("2026-11-15T10:00:00.000Z")), null, "an old-format report is read again");
+
     // Reuse within seven days: the finished-or-working row comes back, so the site is not read twice.
-    const reused = await findReusableScan(db, TENANT, "acme.example", new Date("2026-11-15T10:00:00.000Z"));
-    assert.equal(reused?.id, row.id);
-    assert.equal(await findReusableScan(db, TENANT, "acme.example", new Date("2026-12-01T10:00:00.000Z")), null, "after the window a new scan is made");
+    const fresh = (await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: null, now: new Date("2026-11-14T10:00:00.000Z") })).row;
+    await setStatus(db, { tenantId: TENANT, id: fresh.id, status: "done", stage: "done", errorCode: null, now: new Date("2026-11-14T10:01:00.000Z") });
+    const reused = await findReusableScan(db, TENANT, "fresh.example", new Date("2026-11-15T10:00:00.000Z"));
+    assert.equal(reused?.id, fresh.id);
+    assert.equal(await findReusableScan(db, TENANT, "fresh.example", new Date("2026-12-01T10:00:00.000Z")), null, "after the window a new scan is made");
+
+    // Today's old-format report of a domain is read again in place, once; a claimed one is never reset.
+    const early = new Date(Date.parse(REPORT_FORMAT_SINCE) - 3_600_000);
+    const later = new Date(Date.parse(REPORT_FORMAT_SINCE) + 3_600_000);
+    const old = (await insertScan(db, { tenantId: TENANT, domain: "old.example", url: "https://old.example/", ipHash: null, now: early })).row;
+    await setStatus(db, { tenantId: TENANT, id: old.id, status: "done", stage: "done", errorCode: null, now: early });
+    const reread = await insertScan(db, { tenantId: TENANT, domain: "old.example", url: "https://old.example/", ipHash: null, now: later });
+    assert.equal(reread.row.id, old.id, "the same row, under the one-per-day index");
+    assert.equal(reread.started, true, "the old-format report is read again");
+    assert.equal(reread.row.status, "reading");
+    assert.equal(reread.row.createdAt, later.toISOString(), "dated now, so it is reusable and not reset again");
+    const third = await insertScan(db, { tenantId: TENANT, domain: "old.example", url: "https://old.example/", ipHash: null, now: new Date(later.getTime() + 60_000) });
+    assert.equal(third.started, false, "the new read is the scan; it is not reset again");
+    const kept = (await insertScan(db, { tenantId: TENANT, domain: "kept.example", url: "https://kept.example/", ipHash: null, now: early })).row;
+    await setStatus(db, { tenantId: TENANT, id: kept.id, status: "done", stage: "done", errorCode: null, now: early });
+    assert.equal(await reserveClaim(db, { tenantId: TENANT, id: kept.id, leadRecordId: "lead-kept", now: early }), "reserved");
+    const claimedAgain = await insertScan(db, { tenantId: TENANT, domain: "kept.example", url: "https://kept.example/", ipHash: null, now: later });
+    assert.equal(claimedAgain.started, false, "a report a lead claimed is never reset");
+    assert.equal((await getScan(db, TENANT, kept.id))?.status, "done");
 
     // The view mid-enrichment: read, health and score are done; profile runs; the public view has no page text.
     const mid = (await getScan(db, TENANT, row.id))!;

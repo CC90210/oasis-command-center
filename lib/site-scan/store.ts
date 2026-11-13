@@ -22,6 +22,14 @@ import {
 } from "@/lib/site-scan/types";
 
 export const SCAN_REUSE_DAYS = 7;
+/**
+ * A report made before this moment is never handed to a new visitor: it predates the live log
+ * (bravo__260, #814), the home page picture (bravo__261, #817) and the report fixes since (#813),
+ * so the page would show a silent console and an empty browser frame. A repeat of such a domain is
+ * read again (findReusableScan, and insertScan resets today's row in place). Move it forward
+ * whenever what a report shows changes. A report a lead claimed is never reset.
+ */
+export const REPORT_FORMAT_SINCE = "2026-11-13T05:21:00.000Z";
 /** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
 export const STALE_READ_MS = 3 * 60_000;
 
@@ -102,7 +110,8 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
  * A failed row, and a read nobody has touched for STALE_READ_MS (its Worker died), are not reused.
  */
 export async function findReusableScan(db: Client, tenantId: string, domain: string, now: Date): Promise<ScanRow | null> {
-  const since = new Date(now.getTime() - SCAN_REUSE_DAYS * 86_400_000).toISOString();
+  const window = new Date(now.getTime() - SCAN_REUSE_DAYS * 86_400_000).toISOString();
+  const since = window > REPORT_FORMAT_SINCE ? window : REPORT_FORMAT_SINCE;
   const staleBefore = new Date(now.getTime() - STALE_READ_MS).toISOString();
   const rs = await db.execute({
     sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND created_at >= ? AND status <> 'failed'
@@ -139,15 +148,17 @@ export async function insertScan(
     // Two visitors, one domain, one day. A failed or orphaned row is reset for this attempt (the
     // conditional UPDATE lets exactly one retry win); a live one is the scan.
     const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
-    // The row a retry may take over: failed, or a read nobody has touched for STALE_READ_MS.
+    // The row a retry may take over: failed, a read nobody has touched for STALE_READ_MS, or a
+    // report made before REPORT_FORMAT_SINCE (findReusableScan no longer hands it out).
     const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?))`;
-    const where = [input.tenantId, input.domain, day, staleBefore];
+              AND (status = 'failed' OR (status IN ('queued', 'reading') AND updated_at < ?) OR created_at < ?)`;
+    const where = [input.tenantId, input.domain, day, staleBefore, REPORT_FORMAT_SINCE];
     // The retry is read again, so its Tier 0 claim is released with the rest (bravo__260).
     const resetSql = (claim: string) => ({
       sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, updated_at = ? WHERE ${resettable}`,
-      args: [input.url, at, ...where],
+              embedding_json = NULL, error_code = NULL, enriched_at = NULL${claim}, created_at = ?, updated_at = ?, expires_at = ? WHERE ${resettable}`,
+      // A reset is a fresh read: it is dated now (so it is reusable, and not reset again) and kept the full TTL.
+      args: [input.url, at, at, expires, ...where],
     });
     // The failed attempt's feed goes in the same transaction as the reset, on the same condition: it
     // is never replayed beside the new read, never uses up its allowance, and no stream can claim
