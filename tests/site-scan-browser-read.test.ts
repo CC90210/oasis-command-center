@@ -83,6 +83,16 @@ async function main() {
     assert.equal(hop.headers.get("location"), `${SITE}/`);
     await assert.rejects(deps.fetch(`${SITE}/contact`, { method: "GET", redirect: "manual", signal: new AbortController().signal, headers: {} }));
     assert.deepEqual([...missing], [`${SITE}/contact`]);
+
+    // Requests made at once (the reader's batches of four) spend the budget as the latest of their ends, not their sum.
+    const four = br.parseBrowserPages(["a", "b", "c", "d"].map((p) => ({ url: `${SITE}/${p}`, status: 200, content_type: "text/html", body: "<p>x</p>", ms: 1_000 })));
+    assert.ok(four.ok);
+    const batch = br.replayRead(four.pages, 0);
+    const req = () => ({ method: "GET" as const, redirect: "manual" as const, signal: new AbortController().signal, headers: {} });
+    await Promise.all(four.pages.map((p) => batch.deps.fetch(p.url, req())));
+    assert.equal(batch.deps.clock(), 1_000, "four pages at once took one second, not four");
+    await batch.deps.fetch(four.pages[0].url, req());
+    assert.equal(batch.deps.clock(), 2_000, "one alone adds its own time");
   });
 
   await seedRunner(db, t0, ["site_scan_enrich"], "bea:oasis-vps-audit");
@@ -132,10 +142,19 @@ async function main() {
     assert.ok(feed.some((e) => e.source === "runner" && e.kind === "score"));
   });
 
-  await check("a read already done is never overwritten, and only the scan's own tool may post", async () => {
+  await check("a retry gets the finished read back, nothing overwritten; a lease that no longer holds writes nothing; only the scan's own tool may post", async () => {
+    const before = (await getScan(db, OASIS, row.id))!;
     const again = await post({ ...base, round: 1, pages: [browserPage(`${SITE}/robots.txt`)] });
-    assert.equal(again.status, 409);
-    assert.equal(again.body.error, "not_wanted");
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.deepEqual([again.body.done, again.body.repeated], [true, true], "a lost answer or a retry: the result again");
+    assert.ok((again.body.input as { facts?: unknown })?.facts, "with the job's input rebuilt from the saved read");
+    assert.deepEqual((await getScan(db, OASIS, row.id))!.facts, before.facts, "the saved read is untouched");
+    const { saveBrowserRead } = await import("../lib/site-scan/store");
+    await db.execute({ sql: "UPDATE site_scans SET facts_json = json_set(facts_json, '$.site.unread', 'home_page_failed') WHERE id = ?", args: [row.id] });
+    const stale = await saveBrowserRead(db, { tenantId: OASIS, id: row.id, facts: before.facts!, score: before.score!, narrative: before.narrative!, now: t0, lease: { jobId, runnerKey: "bea:oasis-vps-audit", leaseId: "f".repeat(32) } });
+    assert.equal(stale, false, "a runner whose lease moved on writes nothing");
+    assert.equal((await getScan(db, OASIS, row.id))!.facts?.site.unread, "home_page_failed");
+    await db.execute({ sql: "UPDATE site_scans SET facts_json = ? WHERE id = ?", args: [JSON.stringify(before.facts), row.id] });
     const r = await post({ ...base, round: 9, pages: [] });
     assert.equal(r.status, 422);
     await db.execute({ sql: "UPDATE tool_jobs SET tool_key = 'ai_audit_pdf' WHERE id = ?", args: [jobId] });
@@ -194,6 +213,26 @@ async function main() {
     const robots = await insertScan(db, { tenantId: OASIS, domain: "robots-site.ca", url: "https://robots-site.ca/", ipHash: null, now: t0 });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "not_allowed" } }), robots.row.id] });
     assert.equal((await findReusableScan(db, OASIS, "robots-site.ca", later))?.id, robots.row.id, "robots.txt closing the site stays the answer for the week");
+  });
+
+  await check("a site read again in place gets a runner job of its own, a finished one from before never in its way", async () => {
+    const { row: retry } = await insertScan(db, { tenantId: OASIS, domain: "retry-site.ca", url: "https://retry-site.ca/", ipHash: null, now: t0 });
+    assert.deepEqual(await run.runTier0(db, { tenantId: OASIS, scanId: retry.id }, tier0(refusingSite())), { ok: true, code: "browser_read" });
+    const jobsOf = async () => (await db.execute({ sql: "SELECT id, status FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ? ORDER BY created_at", args: [retry.id] })).rows;
+    assert.equal((await jobsOf()).length, 1);
+    // That job finishes on the empty read (a runner before this change); the report closes empty.
+    await db.execute({ sql: "UPDATE tool_jobs SET status = 'done' WHERE json_extract(input_json, '$.scan_id') = ?", args: [retry.id] });
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [retry.id] });
+    // The next visitor today: the empty report is read again in place, and the new read needs a runner.
+    const later = new Date(t0.getTime() + 3_600_000);
+    const again = await insertScan(db, { tenantId: OASIS, domain: "retry-site.ca", url: "https://retry-site.ca/", ipHash: null, now: later });
+    assert.equal(again.row.id, retry.id);
+    assert.equal(again.started, true);
+    await seedRunner(db, later, ["site_scan_enrich"], "bea:oasis-vps-audit"); // still listening an hour on
+    assert.deepEqual(await run.runTier0(db, { tenantId: OASIS, scanId: retry.id }, { ...tier0(refusingSite()), now: () => later }), { ok: true, code: "browser_read" });
+    const jobs = await jobsOf();
+    assert.equal(jobs.length, 2, "a second job, queued: the finished one's key is not the new attempt's");
+    assert.equal(jobs[1].status, "queued");
   });
 
   await check("with no runner listening, a refused site closes at once as before", async () => {

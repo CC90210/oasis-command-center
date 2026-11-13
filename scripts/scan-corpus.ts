@@ -25,7 +25,7 @@ import { defaultSiteDeps } from "../lib/ai-audit/briefs";
 import { siteTarget } from "../lib/ai-audit/site-url";
 import { scanKeyOf, insertScan, getScan } from "../lib/site-scan/store";
 import { runTier0, browserRead } from "../lib/site-scan/run";
-import { parseBrowserPages, MAX_BROWSER_ROUNDS } from "../lib/site-scan/browser-read";
+import { parseBrowserPages, MAX_BROWSER_ROUNDS, needsBrowserRead } from "../lib/site-scan/browser-read";
 import { enrichJobInput, parseEnrichReport, applyEnrichReport } from "../lib/site-scan/enrich-job";
 import { toView } from "../lib/site-scan/view";
 
@@ -45,11 +45,21 @@ function startWorker() {
   const python = join(BEA, ".venv", "Scripts", existsSync(join(BEA, ".venv", "Scripts", "python.exe")) ? "python.exe" : "python");
   const child = spawn(python, [join(BEA, "scripts", "site_scan", "corpus_worker.py")], { cwd: BEA, stdio: ["pipe", "pipe", "inherit"] });
   const lines = createInterface({ input: child.stdout });
-  const waiting: Array<(v: Record<string, unknown>) => void> = [];
-  lines.on("line", (l) => waiting.shift()?.(JSON.parse(l)));
+  const waiting: Array<{ resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }> = [];
+  lines.on("line", (l) => waiting.shift()?.resolve(JSON.parse(l)));
+  // A worker that dies fails what waits on it and whatever is asked after, through each site's own catch.
+  let failure: Error | null = null;
+  const fail = (reason: Error) => {
+    failure ??= reason;
+    for (const pending of waiting.splice(0)) pending.reject(reason);
+  };
+  child.on("error", fail);
+  child.on("exit", (code) => fail(new Error(`the corpus worker exited with code ${code}`)));
+  child.stdin.on("error", fail);
   const ask = (msg: Record<string, unknown>) =>
-    new Promise<Record<string, unknown>>((resolve) => {
-      waiting.push(resolve);
+    new Promise<Record<string, unknown>>((resolve, reject) => {
+      if (failure) return reject(failure);
+      waiting.push({ resolve, reject });
       child.stdin.write(JSON.stringify(msg) + "\n");
     });
   return { ask, stop: () => child.stdin.end() };
@@ -72,15 +82,19 @@ async function scanOne(db: Db, worker: ReturnType<typeof startWorker>, input: st
   const target = siteTarget(input);
   if (target.kind !== "site") return { input, outcome: `refused at the door: ${target.kind}${"reason" in target ? ` (${String(target.reason)})` : ""}` };
   await seedRunner(db, new Date(), ["site_scan_enrich"], "bea:corpus");
-  const { row } = await insertScan(db, { tenantId: OASIS, domain: scanKeyOf(target), url: target.start, ipHash: null, now: new Date() });
+  const { row, started } = await insertScan(db, { tenantId: OASIS, domain: scanKeyOf(target), url: target.start, ipHash: null, now: new Date() });
+  // The same site twice in one run ("melnik.ca" and "WWW.MELNIK.CA/") is one scan, as in production: said, not re-reported.
+  if (!started) return { input, outcome: `the same scan as ${row.domain} earlier in this run (one per site per day)` };
   const site = blockWorker
     ? { fetch: async () => new Response("Forbidden", { status: 403, headers: { "content-type": "text/html" } }), clock: () => Date.now() }
     : defaultSiteDeps();
   const tier0 = await runTier0(db, { tenantId: OASIS, scanId: row.id }, { site, pagespeed: null, now: () => new Date() });
   const workerUnread = (await getScan(db, OASIS, row.id))?.facts?.site.unread ?? null;
   let rounds = 0;
-  if (tier0.code === "browser_read") {
-    const scan = (await getScan(db, OASIS, row.id))!;
+  // The browser rounds for every scan the runner would read in its browser: a refused site and a thin one alike.
+  const handed = (await getScan(db, OASIS, row.id))!;
+  if (handed.status === "enriching" && needsBrowserRead(handed.facts?.site)) {
+    const scan = handed;
     const start = scan.facts?.start_url ?? target.start;
     const u = new URL(start);
     let want = [`${u.origin}/robots.txt`, start, start.replace(/^https:/, "http:"), `http://${u.host}/robots.txt`, `${u.origin}/sitemap.xml`];

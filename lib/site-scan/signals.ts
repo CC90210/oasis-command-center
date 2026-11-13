@@ -343,13 +343,25 @@ export function extractSignals(input: { domain: string; pages: readonly PageSnap
   }
 
   const separator = /\s[|\-\u2013\u2014:·\u2022]\s/;
-  const named = (s: string | null | undefined): string | null => (s && !GENERIC_PAGE_LABEL.test(s.trim()) ? s : null);
-  const nameFromTitle = title ? title.split(separator).map((s) => s.trim()).filter((s) => !!named(s)) : [];
+  // A page's own label is never the business's name ("Home page | Cuisina" is Cuisina, Magento's
+  // default title, live scan 2026-11-13), and a greeting is no part of it ("Welcome to Joe's Pizza"):
+  // every candidate is tidied first, and one that is then only a label is passed over for the next.
+  const named = (s: string | null | undefined): string | null => {
+    const t = s ? tidyName(s) : "";
+    return t && !GENERIC_PAGE_LABEL.test(t) ? t : null;
+  };
+  const nameFromTitle = title ? title.split(separator).map((s) => named(s)).filter((s): s is string => !!s) : [];
   // og:site_name is often the whole page title ("Harper's Garden Centre | Hamilton, Ontario"): the
-  // name is what comes before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
-  const ogName = named(ogSiteName ? ogSiteName.split(/\s[|\u00b7\u2022]\s/)[0].trim() || null : null);
-  const chosenName = ogName ?? schemaNames.find((n) => !!named(n)) ?? (nameFromTitle.length > 1 ? nameFromTitle[nameFromTitle.length - 1].length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(nameFromTitle[nameFromTitle.length - 1]) ? nameFromTitle[nameFromTitle.length - 1] : nameFromTitle[0] : nameFromTitle[0]);
-  const businessName = clean(chosenName ? tidyName(chosenName) : input.domain, 80) ?? input.domain;
+  // name is its first part that is one, before a pipe or dot. Not a hyphen: "Smith - Jones Law" is one name.
+  const ogName = ogSiteName ? (ogSiteName.split(/\s[|\u00b7\u2022]\s/).map((s) => named(s)).find((s) => !!s) ?? null) : null;
+  const lastPart = nameFromTitle[nameFromTitle.length - 1];
+  const chosenName =
+    ogName ??
+    schemaNames.map((n) => named(n)).find((n) => !!n) ??
+    (nameFromTitle.length > 1 && lastPart.length <= 40 && /inc|ltd|llc|co\.|company|group|clinic|studio|salon|services|plumbing|dental/i.test(lastPart)
+      ? lastPart
+      : (nameFromTitle[0] ?? null));
+  const businessName = clean(chosenName ?? input.domain, 80) ?? input.domain;
   const tagline = clean(h1[0] ?? metaDescription ?? (nameFromTitle.length > 1 ? nameFromTitle.slice(1).join(" ") : null), 200);
   const words = allText.split(/\s+/).filter(Boolean);
 

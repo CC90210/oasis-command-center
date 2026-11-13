@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
 import { eventsTableMissing } from "@/lib/site-scan/events";
 import { BROWSER_READ_UNREAD } from "@/lib/site-scan/browser-read";
+import { LEASE_GUARD } from "@/lib/tools/store";
 import {
   SCAN_STAGES,
   SCAN_TTL_DAYS,
@@ -231,14 +232,21 @@ export async function saveTier0(
  * while the runner is working on the row, and only over a read the Worker could not do, so a later
  * post never overwrites a real read.
  */
+export type ScanLease = { jobId: string; runnerKey: string; leaseId: string };
+
 export async function saveBrowserRead(
   db: Client,
-  input: { tenantId: string; id: string; facts: ScanFacts; score: ScanScore; narrative: ScanNarrative; now: Date },
+  input: { tenantId: string; id: string; facts: ScanFacts; score: ScanScore; narrative: ScanNarrative; now: Date; lease?: ScanLease },
 ): Promise<boolean> {
+  // With a lease, the write holds only while the runner's lease on the job does (the same test as
+  // enrichStatement): a runner that paused past its lease and resumes after the job moved on writes nothing.
   const rs = await db.execute({
     sql: `UPDATE site_scans SET facts_json = ?, score_json = ?, narrative_json = ?, updated_at = ?
-          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND ${BROWSER_WANTED}`,
-    args: [JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.now.toISOString(), input.tenantId, input.id, ...BROWSER_READ_UNREAD],
+          WHERE tenant_id = ? AND id = ? AND status = 'enriching' AND ${BROWSER_WANTED}${input.lease ? ` AND EXISTS (SELECT 1 FROM tool_jobs WHERE ${LEASE_GUARD})` : ""}`,
+    args: [
+      JSON.stringify(input.facts), JSON.stringify(input.score), JSON.stringify(input.narrative), input.now.toISOString(), input.tenantId, input.id, ...BROWSER_READ_UNREAD,
+      ...(input.lease ? [input.lease.jobId, input.lease.runnerKey, input.lease.leaseId] : []),
+    ],
   });
   return rs.rowsAffected === 1;
 }

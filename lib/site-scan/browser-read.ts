@@ -97,11 +97,15 @@ export function parseBrowserPages(raw: unknown): { ok: true; pages: BrowserPage[
 export function replayRead(pages: BrowserPage[], start = 0): { deps: Pick<SiteReadDeps, "fetch" | "clock">; missing: Set<string> } {
   const byUrl = new Map(pages.map((p) => [p.url, p]));
   const missing = new Set<string>();
+  // Requests the reader makes at once (its batches of four pages) are at once here too: they start
+  // from one moment and the clock moves to the latest of their ends, not to their sum, so the read's
+  // time budget is spent as the site's answers were.
   let now = start;
+  let burst: number | null = null;
   return {
     missing,
     deps: {
-      clock: () => now,
+      clock: () => burst ?? now,
       fetch: async (url) => {
         const key = pageKey(url);
         const page = key ? byUrl.get(key) : undefined;
@@ -109,7 +113,13 @@ export function replayRead(pages: BrowserPage[], start = 0): { deps: Pick<SiteRe
           if (key) missing.add(key);
           throw new Error("not read by the browser");
         }
-        now += page.ms;
+        if (burst === null) {
+          burst = now;
+          queueMicrotask(() => {
+            burst = null;
+          });
+        }
+        now = Math.max(now, burst + page.ms);
         const redirect = page.status >= 300 && page.status < 400;
         const headers: Record<string, string> = {};
         if (page.contentType) headers["content-type"] = page.contentType;

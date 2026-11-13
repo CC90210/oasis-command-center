@@ -119,5 +119,15 @@ assert.equal(tidyName("Sweet Home"), "Sweet Home", "a trailing label leaves at l
 assert.equal(tidyName("Home Depot"), "Home Depot", "only a trailing label goes");
 const greeted = extractSignals({ domain: "mm.example", pages: [page("https://mm.example/", `<html><head><title>Mandy Management Home</title></head><body></body></html>`)] });
 assert.equal(greeted.business_name, "Mandy Management");
+// CodeRabbit on #819: a generic first part of og:site_name gives way to its next part; a candidate that is
+// only a label once tidied ("Welcome to the Homepage") gives way to the schema's name.
+const ogLater = extractSignals({ domain: "c.example", pages: [page("https://c.example/", `<html><head><title>Home</title><meta property="og:site_name" content="Home | Cuisina"></head><body></body></html>`)] });
+assert.equal(ogLater.business_name, "Cuisina");
+const tidiedLabel = extractSignals({
+  domain: "w.example",
+  pages: [page("https://w.example/", `<html><head><title>Welcome to the Homepage</title><meta property="og:site_name" content="Welcome to the Homepage">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"LocalBusiness","name":"Westside Dental"}</script></head><body></body></html>`)],
+});
+assert.equal(tidiedLabel.business_name, "Westside Dental");
 
 console.log("site-scan-signals: ok");

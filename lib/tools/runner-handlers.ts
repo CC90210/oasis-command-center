@@ -54,8 +54,9 @@ import { OASIS_INTERNAL_TENANT_IDS } from "@/lib/ai/tools/client-safe-registry";
 import { r2Configured, r2StorageSurface } from "@/lib/r2-storage";
 import { pathBelongsToTenant, sanitizeStorageFilename } from "@/lib/storage-helpers";
 import { enrichJobInput, enrichReportStatement, parseEnrichReport } from "@/lib/site-scan/enrich-job";
-import { MAX_BROWSER_ROUNDS, parseBrowserPages } from "@/lib/site-scan/browser-read";
+import { MAX_BROWSER_ROUNDS, needsBrowserRead, parseBrowserPages } from "@/lib/site-scan/browser-read";
 import { browserRead } from "@/lib/site-scan/run";
+import { getScan as getSiteScan } from "@/lib/site-scan/store";
 import {
   DOWNLOAD_PAGE_MAX,
   DOWNLOAD_URL_TTL_SECONDS,
@@ -489,8 +490,14 @@ export async function handleToolsScanPages(req: Request, deps: RunnerDeps): Prom
   if (job.toolKey !== "site_scan_enrich") return invalid("tool_key");
   const scanId = typeof job.input.scan_id === "string" ? job.input.scan_id : "";
   if (!scanId) return invalid("job");
-  const read = await browserRead(deps.db, { tenantId: job.tenantId, scanId, pages: parsed.pages, lastRound: round === MAX_BROWSER_ROUNDS, now: deps.now });
-  if (!read.ok) return toolsJson(409, { ok: false, error: read.code });
+  const read = await browserRead(deps.db, { tenantId: job.tenantId, scanId, pages: parsed.pages, lastRound: round === MAX_BROWSER_ROUNDS, now: deps.now, lease: { jobId: ref.jobId, runnerKey: ref.runnerKey, leaseId: ref.leaseId } });
+  if (!read.ok) {
+    // A read this job finished already (its answer was lost, or it is retrying): the result again, nothing overwritten.
+    const scan = await getSiteScan(deps.db, job.tenantId, scanId);
+    if (!scan || scan.status !== "enriching" || !scan.facts || needsBrowserRead(scan.facts.site)) return toolsJson(409, { ok: false, error: read.code });
+    const again = await enrichJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
+    return toolsJson(200, { ok: true, done: true, unread: scan.facts.site.unread, input: again.ok ? again.input : null, repeated: true });
+  }
   if (read.need) return toolsJson(200, { ok: true, need: read.need });
   const built = await enrichJobInput(deps.db, { tenantId: job.tenantId, input: job.input });
   return toolsJson(200, { ok: true, done: true, unread: read.unread, input: built.ok ? built.input : null });
@@ -534,7 +541,9 @@ export async function handleToolsScanScreenshot(req: Request, deps: RunnerDeps):
     if (err instanceof Error && /no such column: screenshot_jpeg/i.test(err.message)) return notInstalled("screenshot_column_missing");
     throw err;
   }
-  const url = kept === "shot" && shot ? shotPath(scanId, shot.seq) : screenshotPath(scanId);
+  // Versioned: a retried runner replaces a picture under the same path, and the new address makes the
+  // visitor's browser fetch it instead of the one it cached (the routes cache a picture for a day).
+  const url = `${kept === "shot" && shot ? shotPath(scanId, shot.seq) : screenshotPath(scanId)}?v=${deps.now.getTime()}`;
   const text = shot && shot.seq > 0 ? `Looking at ${pagePath(shot.pageUrl)}` : "Took a picture of the home page as a visitor first sees it";
   const line = cleanEvent({ kind: "screenshot", text, data: shot ? { url, page: shot.pageUrl, seq: shot.seq } : { url }, at: deps.now.toISOString() });
   if (line) {

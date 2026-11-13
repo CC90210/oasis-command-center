@@ -26,7 +26,7 @@ async function main() {
 
   const t0 = new Date("2026-11-12T20:00:00.000Z");
   const { row } = await insertScan(db, { tenantId: OASIS, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: t0 });
-  assert.deepEqual(await queueEnrichment(db, { tenantId: OASIS, scanId: row.id, now: t0 }), { ok: true });
+  assert.deepEqual(await queueEnrichment(db, { tenantId: OASIS, scanId: row.id, attempt: row.createdAt, now: t0 }), { ok: true });
   const jobId = String((await db.execute({ sql: "SELECT id FROM tool_jobs WHERE tool_key = 'site_scan_enrich' AND json_extract(input_json, '$.scan_id') = ?", args: [row.id] })).rows[0].id);
   await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = 'bea:oasis-pc-scan', lease_id = ? WHERE id = ?", args: [LEASE, jobId] });
 

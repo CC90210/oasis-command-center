@@ -39,7 +39,7 @@ async function main() {
 
   const t0 = new Date("2026-11-12T20:00:00.000Z");
   const { row } = await insertScan(db, { tenantId: OASIS, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: t0 });
-  assert.deepEqual(await queueEnrichment(db, { tenantId: OASIS, scanId: row.id, now: t0 }), { ok: true });
+  assert.deepEqual(await queueEnrichment(db, { tenantId: OASIS, scanId: row.id, attempt: row.createdAt, now: t0 }), { ok: true });
   const jobId = String((await db.execute({ sql: "SELECT id FROM tool_jobs WHERE tool_key = 'site_scan_enrich' AND json_extract(input_json, '$.scan_id') = ?", args: [row.id] })).rows[0].id);
   await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = 'bea:oasis-pc-scan', lease_id = ? WHERE id = ?", args: [LEASE, jobId] });
 
@@ -68,7 +68,7 @@ async function main() {
     const line = (await feedOf()).filter((e) => e.kind === "screenshot");
     assert.equal(line.length, 1);
     assert.equal(line[0].source, "runner");
-    assert.equal(line[0].data?.url, `/api/scan/${row.id}/screenshot`);
+    assert.equal(line[0].data?.url, `/api/scan/${row.id}/screenshot?v=${t0.getTime()}`, "versioned: a replaced picture gets a new address");
     const at = (await db.execute({ sql: "SELECT screenshot_at FROM site_scans WHERE id = ?", args: [row.id] })).rows[0].screenshot_at;
     assert.equal(at, t0.toISOString());
   });
@@ -130,8 +130,8 @@ async function main() {
     assert.equal((await shots.readScreenshot(db, { tenantId: OASIS, scanId: row.id }))?.length, 900, "a later page never replaces the home page");
     const lines = (await feedOf()).filter((e) => e.kind === "screenshot").slice(-2);
     assert.deepEqual(lines.map((e) => [e.text, e.data?.url, e.data?.page, e.data?.seq]), [
-      ["Took a picture of the home page as a visitor first sees it", `/api/scan/${row.id}/shot/0`, "https://acme-plumbing.ca/", 0],
-      ["Looking at /contact?ref=nav", `/api/scan/${row.id}/shot/1`, "https://acme-plumbing.ca/contact?ref=nav", 1],
+      ["Took a picture of the home page as a visitor first sees it", `/api/scan/${row.id}/shot/0?v=${t0.getTime()}`, "https://acme-plumbing.ca/", 0],
+      ["Looking at /contact?ref=nav", `/api/scan/${row.id}/shot/1?v=${t0.getTime()}`, "https://acme-plumbing.ca/contact?ref=nav", 1],
     ]);
     const again = await post({ ...base, seq: 1, page_url: "https://acme-plumbing.ca/contact", image_b64: b64(jpeg(700)) });
     assert.equal(again.status, 200, "a retried job may post the same place again");

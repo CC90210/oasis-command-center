@@ -19,7 +19,7 @@ import { inputHashOf, insertJob, isMissingToolTables, liveRunnerForTool, newJobI
 import { baseNarrative } from "@/lib/site-scan/narrative";
 import { scoreFacts } from "@/lib/site-scan/score";
 import { extractSignals } from "@/lib/site-scan/signals";
-import { getScan, saveBrowserRead, saveTier0, setStatus } from "@/lib/site-scan/store";
+import { getScan, saveBrowserRead, saveTier0, setStatus, type ScanLease } from "@/lib/site-scan/store";
 import { appendEvents, cleanEvent, eventsTableMissing, EventSink, NO_EVENTS, type CleanEvent, type ScanEvents } from "@/lib/site-scan/events";
 import { checkLines, pageLine, planLine, scoreLines, signalLines, speedLine, type Line } from "@/lib/site-scan/live";
 import { isThinRead, needsBrowserRead, replayRead, wantsBrowserRead, type BrowserPage } from "@/lib/site-scan/browser-read";
@@ -179,7 +179,7 @@ export async function runTier0(
     if (wantsBrowserRead(report.unread) && (await enrichRunnerLive(db, input.tenantId, deps.now()))) {
       const handed = await saveTier0(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, status: "enriching", stage: "health", now: deps.now() });
       if (!handed) return { ok: false, code: "status_changed" };
-      const queued = await queueEnrichment(db, { tenantId: input.tenantId, scanId: row.id, now: deps.now() });
+      const queued = await queueEnrichment(db, { tenantId: input.tenantId, scanId: row.id, attempt: row.createdAt, now: deps.now() });
       if (queued.ok) {
         say({ kind: "note", text: "This site turns away our first reader, so a real browser on another network is opening it instead" });
         return { ok: true, code: "browser_read" };
@@ -197,7 +197,7 @@ export async function runTier0(
   const saved = await saveTier0(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, status: "enriching", stage: "profile", now: deps.now() });
   if (!saved) return { ok: false, code: "status_changed" };
 
-  const queued = await queueEnrichment(db, { tenantId: input.tenantId, scanId: row.id, now: deps.now() });
+  const queued = await queueEnrichment(db, { tenantId: input.tenantId, scanId: row.id, attempt: row.createdAt, now: deps.now() });
   if (!queued.ok) {
     // No runner tables, or the queue refused: the Worker's own report stands, marked finished.
     console.error("[site-scan.tier0] enrichment not queued", { scanId: row.id, reason: queued.reason });
@@ -254,7 +254,13 @@ export async function enrichRunnerLive(db: Client, tenantId: string, now: Date):
   }
 }
 
-export async function queueEnrichment(db: Client, input: { tenantId: string; scanId: string; now: Date }): Promise<{ ok: true } | { ok: false; reason: string }> {
+/**
+ * Queue the runner's job for one read attempt. `attempt` is the scan row's created_at: a row read
+ * again in place (insertScan's reset) is dated anew, so its job has its own queue identity and a
+ * finished job from an earlier read never stands in its way (its idempotency key would, with the
+ * scan id alone). Queueing the same attempt twice is still one job.
+ */
+export async function queueEnrichment(db: Client, input: { tenantId: string; scanId: string; attempt: string; now: Date }): Promise<{ ok: true } | { ok: false; reason: string }> {
   const jobInput = { scan_id: input.scanId };
   try {
     const outcome = await insertJob(
@@ -266,7 +272,7 @@ export async function queueEnrichment(db: Client, input: { tenantId: string; sca
         runsOn: "runner",
         input: jobInput,
         inputHash: inputHashOf(ENRICH_TOOL_KEY, jobInput),
-        idempotencyKey: `${ENRICH_TOOL_KEY}:${input.scanId}`,
+        idempotencyKey: `${ENRICH_TOOL_KEY}:${input.scanId}:${input.attempt}`,
         dedupeKey: `${ENRICH_TOOL_KEY}:${input.scanId}`,
         createdBy: null,
         createdByEmail: null,
@@ -290,7 +296,7 @@ export async function queueEnrichment(db: Client, input: { tenantId: string; sca
  */
 export async function browserRead(
   db: Client,
-  input: { tenantId: string; scanId: string; pages: BrowserPage[]; lastRound: boolean; now: Date },
+  input: { tenantId: string; scanId: string; pages: BrowserPage[]; lastRound: boolean; now: Date; lease?: ScanLease },
 ): Promise<{ ok: true; need: string[] } | { ok: true; need: null; unread: string | null } | { ok: false; code: "not_wanted" }> {
   const row = await getScan(db, input.tenantId, input.scanId);
   if (!row || row.status !== "enriching" || !row.facts || !needsBrowserRead(row.facts.site)) return { ok: false, code: "not_wanted" };
@@ -307,11 +313,12 @@ export async function browserRead(
 
   say(healthLines(report, "The browser could not read the site either"));
   const { facts, score, narrative } = analyseRead(row.domain, report, null, input.now.toISOString(), say);
-  if (!(await saveBrowserRead(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, now: input.now }))) return { ok: false, code: "not_wanted" };
+  if (!(await saveBrowserRead(db, { tenantId: input.tenantId, id: row.id, facts, score, narrative, now: input.now, lease: input.lease }))) return { ok: false, code: "not_wanted" };
   const at = input.now.toISOString();
   const events = lines.map((l) => cleanEvent({ kind: l.kind, text: l.text, data: l.data, at })).filter((e): e is CleanEvent => e !== null);
+  // The read is saved; a feed that cannot take its lines is logged, never a failed read (a retry would find the read done).
   await appendEvents(db, { tenantId: input.tenantId, scanId: row.id, source: "runner", events }).catch((err: unknown) => {
-    if (!eventsTableMissing(err)) throw err;
+    if (!eventsTableMissing(err)) console.error("[site-scan.browser-read] the feed could not take the read's lines", { scanId: row.id, error: err instanceof Error ? err.message : String(err) });
   });
   return { ok: true, need: null, unread: report.unread };
 }

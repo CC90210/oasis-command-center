@@ -12,8 +12,12 @@ import type { ScanEvent } from "@/lib/site-scan/events";
 
 type PageRead = { path: string; title: string | null; url: string | null; ok: boolean };
 
-/** Only our own stored pictures of this scan are ever shown (GET /api/scan/:id/screenshot, /shot/:seq). */
-const SHOT_PATH = /^\/api\/scan\/[0-9a-f-]{36}\/(?:screenshot|shot\/\d{1,2})$/;
+/**
+ * Only our own stored pictures of this scan are ever shown (GET /api/scan/:id/screenshot, /shot/:seq).
+ * The `v` is the picture's version: a retried runner replaces a picture under the same path, and
+ * the new address makes the browser fetch it instead of its cached predecessor.
+ */
+const SHOT_PATH = /^\/api\/scan\/[0-9a-f-]{36}\/(?:screenshot|shot\/\d{1,2})(?:\?v=\d{1,16})?$/;
 
 function pathOf(url: string): string {
   try {
@@ -43,7 +47,7 @@ export function SiteViewport({ events, fallbackUrl, live }: { events: ScanEvent[
   const pages = pagesOf(events);
   const current = pages[pages.length - 1] ?? null;
   const shots = events.filter((e) => e.kind === "screenshot" && typeof e.data?.url === "string" && SHOT_PATH.test(e.data.url));
-  const home = shots.find((e) => e.data?.seq === 0 || /\/screenshot$/.test(String(e.data?.url))) ?? shots[0] ?? null;
+  const home = shots.find((e) => e.data?.seq === 0 || /\/screenshot(?:\?v=\d+)?$/.test(String(e.data?.url))) ?? shots[0] ?? null;
   const latest = shots[shots.length - 1] ?? null;
   // Live, the frame follows the walk; finished, it rests on the home page.
   const shot = live ? latest : (home ?? latest);
