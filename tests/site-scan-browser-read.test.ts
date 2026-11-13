@@ -188,6 +188,28 @@ async function main() {
     assert.equal(after.facts?.signals?.business_name, "Bayside Plumbing", "the browser's read replaced the shell");
     assert.equal(after.facts?.site.thin, undefined, "the browser's read is not flagged again");
     assert.ok((after.facts?.signals?.word_count ?? 0) >= br.THIN_WORDS);
+
+    // A browser read that is thin too: kept, and flagged so the next visitor's scan reads the site again.
+    const { findReusableScan } = await import("../lib/site-scan/store");
+    const day2 = new Date(t0.getTime() + 2 * 86_400_000);
+    const { row: still } = await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2 });
+    await seedRunner(db, day2, ["site_scan_enrich"], "bea:oasis-vps-audit");
+    assert.equal((await run.runTier0(db, { tenantId: OASIS, scanId: still.id }, { ...tier0(jsSite), now: () => day2 })).ok, true);
+    const job2 = String((await db.execute({ sql: "SELECT id FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ?", args: [still.id] })).rows[0].id);
+    await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = 'bea:oasis-vps-audit', lease_id = ? WHERE id = ?", args: [LEASE, job2] });
+    const shellPage = (url: string) => ({ ...browserPage(url), ...(new URL(url).pathname === "/" && url.startsWith("https://") ? { body: shell } : {}) });
+    const shellPages = [`https://shell-site.ca/robots.txt`, `https://shell-site.ca/`, "http://shell-site.ca/", "http://shell-site.ca/robots.txt", `https://shell-site.ca/sitemap.xml`].map(shellPage);
+    const thinAgain = await h
+      .handleToolsScanPages(signedRequest("scan-pages", { runner_id: "oasis-vps-audit", job_id: job2, lease_id: LEASE, round: br.MAX_BROWSER_ROUNDS, pages: shellPages }, day2), { db, env: ENV, now: day2, storage: null })
+      .then(answerOf);
+    assert.equal(thinAgain.status, 200, JSON.stringify(thinAgain.body));
+    assert.equal(thinAgain.body.done, true);
+    const kept = (await getScan(db, OASIS, still.id))!;
+    assert.equal(kept.facts?.site.thin, true, "the browser's thin read is flagged");
+    await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [still.id] });
+    const day2later = new Date(day2.getTime() + 3_600_000);
+    assert.equal(await findReusableScan(db, OASIS, "shell-site.ca", day2later), null, "an empty report is not handed to the next visitor");
+    assert.equal((await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2later })).started, true, "today's is read again");
   });
 
   await check("a robots.txt that closes the site stays final: no browser, the report closes", async () => {
