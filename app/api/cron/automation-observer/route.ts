@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { checkAutomationObserverAuth } from "@/lib/automation-observer-auth";
 import { getTursoClient } from "@/lib/turso";
 import { WEBDEV_TENANT_ID } from "@/lib/oasis-tenant";
-import { observeAutomations, observerChecks } from "@/lib/health/automation-observer";
+import { isObserverPagingTick, observeAutomations, observerChecks } from "@/lib/health/automation-observer";
 import { runHealthChecks } from "@/lib/health/runner";
 
 export const runtime = "nodejs";
@@ -33,7 +33,12 @@ export async function GET(req: NextRequest) {
         : independentDelivery === "permanent_failure" ? "Independent observer alert delivery needs connection repair and explicit incident reconciliation; automatic retries are stopped."
           : independentDelivery === "refused" ? "Independent observer alert was rate limited; provider backoff remains pending."
           : "Independent observer delivery state was supplied by the authenticated worker." });
-    const summary = await runHealthChecks(WEBDEV_TENANT_ID, { nowMs: now, checks: observerChecks(findings) });
+    // Every minute is observed and persisted; only the quarter-hour sample may page
+    // (see isObserverPagingTick). notify:false records the run without touching the
+    // alert ladder, exactly as the daily digest's non-paging run does.
+    const summary = await runHealthChecks(WEBDEV_TENANT_ID, {
+      nowMs: now, notify: isObserverPagingTick(Date.parse(tick)), checks: observerChecks(findings),
+    });
     const deliveryUnverified = findings.some((f) => f.id === "automation.health_alert_delivery" && f.observed !== 0);
     const ok = summary.failedAlerts === 0 && !deliveryUnverified;
     await db.execute({ sql: "UPDATE automation_observer_ticks SET completed_at=?,verdict=? WHERE tenant_id=? AND tick_at=?", args: [new Date().toISOString(), ok ? summary.worst : "delivery_failed", WEBDEV_TENANT_ID, tick] });

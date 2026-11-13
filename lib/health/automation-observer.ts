@@ -15,6 +15,23 @@ export const AUTOMATION_OBSERVER_CHECK_IDS = [
 const MINUTE = 60_000;
 const at = (value: unknown) => typeof value === "string" ? Date.parse(value) : NaN;
 
+/**
+ * The observer Worker samples every minute (workers/oasis-automation-observer,
+ * "* * * * *") so the board and health_check_runs stay live. Paging is a
+ * different matter: the runner's two-strike confirmation and its "next check in
+ * 15 min" wording were written for the quarter-hour cadence every other check
+ * runs on. Fed minute samples, "two consecutive failures" meant two MINUTES, so a
+ * Telegram long-poll reconnect (3-4 min) became a 🔴 FAILING and, two minutes
+ * later, a 🟢 RECOVERED — 39 flaps and ~30 pages in the 24 h to 2026-11-13.
+ * Only the quarter-hour sample may page; the state machine then sees one sample
+ * per 15 minutes, as designed, and confirms only what lasts half an hour.
+ */
+export const OBSERVER_PAGING_INTERVAL_MIN = 15;
+export function isObserverPagingTick(tickMs: number): boolean {
+  const date = new Date(tickMs);
+  return Number.isFinite(tickMs) && date.getUTCMinutes() % OBSERVER_PAGING_INTERVAL_MIN === 0;
+}
+
 /** Two expected slots after the last confirmed occurrence, using its real zone.
  * Disabled jobs and a future explicitly scheduled slot are never an outage. */
 export function missedOccurrences(input: { enabled: boolean; schedule: string; zone: string; last: string | null; due?: string | null; created?: string | null; graceMs?: number }, now: number): boolean | null {
