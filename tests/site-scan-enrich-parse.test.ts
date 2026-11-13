@@ -30,6 +30,29 @@ assert.equal(e!.competitors[0].domain, "plomberievip.com", "domains are normalis
 assert.equal(e!.prospects[0].category_label, "Property managers");
 assert.deepEqual(e!.email_auth, { mx: true, spf: false, dmarc: null });
 
+// Engine 2.0's map fields survive: distance, bearing, country, source; the business's location and
+// each source's attribution. Anything out of range is dropped to null, never invented.
+const mapped = parseEnrich({
+  ...good,
+  competitors: [
+    { name: "Gerber Landscaping", domain: "gerber.ca", locality: "Hamilton", country: "ca", distance_km: 3.5, bearing_deg: 140, source: "overture" },
+    { name: "Bad Numbers", distance_km: -4, bearing_deg: 400, country: "Canada", source: "made-up" },
+  ],
+  location: { lat: 43.2557, lon: -79.8711, country: "CA", locality: "Hamilton", source: "overture", precision: "place" },
+  sources: [{ key: "overture", label: "Overture Maps places", note: "Places: Overture Maps Foundation, overturemaps.org.", release: "2026-10-21.0" }, { key: "x" }],
+});
+assert.deepEqual(
+  { country: mapped!.competitors[0].country, d: mapped!.competitors[0].distance_km, b: mapped!.competitors[0].bearing_deg, s: mapped!.competitors[0].source },
+  { country: "CA", d: 3.5, b: 140, s: "overture" },
+);
+assert.deepEqual(
+  { country: mapped!.competitors[1].country, d: mapped!.competitors[1].distance_km, b: mapped!.competitors[1].bearing_deg, s: mapped!.competitors[1].source },
+  { country: null, d: null, b: null, s: null },
+);
+assert.deepEqual(mapped!.location, { lat: 43.2557, lon: -79.8711, country: "CA", locality: "Hamilton", source: "overture" });
+assert.deepEqual(mapped!.sources, [{ key: "overture", label: "Overture Maps places", note: "Places: Overture Maps Foundation, overturemaps.org." }]);
+assert.equal(parseEnrich({ ...good, location: { lat: 200, lon: 0 } })!.location, null, "an impossible location is dropped");
+
 // Wrong schema, missing fields, out-of-range values are refused or dropped.
 assert.equal(parseEnrich({ ...good, schema: "site_scan/enrich/v0" }), null);
 assert.equal(parseEnrich("nope"), null);

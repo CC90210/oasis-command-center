@@ -17,7 +17,7 @@ export const metadata: Metadata = {
 const STEPS = [
   ["Reads the site", "Every public page a visitor would, plus the parts Google reads: speed, structure, trust signals."],
   ["Learns what you sell", "What the site says, in its own words, and the businesses competing for the same searches."],
-  ["Finds who buys it", "Buyer segments scored for fit, with sample businesses from our own Canadian directory when it has a close match. If that part is still running, your report link fills in when it finishes."],
+  ["Finds who buys it", "Buyer segments scored for fit, with real businesses near you, from a worldwide business map and our own directory, when there is a close match. If that part is still running, your report link fills in when it finishes."],
   ["Writes the first move", "When a sample business is found, an email to it, built from your site's own offer. Always, the three fixes worth the most."],
 ] as const;
 
@@ -35,7 +35,7 @@ export default async function ScanPage() {
                 Paste your website. Watch the diagnosis build.
               </h1>
               <p className="mx-auto mt-6 max-w-2xl text-[18px] leading-relaxed text-fg-muted">
-                An AI reads your site like a buyer and like Google, scores it, and works out who buys from you. Where our directory has a match, it finds businesses like them and writes the first email. Live, in about a minute.
+                An AI reads your site like a buyer and like Google, scores it, and works out who buys from you. Where there is a close match nearby, it finds businesses like them and writes the first email. Live, in about a minute.
               </p>
             </div>
           </Reveal>
@@ -60,7 +60,7 @@ export default async function ScanPage() {
           ))}
         </div>
         <p className="mx-auto mt-8 max-w-3xl text-center text-sm leading-relaxed text-fg-dim">
-          Every line of the report traces to something read from your site, measured by Google PageSpeed, or matched in OASIS&rsquo;s own business directory. Nothing is invented to fill a box.
+          Every line of the report traces to something read from your site, measured by Google PageSpeed, or matched in a public business map (Overture Maps) or OASIS&rsquo;s own directory. Nothing is invented to fill a box.
         </p>
       </Section>
     </>
