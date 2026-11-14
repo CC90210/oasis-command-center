@@ -109,25 +109,29 @@ async function store() {
   try {
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql"), "utf8"));
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
+    await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__263_site_scans_attempts.sql"), "utf8"));
     const t0 = new Date("2026-11-14T10:00:00.000Z");
 
-    // A failed scan is retried the same day: the row is reset in place and the caller must run it.
+    // A failed scan is retried the same day: the retry is a new row the caller must run; the failed one is left as it was.
     const first = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: t0 });
     assert.equal(first.started, true);
     await setStatus(db, { tenantId: TENANT, id: first.row.id, status: "failed", stage: "read", errorCode: "read_failed", now: t0 });
     const retry = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: new Date(t0.getTime() + 60_000) });
-    assert.equal(retry.row.id, first.row.id, "one row per domain per day");
+    assert.notEqual(retry.row.id, first.row.id, "every attempt is a row of its own (bravo__263)");
     assert.equal(retry.started, true, "the retry owns the read");
     assert.equal(retry.row.status, "reading");
     assert.equal(retry.row.errorCode, null);
-    // A live read is not restarted by a second visitor.
+    assert.equal((await db.execute({ sql: "SELECT status FROM site_scans WHERE id = ?", args: [first.row.id] })).rows[0].status, "failed", "the failed attempt is left as it was");
+    // A live read is not restarted by a second visitor: they follow it.
     const second = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: new Date(t0.getTime() + 90_000) });
     assert.equal(second.started, false);
+    assert.equal(second.row.id, retry.row.id);
 
-    // An orphaned read (its Worker died) is not handed to the next visitor, and is restarted by them.
+    // An orphaned read (its Worker died) is not handed to the next visitor: they start a read of their own.
     const orphanAt = new Date(t0.getTime() + 61_000 + STALE_READ_MS);
     const restarted = await insertScan(db, { tenantId: TENANT, domain: "fail.example", url: "https://fail.example/", ipHash: null, now: orphanAt });
     assert.equal(restarted.started, true);
+    assert.notEqual(restarted.row.id, retry.row.id);
 
     // Claims: reserved before anything is opened; a second lead loses; the first lead's retry is "mine".
     const { row } = await insertScan(db, { tenantId: TENANT, domain: "claim.example", url: "https://claim.example/", ipHash: "h", now: t0 });

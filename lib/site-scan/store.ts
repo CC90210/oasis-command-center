@@ -1,19 +1,19 @@
 /**
  * lib/site-scan/store.ts — site_scans rows (database/turso/bravo__259_site_scans.sql).
  *
- * Every read and write names the tenant. One row per domain per day per workspace (the unique
- * index): a visitor who starts a scan of a domain scanned earlier today takes that row over and
- * the site is read again, in front of them. A finished report is never handed to a new visitor
- * as the answer (CC, 2026-11-13: the page showed a report from the morning at once, "finished in
- * two seconds"; every scan a visitor starts is a real run they watch). The one row a visitor
- * joins rather than restarts is a read of the same domain still in progress.
+ * Every read and write names the tenant. One row per ATTEMPT (bravo__263): every scan a visitor
+ * starts is a real run they watch, with an id, a feed, pictures and a claim key of its own. A
+ * finished report is never handed to a new visitor as the answer (CC, 2026-11-13: the page showed
+ * a report from the morning at once, "finished in two seconds"), and never taken over in place
+ * either: the earlier visitor keeps their report and their claim, and nothing of theirs (their
+ * visitor hash, their runner's late writes) lands on the new run. The one row a visitor joins
+ * rather than starts is a read of the same domain still in progress, whatever the day.
  */
 import type { Client, InStatement, InValue } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { isMissingTableError } from "@/lib/api-helpers";
 import { eventsTableMissing } from "@/lib/site-scan/events";
 import { BROWSER_READ_UNREAD } from "@/lib/site-scan/browser-read";
-import { shotsTableMissing } from "@/lib/site-scan/screenshot";
 import { LEASE_GUARD } from "@/lib/tools/store";
 import {
   ENRICH_WAIT_MINUTES,
@@ -30,7 +30,7 @@ import {
 
 /** A row still `queued`/`reading` this long after its last write was orphaned (a crashed Worker). */
 export const STALE_READ_MS = 3 * 60_000;
-/** The runner's job for a scan (lib/site-scan/run.ts queues it; the reset below stops an earlier attempt's). */
+/** The runner's job for a scan (lib/site-scan/run.ts queues it; lib/tools/runner-handlers.ts hurries a runner that serves it). */
 export const ENRICH_TOOL_KEY = "site_scan_enrich" as const;
 
 /**
@@ -114,19 +114,28 @@ export async function getScan(db: Client, tenantId: string, id: string): Promise
 const BROWSER_WANTED = `(COALESCE(json_extract(facts_json, '$.site.unread'), '') IN (${BROWSER_READ_UNREAD.map(() => "?").join(", ")}) OR COALESCE(json_extract(facts_json, '$.site.thin'), 0) = 1)`;
 
 /**
+ * A scan being worked on right now: a read fresher than STALE_READ_MS (an older one is a dead
+ * Worker's) or an enrichment within its wait (an older one is closed by the view). The same test
+ * decides what a new visitor joins (insertScan) and when the runner is hurried (scanWorkPending).
+ */
+const LIVE = `((status IN ('queued', 'reading') AND updated_at >= ?) OR (status = 'enriching' AND updated_at >= ?))`;
+const liveArgs = (now: Date): string[] => [
+  new Date(now.getTime() - STALE_READ_MS).toISOString(),
+  new Date(now.getTime() - ENRICH_WAIT_MINUTES * 60_000).toISOString(),
+];
+
+/**
  * Is a scan being worked on right now in any of these workspaces? The runner's claim answer tells
  * it to come back in a couple of seconds while one is (lib/tools/runner-handlers.ts): the match
- * and the pictures start while the visitor watches, never a poll interval later. A read older
- * than STALE_READ_MS is a dead Worker's, and an enrichment older than its wait is closed by the
- * view; neither is work pending. A database without the table has no scans.
+ * and the pictures start while the visitor watches, never a poll interval later. A database
+ * without the table has no scans.
  */
 export async function scanWorkPending(db: Client, tenantIds: readonly string[], now: Date): Promise<boolean> {
   if (!tenantIds.length) return false;
   try {
     const rs = await db.execute({
-      sql: `SELECT 1 FROM site_scans WHERE tenant_id IN (${tenantIds.map(() => "?").join(", ")})
-              AND ((status IN ('queued', 'reading') AND updated_at >= ?) OR (status = 'enriching' AND updated_at >= ?)) LIMIT 1`,
-      args: [...tenantIds, new Date(now.getTime() - STALE_READ_MS).toISOString(), new Date(now.getTime() - ENRICH_WAIT_MINUTES * 60_000).toISOString()],
+      sql: `SELECT 1 FROM site_scans WHERE tenant_id IN (${tenantIds.map(() => "?").join(", ")}) AND ${LIVE} LIMIT 1`,
+      args: [...tenantIds, ...liveArgs(now)],
     });
     return rs.rows.length > 0;
   } catch (err) {
@@ -136,100 +145,37 @@ export async function scanWorkPending(db: Client, tenantIds: readonly string[], 
   }
 }
 
+/** The read of this domain still in progress, if there is one: the scan a new visitor joins. Any day. */
+async function liveScanOfDomain(db: Client, tenantId: string, domain: string, now: Date): Promise<ScanRow | null> {
+  const rs = await db.execute({
+    sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND ${LIVE} ORDER BY created_at DESC LIMIT 1`,
+    args: [tenantId, domain, ...liveArgs(now)],
+  });
+  const r = rs.rows[0];
+  return r ? rowFromRecord(r as unknown as Record<string, unknown>) : null;
+}
+
 /**
- * A new scan row, ready for Tier 0. `started` says the caller owns this read and must run it:
- * true for a fresh row, and for today's row of the domain whenever it is not being worked on
- * right now (it is reset in place, under the one-per-day index, and the site is read again).
- * False when another visitor's read of the same domain today is the one in progress, which the
- * caller's visitor then follows; and for a finished report a lead already claimed, which stays.
+ * The scan for a visitor who just pasted a domain. `started` says the caller owns this read and
+ * must run it: true for the new row every attempt gets (bravo__263: a finished report, a failed
+ * one, an orphaned read, an overdue enrichment, a report a lead claimed; none of them is touched,
+ * the site is read again on a row of its own). False when a read of the same domain is in progress
+ * right now, whatever the day: that run is the scan, and the caller's visitor follows it.
  */
 export async function insertScan(
   db: Client,
   input: { tenantId: string; domain: string; url: string; ipHash: string | null; now: Date },
 ): Promise<{ row: ScanRow; started: boolean }> {
+  const live = await liveScanOfDomain(db, input.tenantId, input.domain, input.now);
+  if (live) return { row: live, started: false };
   const id = randomUUID();
   const at = input.now.toISOString();
-  const day = at.slice(0, 10);
   const expires = new Date(input.now.getTime() + SCAN_TTL_DAYS * 86_400_000).toISOString();
-  try {
-    await db.execute({
-      sql: `INSERT INTO site_scans (id, tenant_id, domain, url, status, stage, outcome, ip_hash, scan_day, created_at, updated_at, expires_at)
-            VALUES (?, ?, ?, ?, 'reading', 'read', 'none', ?, ?, ?, ?, ?)`,
-      args: [id, input.tenantId, input.domain, input.url, input.ipHash, day, at, at, expires],
-    });
-  } catch (err) {
-    if (!(err instanceof Error && /UNIQUE|constraint/i.test(err.message))) throw err;
-    // Two visitors, one domain, one day. A row not being worked on is reset for this attempt (the
-    // conditional UPDATE lets exactly one visitor win); a live one is the scan.
-    const staleBefore = new Date(input.now.getTime() - STALE_READ_MS).toISOString();
-    const enrichOverdueBefore = new Date(input.now.getTime() - ENRICH_WAIT_MINUTES * 60_000).toISOString();
-    // The row this visitor's read may take over: a finished report nobody claimed, a failed one, a
-    // read nobody has touched for STALE_READ_MS (its Worker died), or an enrichment the runner
-    // never delivered (the view closes those as done at the same age).
-    const resettable = `tenant_id = ? AND domain = ? AND scan_day = ? AND lead_record_id IS NULL
-              AND (status IN ('done', 'failed') OR (status IN ('queued', 'reading') AND updated_at < ?) OR (status = 'enriching' AND updated_at < ?))`;
-    const where = [input.tenantId, input.domain, day, staleBefore, enrichOverdueBefore];
-    // Everything of the earlier attempt goes in ONE transaction with the reset, each statement on the
-    // same condition, so a reset that loses the race takes nothing with it and one that wins leaves
-    // nothing behind, and no stream can claim the new read (and start writing) in between:
-    //  - its feed: never replayed beside the new read, never counted against its allowance;
-    //  - its pictures of the walk (bravo__262): the new walk takes its own;
-    //  - its runner job. A job still queued, or still leased by a runner that stalled past the
-    //    enrichment wait (heartbeats extend the lease, not the row), writes under the scan id alone
-    //    (enrichStatement, the picture and page routes): left alive it could put the earlier
-    //    attempt's match, narrative or pictures on the new report, and its in-flight dedupe key would
-    //    keep the new attempt's job from queueing. Failed here, every later write under its lease
-    //    lands nowhere and the runner's next heartbeat tells it to stop.
-    const ofScan = `IN (SELECT id FROM site_scans WHERE ${resettable})`;
-    const clearFeed: InStatement = { sql: `DELETE FROM site_scan_events WHERE tenant_id = ? AND scan_id ${ofScan}`, args: [input.tenantId, ...where] };
-    const clearShots: InStatement = { sql: `DELETE FROM site_scan_shots WHERE tenant_id = ? AND scan_id ${ofScan}`, args: [input.tenantId, ...where] };
-    const stopJob: InStatement = {
-      sql: `UPDATE tool_jobs SET status = 'failed', stage = NULL, error_code = 'scan_restarted', error_message = ?, finished_at = ?, updated_at = ?
-              WHERE tenant_id = ? AND tool_key = ? AND status IN ('queued', 'claimed', 'running') AND json_extract(input_json, '$.scan_id') ${ofScan}`,
-      args: ["The site was scanned again; this attempt's report was replaced.", at, at, input.tenantId, ENRICH_TOOL_KEY, ...where],
-    };
-    // The reset is a fresh read: dated now (so it is not reset again) and kept the full TTL. Its Tier 0
-    // claim is released (bravo__260) and the earlier home page picture dropped (bravo__261), each a
-    // column a database may predate.
-    const resetSql = (extra: string): InStatement => ({
-      sql: `UPDATE site_scans SET status = 'reading', stage = 'read', url = ?, facts_json = NULL, score_json = NULL, enrich_json = NULL, narrative_json = NULL,
-              embedding_json = NULL, error_code = NULL, enriched_at = NULL${extra}, created_at = ?, updated_at = ?, expires_at = ? WHERE ${resettable}`,
-      args: [input.url, at, at, expires, ...where],
-    });
-    // A database that predates one of these tables or columns (a test's, a deployment mid-migration)
-    // fails the whole batch on it; that statement or column is left out and the rest still go together.
-    const withTable: { stmt: InStatement; missing: (e: unknown) => boolean }[] = [
-      { stmt: clearFeed, missing: eventsTableMissing },
-      { stmt: clearShots, missing: shotsTableMissing },
-      { stmt: stopJob, missing: (e) => e instanceof Error && /no such table: tool_jobs/i.test(e.message) },
-    ];
-    const columns = [", tier0_claimed_at = NULL", ", screenshot_jpeg = NULL, screenshot_at = NULL"];
-    let resetRows: number;
-    for (;;) {
-      try {
-        const out = await db.batch([...withTable.map((w) => w.stmt), resetSql(columns.join(""))], "write");
-        resetRows = out[out.length - 1].rowsAffected;
-        break;
-      } catch (batchErr) {
-        const gone = withTable.findIndex((w) => w.missing(batchErr));
-        if (gone >= 0) {
-          withTable.splice(gone, 1);
-          continue;
-        }
-        const column = batchErr instanceof Error ? /no such column: (\w+)/i.exec(batchErr.message)?.[1] : undefined;
-        const set = column ? columns.findIndex((c) => c.includes(column)) : -1;
-        if (set >= 0) {
-          columns.splice(set, 1);
-          continue;
-        }
-        throw batchErr;
-      }
-    }
-    const rs = await db.execute({ sql: `SELECT ${COLUMNS} FROM site_scans WHERE tenant_id = ? AND domain = ? AND scan_day = ? LIMIT 1`, args: [input.tenantId, input.domain, day] });
-    const r = rs.rows[0];
-    if (!r) throw err;
-    return { row: rowFromRecord(r as unknown as Record<string, unknown>), started: resetRows === 1 };
-  }
+  await db.execute({
+    sql: `INSERT INTO site_scans (id, tenant_id, domain, url, status, stage, outcome, ip_hash, scan_day, created_at, updated_at, expires_at)
+          VALUES (?, ?, ?, ?, 'reading', 'read', 'none', ?, ?, ?, ?, ?)`,
+    args: [id, input.tenantId, input.domain, input.url, input.ipHash, at.slice(0, 10), at, at, expires],
+  });
   const row = await getScan(db, input.tenantId, id);
   if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
   return { row, started: true };

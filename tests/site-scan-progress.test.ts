@@ -19,6 +19,7 @@ async function main() {
   const db = await setupToolsDatabase();
   await applyMigrationFile(db, join(ROOT, "database", "turso", "bravo__259_site_scans.sql"));
   await applyMigrationFile(db, join(ROOT, "database", "turso", "bravo__260_site_scan_events.sql"));
+  await applyMigrationFile(db, join(ROOT, "database", "turso", "bravo__263_site_scans_attempts.sql"));
   const h = await import("../lib/tools/runner-handlers");
   const { insertScan } = await import("../lib/site-scan/store");
   const { queueEnrichment } = await import("../lib/site-scan/run");

@@ -46,7 +46,7 @@ function browserPage(url: string): Record<string, unknown> {
 async function main() {
   console.log("site scan browser read:");
   const db = await setupToolsDatabase();
-  for (const f of ["bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__261_site_scan_screenshot.sql"]) {
+  for (const f of ["bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__261_site_scan_screenshot.sql", "bravo__263_site_scans_attempts.sql"]) {
     await applyMigrationFile(db, join(ROOT, "database", "turso", f));
   }
   const br = await import("../lib/site-scan/browser-read");
@@ -207,7 +207,9 @@ async function main() {
     assert.equal(kept.facts?.site.thin, true, "the browser's thin read is flagged");
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [still.id] });
     const day2later = new Date(day2.getTime() + 3_600_000);
-    assert.equal((await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2later })).started, true, "today's is read again");
+    const readAgain = await insertScan(db, { tenantId: OASIS, domain: "shell-site.ca", url: "https://shell-site.ca/", ipHash: null, now: day2later });
+    assert.equal(readAgain.started, true, "the next visitor today gets a read of their own");
+    assert.notEqual(readAgain.row.id, still.id, "on a row of its own (bravo__263)");
   });
 
   await check("a robots.txt that closes the site stays final: no browser, the report closes", async () => {
@@ -217,24 +219,25 @@ async function main() {
     assert.equal((await getScan(db, OASIS, closed.id))!.status, "done");
   });
 
-  await check("a finished report, empty or good, is read again in place for the next visitor today", async () => {
+  await check("a finished report, empty or good, is never the next visitor's answer: they get a read of their own", async () => {
     const { row: empty } = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: t0 });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: "home_page_failed" } }), empty.id] });
     const later = new Date(t0.getTime() + 3_600_000);
     const again = await insertScan(db, { tenantId: OASIS, domain: "empty-site.ca", url: "https://empty-site.ca/", ipHash: null, now: later });
-    assert.equal(again.row.id, empty.id);
-    assert.equal(again.started, true, "today's empty report is read again in place");
+    assert.notEqual(again.row.id, empty.id, "a new row (bravo__263)");
+    assert.equal(again.started, true, "today's empty report is read again");
 
     // A good report too: every scan a visitor starts is a real run they watch (CC, 2026-11-13).
     const { row: good } = await insertScan(db, { tenantId: OASIS, domain: "good-site.ca", url: "https://good-site.ca/", ipHash: null, now: t0 });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', facts_json = ? WHERE id = ?", args: [JSON.stringify({ site: { unread: null } }), good.id] });
     const goodAgain = await insertScan(db, { tenantId: OASIS, domain: "good-site.ca", url: "https://good-site.ca/", ipHash: null, now: later });
-    assert.equal(goodAgain.row.id, good.id);
+    assert.notEqual(goodAgain.row.id, good.id);
     assert.equal(goodAgain.started, true, "a good report is read again too");
     assert.equal(goodAgain.row.facts, null, "the earlier read is not shown as the new one's");
+    assert.equal((await getScan(db, OASIS, good.id))!.status, "done", "and the earlier report keeps standing for its own visitor");
   });
 
-  await check("a site read again in place gets a runner job of its own, a finished one from before never in its way", async () => {
+  await check("a site read again gets a runner job of its own, a finished one from before never in its way", async () => {
     const { row: retry } = await insertScan(db, { tenantId: OASIS, domain: "retry-site.ca", url: "https://retry-site.ca/", ipHash: null, now: t0 });
     assert.deepEqual(await run.runTier0(db, { tenantId: OASIS, scanId: retry.id }, tier0(refusingSite())), { ok: true, code: "browser_read" });
     const jobsOf = async () => (await db.execute({ sql: "SELECT id, status FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ? ORDER BY created_at", args: [retry.id] })).rows;
@@ -242,16 +245,16 @@ async function main() {
     // That job finishes on the empty read (a runner before this change); the report closes empty.
     await db.execute({ sql: "UPDATE tool_jobs SET status = 'done' WHERE json_extract(input_json, '$.scan_id') = ?", args: [retry.id] });
     await db.execute({ sql: "UPDATE site_scans SET status = 'done', stage = 'done' WHERE id = ?", args: [retry.id] });
-    // The next visitor today: the empty report is read again in place, and the new read needs a runner.
+    // The next visitor today: a read of their own, on a new row, and the new read needs a runner.
     const later = new Date(t0.getTime() + 3_600_000);
     const again = await insertScan(db, { tenantId: OASIS, domain: "retry-site.ca", url: "https://retry-site.ca/", ipHash: null, now: later });
-    assert.equal(again.row.id, retry.id);
+    assert.notEqual(again.row.id, retry.id, "a new row (bravo__263)");
     assert.equal(again.started, true);
     await seedRunner(db, later, ["site_scan_enrich"], "bea:oasis-vps-audit"); // still listening an hour on
-    assert.deepEqual(await run.runTier0(db, { tenantId: OASIS, scanId: retry.id }, { ...tier0(refusingSite()), now: () => later }), { ok: true, code: "browser_read" });
-    const jobs = await jobsOf();
-    assert.equal(jobs.length, 2, "a second job, queued: the finished one's key is not the new attempt's");
-    assert.equal(jobs[1].status, "queued");
+    assert.deepEqual(await run.runTier0(db, { tenantId: OASIS, scanId: again.row.id }, { ...tier0(refusingSite()), now: () => later }), { ok: true, code: "browser_read" });
+    assert.equal((await jobsOf()).length, 1, "the finished attempt keeps its one job");
+    const newJobs = (await db.execute({ sql: "SELECT status FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ?", args: [again.row.id] })).rows;
+    assert.deepEqual(newJobs.map((j) => j.status), ["queued"], "the new attempt's own job, queued: the finished one's key is not in its way");
   });
 
   await check("with no runner listening, a refused site closes at once as before", async () => {

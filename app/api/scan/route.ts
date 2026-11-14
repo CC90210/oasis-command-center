@@ -6,8 +6,8 @@
  * a honeypot a script fills, a body under 4 KB, and the audit's own address rules (public names
  * only; a social profile is told so). The response is immediate; the page then opens
  * GET /api/scan/:id/stream, which runs Tier 0 live (this route's after() is the fallback). Every
- * scan a visitor starts is a real run they watch: a finished report of the same site is read
- * again, never handed back (lib/site-scan/store.ts insertScan).
+ * scan a visitor starts is a real run they watch, on a row of its own: a finished report of the
+ * same site is never handed back, and never taken over (lib/site-scan/store.ts insertScan).
  */
 import { NextResponse, after } from "next/server";
 import { AI_AUDIT_TENANT_ID } from "@/lib/forms/oasis-ai-audit-seed";

@@ -24,7 +24,7 @@ const ROOT = join(__dirname, "..");
 const TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 async function migrate(db: Client) {
-  for (const f of ["bravo__206_tool_jobs.sql", "bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql"]) {
+  for (const f of ["bravo__206_tool_jobs.sql", "bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__263_site_scans_attempts.sql"]) {
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", f), "utf8"));
   }
 }
@@ -63,7 +63,7 @@ async function main() {
     assert.equal(cleanEvent({ kind: "page", text: "ok", data: { path: "/" }, at: t0.toISOString() })?.dataJson, '{"path":"/"}');
 
     // ── Append, cap, cursor, tenant scope. ──
-    const { row } = await insertScan(db, { tenantId: TENANT, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: t0 });
+    let { row } = await insertScan(db, { tenantId: TENANT, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: t0 });
     const many = Array.from({ length: MAX_EVENTS_PER_SCAN + 5 }, (_, i) => cleanEvent({ kind: "note", text: `line ${i}`, at: t0.toISOString() })!);
     assert.equal(await appendEvents(db, { tenantId: TENANT, scanId: "other-scan", source: "worker", events: many }), MAX_EVENTS_PER_SCAN, "one scan's feed stops at the cap");
     const firstTen = await listEvents(db, { tenantId: TENANT, scanId: "other-scan", afterId: 0, limit: 10 });
@@ -93,17 +93,20 @@ async function main() {
     assert.equal(await claimTier0(db, { tenantId: TENANT, id: row.id, now: t0 }), "taken", "only a reading scan is claimable");
     await appendEvents(db, { tenantId: TENANT, scanId: row.id, source: "worker", events: [cleanEvent({ kind: "error", text: "The site could not be read from here", at: t0.toISOString() })!] });
     const retry = await insertScan(db, { tenantId: TENANT, domain: "acme-plumbing.ca", url: "https://acme-plumbing.ca/", ipHash: null, now: new Date(t0.getTime() + 60_000) });
-    assert.ok(retry.started && retry.row.id === row.id);
-    assert.deepEqual(await listEvents(db, { tenantId: TENANT, scanId: row.id, afterId: 0 }), [], "a retry does not replay the failed attempt's feed");
-    assert.equal(await claimTier0(db, { tenantId: TENANT, id: row.id, now: t0 }), "claimed", "a retried scan is read again");
+    assert.ok(retry.started && retry.row.id !== row.id, "a retry is a read of its own (bravo__263)");
+    assert.deepEqual(await listEvents(db, { tenantId: TENANT, scanId: retry.row.id, afterId: 0 }), [], "a retry does not replay the failed attempt's feed");
+    assert.equal((await listEvents(db, { tenantId: TENANT, scanId: row.id, afterId: 0 })).length, 1, "which stays with the failed attempt");
+    assert.equal(await claimTier0(db, { tenantId: TENANT, id: retry.row.id, now: t0 }), "claimed", "a retried scan is read again");
     const old = createClient({ url: `file:${join(dir, "old.db")}` });
     await old.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
+    await old.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__263_site_scans_attempts.sql"), "utf8"));
     assert.equal(await claimTier0(old, { tenantId: TENANT, id: row.id, now: t0 }), "unsupported", "a database before bravo__260 falls back to the old path");
     const oldRow = await insertScan(old, { tenantId: TENANT, domain: "old.ca", url: "https://old.ca/", ipHash: null, now: t0 });
     await setStatus(old, { tenantId: TENANT, id: oldRow.row.id, status: "failed", stage: "read", errorCode: "read_failed", now: t0 });
     const oldRetry = await insertScan(old, { tenantId: TENANT, domain: "old.ca", url: "https://old.ca/", ipHash: null, now: new Date(t0.getTime() + 60_000) });
-    assert.ok(oldRetry.started && oldRetry.row.status === "reading", "a retry still resets on a database before bravo__260");
+    assert.ok(oldRetry.started && oldRetry.row.status === "reading", "a retry is a new read on a database before bravo__260 too");
     old.close();
+    row = retry.row; // the attempt the rest of this test follows: the failed one keeps its own feed
 
     // ── Tier 0 writes a real feed from a real read (no runner: it finishes with the Worker's report). ──
     const clock = { ms: Date.parse("2026-11-12T10:01:00.000Z") };
