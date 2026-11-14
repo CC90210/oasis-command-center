@@ -339,6 +339,10 @@ const nextConfig = {
       // The free scan's offer form (lib/site-scan/offer.ts) has no page of its own: its address is
       // the scan itself (lib/offers/short-links.ts OASIS_OFFER_SITE_PAGES), never a second form page.
       { source: "/f/oasis-ai-cc/free-scan", destination: "/scan", permanent: false },
+      // The "Start here" offer's form slug is `vsl` and its address is /vsl (app/vsl/route.ts). Maven's
+      // explainer films and personal-brand funnel printed /f/oasis-ai-cc/start, which never existed
+      // (agent inbox, 2026-11-13: "returns 404"); a printed address stays printed, so it lands on /vsl.
+      { source: "/f/oasis-ai-cc/start", destination: "/vsl", permanent: false },
       {
         // The short campaign URL is public and permanent. Next preserves the
         // query string, so UTM/source attribution reaches the canonical form.
