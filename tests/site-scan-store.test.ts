@@ -92,6 +92,12 @@ async function main() {
     assert.equal(joined.started, false);
     assert.equal((await scanCounts(db, TENANT)).scans, 3, "every attempt counts as a scan run");
 
+    // Two visitors pasting one domain in the same instant start one read, not two: the insert and the
+    // "is one in progress" test are one statement (independent review of this change, 2026-11-14).
+    const race = await Promise.all([0, 1, 2].map(() => insertScan(db, { tenantId: TENANT, domain: "race.example", url: "https://race.example/", ipHash: null, now: later })));
+    assert.equal(race.filter((r) => r.started).length, 1, "exactly one visitor owns the read");
+    assert.equal(new Set(race.map((r) => r.row.id)).size, 1, "the others follow it");
+
     // A read that straddles UTC midnight is still the scan the next visitor joins.
     const nightRow = (await insertScan(db, { tenantId: TENANT, domain: "night.example", url: "https://night.example/", ipHash: null, now: new Date("2026-11-14T23:59:30.000Z") })).row;
     const morning = await insertScan(db, { tenantId: TENANT, domain: "night.example", url: "https://night.example/", ipHash: null, now: new Date("2026-11-15T00:00:30.000Z") });

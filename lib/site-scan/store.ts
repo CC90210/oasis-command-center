@@ -166,19 +166,29 @@ export async function insertScan(
   db: Client,
   input: { tenantId: string; domain: string; url: string; ipHash: string | null; now: Date },
 ): Promise<{ row: ScanRow; started: boolean }> {
-  const live = await liveScanOfDomain(db, input.tenantId, input.domain, input.now);
-  if (live) return { row: live, started: false };
   const id = randomUUID();
   const at = input.now.toISOString();
   const expires = new Date(input.now.getTime() + SCAN_TTL_DAYS * 86_400_000).toISOString();
-  await db.execute({
-    sql: `INSERT INTO site_scans (id, tenant_id, domain, url, status, stage, outcome, ip_hash, scan_day, created_at, updated_at, expires_at)
-          VALUES (?, ?, ?, ?, 'reading', 'read', 'none', ?, ?, ?, ?, ?)`,
-    args: [id, input.tenantId, input.domain, input.url, input.ipHash, at.slice(0, 10), at, at, expires],
-  });
-  const row = await getScan(db, input.tenantId, id);
-  if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
-  return { row, started: true };
+  for (let attempt = 0; ; attempt++) {
+    // One statement decides: the row goes in unless a read of the domain is in progress. The test and
+    // the insert are never apart (SQLite's write lock serializes them), so two visitors pasting one
+    // domain in the same instant start one read, not two, now that no unique index stands in the way.
+    const ins = await db.execute({
+      sql: `INSERT INTO site_scans (id, tenant_id, domain, url, status, stage, outcome, ip_hash, scan_day, created_at, updated_at, expires_at)
+            SELECT ?, ?, ?, ?, 'reading', 'read', 'none', ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM site_scans WHERE tenant_id = ? AND domain = ? AND ${LIVE})`,
+      args: [id, input.tenantId, input.domain, input.url, input.ipHash, at.slice(0, 10), at, at, expires, input.tenantId, input.domain, ...liveArgs(input.now)],
+    });
+    if (ins.rowsAffected === 1) {
+      const row = await getScan(db, input.tenantId, id);
+      if (!row) throw new Error("site-scan.store: inserted a scan but cannot read it back");
+      return { row, started: true };
+    }
+    const live = await liveScanOfDomain(db, input.tenantId, input.domain, input.now);
+    if (live) return { row: live, started: false };
+    // The read in progress finished between the two statements: this visitor's own read, then.
+    if (attempt) throw new Error("site-scan.store: the insert was refused twice with no live scan of the domain");
+  }
 }
 
 /**
