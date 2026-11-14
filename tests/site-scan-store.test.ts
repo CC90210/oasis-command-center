@@ -1,8 +1,9 @@
 /**
  * tests/site-scan-store.test.ts — site_scans end to end on a throwaway local libSQL file:
- * migration bravo__259 applied as scripts/apply_turso_migration.py splits it, bravo__206 for the
- * runner queue; insert, reuse within the window, Tier 0 save, the queued enrichment job, the
- * runner's report applied, and the view's stage ticks at each step. No network.
+ * migrations bravo__259 and bravo__263 applied whole, bravo__206 for the runner queue; insert, a
+ * read in progress joined, every other repeat a new attempt on a row of its own, Tier 0 save, the
+ * queued enrichment job, the runner's report applied, and the view's stage ticks at each step.
+ * No network.
  *
  * Run: node --conditions=react-server --import tsx tests/site-scan-store.test.ts
  */
@@ -28,6 +29,7 @@ async function main() {
     // Whole files: bravo__206 holds triggers whose bodies carry semicolons a splitter would cut.
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__206_tool_jobs.sql"), "utf8"));
     await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
+    await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", "bravo__263_site_scans_attempts.sql"), "utf8"));
     assert.equal(await siteScanTablesInstalled(db), true);
 
     const t0 = new Date("2026-11-12T10:00:00.000Z");
@@ -36,9 +38,10 @@ async function main() {
     assert.equal(row.stage, "read");
     assert.equal((await scanCounts(db, TENANT)).scans, 1);
 
-    // The same domain the same day is the same row; another workspace never sees it.
-    const again = await insertScan(db, { tenantId: TENANT, domain: "acme.example", url: "https://acme.example/", ipHash: null, now: new Date("2026-11-12T11:00:00.000Z") });
-    assert.equal(again.row.id, row.id, "one scan per domain per day");
+    // A second visitor during the read joins it (the same row); another workspace never sees it.
+    const again = await insertScan(db, { tenantId: TENANT, domain: "acme.example", url: "https://acme.example/", ipHash: null, now: new Date("2026-11-12T10:00:20.000Z") });
+    assert.equal(again.row.id, row.id, "a read in progress is joined");
+    assert.equal(again.started, false);
     assert.equal(await getScan(db, "other-tenant", row.id), null);
 
     // The view while reading: the first stage runs, nothing is done.
@@ -68,37 +71,61 @@ async function main() {
     assert.equal(jobs.rows[0].status, "queued");
     assert.deepEqual(JSON.parse(String(jobs.rows[0].input_json)), { scan_id: row.id }, "the job carries the scan id only");
 
-    // A finished report is never the next visitor's answer: the same domain the same day is read again
-    // in place (CC, 2026-11-13: a report from the morning came back at once, "finished in two seconds").
-    const fresh = (await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: null, now: new Date("2026-11-14T10:00:00.000Z") })).row;
+    // A finished report is never the next visitor's answer (CC, 2026-11-13: a report from the morning
+    // came back at once, "finished in two seconds") and never taken over either: the same domain the
+    // same day is a new attempt on a row of its own (bravo__263). The earlier visitor keeps their
+    // report, their visitor hash and their claim key, which names their row alone.
+    const fresh = (await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: "visitor-a", now: new Date("2026-11-14T10:00:00.000Z") })).row;
     await saveTier0(db, { tenantId: TENANT, id: fresh.id, facts: { ...facts, domain: "fresh.example" }, score, narrative, status: "done", stage: "done", now: new Date("2026-11-14T10:01:00.000Z") });
     const later = new Date("2026-11-14T15:00:00.000Z");
-    const reread = await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: null, now: later });
-    assert.equal(reread.row.id, fresh.id, "the same row, under the one-per-day index");
-    assert.equal(reread.started, true, "the finished report is read again");
+    const reread = await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: "visitor-b", now: later });
+    assert.notEqual(reread.row.id, fresh.id, "a new attempt is a new row");
+    assert.equal(reread.started, true, "the site is read again");
     assert.equal(reread.row.status, "reading");
     assert.equal(reread.row.facts, null, "nothing of the earlier read passes for the new one's");
-    assert.equal(reread.row.createdAt, later.toISOString(), "dated now");
+    assert.equal(reread.row.createdAt, later.toISOString());
+    const hashes = await db.execute({ sql: "SELECT id, ip_hash FROM site_scans WHERE tenant_id = ? AND domain = 'fresh.example' ORDER BY created_at", args: [TENANT] });
+    assert.deepEqual(hashes.rows.map((r) => [r.id, r.ip_hash]), [[fresh.id, "visitor-a"], [reread.row.id, "visitor-b"]], "each attempt carries its own visitor");
+    assert.equal((await getScan(db, TENANT, fresh.id))?.facts?.domain, "fresh.example", "the earlier visitor's report stays");
     const joined = await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: null, now: new Date(later.getTime() + 60_000) });
-    assert.equal(joined.started, false, "the new read is the scan; a second visitor follows it");
-    const nextDay = await insertScan(db, { tenantId: TENANT, domain: "fresh.example", url: "https://fresh.example/", ipHash: null, now: new Date("2026-11-15T10:00:00.000Z") });
-    assert.notEqual(nextDay.row.id, fresh.id, "the next day is a new row");
-    assert.equal(nextDay.started, true);
+    assert.equal(joined.row.id, reread.row.id, "the new read is the scan; a second visitor follows it");
+    assert.equal(joined.started, false);
+    assert.equal((await scanCounts(db, TENANT)).scans, 3, "every attempt counts as a scan run");
 
-    // An enrichment the runner never delivered is read again once the view would have closed it; a live one is joined.
+    // Two visitors pasting one domain in the same instant start one read, not two: the insert and the
+    // "is one in progress" test are one statement (independent review of this change, 2026-11-14).
+    const race = await Promise.all([0, 1, 2].map(() => insertScan(db, { tenantId: TENANT, domain: "race.example", url: "https://race.example/", ipHash: null, now: later })));
+    assert.equal(race.filter((r) => r.started).length, 1, "exactly one visitor owns the read");
+    assert.equal(new Set(race.map((r) => r.row.id)).size, 1, "the others follow it");
+
+    // A read that straddles UTC midnight is still the scan the next visitor joins.
+    const nightRow = (await insertScan(db, { tenantId: TENANT, domain: "night.example", url: "https://night.example/", ipHash: null, now: new Date("2026-11-14T23:59:30.000Z") })).row;
+    const morning = await insertScan(db, { tenantId: TENANT, domain: "night.example", url: "https://night.example/", ipHash: null, now: new Date("2026-11-15T00:00:30.000Z") });
+    assert.equal(morning.row.id, nightRow.id, "joined across the day boundary");
+    assert.equal(morning.started, false);
+
+    // An enrichment the runner never delivered is read again, on a new row, once the view would have closed it; a live one is joined.
     const stuck = (await insertScan(db, { tenantId: TENANT, domain: "stuck.example", url: "https://stuck.example/", ipHash: null, now: later })).row;
     await saveTier0(db, { tenantId: TENANT, id: stuck.id, facts: { ...facts, domain: "stuck.example" }, score, narrative, status: "enriching", stage: "profile", now: later });
     const stuckAgain = (d: number) => insertScan(db, { tenantId: TENANT, domain: "stuck.example", url: "https://stuck.example/", ipHash: null, now: new Date(later.getTime() + d) });
-    assert.equal((await stuckAgain(5 * 60_000)).started, false, "the runner is still expected: the visitor follows this run");
-    assert.equal((await stuckAgain((ENRICH_WAIT_MINUTES + 1) * 60_000)).started, true, "overdue: read again");
+    const following = await stuckAgain(5 * 60_000);
+    assert.equal(following.started, false, "the runner is still expected: the visitor follows this run");
+    assert.equal(following.row.id, stuck.id);
+    const overdue = await stuckAgain((ENRICH_WAIT_MINUTES + 1) * 60_000);
+    assert.equal(overdue.started, true, "overdue: read again");
+    assert.notEqual(overdue.row.id, stuck.id);
+    assert.equal((await getScan(db, TENANT, stuck.id))?.status, "enriching", "the overdue row is left as it is; the view closes it");
 
-    // A report a lead claimed is never reset: that lead's audit is built on it.
+    // A report a lead claimed is never touched: that lead's audit is built on it. The next visitor gets a run of their own.
     const kept = (await insertScan(db, { tenantId: TENANT, domain: "kept.example", url: "https://kept.example/", ipHash: null, now: later })).row;
     await setStatus(db, { tenantId: TENANT, id: kept.id, status: "done", stage: "done", errorCode: null, now: later });
     assert.equal(await reserveClaim(db, { tenantId: TENANT, id: kept.id, leadRecordId: "lead-kept", now: later }), "reserved");
-    const claimedAgain = await insertScan(db, { tenantId: TENANT, domain: "kept.example", url: "https://kept.example/", ipHash: null, now: new Date(later.getTime() + 60_000) });
-    assert.equal(claimedAgain.started, false, "a report a lead claimed is never reset");
-    assert.equal((await getScan(db, TENANT, kept.id))?.status, "done");
+    const afterClaim = await insertScan(db, { tenantId: TENANT, domain: "kept.example", url: "https://kept.example/", ipHash: null, now: new Date(later.getTime() + 60_000) });
+    assert.equal(afterClaim.started, true, "a real run for the next visitor, not the claimed report");
+    assert.notEqual(afterClaim.row.id, kept.id);
+    const keptRow = (await getScan(db, TENANT, kept.id))!;
+    assert.equal(keptRow.status, "done");
+    assert.equal(keptRow.leadRecordId, "lead-kept", "the claim stays on the claimed row");
 
     // The view mid-enrichment: read, health and score are done; profile runs; the public view has no page text.
     const mid = (await getScan(db, TENANT, row.id))!;
@@ -139,8 +166,8 @@ async function main() {
     assert.deepEqual(finalState, { read: "done", health: "done", profile: "done", segments: "done", prospects: "done", email: "done", score: "done", done: "done" });
     assert.equal(await applyEnrichReport(db, { tenantId: TENANT, jobInput: { scan_id: row.id }, report: report.value, now: t2 }), true, "a repeated report is idempotent on a done row");
 
-    // A site read again in place: the earlier attempt's runner job, still leased by a runner that stalled,
-    // is stopped by the reset, so its late report lands nowhere, and the new attempt queues a job of its own.
+    // The earlier attempt's runner job, still leased by a runner that stalled past the wait, keeps
+    // writing to ITS row alone: the new attempt has an id, a job and a dedupe key of its own.
     const d0 = new Date("2026-11-16T10:00:00.000Z");
     const held = (await insertScan(db, { tenantId: TENANT, domain: "held.example", url: "https://held.example/", ipHash: null, now: d0 })).row;
     await saveTier0(db, { tenantId: TENANT, id: held.id, facts: { ...facts, domain: "held.example" }, score, narrative, status: "enriching", stage: "profile", now: d0 });
@@ -150,15 +177,15 @@ async function main() {
     await db.execute({ sql: "UPDATE tool_jobs SET status = 'running', claimed_by = ?, lease_id = ? WHERE id = ?", args: [lease.runnerKey, lease.leaseId, heldJob] });
     const d1 = new Date(d0.getTime() + (ENRICH_WAIT_MINUTES + 1) * 60_000);
     const heldAgain = await insertScan(db, { tenantId: TENANT, domain: "held.example", url: "https://held.example/", ipHash: null, now: d1 });
-    assert.equal(heldAgain.started, true, "an enrichment past its wait is read again");
-    const stopped = (await db.execute({ sql: "SELECT status, error_code FROM tool_jobs WHERE id = ?", args: [heldJob] })).rows[0];
-    assert.deepEqual([stopped.status, stopped.error_code], ["failed", "scan_restarted"], "the earlier attempt's job is stopped with the reset");
-    await saveTier0(db, { tenantId: TENANT, id: held.id, facts: { ...facts, domain: "held.example" }, score, narrative, status: "enriching", stage: "profile", now: d1 });
+    assert.equal(heldAgain.started, true, "an enrichment past its wait is read again, on a new row");
+    assert.notEqual(heldAgain.row.id, held.id);
     const lateWrite = await db.execute(enrichStatement({ tenantId: TENANT, id: held.id, enrich: report.value.enrich, narrative: null, embedding: null, now: d1 }, lease));
-    assert.equal(lateWrite.rowsAffected, 0, "the stalled runner's late report lands nowhere");
-    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: held.id, attempt: heldAgain.row.createdAt, now: d1 }), { ok: true });
-    const queuedNow = await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ? AND status = 'queued'", args: [held.id] });
-    assert.equal(Number(queuedNow.rows[0].n), 1, "the new attempt's own job is queued; the stopped one no longer holds the dedupe key");
+    assert.equal(lateWrite.rowsAffected, 1, "the stalled runner's late report lands on its own row");
+    assert.equal((await getScan(db, TENANT, heldAgain.row.id))?.enrich, null, "and never on the new attempt's");
+    await saveTier0(db, { tenantId: TENANT, id: heldAgain.row.id, facts: { ...facts, domain: "held.example" }, score, narrative, status: "enriching", stage: "profile", now: d1 });
+    assert.deepEqual(await queueEnrichment(db, { tenantId: TENANT, scanId: heldAgain.row.id, attempt: heldAgain.row.createdAt, now: d1 }), { ok: true });
+    const queuedNow = await db.execute({ sql: "SELECT COUNT(*) AS n FROM tool_jobs WHERE json_extract(input_json, '$.scan_id') = ? AND status = 'queued'", args: [heldAgain.row.id] });
+    assert.equal(Number(queuedNow.rows[0].n), 1, "the new attempt's own job is queued");
 
     // An enrichment that never arrives is closed by the view after the wait; the Worker's report stands.
     const { row: second } = await insertScan(db, { tenantId: TENANT, domain: "slow.example", url: "https://slow.example/", ipHash: null, now: t0 });

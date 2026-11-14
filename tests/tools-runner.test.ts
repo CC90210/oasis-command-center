@@ -89,6 +89,7 @@ async function main() {
 
   await check("a free scan being worked on asks the runner back in two seconds; none, the usual wait", async () => {
     await db.executeMultiple(readFileSync(join(__dirname, "..", "database", "turso", "bravo__259_site_scans.sql"), "utf8"));
+    await db.executeMultiple(readFileSync(join(__dirname, "..", "database", "turso", "bravo__263_site_scans_attempts.sql"), "utf8"));
     const { insertScan, setStatus } = await import("../lib/site-scan/store");
     const now = new Date("2026-10-09T01:00:00.000Z");
     const { row } = await insertScan(db, { tenantId: OASIS, domain: "poll-hint.example", url: "https://poll-hint.example/", ipHash: null, now });

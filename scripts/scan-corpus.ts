@@ -74,7 +74,7 @@ type Db = Awaited<ReturnType<typeof setupToolsDatabase>>;
 /** One database for the run (the test harness keeps one file per process); each site is its own scan row. */
 async function setup(): Promise<Db> {
   const db = await setupToolsDatabase();
-  for (const f of ["bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__261_site_scan_screenshot.sql"]) await applyMigrationFile(db, join(ROOT, "database", "turso", f));
+  for (const f of ["bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__261_site_scan_screenshot.sql", "bravo__263_site_scans_attempts.sql"]) await applyMigrationFile(db, join(ROOT, "database", "turso", f));
   await seedRunner(db, new Date(), ["site_scan_enrich"], "bea:corpus");
   return db;
 }

@@ -43,7 +43,7 @@ async function main() {
   const dir = mkdtempSync(join(tmpdir(), "site-scan-metrics-"));
   const db = createClient({ url: `file:${join(dir, "t.db")}` });
   try {
-    for (const f of ["bravo__206_tool_jobs.sql", "bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql"]) {
+    for (const f of ["bravo__206_tool_jobs.sql", "bravo__259_site_scans.sql", "bravo__260_site_scan_events.sql", "bravo__263_site_scans_attempts.sql"]) {
       await db.executeMultiple(readFileSync(join(ROOT, "database", "turso", f), "utf8"));
     }
     const now = new Date("2026-11-12T18:00:00.000Z");

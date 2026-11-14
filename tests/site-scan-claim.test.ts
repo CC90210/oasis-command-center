@@ -34,7 +34,7 @@ async function seedLead(db: Client, id: string, stage: string) {
 
 async function main() {
   const db = await setupDatabase();
-  for (const f of ["bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__259_site_scans.sql"]) await apply(db, f);
+  for (const f of ["bravo__206_tool_jobs.sql", "bravo__237_ai_audit_core.sql", "bravo__238_ai_audit_delivery.sql", "bravo__239_ai_audit_discovery.sql", "bravo__259_site_scans.sql", "bravo__263_site_scans_attempts.sql"]) await apply(db, f);
   await db.execute({ sql: "INSERT INTO forms (id, tenant_id, slug, name) VALUES (?, ?, 'ai-audit', 'AI audit'), (?, ?, 'start', 'Start')", args: [AUDIT_FORM, OASIS, START_FORM, OASIS] });
   await seedLead(db, LEAD_A, "qualified");
   await seedLead(db, LEAD_B, "qualified");
