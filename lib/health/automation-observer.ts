@@ -131,12 +131,16 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
   add("notification_delivery", data.outbox ? notices : null, `${notices} notification(s) are overdue, refused, or have an unknown provider acknowledgment. Queued does not mean delivered.`);
   add("health_alert_delivery", data.healthDelivery ? data.healthDelivery.length : null,
     `${data.healthDelivery?.length ?? "Unverified"} health alert delivery acknowledgment(s) require attention. Uncertain sends are held for reconciliation.`);
-  const stuck = (data.occurrences ?? []).filter((r) => r.state === "delivery_unknown" || (["claimed", "running"].includes(String(r.state)) && (Number(r.lease_expires_at) * 1000 < now || Number(r.deadline_at) * 1000 < now)));
   const latest = new Map<string, Row>();
   for (const row of data.occurrences ?? []) {
     const previous = latest.get(String(row.job_id));
     if (!previous || String(row.scheduled_at) > String(previous.scheduled_at)) latest.set(String(row.job_id), row);
   }
+  // Only a job's latest occurrence can be stuck. A lost lease stays `delivery_unknown` in the table
+  // for good (nothing reconciles it), so counting every such row paged "business outcomes" for days
+  // after the job had run again cleanly (2026-11-09 to 11-14: three old lost leases, one failing
+  // check). The job's next run is the verdict on it; a lost lease nobody has run since still counts.
+  const stuck = [...latest.values()].filter((r) => r.state === "delivery_unknown" || (["claimed", "running"].includes(String(r.state)) && (Number(r.lease_expires_at) * 1000 < now || Number(r.deadline_at) * 1000 < now)));
   const failed = [...latest.values()].filter((r) => {
     const definition = (data.empire ?? []).find((job) => job.id === r.job_id);
     if (!definition || !Number(definition.is_active)) return false;

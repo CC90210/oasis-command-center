@@ -83,6 +83,10 @@ async function outcomes() {
   f.rows.cron_jobs.at(-1)!.is_active = 1;
   f.rows.automation_occurrences.push({ job_id: "digest", scheduled_at: new Date(NOW + 1000).toISOString(), state: "completed", result_json: JSON.stringify({ business_status: "checked" }) });
   assert.equal((await f.read()).get("business_outcomes")?.observed, 1, "new success supersedes old failed job occurrence");
+  f.rows.automation_occurrences.push({ job_id: "lost", scheduled_at: iso(120), state: "delivery_unknown", result_json: JSON.stringify({ status: "delivery_unknown", error_code: "execution_lease_expired" }) });
+  assert.equal((await f.read()).get("business_outcomes")?.observed, 2, "a lost lease nobody has run since is stuck");
+  f.rows.automation_occurrences.push({ job_id: "lost", scheduled_at: iso(60), state: "completed", result_json: JSON.stringify({ business_status: "checked" }) });
+  assert.equal((await f.read()).get("business_outcomes")?.observed, 1, "a later clean run supersedes a lost lease; it no longer pages for good");
   f.rows.vps_unit_controls.push({ service: "vps.oasis-inbox-sweep", desired: "off" });
   f.rows.tenant_cron_jobs[0].enabled = 0;
   result = await f.read();
