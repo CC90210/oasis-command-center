@@ -137,6 +137,15 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
   add("notification_delivery", data.outbox ? notices : null, `${notices} notification(s) are overdue, refused, or have an unknown provider acknowledgment. Queued does not mean delivered.`);
   add("health_alert_delivery", data.healthDelivery ? data.healthDelivery.length : null,
     `${data.healthDelivery?.length ?? "Unverified"} health alert delivery acknowledgment(s) require attention. Uncertain sends are held for reconciliation.`);
+  let weekly: { overall?: string; checked_at?: string } = {};
+  try {
+    const parsed = JSON.parse(String(data.weekly?.[0]?.metadata || "{}"));
+    if (parsed && typeof parsed === "object") weekly = parsed;
+  } catch { /* explicit unverified */ }
+  // The Python publisher emits WARN for a completed, degraded check. Keep its
+  // verdict visible instead of treating that valid report as missing evidence.
+  const weeklyKnown = ["GREEN", "WARN", "AMBER", "RED"].includes(weekly.overall ?? "") && Number.isFinite(at(weekly.checked_at));
+  const weeklyStale = now - at(weekly.checked_at) > (7 * 24 + 2) * 60 * MINUTE;
   const latest = new Map<string, Row>();
   for (const row of data.occurrences ?? []) {
     const previous = latest.get(String(row.job_id));
@@ -152,7 +161,10 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
     if (!definition || !Number(definition.is_active)) return false;
     if (r.state === "failed") return true;
     if (r.state !== "completed") return false;
-    if (WEEKLY_VERDICT_JOB.test(String(definition.name))) return false;
+    // weekly_system_gate pages this verdict, so it is counted once. Only when the gate's record IS
+    // this run's, though: the digest completes even if publishing that record fails, and the gate
+    // then still reads an older week, valid for 7 days + 2 h (Codex, 2026-11-16).
+    if (WEEKLY_VERDICT_JOB.test(String(definition.name)) && weeklyKnown && at(weekly.checked_at) >= at(r.scheduled_at)) return false;
     try {
       const outcome = JSON.parse(String(r.result_json || "{}"));
       return ["partial", "failed", "unknown", "delivery_unknown"].includes(outcome.business_status ?? outcome.status ?? "unknown") || Number(outcome.failed_count) > 0;
@@ -160,15 +172,6 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
   });
   add("business_outcomes", data.occurrences ? stuck.length + failed.length : null,
     `${stuck.length} execution(s) lost their lease/deadline or have uncertain effects; ${failed.length} job(s) have a failed, partial, or unverified latest business outcome.`);
-  let weekly: { overall?: string; checked_at?: string } = {};
-  try {
-    const parsed = JSON.parse(String(data.weekly?.[0]?.metadata || "{}"));
-    if (parsed && typeof parsed === "object") weekly = parsed;
-  } catch { /* explicit unverified */ }
-  // The Python publisher emits WARN for a completed, degraded check. Keep its
-  // verdict visible instead of treating that valid report as missing evidence.
-  const weeklyKnown = ["GREEN", "WARN", "AMBER", "RED"].includes(weekly.overall ?? "") && Number.isFinite(at(weekly.checked_at));
-  const weeklyStale = now - at(weekly.checked_at) > (7 * 24 + 2) * 60 * MINUTE;
   // Page on RED only. WARN/AMBER is the digest's own "degraded but operating" band: a 99/100
   // self-audit, an aging strategy pulse, memory notes past review. It stays in this reason and in
   // the weekly digest, but paging it meant a page every day forever, since nothing short of a
