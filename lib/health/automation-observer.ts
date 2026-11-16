@@ -28,6 +28,12 @@ const at = (value: unknown) => typeof value === "string" ? Date.parse(value) : N
  * minutes after the first — a condition has to outlive a reconnect to page.
  */
 export const OBSERVER_PAGING_INTERVAL_MIN = 15;
+
+/** The weekly digest's business status IS the weekly system verdict (the scheduler maps
+ * "OVERALL: RED" to failed), and weekly_system_gate already pages on that verdict, so counting
+ * it in business_outcomes too paged one condition twice (2026-11-15). Only its COMPLETED verdict
+ * is excluded: a digest that crashed or could not deliver is the reporter failing, and counts. */
+export const WEEKLY_VERDICT_JOB = /^Weekly Full-Truth Health Digest$/;
 export function isObserverPagingTick(tickMs: number): boolean {
   const date = new Date(tickMs);
   return Number.isFinite(tickMs) && date.getUTCMinutes() % OBSERVER_PAGING_INTERVAL_MIN === 0;
@@ -146,6 +152,7 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
     if (!definition || !Number(definition.is_active)) return false;
     if (r.state === "failed") return true;
     if (r.state !== "completed") return false;
+    if (WEEKLY_VERDICT_JOB.test(String(definition.name))) return false;
     try {
       const outcome = JSON.parse(String(r.result_json || "{}"));
       return ["partial", "failed", "unknown", "delivery_unknown"].includes(outcome.business_status ?? outcome.status ?? "unknown") || Number(outcome.failed_count) > 0;
@@ -162,7 +169,11 @@ export async function observeAutomations(db: Client, tenantId: string, now = Dat
   // verdict visible instead of treating that valid report as missing evidence.
   const weeklyKnown = ["GREEN", "WARN", "AMBER", "RED"].includes(weekly.overall ?? "") && Number.isFinite(at(weekly.checked_at));
   const weeklyStale = now - at(weekly.checked_at) > (7 * 24 + 2) * 60 * MINUTE;
-  add("weekly_system_gate", !weeklyKnown || weeklyStale ? null : weekly.overall === "GREEN" ? 0 : 1,
+  // Page on RED only. WARN/AMBER is the digest's own "degraded but operating" band: a 99/100
+  // self-audit, an aging strategy pulse, memory notes past review. It stays in this reason and in
+  // the weekly digest, but paging it meant a page every day forever, since nothing short of a
+  // perfect week is GREEN. A missing, stale or unknown verdict is still unverified (null).
+  add("weekly_system_gate", !weeklyKnown || weeklyStale ? null : weekly.overall === "RED" ? 1 : 0,
     !weeklyKnown || weeklyStale ? "Weekly system gate is missing, unverified, or overdue." : `Weekly system verdict: ${weekly.overall}. Report delivery is recorded separately and is not proof of a healthy system.`);
   return result;
 }

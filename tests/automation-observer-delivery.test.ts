@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ObserverIncident, type Incident, type Env } from "../workers/oasis-automation-observer/src/index";
+import { ObserverIncident, OUTAGE_CONFIRM_BAD, type Incident, type Env } from "../workers/oasis-automation-observer/src/index";
 
 async function main() {
   const original = { fetch: globalThis.fetch, now: Date.now, log: console.log };
@@ -14,6 +14,8 @@ async function main() {
   const worker = new ObserverIncident({ storage: { get: async <T>(key: string) => data.get(key) as T | undefined, put: async (key, value) => { data.set(key, value); } }, blockConcurrencyWhile: async (fn) => fn() }, env);
   const incident = () => data.get("incident") as Incident;
   const tick = async (seconds = 60) => { clock += seconds * 1000; await worker.fetch(); };
+  // A sustained outage: enough failing minutes to confirm one.
+  const outage = async () => { for (let i = 0; i < OUTAGE_CONFIRM_BAD; i++) await tick(); };
   try {
     Date.now = () => clock;
     console.log = () => undefined;
@@ -25,17 +27,33 @@ async function main() {
       assert.equal(headers["x-oasis-cron-attest"], undefined);
       return Response.json({ ok: healthy, status: healthy ? "observed" : "unverified" }, { status: healthy ? 200 : 503 });
     }) as typeof fetch;
-    await tick(); await tick();
+    await outage();
     assert.equal(incident().receipts?.alert, 1);
     healthy = true; await tick(300); await tick();
     assert.equal(incident().open, false);
     assert.deepEqual(incident().receipts, { alert: 1, recovery: 2 }, "closed incident retains provider receipts");
 
+    // A blip shorter than the window pages neither "cannot verify" nor "recovered"
+    // (2026-11-15/16: two such pairs from minute-long app/database hiccups).
+    data.clear(); healthy = false;
+    const quiet = calls;
+    for (let i = 0; i < OUTAGE_CONFIRM_BAD - 1; i++) await tick();
+    assert.equal(incident().open, false, "a few failing minutes are a blip, not an outage");
+    healthy = true; await tick(); await tick();
+    assert.equal(calls, quiet, "a blip sends nothing in either direction");
+
+    // A flapping app (failing every other minute) is half broken and still pages, once.
+    data.clear();
+    for (let i = 0; i < 2 * OUTAGE_CONFIRM_BAD - 1; i++) { healthy = i % 2 === 1; await tick(); }  // fail, ok, fail, …
+    assert.equal(incident().open, true, "persistent flapping confirms an outage");
+    assert.equal(calls, quiet + 1, "and pages exactly once");
+    healthy = true; await tick(); await tick();
+
     for (const code of [400, 401, 403, 404]) {
       data.clear(); healthy = false;
       reply = () => new Response("provider refusal", { status: code });
       const before = calls;
-      await tick(); await tick();
+      await outage();
       assert.equal(incident().delivery, "permanent_failure");
       for (let i = 0; i < 4; i++) await tick(300);
       assert.equal(calls, before + 1, `HTTP${code} must not retry until explicit repair/reconciliation`);
@@ -47,7 +65,7 @@ async function main() {
     probeDelay = 20_000; sendDelay = 5_000;
     reply = () => Response.json({ ok: false, error_code: 429, parameters: { retry_after: 900 } }, { status: 429, headers: { "retry-after": "1200" } });
     const before = calls;
-    await tick(); await tick();
+    await outage();
     assert.equal(incident().delivery, "refused");
     assert.equal(incident().retryAt, clock + 1200_000);
     probeDelay = 0; sendDelay = 0;
