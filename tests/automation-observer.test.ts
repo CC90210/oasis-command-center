@@ -3,7 +3,7 @@ import { observeAutomations, missedOccurrences, isObserverPagingTick, OBSERVER_P
 import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 import { VPS_HEALTH_SERVICES } from "../lib/automations/vps-health";
 import { incidentWindow } from "../lib/health/incident-window";
-import { ObserverIncident, nextIncident, type Env, type Incident } from "../workers/oasis-automation-observer/src/index";
+import { ObserverIncident, OUTAGE_CONFIRM_BAD, nextIncident, type Env, type Incident } from "../workers/oasis-automation-observer/src/index";
 
 const NOW = Date.parse("2026-11-09T12:00:00Z");
 const iso = (minutes = 0) => new Date(NOW - minutes * 60_000).toISOString();
@@ -65,11 +65,21 @@ async function outcomes() {
   assert.equal(result.get("notification_delivery")?.observed, 1);
   assert.equal(result.get("business_outcomes")?.observed, 2, "exit-zero delivered red digest still has failed business outcome");
   assert.equal(result.get("weekly_system_gate")?.observed, 1, "delivering a report cannot make RED green");
+  // The real weekly digest: its COMPLETED verdict is weekly_system_gate's to page, not
+  // business_outcomes' (one condition, one page). A digest that did not complete is the
+  // reporter failing, and still counts.
+  f.rows.cron_jobs.push({ id: "weekly-digest", name: "Weekly Full-Truth Health Digest", is_active: 1, schedule: "0 7 * * 0", next_run_at: new Date(NOW + 7 * 86400_000).toISOString(), fail_count: 0 });
+  f.rows.automation_occurrences.push({ job_id: "weekly-digest", scheduled_at: iso(), state: "completed", result_json: JSON.stringify({ business_status: "failed", summary: "OVERALL: RED" }) });
+  assert.equal((await f.read()).get("business_outcomes")?.observed, 2, "the weekly RED pages once, through weekly_system_gate");
+  f.rows.automation_occurrences.at(-1)!.state = "failed";
+  assert.equal((await f.read()).get("business_outcomes")?.observed, 3, "a digest that crashed or could not deliver still counts");
+  f.rows.automation_occurrences.pop();
+  f.rows.cron_jobs.pop();
   for (const delivered of [false, true]) {
     f.rows.weekly[0].metadata = JSON.stringify({ overall: "WARN", checked_at: iso(), report_delivered: delivered });
     const warning = (await f.read()).get("weekly_system_gate");
-    assert.equal(warning?.observed, 1, "the Python WARN verdict is a known degraded result regardless of report delivery");
-    assert.match(warning?.reason ?? "", /Weekly system verdict: WARN/);
+    assert.equal(warning?.observed, 0, "WARN is degraded-but-operating: reported in the digest, never paged daily");
+    assert.match(warning?.reason ?? "", /Weekly system verdict: WARN/, "the WARN verdict stays visible on the board");
   }
   f.rows.weekly[0].metadata = JSON.stringify({ overall: "WARN", checked_at: iso(8 * 24 * 60) });
   assert.equal((await f.read()).get("weekly_system_gate")?.observed, null, "an expired WARN report remains unverified");
@@ -100,8 +110,16 @@ async function outcomes() {
 
 async function independent() {
   let state: Incident | undefined;
-  for (const healthy of [false, true, false, true, false]) state = nextIncident(state, healthy, NOW);
-  assert.equal(state?.open, true, "three of six catches alternating failure");
+  for (const healthy of [false, false, true, true]) state = nextIncident(state, healthy, NOW);
+  assert.equal(state?.open, false, "a two-minute blip (an app deploy, a database stall) is not an outage");
+  state = undefined;
+  for (const healthy of [false, false, false, false]) state = nextIncident(state, healthy, NOW);
+  assert.equal(state?.open, false, "four failing minutes are still a blip");
+  state = nextIncident(state, false, NOW);
+  assert.equal(state?.open, true, "five failing minutes are an outage");
+  state = undefined;
+  for (const healthy of [false, true, false, true, false, true, false, true, false]) state = nextIncident(state, healthy, NOW);
+  assert.equal(state?.open, true, "an app failing every other minute is half broken: flapping still opens");
   let window: string | undefined;
   for (const verdict of ["failing", "ok", "failing", "ok"] as const) window = incidentWindow(window, verdict).serialized;
   assert.equal(incidentWindow(window, "failing").confirm, true);
@@ -121,6 +139,8 @@ async function independent() {
   const headers: string[] = [];
   const env = { CRON_SECRET: "synthetic-secret", AUTOMATION_OBSERVER_ATTEST_SECRET: "synthetic-attest", OASIS_TELEGRAM_BOT_TOKEN: "synthetic-token", OASIS_TELEGRAM_CHAT_ID: "synthetic-chat" } as Env;
   const worker = new ObserverIncident({ storage: { get: async <T>(key: string) => data.get(key) as T | undefined, put: async (key, value) => { data.set(key, value); } }, blockConcurrencyWhile: async (work) => work() }, env);
+  // An outage long enough to confirm: one failing sample a minute.
+  const down = async () => { for (let i = 0; i < OUTAGE_CONFIRM_BAD; i++) { if (i) time += 60_000; await worker.fetch(); } };
   try {
     Date.now = () => time;
     console.log = () => undefined;
@@ -134,21 +154,21 @@ async function independent() {
       headers.push(String((init?.headers as Record<string, string>)["x-oasis-observer-delivery"]));
       return Response.json({ ok: available, status: available ? "observed" : "unverified" }, { status: available ? 200 : 503 });
     }) as typeof fetch;
-    await worker.fetch(); time += 60_000; await worker.fetch();
-    assert.equal(sends, 1, "database outage alerts independently after two minutes");
+    await down();
+    assert.equal(sends, 1, "a sustained database outage alerts independently");
     time += 60_000; await worker.fetch();
     assert.equal(sends, 1, "receipt-confirmed incident is not duplicated");
     available = true; time += 300_000; await worker.fetch(); time += 60_000; await worker.fetch();
     assert.equal(sends, 2, "two complete observations recover once");
     assert.equal((data.get("incident") as Incident).open, false);
-    available = false; receiptUnknown = true; time += 300_000; await worker.fetch(); time += 60_000; await worker.fetch();
+    available = false; receiptUnknown = true; time += 300_000; await down();
     assert.equal(sends, 3);
     time += 600_000; await worker.fetch();
     assert.equal(sends, 3, "unknown provider acknowledgment is not replayed");
     assert.equal((data.get("incident") as Incident).delivery, "delivery_unknown");
     assert.equal(headers.at(-1), "delivery_unknown", "durable independent failure returns to existing health UI when app returns");
     data.clear(); receiptUnknown = false; receiptMissing = true;
-    time += 600_000; await worker.fetch(); time += 60_000; await worker.fetch();
+    time += 600_000; await down();
     assert.equal(sends, 4);
     assert.equal((data.get("incident") as Incident).delivery, "delivery_unknown", "HTTP200 without receipt is ambiguous, not a safe refusal");
     time += 600_000; await worker.fetch(); assert.equal(sends, 4);

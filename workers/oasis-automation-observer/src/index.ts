@@ -10,10 +10,19 @@ export interface Env {
 }
 export type Incident = { samples: boolean[]; open: boolean; delivered: boolean; delivery: "none" | "sending" | "delivered" | "refused" | "permanent_failure" | "delivery_unknown"; lastAttempt: number; openedAt: number | null;
   retryAt?: number; receipts?: { alert?: number; recovery?: number }; deliveryError?: string | null };
+/** This Worker samples every minute, so a sample-count rule is a time rule. "Two consecutive or
+ * three in six" meant two to three MINUTES: an app deploy swapping versions or a database stall
+ * past the 20 s probe paged "cannot verify the systems" and, minutes later, "recovered" (two such
+ * pairs 2026-11-15/16). An outage opens when OUTAGE_CONFIRM_BAD of the last OUTAGE_WINDOW samples
+ * failed: five minutes of a down app, or an app failing every other minute (flapping is half
+ * broken and still pages), but never a two-to-four-minute blip. Recovery still closes on two
+ * consecutive good samples, which a flapping app never produces. */
+export const OUTAGE_WINDOW = 10;
+export const OUTAGE_CONFIRM_BAD = 5;
 export function nextIncident(previous: Incident | undefined, healthy: boolean, now: number): Incident {
   const state = previous ?? { samples: [], open: false, delivered: false, delivery: "none", lastAttempt: 0, openedAt: null };
-  const samples = [...state.samples.slice(-5), healthy];
-  const bad = !healthy && ((samples.length >= 2 && samples.slice(-2).every((s) => !s)) || samples.filter((s) => !s).length >= 3);
+  const samples = [...state.samples.slice(-(OUTAGE_WINDOW - 1)), healthy];
+  const bad = !healthy && samples.filter((s) => !s).length >= OUTAGE_CONFIRM_BAD;
   return { ...state, samples, open: state.open || bad, openedAt: state.openedAt ?? (bad ? now : null), delivery: state.delivery === "sending" ? "delivery_unknown" : state.delivery };
 }
 
