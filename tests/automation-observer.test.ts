@@ -71,6 +71,15 @@ async function outcomes() {
   f.rows.cron_jobs.push({ id: "weekly-digest", name: "Weekly Full-Truth Health Digest", is_active: 1, schedule: "0 7 * * 0", next_run_at: new Date(NOW + 7 * 86400_000).toISOString(), fail_count: 0 });
   f.rows.automation_occurrences.push({ job_id: "weekly-digest", scheduled_at: iso(), state: "completed", result_json: JSON.stringify({ business_status: "failed", summary: "OVERALL: RED" }) });
   assert.equal((await f.read()).get("business_outcomes")?.observed, 2, "the weekly RED pages once, through weekly_system_gate");
+  // The digest completes even when publishing the gate's record fails (persist_results only prints
+  // the database error), and the gate then still reads LAST week's verdict, valid for 7 days + 2 h.
+  // That run's occurrence is its only evidence, so it counts (Codex, 2026-11-16).
+  const thisWeek = f.rows.weekly[0].metadata;
+  f.rows.weekly[0].metadata = JSON.stringify({ overall: "GREEN", checked_at: iso(7 * 24 * 60 - 30), report_delivered: true });
+  result = await f.read();
+  assert.equal(result.get("weekly_system_gate")?.observed, 0, "the gate is reading last week's GREEN");
+  assert.equal(result.get("business_outcomes")?.observed, 3, "so this run's RED occurrence pages instead");
+  f.rows.weekly[0].metadata = thisWeek;
   f.rows.automation_occurrences.at(-1)!.state = "failed";
   assert.equal((await f.read()).get("business_outcomes")?.observed, 3, "a digest that crashed or could not deliver still counts");
   f.rows.automation_occurrences.pop();
