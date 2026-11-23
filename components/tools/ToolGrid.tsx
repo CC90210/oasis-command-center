@@ -5,6 +5,11 @@
  * workspace can use (lib/tools/catalog.ts decides which), each with its fields,
  * a Run button and its runs.
  *
+ * Tool and result disclosures keep their contents mounted, preserving drafts,
+ * select choices and polling while closed. Old results start collapsed; runs
+ * submitted during this visit open their result when ready. Hook drafts have
+ * their own platform disclosures so scripts do not overwhelm the other tools.
+ *
  * THE LIFECYCLE (2026-10-26). Above the form, a card shows every run in flight
  * (each with its stage, a progress strip, a Refresh) and, under those, every
  * finished run not yet put away, newest first, each with its result (Download,
@@ -54,8 +59,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { copyText } from "@/lib/clipboard";
 import { parseContentResult } from "@/lib/tools/content-results";
+import { toolErrorLine } from "@/lib/tools/errors";
 import { CORPUS_LABEL_COPY, type CorpusLabel } from "@/lib/founders/ingest-core";
 import { inputRefusalLine, toolByKey } from "@/lib/tools/registry";
 import { setupHref } from "@/lib/setup-links";
@@ -175,7 +182,7 @@ export function ToolGrid({
       {!catalog.installed ? (
         <p className="px-1 text-sm text-fg-muted">{NOT_SET_UP}</p>
       ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3">
           {catalog.tools.map((tool) => (
             <ToolCard
               key={tool.key}
@@ -201,6 +208,10 @@ type CardProps = Required<Omit<ToolGridProps, "catalog" | "className" | "showHea
 function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownloadPrefix, extractedVideosHref, storageScope, settingsAiHref, showCodes }: CardProps) {
   const def = toolByKey(tool.key);
   const isVideo = tool.key === VIDEO_TOOL_KEY;
+  const [expanded, setExpanded] = useState(isVideo);
+  // Only results started in this visit open themselves. Loading old runs must
+  // never bury the tool forms under pages of generated copy.
+  const [sessionRuns, setSessionRuns] = useState<readonly string[]>([]);
   const storageKey = doneIdsKey(tool.key, storageScope);
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(tool.fields.map((f) => [f.name, f.defaultValue ?? ""])),
@@ -288,9 +299,19 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
   // /founders/marketing/extracted links back to /tools#video-extractor: once the
   // card is on the page (and its section open), land on it.
   useEffect(() => {
-    if (!isVideo || window.location.hash !== `#${VIDEO_CARD_ID}`) return;
-    const frame = window.requestAnimationFrame(() => document.getElementById(VIDEO_CARD_ID)?.scrollIntoView({ block: "start" }));
-    return () => window.cancelAnimationFrame(frame);
+    if (!isVideo) return;
+    let frame = 0;
+    const openLinkedCard = () => {
+      if (window.location.hash !== `#${VIDEO_CARD_ID}`) return;
+      setExpanded(true);
+      frame = window.requestAnimationFrame(() => document.getElementById(VIDEO_CARD_ID)?.scrollIntoView({ block: "start" }));
+    };
+    openLinkedCard();
+    window.addEventListener("hashchange", openLinkedCard);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("hashchange", openLinkedCard);
+    };
   }, [isVideo]);
 
   useEffect(() => {
@@ -379,6 +400,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
         attempt.current = null;
         pollStart.current = null;
         setJobs((prev) => withRun(prev, job));
+        setSessionRuns((ids) => [...ids, job.id]);
         if (tool.runsOn === "runner") setValues((v) => ({ ...v, url: "" }));
         // A worker tool runs inside the request and answers already finished, so
         // the in-flight watcher above never sees it start: tell the page here.
@@ -429,28 +451,54 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
 
   const seen = clock !== null && lastSeenAt ? seenLine(lastSeenAt, clock) : null;
   // A link comes back whole from the run's summary; the first 80 characters of a long text do not.
-  const canRetry = tool.fields.some((f) => f.kind === "url");
+  const canRestoreLink = (job: JobView) => tool.fields.some((f) => f.kind === "url") && def?.validate({ url: job.input_summary }).ok === true;
   const history = jobs ?? [];
+  const failedCount = finished.filter((job) => job.status !== "done").length;
+  const status = refusal ? "Action needed" : readError ? "Couldn't load recent runs" :
+    running.length > 0 ? `${running.length} running${failedCount ? ` · ${failedCount} need attention` : ""}` :
+    failedCount > 0 ? `${failedCount} ${failedCount === 1 ? "run needs" : "runs need"} attention` :
+    finished.length > 0 ? `${finished.length} ${finished.length === 1 ? "result" : "results"} ready` :
+    tool.state === "runner_offline" ? "Computer offline" :
+    tool.state === "needs_ai_account" ? "Connect an AI account" :
+    tool.state === "ai_account_unreadable" ? "Couldn't check AI account" : "Ready";
+  const needsAttention = Boolean(refusal || readError || failedCount || !ready);
+  const panelId = `tool-${tool.key}-body`;
 
   return (
     <article
       id={isVideo ? VIDEO_CARD_ID : undefined}
-      className="flex min-w-0 scroll-mt-24 flex-col gap-3 rounded-xl border border-bg-border bg-bg-panel p-4"
+      className="min-w-0 scroll-mt-24 rounded-xl border border-bg-border bg-bg-panel"
       aria-labelledby={`tool-${tool.key}`}
       data-phase={ready ? phase : tool.state}
     >
-      <header className="space-y-1">
-        <h3 id={`tool-${tool.key}`} className="text-sm font-semibold text-fg">
-          {tool.title}
+      <header>
+        <h3 id={`tool-${tool.key}`}>
+          <button
+            type="button"
+            aria-label={tool.title}
+            aria-expanded={expanded}
+            aria-controls={panelId}
+            aria-describedby={`tool-${tool.key}-description tool-${tool.key}-summary`}
+            onClick={() => setExpanded((open) => !open)}
+            className={`flex w-full items-start gap-3 rounded-xl p-4 text-left transition-colors hover:bg-bg-elev/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${TAP}`}
+          >
+            {expanded ? <ChevronDown aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted" /> : <ChevronRight aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted" />}
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold text-fg">{tool.title}</span>
+              <span id={`tool-${tool.key}-description`} className="mt-1 block text-xs font-normal leading-5 text-fg-muted">{tool.description}</span>
+              <span id={`tool-${tool.key}-summary`} role="status" className={`mt-2 block text-xs font-medium tabular-nums ${needsAttention ? "text-status-hot" : "text-fg-muted"}`}>{status}</span>
+            </span>
+          </button>
         </h3>
-        <p className="text-xs leading-5 text-fg-muted">{tool.description}</p>
+      </header>
+      {/* Hide rather than unmount: drafts, select choices, reads and poll timers survive a collapse. */}
+      <div id={panelId} hidden={!expanded} className="space-y-4 border-t border-bg-border p-4">
         {tool.runner && (
           <p className="text-[11px] text-fg-dim">
             {runsOnText(tool.runner.label)}
             {seen ? `, ${seen}` : null}
           </p>
         )}
-      </header>
 
       {tool.state === "needs_ai_account" && (
         <div className="space-y-2">
@@ -489,8 +537,13 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
               assetHrefPrefix={assetHrefPrefix}
               assetDownloadPrefix={assetDownloadPrefix}
               showCodes={showCodes}
+              defaultExpanded={sessionRuns.includes(job.id)}
               onDone={() => putAway(job, false)}
-              onRetry={canRetry ? () => putAway(job, true) : undefined}
+              onRetry={canRestoreLink(job) ? () => putAway(job, true) : () => {
+                formRef.current?.scrollIntoView({ block: "center" });
+                formRef.current?.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")?.focus();
+              }}
+              retryLabel={canRestoreLink(job) ? TRY_AGAIN_LABEL : "Edit and retry"}
             />
           ))}
         </div>
@@ -617,6 +670,7 @@ function ToolCard({ tool, runEndpoint, jobsEndpoint, assetHrefPrefix, assetDownl
       {showsRuns && history.length > 0 && (
         <RunHistory jobs={history} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} extractedVideosHref={extractedVideosHref} showTimes={mounted} />
       )}
+      </div>
     </article>
   );
 }
@@ -649,6 +703,8 @@ export function ReviewBlock({
   showCodes,
   onDone,
   onRetry,
+  retryLabel = TRY_AGAIN_LABEL,
+  defaultExpanded = false,
 }: {
   job: JobView;
   tool: Pick<CatalogTool, "key" | "runsOn">;
@@ -656,28 +712,44 @@ export function ReviewBlock({
   assetDownloadPrefix?: string;
   showCodes: boolean;
   onDone: () => void;
-  /** Absent when the input cannot be restored whole (a long text), so no Try again is offered. */
+  /** Restore a complete link or focus the existing draft when it cannot be restored. */
   onRetry?: () => void;
+  retryLabel?: string;
+  defaultExpanded?: boolean;
 }) {
   const failed = job.status !== "done";
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const panelId = `tool-${tool.key}-result-${job.id}`;
+  const knownFailure = toolErrorLine(job.error_code, tool.runsOn);
+  const failureMessage = job.error_code === "login_required"
+    ? "This link requires a signed-in account. Try a public link that opens without signing in."
+    : knownFailure === "The download failed on the connected computer." && tool.key !== VIDEO_TOOL_KEY && tool.key !== "video_remix"
+      ? "This run stopped before it finished. Review the inputs and try again." : knownFailure;
   return (
-    <div className="space-y-3" data-testid={`tool-${tool.key}-review`} data-job={job.id}>
-      <div className="space-y-1">
-        <p className={`text-sm font-semibold ${failed ? "text-status-hot" : "text-fg"}`}>{reviewHeadline(job, tool.key)}</p>
-        <p className="break-all text-xs text-fg-muted">{resultTitle(job) ?? job.input_summary}</p>
-      </div>
-      {failed ? (
-        <p className="text-xs text-status-hot">
-          {job.error_message}
-          {showCodes && job.error_code ? <span className="ml-2 font-mono text-[10px] text-fg-dim">{job.error_code}</span> : null}
-        </p>
-      ) : (
-        <RunResult job={job} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} />
+    <div className="rounded-lg border border-bg-border" data-testid={`tool-${tool.key}-review`} data-job={job.id}>
+      <button type="button" aria-expanded={expanded} aria-controls={panelId}
+        onClick={() => setExpanded((open) => !open)}
+        className={`flex w-full items-start gap-2 rounded-lg p-3 text-left hover:bg-bg-elev/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${TAP}`}>
+        {expanded ? <ChevronDown aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted" /> : <ChevronRight aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted" />}
+        <span className="min-w-0 flex-1 space-y-1">
+          <span className={`block text-sm font-semibold ${failed ? "text-status-hot" : "text-fg"}`}>{reviewHeadline(job, tool.key)}</span>
+          <span className="line-clamp-2 block break-words text-xs text-fg-muted [overflow-wrap:anywhere]">{resultTitle(job) ?? job.input_summary}</span>
+          {failed && <span className="block break-words text-xs font-normal leading-5 text-status-hot">{failureMessage}</span>}
+        </span>
+        <span className="shrink-0 text-xs text-fg-muted">{expanded ? "Hide" : failed ? "Actions" : "View"}</span>
+      </button>
+      <div id={panelId} hidden={!expanded} className="space-y-3 border-t border-bg-border p-3">
+      {!failed && <RunResult job={job} tool={tool} assetHrefPrefix={assetHrefPrefix} assetDownloadPrefix={assetDownloadPrefix} />}
+      {failed && showCodes && (job.error_code || job.error_message) && (
+        <details className="text-xs text-fg-muted">
+          <summary className={`flex cursor-pointer items-center ${TAP}`}>Technical details</summary>
+          <p className="max-h-40 overflow-auto break-words pb-2 font-mono text-[11px] [overflow-wrap:anywhere]">{job.error_code}{job.error_message ? `: ${job.error_message}` : ""}</p>
+        </details>
       )}
       <div className="flex flex-wrap items-center gap-2">
         {failed && onRetry && (
           <button type="button" className={`btn-primary ${TAP}`} onClick={onRetry}>
-            {TRY_AGAIN_LABEL}
+            {retryLabel}
           </button>
         )}
         <button type="button" className={`btn-secondary ${TAP}`} data-testid={`tool-${tool.key}-done`} onClick={onDone}>
@@ -685,6 +757,7 @@ export function ReviewBlock({
         </button>
       </div>
       <p className="text-[11px] text-fg-dim">{doneHint(tool.key, failed)}</p>
+      </div>
     </div>
   );
 }
@@ -728,7 +801,7 @@ export function RunHistory({
                 {OPEN_EXTRACTED}
               </a>
             )}
-            {j.status === "failed" && j.error_message && <span className="w-full">{j.error_message}</span>}
+            {j.status === "failed" && <span className="w-full">{toolErrorLine(j.error_code, tool.runsOn)}</span>}
           </li>
         ))}
       </ul>
@@ -747,20 +820,29 @@ export function RunResult({ job, tool, assetHrefPrefix, assetDownloadPrefix = ""
   switch (tool.key) {
     case "hook_rewriter": {
       const checked = parseContentResult("hook_rewriter", r);
-      return checked && "hooks" in checked ? <div className="space-y-3">{checked.hooks.map((h, i) => <article key={i} className="rounded-lg border border-bg-border p-3 space-y-2">
-        <p className="text-xs uppercase text-fg-muted">{h.platform}</p><p className="font-semibold">{h.hook}</p>
-        <p className="whitespace-pre-wrap text-sm">{h.script}</p><p className="whitespace-pre-wrap text-sm text-fg-muted">{h.caption}</p>
-        <CopyTextButton text={`${h.hook}\n\n${h.script}\n\n${h.caption}`} />
-      </article>)}</div> : null;
+      return checked && "hooks" in checked ? <div className="space-y-2">
+        <p className="text-xs text-fg-muted">Choose a platform to review and copy its draft.</p>
+        {checked.hooks.map((h) => <details key={h.platform} className="rounded-lg border border-bg-border">
+          <summary className={`cursor-pointer rounded-lg px-3 py-3 text-sm text-fg [overflow-wrap:anywhere] ${TAP}`}>
+            <span className="mr-2 text-xs font-medium capitalize text-fg-muted">{h.platform}</span>{h.hook}
+          </summary>
+          <div className="space-y-3 border-t border-bg-border p-3">
+            <div><p className="mb-1 text-xs font-medium text-fg-muted">Script</p><p className="whitespace-pre-wrap break-words text-sm leading-6 [overflow-wrap:anywhere]">{h.script}</p></div>
+            <div><p className="mb-1 text-xs font-medium text-fg-muted">Caption</p><p className="whitespace-pre-wrap break-words text-sm leading-6 text-fg-muted [overflow-wrap:anywhere]">{h.caption}</p></div>
+            <CopyTextButton text={`${h.hook}\n\n${h.script}\n\n${h.caption}`} />
+          </div>
+        </details>)}
+      </div> : <p role="alert" className="text-sm text-status-hot">This result couldn&apos;t be displayed. Try running the tool again.</p>;
     }
     case "broll_matcher": {
       const checked = parseContentResult("broll_matcher", r);
       return checked && "matches" in checked ? <div className="space-y-3">
         {checked.matches.length === 0 && <p className="text-sm text-fg-muted">No matches in the indexed visual library.</p>}
-        {checked.matches.map((m, i) => <article key={i} className="rounded-lg border border-bg-border p-3">
-          <p className="text-xs text-fg-muted">{m.keyword}</p><a className="text-accent underline" href={m.url} target="_blank" rel="noreferrer">{m.title}</a>
-          <p className="text-xs text-fg-muted">{m.license}</p>
-        </article>)}<p className="text-xs text-fg-muted">{checked.note}</p></div> : null;
+        <ul className="divide-y divide-bg-border">{checked.matches.map((m, i) => <li key={i} className="py-2">
+          <p className="break-words text-xs text-fg-muted">{m.keyword}</p>
+          <a className={`flex items-center break-words text-sm text-accent underline underline-offset-2 [overflow-wrap:anywhere] ${TAP}`} href={m.url} target="_blank" rel="noreferrer">{m.title}</a>
+          <p className="break-words text-xs text-fg-muted">{m.license}</p>
+        </li>)}</ul><p className="text-xs leading-5 text-fg-muted">{checked.note}</p></div> : <p role="alert" className="text-sm text-status-hot">This result couldn&apos;t be displayed. Try running the tool again.</p>;
     }
     case "video_remix": {
       const clips = Array.isArray(r?.clips) ? r.clips as Array<{ asset_id: string; title: string }> : [];
