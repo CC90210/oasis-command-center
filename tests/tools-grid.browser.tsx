@@ -29,6 +29,7 @@ window.addEventListener("fixture:refresh", () => {
 
 const definition = TOOL_REGISTRY.find((tool) => tool.key === "video_download")!;
 const offline = new URLSearchParams(location.search).has("offline");
+const allTools = new URLSearchParams(location.search).has("all");
 const tool: CatalogTool = {
   key: definition.key,
   title: definition.title,
@@ -46,7 +47,10 @@ createRoot(document.getElementById("root")!).render(
     {/* The page wraps the grid in a CollapsibleSection panel (p-5): the same 20 px, so a 360 px check is honest. */}
     <div style={{ padding: 20, border: "1px solid transparent" }}>
       <ToolGrid
-        catalog={{ installed: true, tools: [tool] }}
+        catalog={{ installed: true, tools: allTools ? ["video_download", "video_remix", "hook_rewriter", "broll_matcher"].map((key) => {
+          const def = TOOL_REGISTRY.find((item) => item.key === key)!;
+          return { ...tool, key: def.key, title: def.title, description: def.description, runLabel: def.runLabel, runsOn: def.runsOn, fields: def.fields };
+        }) : [tool] }}
         assetHrefPrefix="/founders/marketing/extracted?video="
         assetDownloadPrefix="/api/founders/marketing/assets/"
         extractedVideosHref="/founders/marketing/extracted"

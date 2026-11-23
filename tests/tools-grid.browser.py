@@ -25,7 +25,7 @@ Pins the lifecycle CC asked for on 2026-10-25:
     under the same idempotency key; an accepted run or a refusal starts a new key;
   - a failed run offers Try again (the link comes back) and Dismiss;
   - the offline card offers Check connection, which asks the page to refresh,
-    says "Still offline" when nothing changes, and has no Run button;
+    says "Still unavailable" when nothing changes, and has no Run button;
   - no Extracted videos tab; Content Tools is current on this page;
   - every visible control is 44 px tall, Download is above a phone's fold, and
     nothing overflows sideways at 360 px.
@@ -34,8 +34,10 @@ Run: OASIS_TEST_PYTHON=<python with playwright + chromium> npm run test:content-
 """
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import async_playwright, expect
 
@@ -65,6 +67,7 @@ FAILED = dict(
 )
 SHOTS = Path("tmp/content-tools-browser")
 PHONE_FOLD = 800
+CASE_FILTER = os.environ.get("OASIS_TEST_CASE", "")
 
 
 async def answer(route, payload, status=200):
@@ -106,6 +109,12 @@ def reviews(page):
     return card(page).get_by_test_id("tool-video_download-review")
 
 
+async def open_review(review):
+    toggle = review.locator("button[aria-expanded]").first
+    if await toggle.get_attribute("aria-expanded") == "false":
+        await toggle.click()
+
+
 async def tap_targets(c):
     """Every visible button and link in the card is at least 44 px tall."""
     boxes = await c.locator("button:visible, a:visible").evaluate_all(
@@ -122,10 +131,15 @@ async def no_sideways_overflow(page):
 
 async def main():
     failures = []
+    executed = 0
     async with async_playwright() as p:
         browser = await p.chromium.launch()
 
         async def run(name, fn, width=1280):
+            nonlocal executed
+            if CASE_FILTER and CASE_FILTER not in name:
+                return
+            executed += 1
             context = await browser.new_context(viewport={"width": width, "height": 900})
             page = await context.new_page()
             errors = []
@@ -149,6 +163,8 @@ async def main():
             await expect(r).to_have_count(1)
             await expect(r.get_by_text("Video extracted", exact=True)).to_be_visible()
             await expect(r.get_by_text("An older video", exact=True)).to_be_visible()
+            await expect(r.locator("button[aria-expanded]")).to_have_attribute("aria-expanded", "false")
+            await open_review(r)
             download = r.get_by_role("link", name="Download", exact=True)
             await expect(download).to_have_attribute("href", "/api/founders/marketing/assets/old-asset/download")
             await expect(r.get_by_role("link", name="Open in Extracted videos", exact=True)).to_have_attribute("href", "/founders/marketing/extracted?video=old-asset")
@@ -292,11 +308,13 @@ async def main():
             await expect(r).to_have_count(2)
             await expect(r.nth(0).get_by_text("Video extracted", exact=True)).to_be_visible()
             await expect(r.nth(1).get_by_text("Didn't finish", exact=True)).to_be_visible()
+            await open_review(r.nth(0))
             await tap_targets(c)
             await r.nth(0).get_by_role("button", name="Done", exact=True).click()
             await expect(r).to_have_count(1)
             await expect(r.get_by_text("Didn't finish", exact=True)).to_be_visible()
             await expect(c).to_have_attribute("data-phase", "review")
+            await open_review(r)
             await r.get_by_role("button", name="Dismiss", exact=True).click()
             await expect(r).to_have_count(0)
             await expect(c).to_have_attribute("data-phase", "idle")
@@ -471,8 +489,11 @@ async def main():
             await expect(r).to_have_count(2)
             failed = r.nth(0)
             await expect(failed.get_by_text("Didn't finish", exact=True)).to_be_visible()
-            await expect(failed.get_by_text("That link couldn't be downloaded.")).to_be_visible()
-            await expect(failed.get_by_text("download_failed", exact=True)).to_be_visible()
+            await expect(failed.get_by_text("The download failed on the connected computer.", exact=True)).to_be_visible()
+            await open_review(failed)
+            await expect(failed.get_by_text("download_failed", exact=False)).to_be_hidden()
+            await failed.locator("summary").click()
+            await expect(failed.get_by_text("download_failed", exact=False)).to_be_visible()
             await expect(failed.get_by_role("link", name="Download", exact=True)).to_have_count(0)
             await failed.get_by_role("button", name="Try again", exact=True).click()
             await expect(r).to_have_count(1)
@@ -483,6 +504,7 @@ async def main():
             await page.evaluate("(k) => localStorage.removeItem(k)", DONE_KEY)
             await page.reload()
             await expect(reviews(page)).to_have_count(2)
+            await open_review(reviews(page).nth(0))
             await reviews(page).nth(0).get_by_role("button", name="Dismiss", exact=True).click()
             await expect(reviews(page)).to_have_count(1)
             await expect(c.get_by_label("Link", exact=True)).to_have_value("")
@@ -492,7 +514,7 @@ async def main():
             await page.goto(TOOLS + "?offline")
             c = card(page)
             await expect(c).to_have_attribute("data-phase", "runner_offline")
-            await expect(c.get_by_test_id("tool-video_download-offline")).to_contain_text("OASIS PC")
+            await expect(c.get_by_test_id("tool-video_download-offline")).to_contain_text("This tool is unavailable right now.")
             await expect(c.get_by_label("Link", exact=True)).to_have_count(0)
             await expect(c.get_by_role("button", name="Extract video", exact=True)).to_have_count(0)
             await expect(reviews(page)).to_have_count(0)
@@ -503,11 +525,101 @@ async def main():
             assert await page.evaluate("window.__refreshes") == 1, "the page was not asked to refresh"
             await expect(c.get_by_role("button", name="Checking...", exact=True)).to_be_disabled()
             # Nothing changed on the server side: the card says so instead of going quiet.
-            await expect(c.get_by_text("Still offline", exact=False)).to_be_visible(timeout=6000)
+            await expect(c.get_by_text("Still unavailable. Wait a minute, then check again.", exact=True)).to_be_visible(timeout=6000)
             await expect(c.get_by_role("button", name="Check connection", exact=True)).to_be_enabled()
+
+        async def compact_content_tools(page):
+            hooks = [{"platform": platform, "hook": "A clearer question for your next update?",
+                      "script": "Start with one real example. Explain what changed, why it mattered, and what you would try next. " * 8,
+                      "caption": "One useful example. One next step."}
+                     for platform in ["tiktok", "instagram", "youtube", "linkedin", "threads"]]
+            hook_job = dict(OLD, id="hooks-old", tool_key="hook_rewriter", asset_id=None,
+                            input_summary="A founder explains a useful change.", result={"hooks": hooks})
+            broll_job = dict(OLD, id="broll-old", tool_key="broll_matcher", asset_id=None,
+                             input_summary="Workshop, notebook and morning light.", result={"matches": [
+                                 {"keyword": "notebook", "title": "Notebook in morning light", "url": "https://www.pexels.com/video/12345/", "license": "Pexels licence", "score": 0.6}]})
+            failed_job = dict(FAILED, error_code="login_required", error_message="This post needs a signed-in account to download.")
+            state = {"video_download": [failed_job], "video_remix": [], "hook_rewriter": [hook_job], "broll_matcher": [broll_job]}
+            async def read(route):
+                key = parse_qs(urlparse(route.request.url).query)["tool"][0]
+                await answer(route, {"ok": True, "jobs": state[key]})
+            await page.route("**/api/tools/jobs?*", read)
+            await page.goto(TOOLS + "?all")
+            hook_card = page.locator('article[aria-labelledby="tool-hook_rewriter"]')
+            hook_toggle = hook_card.get_by_role("button", name="Viral hook & script rewriter", exact=True)
+            await expect(hook_toggle).to_have_attribute("aria-expanded", "false")
+            await expect(hook_card.get_by_role("status").first).to_have_text("1 result ready")
+            await expect(card(page).get_by_text("This link requires a signed-in account. Try a public link that opens without signing in.", exact=True)).to_be_visible()
+            await no_sideways_overflow(page)
+            SHOTS.mkdir(parents=True, exist_ok=True)
+            width = page.viewport_size["width"]
+            await page.screenshot(path=str(SHOTS / f"tools-compact-{width}.png"), full_page=True)
+            # Native keyboard toggles must retain the actual mounted field, its
+            # value and its chosen select option across collapse/reopen.
+            await hook_toggle.focus()
+            await page.keyboard.press("Enter")
+            transcript = hook_card.get_by_label("Transcript (or paste a video link below)", exact=True)
+            draft = "A complete original transcript about making a useful change for a customer."
+            await transcript.fill(draft)
+            await hook_card.get_by_label("Writing approach", exact=True).select_option("ceo_log")
+            await hook_toggle.focus()
+            await page.keyboard.press("Space")
+            await expect(transcript).to_be_hidden()
+            await expect(transcript).to_have_value(draft)
+            await page.keyboard.press("Enter")
+            await expect(transcript).to_have_value(draft)
+            await expect(hook_card.get_by_label("Writing approach", exact=True)).to_have_value("ceo_log")
+            prior = hook_card.get_by_test_id("tool-hook_rewriter-review")
+            await expect(prior.locator("button[aria-expanded]")).to_have_attribute("aria-expanded", "false")
+            await open_review(prior)
+            await expect(prior.locator("details")).to_have_count(5)
+            first_draft = prior.locator("details").first
+            await first_draft.locator("summary").focus()
+            await page.keyboard.press("Enter")
+            await page.evaluate("Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText: async (text) => {window.__copied=text}}})")
+            await first_draft.get_by_role("button", name="Copy", exact=True).click()
+            assert await page.evaluate("window.__copied") == hooks[0]["hook"] + "\n\n" + hooks[0]["script"] + "\n\n" + hooks[0]["caption"]
+            await first_draft.locator("summary").click()
+            await tap_targets(hook_card)
+            await no_sideways_overflow(page)
+            await page.screenshot(path=str(SHOTS / f"tools-hooks-{width}.png"), full_page=True)
+            # A long raw failure stays behind Technical details; a transcript
+            # summary is never restored into the URL field as a retry.
+            raw = "Synthetic technical diagnostic: " + "trace/" * 200
+            bad = dict(hook_job, id="hooks-failed", status="failed", result=None, error_code="runner_error", error_message=raw)
+            state["hook_rewriter"] = [bad]
+            await page.evaluate('window.dispatchEvent(new Event("focus"))')
+            failed = hook_card.locator('[data-job="hooks-failed"]')
+            await expect(failed).to_be_visible()
+            await expect(failed.get_by_text(raw, exact=False)).to_be_hidden()
+            await open_review(failed)
+            await failed.get_by_role("button", name="Edit and retry", exact=True).click()
+            await expect(transcript).to_be_focused()
+            await expect(transcript).to_have_value(draft)
+            await expect(hook_card.get_by_label("Video link", exact=True)).to_have_value("")
+            # A run can finish while its card is closed. Its poll and draft
+            # survive, and its new result opens when the card is reopened.
+            queued = dict(hook_job, id="hooks-new", status="queued", result=None)
+            async def post(route):
+                body = route.request.post_data_json
+                assert body["input"]["transcript"] == draft and body["input"]["framework"] == "ceo_log", body
+                state["hook_rewriter"] = [queued]
+                await answer(route, {"ok": True, "job": queued})
+            await page.route("**/api/tools/run", post)
+            await hook_card.get_by_role("button", name="Write five hooks", exact=True).click()
+            await expect(hook_card.get_by_test_id("tool-hook_rewriter-running")).to_be_visible()
+            await hook_toggle.click()
+            state["hook_rewriter"] = [dict(hook_job, id="hooks-new")]
+            await expect(hook_card.get_by_role("status").first).to_have_text("1 result ready", timeout=7000)
+            await hook_toggle.click()
+            await expect(hook_card.locator('[data-job="hooks-new"] button[aria-expanded]')).to_have_attribute("aria-expanded", "true")
+            await expect(transcript).to_have_value(draft)
+            await no_sideways_overflow(page)
 
         for width in (1280, 360):
             await run(f"review, Done, idle, drawer, nav, tap targets and layout at {width}px", review_then_done, width)
+        for width in (1440, 390):
+            await run(f"compact cards, keyboard/state, result copy, safe errors and collapsed polling at {width}px", compact_content_tools, width)
         await run("a fresh visit after Done starts idle", reentry)
         await run("idle -> Extract video -> running stages -> review -> Done -> idle", full_run)
         await run("a second link queues while the first downloads; both show with their stage", queue_second_link)
@@ -520,8 +632,10 @@ async def main():
         await run("an unanswered run request says so and reads the runs at once", unconfirmed_then_rereads)
         await run("idempotency keys: kept with no answer, new after an accepted run or a refusal", retry_keys)
         await run("a failed run offers Try again (the link comes back) and Dismiss", failed_run)
-        await run("offline: Check connection asks the page to refresh and says Still offline; no Run button", offline)
+        await run("offline: Check connection asks the page to refresh and says Still unavailable; no Run button", offline)
         await browser.close()
+    if executed == 0:
+        raise SystemExit("No browser case matched OASIS_TEST_CASE")
     if failures:
         raise SystemExit(f"{len(failures)} browser regression(s) failed: {', '.join(failures)}")
 

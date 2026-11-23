@@ -111,7 +111,8 @@ function renderMarkup(cases: Array<{ id: string; catalog: ToolCatalog; showCodes
   return (JSON.parse(r.stdout) as { markup: Record<string, string> }).markup;
 }
 
-const buttons = (html: string) => [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].map((m) => m[1].replace(/<[^>]+>/g, "").trim());
+// Action buttons are checked independently from the new disclosure controls.
+const buttons = (html: string) => [...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].filter((m) => !m[1].includes("aria-expanded")).map((m) => m[2].replace(/<[^>]+>/g, "").trim());
 const links = (html: string) => [...html.matchAll(/<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => [m[2].replace(/<[^>]+>/g, "").trim(), m[1]]);
 const articles = (html: string) => (html.match(/<article\b/g) ?? []).length;
 const decode = (s: string) => s.replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/&gt;/g, ">").replace(/&lt;/g, "<");
@@ -261,6 +262,16 @@ async function main() {
     assert.ok(html.includes(">Tools<"), "the section heading");
   });
 
+  await check("cards and old results have named keyboard disclosures; collapsed forms and result actions stay mounted", () => {
+    assert.match(markup.full, /aria-label="Repurpose a post" aria-expanded="false" aria-controls="tool-repurpose_post-body"/);
+    assert.match(markup.full, /id="tool-repurpose_post-body" hidden=""/);
+    assert.match(markup.full, /aria-label="Video extractor" aria-expanded="true"/);
+    assert.match(markup.full, /id="tool-repurpose_post-post"/, "a hidden draft field remains mounted");
+    assert.match(markup.review_video, /aria-expanded="false" aria-controls="tool-video_download-result-v1"/);
+    assert.match(markup.review_video, /id="tool-video_download-result-v1" hidden=""/);
+    assert.match(markup.review_failed, /<summary[^>]*>Technical details<\/summary>/);
+  });
+
   await check("the panels with real runs: a finished video (Download, Open, Done), a failure (Try again, Dismiss, the code for founders only), a learned link, runs in flight, the drawer", () => {
     assert.deepEqual(buttons(markup.review_video), ["Done"]);
     assert.deepEqual(links(markup.review_video), [
@@ -343,7 +354,7 @@ async function main() {
         assert.match(m[0], /\bmin-h-11\b/, `${id}: ${m[0].slice(0, 120)}`);
       }
     }
-    assert.ok((markup.history.match(/<a\b/g) ?? []).length === 3 && (markup.review_failed.match(/<button\b/g) ?? []).length === 2, "not vacuous: the panels carry controls");
+    assert.ok((markup.history.match(/<a\b/g) ?? []).length === 3 && buttons(markup.review_failed).length === 2, "not vacuous: the panels carry actions");
   });
 
   await check("no internal name on the screen", () => {
